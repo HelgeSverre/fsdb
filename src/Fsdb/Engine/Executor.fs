@@ -130,11 +130,18 @@ type private EqualityAccessPlan =
       TableRowCount: int
       Rows: Lazy<(RowId * Value[]) list> }
 
+type private IndexUnionAccessPlan =
+    { KeyNames: string list
+      Columns: ColumnDef list
+      CandidateRowIds: Set<RowId>
+      Rows: Lazy<(RowId * Value[]) list> }
+
 type private PhysicalAccessPlan =
     | EqualityAccess of EqualityAccessPlan
     | MembershipAccess of EqualityAccessPlan
     | SpatialAccess of Storage.SpatialLookup
     | RangeAccess of Storage.RangeLookup
+    | IndexUnionAccess of IndexUnionAccessPlan
 
 let private equalityAccessPlan (table: Table) (index: EqualityIndex) rowIds =
     { KeyName = index.Name
@@ -150,14 +157,14 @@ let private equalityAccessPlan (table: Table) (index: EqualityIndex) rowIds =
 let private isUsefulEqualityCardinality tableRows candidateRows =
     QueryPlanner.chooseEquality tableRows candidateRows = QueryPlanner.IndexLookup
 
-let private isUsefulEqualityAccess plan =
+let private isUsefulEqualityAccess (plan: EqualityAccessPlan) =
     isUsefulEqualityCardinality plan.TableRowCount plan.CandidateRowIds.Count
 
 type private IndexAccessPolicy =
     | CostedRead
     | CandidateNarrowing
 
-let private acceptsEqualityAccess policy plan =
+let private acceptsEqualityAccess policy (plan: EqualityAccessPlan) =
     match policy with
     | CostedRead -> isUsefulEqualityAccess plan
     | CandidateNarrowing -> true
@@ -3498,6 +3505,14 @@ let private conjuncts (expr: Expr) : Expr list =
     let rec loop acc expr =
         match expr with
         | BinOp(And, l, r) -> loop (loop acc l) r
+        | _ -> expr :: acc
+
+    List.rev (loop [] expr)
+
+let private disjuncts (expr: Expr) : Expr list =
+    let rec loop acc expr =
+        match expr with
+        | BinOp(Or, left, right) -> loop (loop acc left) right
         | _ -> expr :: acc
 
     List.rev (loop [] expr)
@@ -10589,18 +10604,76 @@ and private physicalAccessCandidateCount = function
     | MembershipAccess plan -> plan.CandidateRowIds.Count
     | SpatialAccess plan -> plan.SpatialRows.Length
     | RangeAccess plan -> plan.RangeRowCount
+    | IndexUnionAccess plan -> plan.CandidateRowIds.Count
 
 and private physicalAccessPreference = function
     | EqualityAccess _ -> 0
     | MembershipAccess _ -> 1
     | SpatialAccess _ -> 2
     | RangeAccess _ -> 3
+    | IndexUnionAccess _ -> 4
 
 and private physicalAccessRows = function
     | EqualityAccess plan
     | MembershipAccess plan -> plan.Columns, plan.Rows.Value
     | SpatialAccess plan -> plan.SpatialColumns, plan.SpatialRows
     | RangeAccess plan -> plan.RangeColumns, plan.RangeRows.Value
+    | IndexUnionAccess plan -> plan.Columns, plan.Rows.Value
+
+and private physicalAccessRowIds = function
+    | EqualityAccess plan
+    | MembershipAccess plan -> plan.CandidateRowIds
+    | SpatialAccess plan -> plan.SpatialRows |> List.map fst |> Set.ofList
+    | RangeAccess plan -> plan.RangeRows.Value |> List.map fst |> Set.ofList
+    | IndexUnionAccess plan -> plan.CandidateRowIds
+
+and private physicalAccessKeyNames = function
+    | EqualityAccess plan
+    | MembershipAccess plan -> [ plan.KeyName ]
+    | SpatialAccess plan -> [ plan.SpatialIndexName ]
+    | RangeAccess plan -> [ plan.RangeIndexName ]
+    | IndexUnionAccess plan -> plan.KeyNames
+
+and private tryIndexUnionAccessInTableWith
+    (policy: IndexAccessPolicy)
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : IndexUnionAccessPlan option =
+    let planFor expression =
+        match disjuncts expression with
+        | [ _ ] -> None
+        | branches ->
+            branches
+            |> List.map (fun branch ->
+                tryPhysicalAccessInTableWith CandidateNarrowing store registry table tref (Some branch))
+            |> tryAllSome
+            |> Option.bind (fun accesses ->
+                let rowIds = accesses |> Seq.collect (physicalAccessRowIds >> Set.toSeq) |> Set.ofSeq
+
+                let accepted =
+                    policy = CandidateNarrowing
+                    || QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
+
+                if not accepted then
+                    None
+                else
+                    let keyNames = accesses |> List.collect physicalAccessKeyNames |> List.distinct
+
+                    Some
+                        { KeyNames = keyNames
+                          Columns = table.Columns
+                          CandidateRowIds = rowIds
+                          Rows = lazy (Storage.rowsForRowIds table rowIds) })
+
+    whereExpr
+    |> optionalConjuncts
+    |> List.choose planFor
+    |> function
+        | [] -> None
+        | plans -> plans |> List.minBy (_.CandidateRowIds.Count) |> Some
 
 and private physicalAccessCandidatesInTableWith
     (policy: IndexAccessPolicy)
@@ -10617,7 +10690,9 @@ and private physicalAccessCandidatesInTableWith
       trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
       |> Option.map SpatialAccess
       tryRangeAccessInTableWith policy BareOrQualifiedColumn store registry table tref whereExpr
-      |> Option.map RangeAccess ]
+      |> Option.map RangeAccess
+      tryIndexUnionAccessInTableWith policy store registry table tref whereExpr
+      |> Option.map IndexUnionAccess ]
     |> List.choose id
 
 and private choosePhysicalAccess candidates =
@@ -15206,8 +15281,8 @@ type private ExplainRow =
       SelectType: string
       Table: string option
       Type: string option
-      /// `Some(keyName, keyLen)` when execution reads this table through a
-      /// one-column equality index.
+      /// `Some(keyName, keyLen)` when execution reads this table through one
+      /// or more physical indexes.
       Key: (string * int option) option
       Ref: string option
       Rows: uint64 option
@@ -15580,6 +15655,18 @@ let rec private explainJoinBlock
                       Ref = None
                       Rows = Some(uint64 plan.RangeRowCount)
                       Extra = accessExtra }
+            | IndexUnionAccess plan ->
+                let keyNames = String.concat "," plan.KeyNames
+
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                      Type = Some "index_merge"
+                      Key = Some(keyNames, None)
+                      Ref = None
+                      Rows = Some(uint64 plan.CandidateRowIds.Count)
+                      Extra = sprintf "Using union(%s)" keyNames :: accessExtra }
 
             true
 

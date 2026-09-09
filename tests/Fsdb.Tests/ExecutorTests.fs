@@ -6162,11 +6162,46 @@ let tests =
 
                     Expect.equal overlapping.EstimatedRows (Some "20") "rows found by both branches are counted once"
 
+                    let membership =
+                        runDefault store "EXPLAIN SELECT id FROM unioned WHERE age IN (30) OR sort_key BETWEEN 90 AND 92"
+                        |> explainRow
+
+                    Expect.equal membership.AccessType (Some "index_merge") "membership branches participate in the union"
+                    Expect.equal membership.Key (Some "ix_age,ix_sort_key") "membership retains its contributing key"
+
+                    let nested =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM unioned WHERE age = 30 OR sort_key BETWEEN 90 AND 91 OR id = 100"
+                        |> explainRow
+
+                    Expect.equal nested.AccessType (Some "index_merge") "nested disjunctions flatten into one union"
+                    Expect.equal nested.Key (Some "ix_age,ix_sort_key,PRIMARY") "nested branches retain encounter order"
+                    Expect.equal nested.EstimatedRows (Some "23") "nested branches share one deduplicated estimate"
+
                     let partial =
                         runDefault store "EXPLAIN SELECT id FROM unioned WHERE age = 30 OR touched + 0 = 1"
                         |> explainRow
 
                     Expect.equal partial.AccessType (Some "ALL") "one unindexable OR branch keeps the safe scan path"
+
+                    runDefault store "CREATE TABLE anchor (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO anchor VALUES (1)" |> ignore
+
+                    let joinedSql =
+                        $"SELECT u.id FROM unioned u JOIN anchor a ON a.id = 1 WHERE u.age = 30 OR u.sort_key BETWEEN 90 AND 92"
+
+                    let joinedPlan =
+                        runDefault store $"EXPLAIN {joinedSql}"
+                        |> explainRows
+                        |> List.find (fun row -> row.Table = Some "u")
+
+                    Expect.equal joinedPlan.AccessType (Some "index_merge") "joined source predicates retain index union access"
+
+                    match runDefault store joinedSql with
+                    | ResultSet(_, joinedRows) ->
+                        Expect.equal joinedRows (rows "scanned" predicate) "joined union rows match the scan twin"
+                    | other -> failtestf "expected joined index-union rows, got %A" other
 
                     let updateSql table = $"UPDATE {table} SET touched = 1 WHERE {predicate}"
                     let unionedUpdate = updateSql "unioned"
