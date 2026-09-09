@@ -690,7 +690,7 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
     elif typeId = TypeDouble then
         w.WriteDoubleLE(Double.Parse(s, Globalization.CultureInfo.InvariantCulture))
     elif typeId = TypeDate then
-        match tryParseZeroDate s with
+        match tryParseDateComponents s with
         | Some date when isAllZeroDate date -> w.WriteByte 0uy
         | Some date ->
             let year, month, day = zeroDateParts date
@@ -718,7 +718,7 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
             if micros <> 0 then
                 w.WriteInt32LE micros
 
-        match tryParseZeroDateTime s with
+        match tryParseDateTimeComponents s with
         | Some dateTime when isAllZeroDateTime dateTime -> w.WriteByte 0uy
         | Some dateTime ->
             let date, hour, minute, second, micros = zeroDateTimeParts dateTime
@@ -853,7 +853,7 @@ let private readBinaryDateTime (r: Reader) : Value =
             if len > 4 then int (r.ReadByte()), int (r.ReadByte()), int (r.ReadByte()) else 0, 0, 0
 
         let micros = if len > 7 then r.ReadInt32LE() else 0
-        match tryZeroDate year month day with
+        match tryZeroDate year month day |> Option.orElseWith (fun () -> tryInvalidDate year month day) with
         | Some date ->
             tryZeroDateTime date hour minute second micros
             |> Option.map VZeroDateTime

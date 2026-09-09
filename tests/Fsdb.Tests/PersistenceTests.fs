@@ -2616,18 +2616,37 @@ let tests =
               let r = Reader(w.ToArray())
               Expect.equal (decodeValue r) original "VJson round-trips through encodeValue/decodeValue"
 
-          testCase "the Value binary codec round-trips zero temporal values"
+          testCase "the Value binary codec round-trips component temporal values"
           <| fun _ ->
               let date = tryZeroDate 2020 0 1 |> Option.get
               let dateTime = tryZeroDateTime date 12 34 56 123_000 |> Option.get
+              let invalidDate = tryInvalidDate 2023 2 31 |> Option.get
+              let invalidDateTime = tryZeroDateTime invalidDate 12 34 56 123_000 |> Option.get
 
               let time = tryParseTimeValue "-838:59:58.123456" |> Option.get
 
-              for original in [ VZeroDate date; VZeroDateTime dateTime; VTime time ] do
+              for original in [ VZeroDate date; VZeroDateTime dateTime; VZeroDate invalidDate; VZeroDateTime invalidDateTime; VTime time ] do
                   let w = Writer()
                   encodeValue w original
                   let r = Reader(w.ToArray())
                   Expect.equal (decodeValue r) original (sprintf "%A round-trips" original)
+
+          testCase "WAL replay preserves invalid component dates"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES,ALLOW_INVALID_DATES'"
+              let session, _ = handle session "CREATE TABLE invalid_dates (d DATE, dt DATETIME(6))"
+              let _, inserted = handle session "INSERT INTO invalid_dates VALUES ('2023-02-31', '2023-04-31 12:34:56.123456')"
+              Expect.equal inserted (Affected 1UL) "row is persisted"
+
+              match rowsOf (load dir) defaultDatabase "invalid_dates" with
+              | [ [| VZeroDate date; VZeroDateTime dateTime |] ] ->
+                  Expect.equal (formatZeroDate date) "2023-02-31" "date"
+                  Expect.equal (formatZeroDateTime dateTime) "2023-04-31 12:34:56.123456" "datetime"
+              | other -> failtestf "expected recovered invalid dates, got %A" other
 
           testCase "WAL replay preserves a zero-date default accepted by the originating session"
           <| fun _ ->

@@ -746,6 +746,14 @@ let tests =
               let allZero = tryZeroDate 0 0 0 |> Option.get |> fun date -> tryZeroDateTime date 0 0 0 0 |> Option.get
               Expect.equal (readBinaryValue (Reader(zero.ToArray())) TypeDateTime false) (VZeroDateTime allZero) "zero datetime"
 
+              let invalid = Writer()
+              invalid.WriteByte 4uy
+              invalid.WriteInt16LE 2023
+              invalid.WriteByte 2uy
+              invalid.WriteByte 31uy
+              let invalidDate = tryInvalidDate 2023 2 31 |> Option.get
+              Expect.equal (readBinaryValue (Reader(invalid.ToArray())) TypeDate false) (VZeroDate invalidDate) "invalid component date"
+
               // full DATETIME (len=11): year..second plus microseconds
               let dt = Writer()
               dt.WriteByte 11uy

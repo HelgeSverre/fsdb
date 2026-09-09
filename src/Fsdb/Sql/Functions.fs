@@ -2093,6 +2093,13 @@ let tryDateTimeValue (v: Value) : DateTime option =
     | VDateTime dt -> Some dt
     | VTimestamp dt -> Some dt
     | VDate d -> Some(d.ToDateTime TimeOnly.MinValue)
+    | VZeroDate date -> tryNormalizeInvalidDate date |> Option.map _.ToDateTime(TimeOnly.MinValue)
+    | VZeroDateTime dateTime ->
+        let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
+
+        tryNormalizeInvalidDate date
+        |> Option.map (fun normalized ->
+            normalized.ToDateTime(TimeOnly(hour, minute, second)).AddTicks(int64 microseconds * 10L))
     | VNull -> None
     | _ ->
         match toText v with
@@ -2230,7 +2237,8 @@ let tryIntervalArgument (v: Value) : (float * string) option =
 /// a time part.
 let private looksDateOnly (v: Value) : bool =
     match v with
-    | VDate _ -> true
+    | VDate _
+    | VZeroDate _ -> true
     | VString s -> not (s.Contains ':')
     | _ -> false
 
@@ -2908,6 +2916,8 @@ let private unixEpoch = DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
 let internal unixTimestampFn (zone: SqlTimeZone) : Scalar =
     function
     | [] -> VInt(int64 (DateTime.UtcNow - unixEpoch).TotalSeconds)
+    | [ VZeroDate date ] when isInvalidDate date -> VInt 0L
+    | [ VZeroDateTime dateTime ] when isInvalidDate (zeroDateOfDateTime dateTime) -> VInt 0L
     | [ v ] when not (anyNull [ v ]) ->
         tryDateTimeValue v
         |> Option.bind (fun dateTime ->

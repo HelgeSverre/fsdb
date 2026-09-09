@@ -6,6 +6,7 @@ type Settings =
     { Strict: bool
       NoZeroDate: bool
       NoZeroInDate: bool
+      AllowInvalidDates: bool
       OnlyFullGroupBy: bool
       NoEngineSubstitution: bool
       NoAutoValueOnZero: bool
@@ -87,6 +88,7 @@ let settingsFor (value: string) : Settings =
     { Strict = enabled modes "STRICT_TRANS_TABLES" || enabled modes "STRICT_ALL_TABLES"
       NoZeroDate = enabled modes "NO_ZERO_DATE"
       NoZeroInDate = enabled modes "NO_ZERO_IN_DATE"
+      AllowInvalidDates = enabled modes "ALLOW_INVALID_DATES"
       OnlyFullGroupBy = enabled modes "ONLY_FULL_GROUP_BY"
       NoEngineSubstitution = enabled modes "NO_ENGINE_SUBSTITUTION"
       NoAutoValueOnZero = enabled modes "NO_AUTO_VALUE_ON_ZERO"

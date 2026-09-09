@@ -618,6 +618,7 @@ let tests =
                             { Strict = false
                               NoZeroDate = false
                               NoZeroInDate = false
+                              AllowInvalidDates = false
                               TruncateFractional = false
                               TimeZone = SystemTimeZone }
                             (col "established" TDate false)

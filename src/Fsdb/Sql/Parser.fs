@@ -1821,7 +1821,7 @@ let private temporalLit: Parser<Expr, unit> =
             match MySqlTemporal.tryDate text with
             | Some d -> preturn (Lit(VDate d))
             | None ->
-                tryParseZeroDate text
+                tryParseZeroDate text |> Option.orElseWith (fun () -> tryParseInvalidDate text)
                 |> Option.map (VZeroDate >> Lit >> preturn)
                 |> Option.defaultWith (fun () -> refuse "DATE")
         | "TIMESTAMP" ->
@@ -1833,7 +1833,7 @@ let private temporalLit: Parser<Expr, unit> =
                 match MySqlTemporal.tryDateTime text with
                 | Some dt -> preturn (Lit(VDateTime dt))
                 | None ->
-                    tryParseZeroDateTime text
+                    tryParseZeroDateTime text |> Option.orElseWith (fun () -> tryParseInvalidDateTime text)
                     |> Option.map (VZeroDateTime >> Lit >> preturn)
                     |> Option.defaultWith (fun () -> refuse "DATETIME")
         | _ ->

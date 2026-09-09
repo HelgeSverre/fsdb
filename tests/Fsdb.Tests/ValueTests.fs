@@ -106,6 +106,14 @@ let tests =
                     let date = tryZeroDate 2020 0 1 |> Option.get
                     Expect.equal (toText (VZeroDate date)) (Some "2020-00-01") "partial zero date"
 
+                testCase "invalid component dates retain their written fields and normalize for calendar arithmetic"
+                <| fun _ ->
+                    let date = tryInvalidDate 2023 2 31 |> Option.get
+                    Expect.equal (toText (VZeroDate date)) (Some "2023-02-31") "stored fields"
+                    Expect.equal (tryNormalizeInvalidDate date) (Some(DateOnly(2023, 3, 3))) "calendar arithmetic basis"
+                    Expect.isNone (tryInvalidDate 2023 2 28) "valid dates use DateOnly"
+                    Expect.isNone (tryInvalidDate 2023 13 1) "month remains bounded"
+
                 testCase "zero datetimes preserve their time component"
                 <| fun _ ->
                     let date = tryZeroDate 0 0 0 |> Option.get

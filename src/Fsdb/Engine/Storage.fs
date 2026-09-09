@@ -1455,6 +1455,7 @@ type TemporalCoercionMode =
     { Strict: bool
       NoZeroDate: bool
       NoZeroInDate: bool
+      AllowInvalidDates: bool
       TruncateFractional: bool
       TimeZone: SqlTimeZone }
 
@@ -1462,6 +1463,7 @@ let temporalCoercionMode (store: Store) =
     { Strict = store.ExecutionSettings.SqlMode.Strict
       NoZeroDate = store.ExecutionSettings.SqlMode.NoZeroDate
       NoZeroInDate = store.ExecutionSettings.SqlMode.NoZeroInDate
+      AllowInvalidDates = store.ExecutionSettings.SqlMode.AllowInvalidDates
       TruncateFractional = store.ExecutionSettings.SqlMode.TimeTruncateFractional
       TimeZone = store.ExecutionSettings.TimeZone }
 
@@ -2051,7 +2053,11 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
 
             let zeroDateResult date =
                 let year, month, day = zeroDateParts date
-                let rejected = if year = 0 && month = 0 && day = 0 then mode.NoZeroDate else mode.NoZeroInDate
+                let rejected =
+                    if year = 0 && month = 0 && day = 0 then
+                        mode.NoZeroDate
+                    else
+                        mode.NoZeroInDate
 
                 if not rejected then
                     Ok(VZeroDate date)
@@ -2064,27 +2070,41 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 let warningCode = if month > 12 || day > 31 then 1265 else 1264
                 zeroDateFallback warningCode
 
+            let invalidDateResult date =
+                if mode.AllowInvalidDates then Ok(VZeroDate date) else zeroDateFallback 1264
+
             match v with
             | VDate d -> Ok(VDate d)
             | VDateTime dt -> Ok(VDate(DateOnly.FromDateTime dt))
-            | VZeroDate d -> zeroDateResult d
-            | VZeroDateTime dt -> zeroDateResult (zeroDateOfDateTime dt)
+            | VZeroDate d -> if isInvalidDate d then invalidDateResult d else zeroDateResult d
+            | VZeroDateTime dt ->
+                let date = zeroDateOfDateTime dt
+                if isInvalidDate date then invalidDateResult date else zeroDateResult date
             | VString s ->
-                match tryParseZeroDate (s.Trim()) with
+                let text = s.Trim()
+
+                match tryParseZeroDate text with
                 | Some d -> zeroDateResult d
                 | None ->
-                    match tryParseZeroDateTime (s.Trim()) with
+                    match tryParseZeroDateTime text with
                     | Some dt -> zeroDateResult (zeroDateOfDateTime dt)
                     | None ->
-                        match tryParseDateParts (s.Trim()) with
-                        | Some(year, month, day) when year = 0 || month = 0 || day = 0 -> invalidZeroDateResult year month day
-                        | _ ->
-                            match DateOnly.TryParse(s.Trim(), CultureInfo.InvariantCulture) with
-                            | true, d -> Ok(VDate d)
-                            | false, _ ->
-                                match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                                | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
-                                | false, _ -> temporalFallback ()
+                        match tryParseInvalidDate text with
+                        | Some date -> invalidDateResult date
+                        | None ->
+                            match tryParseInvalidDateTime text with
+                            | Some dateTime -> invalidDateResult (zeroDateOfDateTime dateTime)
+                            | None ->
+                                match tryParseDateParts text with
+                                | Some(year, month, day) when year = 0 || month = 0 || day = 0 || month > 12 || day > 31 ->
+                                    invalidZeroDateResult year month day
+                                | _ ->
+                                    match DateOnly.TryParse(text, CultureInfo.InvariantCulture) with
+                                    | true, d -> Ok(VDate d)
+                                    | false, _ ->
+                                        match DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                                        | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
+                                        | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
         | TDateTime fsp
         | TTimestamp fsp ->
@@ -2126,6 +2146,11 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             let invalidZeroDateResult year month day =
                 let warningCode = if month > 12 || day > 31 then 1265 else 1264
                 zeroDateFallback warningCode
+
+            let invalidDateResult dateTime =
+                match col.Type with
+                | TDateTime _ when mode.AllowInvalidDates -> Ok(VZeroDateTime dateTime)
+                | _ -> zeroDateFallback 1264
 
             let timestampRangeResult value =
                 match col.Type, value with
@@ -2195,9 +2220,9 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             | VDate d -> tryAdjust (d.ToDateTime(TimeOnly.MinValue))
             | VZeroDate d ->
                 match tryZeroDateTime d 0 0 0 0 with
-                | Some dt -> zeroDateResult dt
+                | Some dt -> if isInvalidDate d then invalidDateResult dt else zeroDateResult dt
                 | None -> zeroDateError ()
-            | VZeroDateTime dt -> zeroDateResult dt
+            | VZeroDateTime dt -> if isInvalidDate (zeroDateOfDateTime dt) then invalidDateResult dt else zeroDateResult dt
             | VString s ->
                 let text = s.Trim()
 
@@ -2216,14 +2241,24 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                             | Some dt -> zeroDateResult dt
                             | None -> zeroDateError ()
                         | None ->
-                            let datePart = text.Split([| ' '; 'T' |], StringSplitOptions.RemoveEmptyEntries) |> Array.tryHead
+                            match tryParseInvalidDateTime text with
+                            | Some dateTime -> invalidDateResult dateTime
+                            | None ->
+                                match tryParseInvalidDate text with
+                                | Some date ->
+                                    match tryZeroDateTime date 0 0 0 0 with
+                                    | Some dateTime -> invalidDateResult dateTime
+                                    | None -> zeroDateError ()
+                                | None ->
+                                    let datePart = text.Split([| ' '; 'T' |], StringSplitOptions.RemoveEmptyEntries) |> Array.tryHead
 
-                            match datePart |> Option.bind tryParseDateParts with
-                            | Some(year, month, day) when year = 0 || month = 0 || day = 0 -> invalidZeroDateResult year month day
-                            | _ ->
-                                match DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                                | true, dt -> tryAdjust dt
-                                | false, _ -> temporalFallback ()
+                                    match datePart |> Option.bind tryParseDateParts with
+                                    | Some(year, month, day) when year = 0 || month = 0 || day = 0 || month > 12 || day > 31 ->
+                                        invalidZeroDateResult year month day
+                                    | _ ->
+                                        match DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                                        | true, dt -> tryAdjust dt
+                                        | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
 let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
@@ -2237,6 +2272,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         { Strict = strict
           NoZeroDate = true
           NoZeroInDate = true
+          AllowInvalidDates = false
           TruncateFractional = false
           TimeZone = SystemTimeZone }
         col
@@ -2326,6 +2362,7 @@ let evalDefault (col: ColumnDef) : Value =
         { Strict = true
           NoZeroDate = true
           NoZeroInDate = true
+          AllowInvalidDates = false
           TruncateFractional = false
           TimeZone = SystemTimeZone }
         col

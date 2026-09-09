@@ -1375,8 +1375,8 @@ let ofWire (s: string) : Value =
             |> tryTimeValue
             |> Option.map VTime
             |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid time %s" payload)
-        | 'Z' -> tryParseZeroDate payload |> Option.map VZeroDate |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid zero date %s" payload)
-        | 'W' -> tryParseZeroDateTime payload |> Option.map VZeroDateTime |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid zero datetime %s" payload)
+        | 'Z' -> tryParseDateComponents payload |> Option.map VZeroDate |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid date components %s" payload)
+        | 'W' -> tryParseDateTimeComponents payload |> Option.map VZeroDateTime |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid datetime components %s" payload)
         | 'J' -> VJson(unb64 payload)
         | 'G' ->
             let bytes = Convert.FromBase64String payload
@@ -1504,14 +1504,14 @@ let decodeValue (r: #IReader) : Value =
         | None -> failwith "Value.decodeValue: invalid geometry payload"
     | 0x0buy ->
         let year, month, day = r.ReadInt32LE(), r.ReadInt32LE(), r.ReadInt32LE()
-        tryZeroDate year month day |> Option.map VZeroDate |> Option.defaultWith (fun () -> failwith "Value.decodeValue: invalid zero date")
+        tryDateComponents year month day |> Option.map VZeroDate |> Option.defaultWith (fun () -> failwith "Value.decodeValue: invalid date components")
     | 0x0cuy ->
         let year, month, day = r.ReadInt32LE(), r.ReadInt32LE(), r.ReadInt32LE()
         let hour, minute, second, microseconds = r.ReadInt32LE(), r.ReadInt32LE(), r.ReadInt32LE(), r.ReadInt32LE()
-        tryZeroDate year month day
+        tryDateComponents year month day
         |> Option.bind (fun date -> tryZeroDateTime date hour minute second microseconds)
         |> Option.map VZeroDateTime
-        |> Option.defaultWith (fun () -> failwith "Value.decodeValue: invalid zero datetime")
+        |> Option.defaultWith (fun () -> failwith "Value.decodeValue: invalid datetime components")
     | tag -> failwithf "Value.decodeValue: unknown tag 0x%02x" tag
 
 /// The MySQL wire type this value's runtime shape reports as, so a

@@ -2361,6 +2361,94 @@ let tests =
               | Affected 1UL -> ()
               | other -> failtestf "expected strict mode without zero modes to preserve the value, got %A" other
 
+          testCase "ALLOW_INVALID_DATES preserves invalid DATE and DATETIME calendar combinations"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES,ALLOW_INVALID_DATES'"
+              let session, _ = handle session "CREATE TABLE t (d DATE, dt DATETIME(6), ts TIMESTAMP NULL)"
+              let session, result = handle session "INSERT INTO t (d, dt) VALUES ('2023-02-31', '2023-04-31 12:34:56.123456')"
+              Expect.equal result (Affected 1UL) "invalid component dates are stored"
+
+              match
+                  handle
+                      session
+                      "SELECT d, dt, YEAR(d), MONTH(d), DAY(d), DAYOFYEAR(d), LAST_DAY(d), DATE_ADD(d, INTERVAL 1 DAY), TO_DAYS(d), UNIX_TIMESTAMP(d) FROM t"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "2023-02-31"
+                      Some "2023-04-31 12:34:56.123456"
+                      Some "2023"
+                      Some "2"
+                      Some "31"
+                      Some "62"
+                      Some "2023-02-28"
+                      Some "2023-03-04"
+                      Some "738947"
+                      Some "0" ] ]
+                ) -> ()
+              | other -> failtestf "expected preserved invalid dates and component functions, got %A" other
+
+              match handle session "INSERT INTO t (ts) VALUES ('2023-02-31 00:00:00')" |> snd with
+              | Err(1292, _) -> ()
+              | other -> failtestf "expected TIMESTAMP to retain full date validation, got %A" other
+
+          testCase "ALLOW_INVALID_DATES applies to typed literals and defaults"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT DATE '2023-02-31'" |> snd with
+              | Err(1525, _) -> ()
+              | other -> failtestf "expected the default mode to reject an invalid typed date, got %A" other
+
+              match handle session "CREATE TABLE rejected (d DATE DEFAULT '2023-02-31')" |> snd with
+              | Err(1067, _) -> ()
+              | other -> failtestf "expected the default mode to reject an invalid date default, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES,ALLOW_INVALID_DATES'"
+
+              match handle session "SELECT DATE '2023-02-31', TIMESTAMP '2023-04-31 01:02:03'" |> snd with
+              | ResultSet(_, [ [ Some "2023-02-31"; Some "2023-04-31 01:02:03" ] ]) -> ()
+              | other -> failtestf "expected typed invalid dates under ALLOW_INVALID_DATES, got %A" other
+
+              let session, result = handle session "CREATE TABLE accepted (d DATE DEFAULT '2023-02-31')"
+              Expect.equal result (Affected 0UL) "invalid date default is accepted"
+              let session, _ = handle session "INSERT INTO accepted (d) VALUES (DEFAULT)"
+
+              match handle session "SELECT d FROM accepted" |> snd with
+              | ResultSet(_, [ [ Some "2023-02-31" ] ]) -> ()
+              | other -> failtestf "expected the invalid date default to survive, got %A" other
+
+          testCase "ALLOW_INVALID_DATES retains component bounds and zero-date policy"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ =
+                  handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES,ALLOW_INVALID_DATES,NO_ZERO_DATE,NO_ZERO_IN_DATE'"
+              let session, _ = handle session "CREATE TABLE t (d DATE)"
+
+              match handle session "INSERT INTO t VALUES ('2023-02-31')" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected a bounded invalid date to be accepted, got %A" other
+
+              for value in [ "2023-13-01"; "2023-12-32"; "2023-00-31" ] do
+                  match handle session (sprintf "INSERT INTO t VALUES ('%s')" value) |> snd with
+                  | Err(1292, _) -> ()
+                  | other -> failtestf "expected %s to remain invalid, got %A" value other
+
+          testCase "non-strict invalid dates warn with 1264 and become all-zero without ALLOW_INVALID_DATES"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode=''"
+              let session, _ = handle session "CREATE TABLE t (d DATE, dt DATETIME)"
+              let session, result = handle session "INSERT INTO t VALUES ('2023-02-31', '2023-04-31 00:00:00')"
+              Expect.equal result (Affected 1UL) "non-strict insert succeeds"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1264; 1264 ] "invalid calendar warnings"
+
+              match handle session "SELECT d, dt FROM t" |> snd with
+              | ResultSet(_, [ [ Some "0000-00-00"; Some "0000-00-00 00:00:00" ] ]) -> ()
+              | other -> failtestf "expected all-zero fallback values, got %A" other
+
           testCase "non-strict zero modes coerce partial dates to all-zero"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

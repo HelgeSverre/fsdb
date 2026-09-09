@@ -231,6 +231,8 @@ let formatTimeValue (value: TimeValue) =
     let baseText = formatTimeValueFsp 0 value
     if micros = 0UL then baseText else baseText + "." + micros.ToString("D6").TrimEnd('0')
 
+/// Date fields that cannot be represented by `DateOnly`: zero components,
+/// or a bounded invalid day-of-month accepted by `ALLOW_INVALID_DATES`.
 type ZeroDate =
     private
     | ZeroDate of year: int * month: int * day: int
@@ -239,29 +241,48 @@ type ZeroDateTime =
     private
     | ZeroDateTime of date: ZeroDate * hour: int * minute: int * second: int * microseconds: int
 
-let tryZeroDate (year: int) (month: int) (day: int) : ZeroDate option =
+let private dateComponentsInRange year month day =
+    year >= 0 && year <= 9999 && month >= 0 && month <= 12 && day >= 0 && day <= 31
+
+let private calendarDayIsValid year month day =
     let calendarYear = if year = 0 then 2000 else year
+    month = 0 || day = 0 || day <= DateTime.DaysInMonth(calendarYear, month)
 
-    let validDay =
-        month = 0
-        || day = 0
-        || day <= DateTime.DaysInMonth(calendarYear, month)
+let tryDateComponents (year: int) (month: int) (day: int) : ZeroDate option =
+    if dateComponentsInRange year month day then Some(ZeroDate(year, month, day)) else None
 
-    if
-        year >= 0
-        && year <= 9999
-        && month >= 0
-        && month <= 12
-        && day >= 0
-        && day <= 31
-        && validDay
-        && (year = 0 || month = 0 || day = 0)
-    then
+let tryZeroDate (year: int) (month: int) (day: int) : ZeroDate option =
+    if dateComponentsInRange year month day && calendarDayIsValid year month day && (year = 0 || month = 0 || day = 0) then
+        Some(ZeroDate(year, month, day))
+    else
+        None
+
+let tryInvalidDate (year: int) (month: int) (day: int) : ZeroDate option =
+    if dateComponentsInRange year month day && year <> 0 && month <> 0 && day <> 0 && not (calendarDayIsValid year month day) then
         Some(ZeroDate(year, month, day))
     else
         None
 
 let zeroDateParts (ZeroDate(year, month, day)) = year, month, day
+
+let hasZeroDatePart date =
+    let year, month, day = zeroDateParts date
+    year = 0 || month = 0 || day = 0
+
+let isInvalidDate date =
+    let year, month, day = zeroDateParts date
+    not (hasZeroDatePart date) && not (calendarDayIsValid year month day)
+
+let tryNormalizeInvalidDate date =
+    if isInvalidDate date then
+        let year, month, day = zeroDateParts date
+
+        try
+            Some(DateOnly(year, month, 1).AddDays(day - 1))
+        with :? ArgumentOutOfRangeException ->
+            None
+    else
+        None
 
 let formatZeroDate date =
     let year, month, day = zeroDateParts date
@@ -382,12 +403,18 @@ let internal dateTimeFractionalPrecision (text: string) =
 let tryParseZeroDate (text: string) =
     tryParseDateParts text |> Option.bind (fun (year, month, day) -> tryZeroDate year month day)
 
-let tryParseZeroDateTime (text: string) =
+let tryParseInvalidDate (text: string) =
+    tryParseDateParts text |> Option.bind (fun (year, month, day) -> tryInvalidDate year month day)
+
+let tryParseDateComponents (text: string) =
+    tryParseDateParts text |> Option.bind (fun (year, month, day) -> tryDateComponents year month day)
+
+let private tryParseDateTimeComponentsWith parseDate (text: string) =
     let pieces = text.Split([| ' '; 'T' |], StringSplitOptions.RemoveEmptyEntries)
 
     match pieces with
     | [| dateText; timeText |] ->
-        match tryParseZeroDate dateText with
+        match parseDate dateText with
         | Some date ->
             let parseClock (clockText: string) microseconds =
                 match clockText.Split ':' with
@@ -406,3 +433,12 @@ let tryParseZeroDateTime (text: string) =
             | _ -> None
         | None -> None
     | _ -> None
+
+let tryParseZeroDateTime (text: string) =
+    tryParseDateTimeComponentsWith tryParseZeroDate text
+
+let tryParseInvalidDateTime (text: string) =
+    tryParseDateTimeComponentsWith tryParseInvalidDate text
+
+let tryParseDateTimeComponents (text: string) =
+    tryParseDateTimeComponentsWith tryParseDateComponents text

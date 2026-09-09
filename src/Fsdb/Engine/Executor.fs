@@ -4532,14 +4532,16 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     match expr with
     | Lit(VZeroDate date) when
         let year, month, day = Temporal.zeroDateParts date
-        (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
-        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
+        (Temporal.isInvalidDate date && not ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates)
+        || (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
+        || (Temporal.hasZeroDatePart date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATE value: '%s'" (Temporal.formatZeroDate date))
     | Lit(VZeroDateTime dateTime) when
         let date, _, _, _, _ = Temporal.zeroDateTimeParts dateTime
         let year, month, day = Temporal.zeroDateParts date
-        (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
-        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
+        (Temporal.isInvalidDate date && not ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates)
+        || (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
+        || (Temporal.hasZeroDatePart date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | Lit v -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
@@ -5263,13 +5265,14 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         { Strict = false
                           NoZeroDate = true
                           NoZeroInDate = true
+                          AllowInvalidDates = ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates
                           TruncateFractional = ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional
                           TimeZone = ctx.Store.ExecutionSettings.TimeZone }
                         castCol
                         v)
             with
-            | Ok(VZeroDate _)
-            | Ok(VZeroDateTime _) -> Ok VNull
+            | Ok(VZeroDate date) when Temporal.hasZeroDatePart date -> Ok VNull
+            | Ok(VZeroDateTime dateTime) when Temporal.hasZeroDatePart (Temporal.zeroDateOfDateTime dateTime) -> Ok VNull
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->
