@@ -10651,11 +10651,13 @@ and private tryIndexUnionAccessInTableWith
                 tryPhysicalAccessInTableWith CandidateNarrowing store registry table tref (Some branch))
             |> tryAllSome
             |> Option.bind (fun accesses ->
-                let rowIds = accesses |> Seq.collect (physicalAccessRowIds >> Set.toSeq) |> Set.ofSeq
+                let rowIds = accesses |> List.map physicalAccessRowIds |> Set.unionMany
 
                 let accepted =
-                    policy = CandidateNarrowing
-                    || QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
+                    match policy with
+                    | CandidateNarrowing -> true
+                    | CostedRead ->
+                        QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
 
                 if not accepted then
                     None
