@@ -1,5 +1,9 @@
 # fsdb torture-testing design
 
+This document defines the harness's evidence and classification contracts.
+For commands and day-to-day operation, start with the
+[operator guide](README.md).
+
 ## Contents
 
 - [Decision and boundaries](#decision-and-boundaries)
@@ -94,15 +98,18 @@ grammar and the open compatibility ledger. It executes each baseline on both
 servers, then applies a seed-ordered, bounded set of structural mutations. A
 run may chain up to three edits while deduplicating equivalent SQL before
 sampling.
+
 Comment mutations replace natural token boundaries with MySQL block, hash,
 dash, executable-version, or future-version comments and never recurse into an
 existing comment. Block and version comments also surround parentheses and
 commas outside quoted values, covering legal boundaries that contain no
-whitespace in the source. Successful DDL mutations are removed before the next
-case so stored objects cannot contaminate later parser results. MySQL `1064`
-responses are compared by error code and SQLSTATE rather than location text.
-MySQL-valid mutations exercise fsdb acceptance; mutations that reach other
-semantic errors remain visible without being mislabeled as syntax evidence.
+whitespace in the source.
+
+Successful DDL mutations are removed before the next case so stored objects
+cannot contaminate later parser results. MySQL `1064` responses are compared
+by error code and SQLSTATE rather than location text. MySQL-valid mutations
+exercise fsdb acceptance; mutations that reach other semantic errors remain
+visible without being mislabeled as syntax evidence.
 
 After each successful fsdb mutation, the harness records compact commit-event
 hashes and validates row arity, primary/unique keys, foreign-key references,
@@ -183,31 +190,28 @@ later failures are not artifacts of corrupted or missing state.
 
 Scale dimensions independently before combining them:
 
-1. **Seed breadth:** run deterministic seed matrices and retain only unique
+1. **Seed breadth.** Run deterministic seed matrices and retain only unique
    signatures. Start with 1–20 at eight rows before larger data.
-2. **Batch shape:** exercise batches 1, 8, 64, and generator maximums. This
-   separates value handling from multi-row packet/executor behavior.
-3. **Cardinality:** move through 8, 128, 1,000, 10,000, 100,000, 1,000,000,
-   and 2,000,000 rows while recording generation, per-statement, invariant,
-   probe, snapshot, throughput, and memory evidence. Flat volume, relational,
-   and commerce lanes have crossed one million rows; repeat them after
-   storage/query-plan changes as stable A/B benchmarks.
-4. **Type boundaries:** add dedicated models for signed/unsigned limits,
-   precision/scale edges, zero/empty values, Unicode normalization, NUL bytes,
-   temporal boundaries, large blobs, and deeply nested JSON.
-5. **Relational depth:** add composite foreign keys, cyclic DDL ordering,
-   nullable composite references, long dependency chains, cascading-action
-   syntax, and deliberately invalid FK/unique mutations with matched rejection
-   oracles.
-6. **DML sequences:** deterministic UPDATE/DELETE/INSERT-select/upsert,
-   transactions, rollback, constraint violations, and state checks after each
-   mutation.
-7. **Protocol stress:** prepared statements, parameter types, large packets,
-   connection churn, concurrent sessions, cancellation, and partial client
+2. **Batch shape.** Exercise batches 1, 8, 64, and generator maximums. This
+   separates value handling from multi-row packet and executor behavior.
+3. **Cardinality.** Increase one dimension at a time while recording
+   generation, statement, invariant, probe, snapshot, throughput, and memory
+   evidence. Repeat established large campaigns after storage or planner
+   changes to obtain stable A/B comparisons.
+4. **Type boundaries.** Add dedicated models for signed and unsigned limits,
+   precision and scale edges, zero and empty values, Unicode normalization,
+   NUL bytes, temporal boundaries, large blobs, and deeply nested JSON.
+5. **Relational depth.** Add composite foreign keys, cyclic DDL ordering,
+   nullable composite references, long dependency chains, cascading actions,
+   and invalid FK or unique mutations with matched rejection oracles.
+6. **DML sequences.** Compose deterministic updates, deletes, insert-select,
+   upserts, transactions, rollbacks, constraint violations, and state checks.
+7. **Protocol stress.** Exercise prepared statements, parameter types, large
+   packets, connection churn, concurrent sessions, cancellation, and partial
    disconnects.
-8. **Durability:** vary concurrent writers, crash cadence, WAL volume, and
-   checkpoint boundaries in the implemented restart lane; preserve exact
-   acknowledged/ambiguous evidence for every run.
+8. **Durability.** Vary concurrent writers, crash cadence, WAL volume, and
+   checkpoint boundaries. Preserve exact acknowledged and ambiguous commit
+   evidence for every run.
 
 Do not simply skip a first failing statement to expose later failures; that
 creates meaningless downstream differences. To move behind a known failure

@@ -4,6 +4,10 @@ These probes run unmodified, pinned upstream projects against a fresh fsdb
 process. Every target gets an isolated Docker network and database server, so a
 failed installer cannot affect another target.
 
+The suite answers an application-level question: can an unchanged project
+install, migrate, and exercise its database-facing tests through the MySQL wire
+protocol? It does not replace the focused Expecto or differential suites.
+
 These applications add compatibility evidence that the Laravel application
 gauntlet does not provide:
 
@@ -44,7 +48,7 @@ Vitest.
 just smoke-apps gitea
 just smoke-apps mediawiki drupal
 just smoke-apps ghost moodle wordpress rails magento
-just smoke-apps
+just smoke-apps                       # every pinned target
 ```
 
 Build images without running a probe:
@@ -66,6 +70,19 @@ continues through all selected targets and exits nonzero when any target fails.
 Reproducible fsdb failures found by these probes become focused regression
 tests. Deliberate compatibility boundaries remain inventoried in
 [`GAPS.md`](../GAPS.md).
+
+## Classifying failures
+
+A red upstream test is evidence, not automatically an fsdb defect:
+
+| Classification | Next check |
+|---|---|
+| fsdb compatibility | The pinned test passes against MySQL 8.4 but fails against fsdb. Minimize the SQL and add a focused regression. |
+| upstream behavior | The same pinned test fails against MySQL 8.4 with the same observable result. Record it with the campaign. |
+| environment | The database was not reached, or a browser, search service, dependency, timeout, or container failed first. Repair the lane and rerun. |
+
+Compare the earliest causal failure. Later errors after a failed install or
+migration are usually consequences and should not be counted independently.
 
 ## Drupal's full-suite gate
 

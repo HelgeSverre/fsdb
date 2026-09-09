@@ -29,6 +29,27 @@ The torture ledger `torture/support/known-gaps.json` is hand-reviewed. This
 document also covers deliberate implementation ceilings and findings recorded
 under `torture/findings/`.
 
+## Contents
+
+- [Summary by area](#summary-by-area)
+- [1. SQL statements and parser](#1-sql-statements-and-parser)
+- [2. Query execution](#2-query-execution)
+- [3. Built-in functions](#3-built-in-functions)
+- [4. Data types and values](#4-data-types-and-values)
+- [5. Constraints and indexes](#5-constraints-and-indexes)
+- [6. Charsets and collations](#6-charsets-and-collations)
+- [7. Transactions and concurrency](#7-transactions-and-concurrency)
+- [8. Persistence and durability](#8-persistence-and-durability)
+- [9. Views and triggers](#9-views-and-triggers)
+- [10. Stored routines, events, schedulers](#10-stored-routines-events-schedulers)
+- [11. Full-text search](#11-full-text-search)
+- [12. Wire protocol and prepared statements](#12-wire-protocol-and-prepared-statements)
+- [13. Authentication and privileges](#13-authentication-and-privileges)
+- [14. Metadata, administration, logging, replication](#14-metadata-server-administration-logging-replication)
+- [15. Differential-testing and performance tails](#15-differential-testing-and-performance-tails)
+- [16. Deliberate divergences](#16-deliberate-divergences-accepted-not-targeted-for-parity)
+- [17. Relative severity view](#17-relative-severity-view)
+
 ## Summary by area
 
 | Area | Current boundary | Largest remaining gap |
@@ -42,7 +63,7 @@ under `torture/findings/`.
 | [Transactions](#7-transactions-and-concurrency) | Supported isolation levels, row ownership, optimistic merge, and XA | Remaining coarse write shapes |
 | [Persistence](#8-persistence-and-durability) | Opt-in WAL, snapshots, recovery, rotation, and group commit | Foreground rather than background row reclamation |
 | [Views and triggers](#9-views-and-triggers) | Single-table, nested, and restricted join views; ordered compound triggers | Complex updatable views |
-| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | — |
+| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | No open gap recorded |
 | [Full-text](#11-full-text-search) | Maintained inverted indexes and MySQL-shaped scoring | CJK parsing and remaining plan combinations |
 | [Wire protocol](#12-wire-protocol-and-prepared-statements) | Prepared statements, TLS, compression, LOCAL INFILE, and multi-results | GTID state tracking and live TLS certificate reload |
 | [Authentication](#13-authentication-and-privileges) | Host accounts, caching-SHA2/SHA-256/native credentials, grants, roles, proxy grants, and account policy | Pluggable identity and proxy-user selection |
@@ -58,11 +79,11 @@ appear within set-operation branches.
 
 DDL covers databases, tables, indexes, views, triggers, users, grants,
 `CREATE TABLE ... AS SELECT`, temporary tables, `TRUNCATE`, and `RENAME TABLE`.
-Multi-pair `RENAME TABLE` statements resolve from left to right and publish
-atomically. `ALTER TABLE ... RENAME` can combine a database move with other
-schema changes. Base tables retain their data, generated constraint names, and
-foreign key relationships. As in MySQL, a triggered table and a view cannot
-cross a database boundary.
+Multi-pair renames resolve from left to right and publish atomically. Base
+tables retain their data, generated constraint names, and foreign-key
+relationships across supported moves. As in MySQL, a triggered table and a
+view cannot cross a database boundary.
+
 `EXPLAIN` supports traditional, JSON, and ANALYZE forms. Transaction control,
 `SET`, `SHOW`, `USE`, `KILL`, and `DESCRIBE` are text-probed before the grammar
 by `QueryHandler.dispatch`.
@@ -381,40 +402,8 @@ trigger is created.
 
 ## 10. Stored routines, events, schedulers
 
-**Procedures.** Typed `IN`, `OUT`, and `INOUT` parameters work with
-`DECLARE`/`SET`, nested `IF`/`ELSEIF`/`ELSE` and `CASE`, labeled blocks,
-`WHILE`, `REPEAT`, and `LOOP` with `LEAVE`/`ITERATE`, scoped condition
-declarations, `CONTINUE`/`EXIT` handlers, `SIGNAL`/`RESIGNAL`, sequential SQL statements,
-routine variables in expressions and `LIMIT`, and multiple resultsets with
-the protocol's final OK result.
-
-Creation, removal, calls, SHOW output, and routine metadata are persisted.
-Definer and invoker bodies use the corresponding account, routine schema, and
-captured session semantics. `INFORMATION_SCHEMA.PARAMETERS` describes procedure
-arguments and function return or argument rows.
-
-Procedure recursion follows the GLOBAL and SESSION
-`max_sp_recursion_depth` setting, including MySQL's 0–255 bounds and
-per-routine counting for mutual recursion.
-
-**Functions.** Stored functions support typed parameters, return coercion,
-`RETURN`, compound control flow, handlers, cursors, subqueries, typed local
-`SELECT … INTO`, nested function and procedure calls, definer or invoker
-execution, native-function precedence, prepared execution, SHOW metadata, and
-catalog persistence. Stored functions retain MySQL's 1424 recursion refusal
-and restore their creation-time SQL mode, client charset, and connection
-collation.
-
-Data-changing bodies write through the invoking statement's transaction, so a
-failed statement discards their effects. Error 1442 protects every table the
-invoking statement reads or writes. Metadata-only probes and synthetic
-validation rows do not invoke the body, while function writes during
-`CREATE TABLE … AS SELECT` return 1746.
-
-**Events.** One-time and recurring declarations support creation, removal,
-schedule, status, body and name alteration, SHOW output, persistence, and
-definer-context execution. Routine, execute, and event privileges guard their
-corresponding paths.
+No open routine or event difference is recorded. The implemented boundary is
+summarized in the [compatibility guide](docs/compatibility.md#stored-routines-and-events).
 
 ## 11. Full-text search
 
@@ -434,15 +423,18 @@ Flat boolean word expressions score directly from exact or prefix postings.
 Required terms begin with the smallest posting; optional, excluded, raised,
 lowered, and soft terms probe a smaller upstream candidate set or accumulate
 only touched rows. Phrase and proximity conditions intersect their word
-postings, retain ordinary per-word relevance, and check candidate documents
-with ordered matching or a linear sliding window. The grouped evaluator begins
-with the smallest required child and probes the other required children;
-without one, only positive children seed candidates. Bounded AND/OR predicate
-trees intersect or union MATCH candidates before residual evaluation.
-Single-table reads and writes intersect compatible equality, literal-IN, range,
-and spatial candidates before scoring; physical joins score each owning corpus
-before joining. Multi-table UPDATE/DELETE score each physical source before
-evaluating join conditions, predicates, and assignments.
+postings, retain per-word relevance, and check candidate documents with
+ordered matching or a linear sliding window.
+
+The grouped evaluator begins with the smallest required child and probes the
+other required children; without one, only positive children seed candidates.
+Bounded AND/OR predicate trees intersect or union MATCH candidates before
+residual evaluation.
+
+Single-table reads and writes intersect compatible equality, literal-IN,
+range, and spatial candidates before scoring. Physical joins score each owning
+corpus before joining, and multi-table UPDATE/DELETE score each physical source
+before evaluating joins, predicates, and assignments.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|

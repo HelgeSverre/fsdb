@@ -11,7 +11,9 @@ bytes → command → AST → logical plan → lazy `seq`.
 
 MySQL 8.4 is the compatibility oracle; SQLite is not. Readable F# is the
 primary design constraint, ahead of raw performance. The default server is
-in-memory, with an opt-in binary WAL and snapshots for durable use.
+in-memory, with an opt-in binary WAL and snapshots for durable use. The
+[compatibility guide](docs/compatibility.md) explains how behavior is
+validated; [GAPS.md](GAPS.md) is the live ledger of known differences.
 
 ## Contents
 
@@ -41,8 +43,8 @@ in-memory, with an opt-in binary WAL and snapshots for durable use.
 
 ## Quick start
 
-Requires the .NET 10 SDK pinned by `global.json`. A MySQL client is needed for
-the CLI walkthrough below; [`just`](https://github.com/casey/just) is optional
+The server requires the .NET 10 SDK pinned by `global.json`. The walkthrough
+also uses a MySQL client. [`just`](https://github.com/casey/just) is optional,
 but provides the repository's standard commands.
 
 ```sh
@@ -510,6 +512,21 @@ The [`Fsdb.Db` facade](src/Fsdb/Db.fs) owns an engine instance, its extension
 registry, and its transport settings. Register extensions before opening
 connections or serving traffic.
 
+Configuration uses pipeline-friendly builders. Most return a new `Db` value;
+`withLogger` changes the process-wide sink, while `registerTable` and
+`onCommit` attach state to the current store:
+
+| API | Purpose |
+|---|---|
+| `Db.withDataDir` | Load and attach durable WAL/snapshot storage. |
+| `Db.withLogger` | Route process-wide diagnostics to a host callback. |
+| `Db.withTlsCertificate` | Supply the listener's server certificate. |
+| `Db.withClientCertificateAuthority` | Trust a CA for client certificates. |
+| `Db.withAuthenticationRsaKey` | Supply a private key for plaintext SHA-2 full authentication. |
+| `Db.requireSecureTransport` | Reject plaintext sessions. |
+
+Runtime and extension APIs are similarly small:
+
 | API | Purpose |
 |---|---|
 | `Db.registerScalar` | Add a context-free scalar function. |
@@ -518,8 +535,8 @@ connections or serving traffic.
 | `Db.registerTable` | Expose host data as a read-only table in the `fsdb` schema. |
 | `Db.onCommit` | Subscribe to committed row and schema changes. |
 | `Db.connect` | Open a stateful in-process SQL session without a socket. |
-| `Db.serve` | Start a background, stoppable MySQL listener. |
-| `Db.listen` | Run a MySQL listener until its returned `Async` stops. |
+| `Db.serve` | Start a background listener and return its bound endpoint. |
+| `Db.listen` | Run a listener until its returned `Async` stops. |
 
 ### Create an embedded host
 
@@ -571,9 +588,8 @@ built-in, while session-bound functions such as `DATABASE()` and
 types instead of receiving preformatted strings.
 
 Arity is expressed by pattern matching, not by registration metadata. Handle
-`VNull` explicitly: fsdb evaluates expressions against an all-NULL probe row
-before scanning real rows, and SQL functions normally propagate NULL where
-appropriate.
+`VNull` explicitly: metadata validation may evaluate an expression against a
+synthetic all-NULL row, and SQL functions normally propagate NULL.
 
 Raise `SqlError(code, message)` for a deliberate client-visible failure. Any
 other exception becomes error 1105, and an extension failure aborts the current
@@ -776,8 +792,10 @@ match connection.Query "SELECT @request_id" with
 | Executor.MultipleResults results -> printfn "%d results" results.Length
 ```
 
-`Db.serve` starts a background server and returns its bound address and port
-plus a stop function. `Db.listen` returns a foreground `Async<unit>` instead:
+`Db.serve` starts a background server and returns its actual bound address and
+port plus a stop function. This is especially useful with port `0`, where the
+operating system chooses an available port. `Db.listen` returns a foreground
+`Async<unit>` instead:
 
 ```fsharp
 use server = db |> Db.serve System.Net.IPAddress.Loopback 0
@@ -838,6 +856,7 @@ whose bytes differ but extracted identity is the same.
 
 `benchmarks/Fsdb.Benchmarks` runs fsdb head-to-head against native MySQL 8.4
 through BenchmarkDotNet. Each pair uses the same schema, seeded data, and SQL.
+Choose the smallest recipe that answers the question:
 
 ```sh
 just bench               # full latency suite
@@ -898,10 +917,10 @@ is not part of `just check`; see the
 
 ## Documentation
 
-The overview and compatibility guide describe the current implementation.
-`GAPS.md` contains only active differences. Benchmark results and dated torture
-findings are historical evidence and are intentionally left unchanged when the
-implementation moves on.
+The maintained guides describe the current implementation. `GAPS.md` contains
+the active boundaries; immutable benchmark results and dated torture findings
+remain historical evidence and are not rewritten when the implementation
+moves on.
 
 | Guide | Use it for |
 |---|---|

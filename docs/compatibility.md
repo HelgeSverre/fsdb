@@ -1,6 +1,8 @@
 # Compatibility
 
-How fsdb validates MySQL compatibility and records the supporting evidence.
+How fsdb validates MySQL compatibility and where the implemented behavior has
+important operational detail. This is not a blanket compatibility claim:
+[GAPS.md](../GAPS.md) remains the authoritative ledger of open differences.
 
 ## Contents
 
@@ -15,6 +17,7 @@ How fsdb validates MySQL compatibility and records the supporting evidence.
 - [Views and triggers](#views-and-triggers)
   - [Writable views](#writable-views)
   - [Triggers](#triggers)
+- [Stored routines and events](#stored-routines-and-events)
 - [ALTER execution options](#alter-execution-options)
 - [HASH partitioning](#hash-partitioning)
 - [Check constraints](#check-constraints)
@@ -30,9 +33,9 @@ How fsdb validates MySQL compatibility and records the supporting evidence.
 ## Validation method
 
 fsdb is validated by migrating and running the test suites of real Laravel
-applications against it, unmodified. Where a suite diverges from its sqlite
-baseline, the dispute is settled by running the same tests against a real
-MySQL 8.4 — fsdb must match MySQL, not sqlite.
+applications against it without database-specific patches. Where a suite
+diverges from its sqlite baseline, the same test runs against MySQL 8.4. fsdb
+must match MySQL, not sqlite.
 
 `torture/` supplies the differential and failure-injection layers. Each lane
 has a distinct contract:
@@ -88,20 +91,23 @@ The implemented surface includes:
 
 - the MySQL wire protocol, forward-only prepared cursors, and policy-controlled
   zlib or Zstandard compression;
-- PDO and mysql CLI compatibility;
+- mysql CLI, PDO/mysqli, MySqlConnector, Doctrine DBAL, mysql2, and Active
+  Record compatibility through focused or application-level probes;
 - the SQL engine, Laravel migrations, multi-table DML, and `EXPLAIN`;
 - the embedding API, opt-in persistence, and lazy result streaming.
 
-Each area has a runnable acceptance gate through an external client, a
-reference application suite, or a benchmark threshold.
+Evidence comes from external clients, reference application suites, focused
+MySQL-oracle regressions, the differential harness, and performance profiles.
+No single lane is treated as proof of complete MySQL compatibility.
 
 ## GUI clients and introspection
 
 The introspection surface follows queries sent by real clients. Fixtures cover
 TablePlus connect, browse, and structure flows and phpMyAdmin query builders.
-Their supported `information_schema` descriptors are pinned against MySQL
-8.4. The fixture includes `SHOW SLAVE STATUS`, which MySQL 8.4 also rejects
-with 1064.
+Supported `information_schema` descriptors are pinned against MySQL 8.4.
+
+The fixture also includes `SHOW SLAVE STATUS`, which MySQL 8.4 rejects with
+1064; accepting a familiar but removed statement would be a compatibility bug.
 
 Stored views, triggers, procedures, functions, parameters, and events populate
 their corresponding catalogs. `PROCESSLIST`, `Threads_connected`, and `KILL`
@@ -335,6 +341,32 @@ handlers, `SIGNAL`/`RESIGNAL`, and `GET CURRENT/STACKED DIAGNOSTICS`.
 The full MySQL surface is documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
+## Stored routines and events
+
+Stored procedures support typed `IN`, `OUT`, and `INOUT` parameters; local
+variables; nested branches and loops; scoped condition declarations;
+`CONTINUE` and `EXIT` handlers; `SIGNAL`, `RESIGNAL`, and diagnostics; cursors;
+routine variables in expressions and `LIMIT`; and multiple result sets.
+
+Procedure recursion follows the GLOBAL and SESSION
+`max_sp_recursion_depth` setting, including MySQL's per-routine counting for
+mutual recursion.
+
+Stored functions support typed parameters and return coercion, compound
+control flow, handlers, cursors, subqueries, typed local `SELECT ... INTO`,
+nested routine calls, prepared execution, and metadata. MySQL's recursion
+refusal and creation-time SQL mode, charset, and collation behavior are
+retained.
+
+Data-changing routine bodies share the invoking statement's transaction.
+Failed statements discard their effects, and error 1442 protects tables read
+or written by the invoking statement. Metadata probes do not invoke function
+bodies, while function writes during `CREATE TABLE ... AS SELECT` return 1746.
+
+One-time and recurring events retain schedules, status, body, name, definer,
+metadata, persistence, and definer-context execution. Routine, execute, and
+event privileges guard the corresponding operations.
+
 ## ALTER execution options
 
 `ALTER TABLE` retains repeated `ALGORITHM` and `LOCK` clauses with MySQL's
@@ -549,8 +581,8 @@ status, table maintenance, FLUSH, KILL, and explicit table locks.
 
 ### Deliberate limits
 
-The complete ledger lives in [GAPS.md](../GAPS.md). Notable deliberate limits
-include:
+The complete ledger lives in [GAPS.md](../GAPS.md). Deliberate authentication
+and catalog limits include:
 
 - Pluggable authentication and proxy identity selection are absent.
 - Every MySQL `mysql.*` table schema is exposed, but engine-owned help, log,

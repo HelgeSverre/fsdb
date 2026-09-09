@@ -5,10 +5,11 @@ for fsdb. It uses SQL Splitter to generate deterministic MySQL dumps, executes
 the same statements through MySqlConnector against MySQL and fsdb, and records
 enough evidence to classify and replay the first divergence.
 
-This file is the operator guide. The evidence model, failure taxonomy, and
-scale-up strategy live in [`TORTURE-TESTING.md`](TORTURE-TESTING.md).
-Reviewed discovery reports live under [`findings/`](findings/); raw run
-bundles remain ignored under [`artifacts/`](artifacts/).
+This file is the operator guide: choose a lane, run it, and classify its
+artifact. The evidence model, failure taxonomy, and scale-up strategy live in
+[`TORTURE-TESTING.md`](TORTURE-TESTING.md). Reviewed discovery reports live
+under [`findings/`](findings/); raw run bundles remain ignored under
+[`artifacts/`](artifacts/).
 
 Nothing here is part of the root solution or its normal test/benchmark gates.
 Focused bugs found here should be promoted into the normal Expecto suite after
@@ -22,7 +23,7 @@ they are understood and minimized.
 - [Cross-database concurrency](#cross-database-concurrency)
 - [Crash recovery](#crash-recovery)
 - [Syntax mutation](#syntax-mutation)
-- [Corpus scale and tools](#corpus-scale-and-tools)
+- [Scale and toolchain](#scale-and-toolchain)
 - [Scenarios](#scenarios)
 - [Artifacts and classification](#artifacts-and-classification)
 - [Development checks](#development-checks)
@@ -40,6 +41,18 @@ they are understood and minimized.
 | Evidence | Replayable artifacts stay under the ignored `artifacts/` directory. Known gaps are added only by manual review. |
 
 ## Quick start
+
+The command selects one independent lane:
+
+| Lane | Purpose | Oracle |
+|---|---|---|
+| `suite` / `run` | Generated schema, data, queries, and final state | MySQL 8.4 |
+| `syntax` | Valid baselines plus bounded syntax and comment mutations | MySQL 8.4 |
+| `concurrency` | Contended prepared transactions and fault schedules | MySQL 8.4 plus deterministic invariants |
+| `multidb` | Isolation and scaling across independent databases | MySQL 8.4 plus a single-database fsdb baseline |
+| `durability` | Crash, WAL-tail, and snapshot recovery | Acknowledged/ambiguous commit sets |
+
+Run `./scripts/run.sh --help` for every option and its default.
 
 ### Differential suite
 
@@ -65,7 +78,7 @@ Run one scenario or replay a prior artifact bundle:
 ./scripts/run.sh replay --case artifacts/runs/<run>/<case>
 ```
 
-### Transaction concurrency
+## Transaction concurrency
 
 Run the independent prepared-transaction concurrency lane:
 
@@ -85,19 +98,20 @@ phase barrier is asynchronous so the harness does not manufacture thread-pool
 starvation at high connection counts.
 
 The same run applies matched fault schedules to MySQL and fsdb. It cancels a
-statement while it is queued for a row lock, then rolls a contended write back
-to a savepoint. A hot-row connection-churn case mixes commits with disconnects
-that leave transactions open. Further schedules contend on the same row under
-each transaction isolation level and on a generated unique key reached through
-`INSERT ... SELECT` and `REPLACE ... SELECT`. The cases verify atomicity,
-retained pre-savepoint work, rollback on disconnect, statement-time duplicate
-detection, rebased replacement, and subsequent lock reuse.
+statement queued for a row lock, rolls a contended write back to a savepoint,
+and mixes hot-row commits with disconnects that leave transactions open.
+
+Further schedules contend on the same row under each transaction isolation
+level and on a generated unique key reached through `INSERT ... SELECT` and
+`REPLACE ... SELECT`. The cases verify atomicity, retained pre-savepoint work,
+rollback on disconnect, statement-time duplicate detection, rebased
+replacement, and subsequent lock reuse.
 
 Database creation and deletion also run alongside live catalog reads and
 transactions on an anchor table. The final committed value and absence of
 worker errors protect catalog publication from corrupting unrelated traffic.
 
-### Cross-database concurrency
+## Cross-database concurrency
 
 Run the same prepared-transaction workload across independent databases on one
 fsdb process:
@@ -112,7 +126,7 @@ transaction ledgers independently. A separate single-database fsdb run supplies
 the scaling baseline; `--scaling-factor` sets the largest accepted fraction of
 the serially projected runtime.
 
-### Crash recovery
+## Crash recovery
 
 Run the crash/restart durability lane without Docker or a MySQL oracle:
 
@@ -125,12 +139,13 @@ Each operation inserts the same identity into two tables inside one explicit
 transaction. The harness kills the server during every work phase, restarts it
 against the same data directory, and distinguishes acknowledged commits from
 commits whose reply was lost. Recovery must retain every acknowledgement,
-never expose one side of a transaction, and never invent an operation. It then
-observes two automatic snapshot rotations, appends one commit to the new WAL,
-and crashes again. Recovery must include that WAL tail. The last restart follows
-a graceful snapshot checkpoint and must preserve the same recovered sets.
+never expose one side of a transaction, and never invent an operation.
 
-### Syntax mutation
+The lane then crosses automatic snapshot rotation, appends a commit to the new
+WAL, and crashes again. Recovery must include that WAL tail. The last restart
+follows a graceful checkpoint and must preserve the same recovered sets.
+
+## Syntax mutation
 
 Run the bounded syntax-mutation lane:
 
@@ -165,7 +180,7 @@ A baseline-only run is an executable feature inventory. Any disagreement still
 becomes a finding; a deliberate refusal counts as expected only when its exact
 signature is present in the hand-reviewed known-gap ledger.
 
-### Corpus scale and tools
+## Scale and toolchain
 
 `--scale` multiplies the declared model row counts before `--max-rows` applies.
 `--invariant-every 0` runs catalog invariants once after the load; use it for
@@ -207,10 +222,11 @@ still retained.
 
 ### Differential cases
 
-Each case directory contains the exact model and SQL hashes, generator output,
-the generated SQL, split-statement byte ranges and hashes, parser and target
-outcomes, commit summaries, catalog invariants, semantic probes, snapshots,
-comparison, timings, and a versioned `manifest.json`.
+Each case directory contains a versioned `manifest.json` plus the exact inputs
+and evidence needed to replay its first divergence. This includes model and SQL
+hashes, generator output, statement byte ranges, parser and target outcomes,
+commit summaries, catalog invariants, semantic probes, final snapshots,
+comparisons, and timings.
 
 Large statements use bounded prefix and suffix previews in JSON;
 `generated.sql` remains the byte-exact source. `failure.sql` preserves a local
@@ -228,9 +244,10 @@ case.
 
 Outcomes distinguish generator rejection, MySQL rejection, fsdb parser and
 execution gaps, contained internal errors, protocol faults, timeouts, schema or
-data mismatches, invariant failures, and infrastructure failures. The harness
-never adds a finding to `support/known-gaps.json`; entries are reviewed and
-added manually by exact failure signature.
+data mismatches, invariant failures, and infrastructure failures.
+
+The harness never adds a finding to `support/known-gaps.json`; entries are
+reviewed and added manually by exact failure signature.
 
 ### Concurrency and durability
 

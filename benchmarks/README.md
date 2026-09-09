@@ -17,6 +17,18 @@ hotspots, not to chase parity — fsdb optimizes for readable F# first.
 
 ## Running
 
+Choose a recipe by the behavior under investigation:
+
+| Question | Recipe |
+|---|---|
+| General single-connection latency | `just bench` |
+| Recently added SQL features | `just bench-features` |
+| Fast directional check | `just bench-quick` |
+| Commit durability cost | `just bench-durable` |
+| Data-size slope | `just bench-scale` |
+| Concurrent throughput | `just bench-load` or `just bench-load-scale` |
+| Complete local campaign | `just bench-comprehensive` |
+
 ```sh
 just bench               # full latency suite, results -> results/<git-sha>.md
 just bench-features      # selected SQL features, results -> results/<git-sha>-features.md
@@ -43,6 +55,26 @@ Prerequisites and isolation rules:
   refuse to share the selected fsdb port with another listener.
 - Keep other heavy workloads off the machine. Two consecutive runs should
   agree on `PointSelectByPk` within roughly 20%; otherwise, discard the run.
+
+### Focused runs
+
+The public recipes select broad categories. For implementation work, narrow a
+run with environment variables rather than editing benchmark attributes:
+
+```sh
+FSDB_BENCH_METHODS=JoinUsersOrders,CompositeJoinWithResidualEquality \
+  just bench-quick
+
+FSDB_BENCH_CATEGORIES=Planner just bench-quick
+```
+
+`FSDB_BENCH_METHODS` accepts comma-separated method names.
+`FSDB_BENCH_CATEGORIES` accepts comma-separated BenchmarkDotNet categories.
+The data-size variables `FSDB_BENCH_USERS`, `FSDB_BENCH_ORDERS`, and
+`FSDB_BENCH_ARTICLES` override the seeded cardinalities.
+
+A focused result is evidence for that shape, not a replacement for the broader
+suite. Keep the generated provenance header with any tracked artifact.
 
 ## Methodology
 
@@ -195,13 +227,14 @@ same order of magnitude. The former multi-second fsdb-only cliff is absent in
 these runs; the joined FULLTEXT query is still 6.3x slower than MySQL at the
 larger recorded size.
 
-That quick matrix also exposes constant-factor work hidden by slope alone:
-point reads are 237 µs versus 40 µs, recursive CTE evaluation is 953 µs versus
-54 µs, and correlated indexed counts are 1.22 ms versus 207 µs. A sampled CPU
-trace of a saturated recursive-CTE workload attributes most active managed
-time to per-statement query handling, binding, dynamic scope, and `AsyncLocal`
-state transitions rather than the 100-row recursive body itself. At that
-revision, shared statement setup was therefore the next profiling seam rather
+That quick matrix also exposes constant-factor work hidden by slope alone.
+Point reads are 237 µs versus 40 µs, recursive CTE evaluation is 953 µs versus
+54 µs, and correlated indexed counts are 1.22 ms versus 207 µs.
+
+A sampled CPU trace of a saturated recursive-CTE workload attributes most
+active managed time to per-statement query handling, binding, dynamic scope,
+and `AsyncLocal` state transitions rather than the 100-row recursive body.
+At that revision, shared statement setup was the next profiling seam rather
 than a special-purpose CTE container.
 
 The [low-cardinality join profile](results/1c2270d-low-cardinality-joins.md)
@@ -264,13 +297,16 @@ statement overhead visible in the broad load matrix.
 
 The post-index [10k-article](results/8e904fd-fulltext-index.md) and
 [100k-article](results/8e904fd-fulltext-index-scale.md) comparisons, followed
-by the [posting-candidate comparison](results/ef4b4ab-fulltext-postings.md), cover
-natural, boolean, accent-aware, and boolean-prefix queries. Against the
-pre-index 10k baseline, natural search fell from 53.7 ms to 2.76 ms,
-accent-aware search from 51.2 ms to 1.62 ms, boolean search from 50.7 ms to
-3.19 ms, and prefix search from 49.5 ms to 1.44 ms. At the larger recorded
+by the [posting-candidate comparison](results/ef4b4ab-fulltext-postings.md),
+cover natural, boolean, accent-aware, and boolean-prefix queries.
+
+Against the pre-index 10k baseline, natural search fell from 53.7 ms to 2.76
+ms, accent-aware search from 51.2 ms to 1.62 ms, boolean search from 50.7 ms
+to 3.19 ms, and prefix search from 49.5 ms to 1.44 ms. At the larger recorded
 size, posting-driven boolean evaluation is 56.0 ms versus MySQL's 10.7 ms,
-while maintained prefix postings are 33.9 ms versus 2.62 ms. The profiles
-attribute the remaining cost to OR predicates, projection-only MATCH, and the
-general result pipeline rather than document re-tokenization or vocabulary
-scans. See [GAPS.md](../GAPS.md#11-full-text-search) for the current boundary.
+while maintained prefix postings are 33.9 ms versus 2.62 ms.
+
+The profiles attribute the remaining cost to OR predicates, projection-only
+MATCH, and the general result pipeline rather than document re-tokenization or
+vocabulary scans. See [GAPS.md](../GAPS.md#11-full-text-search) for the current
+boundary.
