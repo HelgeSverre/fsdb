@@ -11,6 +11,7 @@ type private Command =
     | Durability
     | Syntax
     | Coverage
+    | Contracts
     | Replay
     | CheckTools
     | Help
@@ -53,6 +54,7 @@ Usage:
   fsdb-torture durability [options]
   fsdb-torture syntax [options]
   fsdb-torture coverage [options]
+  fsdb-torture contracts [options]
   fsdb-torture replay --case <artifact-directory> [options]
   fsdb-torture check-tools [--sql-splitter <path>]
 
@@ -114,6 +116,7 @@ Options:
             | Some "durability" -> Durability, 1
             | Some "syntax" -> Syntax, 1
             | Some "coverage" -> Coverage, 1
+            | Some "contracts" -> Contracts, 1
             | Some "replay" -> Replay, 1
             | Some "check-tools" -> CheckTools, 1
             | Some "--help"
@@ -250,8 +253,8 @@ Options:
         | None when (command = Concurrency || command = MultiDb) && hotAccounts < 2 -> Error "concurrency/multidb requires --hot-accounts of at least 2"
         | None when (command = Concurrency || command = MultiDb) && hotAccounts > accounts -> Error "--hot-accounts cannot exceed --accounts"
         | None when command = MultiDb && databases < 1 -> Error "multidb requires --databases of at least 1"
-        | None when (command = Run || command = Suite || command = Replay || command = Concurrency || command = MultiDb || command = Syntax) && String.IsNullOrWhiteSpace mysql ->
-            Error "run, suite, concurrency, multidb, syntax, and replay require --mysql (torture/scripts/run.sh supplies it automatically)"
+        | None when (command = Run || command = Suite || command = Replay || command = Concurrency || command = MultiDb || command = Syntax || command = Contracts) && String.IsNullOrWhiteSpace mysql ->
+            Error "run, suite, concurrency, multidb, syntax, contracts, and replay require --mysql (torture/scripts/run.sh supplies it automatically)"
         | None ->
             Ok
                 { Command = command
@@ -328,6 +331,11 @@ Options:
           Cases = cli.SyntaxCases
           Depth = cli.SyntaxDepth
           TimeoutSeconds = cli.TimeoutSeconds
+          ArtifactRoot = cli.Artifacts
+          MySqlConnection = cli.MySql }
+
+    let compatibilityOptions cli : CompatibilityOptions =
+        { TimeoutSeconds = cli.TimeoutSeconds
           ArtifactRoot = cli.Artifacts
           MySqlConnection = cli.MySql }
 
@@ -489,6 +497,16 @@ module Program =
         let missing = report.Capabilities |> Array.filter (fun capability -> not (Array.isEmpty capability.MissingAxes))
         printfn "  inspect coverage.json for %d capabilities with unexercised axes" missing.Length
 
+    let private printContracts (report: CompatibilityManifest) directory =
+        let steps = report.Cases |> Array.sumBy _.Steps.Length
+        let failures = report.Cases |> Array.collect _.Steps |> Array.filter (fun step -> not step.Passed)
+        printfn "compatibility contracts: %s — %s" report.Classification directory
+        printfn "  cases=%d steps=%d differences=%d" report.Cases.Length steps failures.Length
+
+        failures
+        |> Array.tryHead
+        |> Option.iter (fun failure -> printfn "  first difference: %s/%s — %s" failure.Name failure.Classification failure.Detail)
+
     let private printDurability (report: DurabilityManifest) directory =
         printfn "%s: %s — %s" report.CaseId report.Classification directory
         printfn
@@ -526,6 +544,18 @@ module Program =
                 let report = Coverage.write directory
                 printCoverage report directory
                 return 0
+            | Ok cli when cli.Command = Contracts ->
+                try
+                    match! CompatibilityRunner.run (Cli.compatibilityOptions cli) with
+                    | Error error ->
+                        eprintfn "compatibility infrastructure failure: %s" error
+                        return 1
+                    | Ok(report, directory) ->
+                        printContracts report directory
+                        return if report.Passed then 0 else 2
+                with error ->
+                    eprintfn "compatibility infrastructure exception: %O" error
+                    return 1
             | Ok cli when cli.Command = Concurrency ->
                 try
                     match! ConcurrencyRunner.run (Cli.concurrencyOptions cli) with

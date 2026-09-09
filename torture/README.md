@@ -23,6 +23,7 @@ they are understood and minimized.
 - [Cross-database concurrency](#cross-database-concurrency)
 - [Crash recovery](#crash-recovery)
 - [Syntax mutation](#syntax-mutation)
+- [Compatibility contracts](#compatibility-contracts)
 - [Capability coverage](#capability-coverage)
 - [Scale and toolchain](#scale-and-toolchain)
 - [Scenarios](#scenarios)
@@ -49,6 +50,7 @@ The command selects one independent lane:
 |---|---|---|
 | `suite` / `run` | Generated schema, data, queries, and final state | MySQL 8.4 |
 | `syntax` | Valid baselines plus bounded syntax and comment mutations | MySQL 8.4 |
+| `contracts` | Declarative behavior, error, prepared-protocol, and connection schedules | MySQL 8.4 |
 | `coverage` | Generated inventory of capabilities and unexercised test axes | Source and executable corpus |
 | `concurrency` | Contended prepared transactions and fault schedules | MySQL 8.4 plus deterministic invariants |
 | `multidb` | Isolation and scaling across independent databases | MySQL 8.4 plus a single-database fsdb baseline |
@@ -184,6 +186,26 @@ operations.
 A baseline-only run is an executable feature inventory. Any disagreement still
 becomes a finding; a deliberate refusal counts as expected only when its exact
 signature is present in the hand-reviewed known-gap ledger.
+
+## Compatibility contracts
+
+Run the small, deterministic contract corpus against both servers:
+
+```bash
+./scripts/run.sh contracts --timeout-seconds 30
+```
+
+Contracts state whether an operation uses the text or binary prepared protocol,
+which named connection owns it, and whether MySQL must succeed or return an
+exact error code and SQLSTATE. `send` and `reap` actions allow overlapping work
+without making wall-clock sleeps part of the expected behavior. Query contracts
+compare names, compatible result types, and ordered typed rows; mutation
+contracts compare affected rows.
+
+The initial contracts cover comment and precedence boundaries, parser errors,
+typed prepared parameters, implicit DDL commit behavior, and independent
+concurrent writers. Add compact regressions here when a behavior spans protocol
+or session state; keep isolated parser or executor regressions in Expecto.
 
 ## Capability coverage
 

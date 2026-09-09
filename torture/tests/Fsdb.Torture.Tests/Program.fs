@@ -660,7 +660,56 @@ let tests =
                     let select = manifest.Capabilities |> Array.find (fun capability -> capability.Id = "statement:select")
                     Expect.contains select.ApplicableAxes "parser" "parser applies"
                     Expect.isTrue (select.Evidence |> Array.exists (fun item -> item.Axis = "parser")) "syntax baseline is evidence"
-                    Expect.contains select.MissingAxes "prepared-protocol" "unproven axes remain visible" ]
+                    let jsonExtract =
+                        manifest.Capabilities
+                        |> Array.find (fun capability -> capability.Id = "function:json_extract")
+
+                    Expect.contains jsonExtract.MissingAxes "prepared-protocol" "unproven axes remain visible" ]
+
+          testList
+              "Compatibility contracts"
+              [ testCase "catalog has stable unique case and step identities"
+                <| fun _ ->
+                    let cases = ContractCatalog.all
+                    Expect.equal (cases |> Array.distinctBy _.Name |> Array.length) cases.Length "case names"
+
+                    for case in cases do
+                        Expect.equal
+                            (case.Steps |> Array.distinctBy _.Name |> Array.length)
+                            case.Steps.Length
+                            (case.Name + " step names")
+
+                testCase "every asynchronous operation is reaped once"
+                <| fun _ ->
+                    for case in ContractCatalog.all do
+                        let sent =
+                            case.Steps
+                            |> Array.choose (fun step ->
+                                match step.Action with
+                                | Send(name, _, _, _, _) -> Some name
+                                | _ -> None)
+
+                        let reaped =
+                            case.Steps
+                            |> Array.choose (fun step ->
+                                match step.Action with
+                                | Reap name -> Some name
+                                | _ -> None)
+
+                        Expect.equal (Array.sort sent) (Array.sort reaped) (case.Name + " pending operations")
+
+                testCase "contract evidence contributes to generated coverage"
+                <| fun _ ->
+                    let manifest: CoverageManifest = Fsdb.Torture.Coverage.create ()
+
+                    let select =
+                        manifest.Capabilities
+                        |> Array.find (fun capability -> capability.Id = "statement:select")
+
+                    Expect.isTrue
+                        (select.Evidence
+                         |> Array.exists (fun item -> item.Axis = "prepared-protocol" && item.Source = "compatibility-contract"))
+                        "prepared SELECT contract is visible" ]
 
           testList
               "Catalog invariants"

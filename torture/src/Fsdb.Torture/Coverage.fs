@@ -134,11 +134,20 @@ module Coverage =
 
     let private evidence axis source = { Axis = axis; Source = source }
 
+    let private contractEvidence =
+        ContractCatalog.coverage
+        |> Seq.collect (fun (capability, axes) -> axes |> Seq.map (fun axis -> capability, evidence axis "compatibility-contract"))
+        |> Seq.groupBy fst
+        |> Seq.map (fun (capability, entries) -> capability, entries |> Seq.map snd |> Seq.toArray)
+        |> Map.ofSeq
+
     let private item area name applicable evidenceItems =
-        let distinctEvidence = evidenceItems |> Array.distinctBy (fun item -> item.Axis, item.Source)
+        let id = area + ":" + snakeCase name
+        let explicitEvidence = contractEvidence |> Map.tryFind id |> Option.defaultValue [||]
+        let distinctEvidence = Array.append evidenceItems explicitEvidence |> Array.distinctBy (fun item -> item.Axis, item.Source)
         let covered = distinctEvidence |> Array.map _.Axis |> Set.ofArray
 
-        { Id = area + ":" + snakeCase name
+        { Id = id
           Area = area
           Name = name
           ApplicableAxes = applicable
