@@ -198,7 +198,10 @@ runs:
   [scan predicates](results/8f119e1-prepared-scan-predicates.md), and
   [mutation predicates](results/584d606-prepared-mutation-predicates.md);
 - join planning: [covered composite keys](results/55e7e5f-quick.md) and
-  [composite key prefixes](results/5aa0131-quick.md).
+  [composite join prefixes](results/5aa0131-quick.md);
+- direct and correlated access:
+  [single-table composite prefixes](results/582cff7-quick.md) and
+  [projected correlated prefixes](results/b2b0bca-quick.md).
 
 These reports explain a measured revision pair. They do not replace the live
 compatibility and performance boundaries in [GAPS.md](../GAPS.md).
