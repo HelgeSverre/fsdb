@@ -10641,6 +10641,7 @@ and private physicalAccessKeyNames = function
     | IndexMergeAccess plan -> plan.KeyNames
 
 and private tryIndexMergeAccessPlan policy kind (table: Table) accesses =
+    let candidateCounts = accesses |> List.map physicalAccessCandidateCount
     let rowIdSets = accesses |> List.map physicalAccessRowIds
 
     let rowIds =
@@ -10652,7 +10653,9 @@ and private tryIndexMergeAccessPlan policy kind (table: Table) accesses =
         match policy with
         | CandidateNarrowing -> true
         | CostedRead ->
-            QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
+            match kind with
+            | MergeUnion -> QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
+            | MergeIntersection -> QueryPlanner.chooseIndexIntersection table.RowsArray.Count candidateCounts rowIds.Count
 
     if not accepted then
         None
@@ -10707,7 +10710,10 @@ and private tryIndexIntersectionAccessInTableWith
             |> List.choose (fun conjunct ->
                 tryPhysicalAccessInTableWith CandidateNarrowing store registry table tref (Some conjunct))
             |> function
-                | _ :: _ :: _ as accesses -> tryIndexMergeAccessPlan policy MergeIntersection table accesses
+                | _ :: _ :: _ as accesses
+                    when policy = CandidateNarrowing
+                         || (accesses |> List.map physicalAccessCandidateCount |> QueryPlanner.shouldProbeIndexIntersection) ->
+                    tryIndexMergeAccessPlan policy MergeIntersection table accesses
                 | _ -> None
         | _ -> None)
 

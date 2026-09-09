@@ -33,6 +33,8 @@ let private equalityPreference estimate =
 
 let private equalityScanFloor = 64
 let private hashJoinFloor = 64
+let private intersectionProbeFloor = 256
+let private intersectionReduction = 8L
 
 let private choose preference estimates =
     estimates
@@ -59,6 +61,16 @@ let chooseEquality tableRows candidateRows =
             RowsRead = max 0 candidateRows
             RowLookups = max 0 candidateRows } ]
         |> choose equalityPreference
+
+let shouldProbeIndexIntersection candidateRows =
+    match candidateRows |> List.filter ((<) 0) with
+    | _ :: _ :: _ as counts -> List.min counts >= intersectionProbeFloor
+    | _ -> false
+
+let chooseIndexIntersection tableRows candidateRows intersectionRows =
+    shouldProbeIndexIntersection candidateRows
+    && int64 (max 0 intersectionRows) * intersectionReduction <= int64 (List.min candidateRows)
+    && chooseRange tableRows intersectionRows = IndexRange
 
 let estimateUniformEqualityCandidates tableRows distinctKeys probeKeys =
     if tableRows <= 0 || distinctKeys <= 0 || probeKeys <= 0 then

@@ -6251,13 +6251,22 @@ let tests =
                     |> ignore
 
                     let values =
-                        [ for id in 1..100 -> sprintf "(%d, %d, %d, 0)" id (if id <= 40 then 30 else 40) id ]
+                        [ for id in 1..1000 do
+                              let age = if id <= 500 then 30 else 40
+
+                              let sortKey =
+                                  if id = 1 then 1
+                                  elif id <= 500 then 1000 + id
+                                  elif id < 1000 then id - 500
+                                  else 2000
+
+                              sprintf "(%d, %d, %d, 0)" id age sortKey ]
                         |> String.concat ", "
 
                     runDefault store $"INSERT INTO intersected VALUES {values}" |> ignore
                     runDefault store $"INSERT INTO scanned VALUES {values}" |> ignore
 
-                    let predicate = "age = 30 AND sort_key BETWEEN 35 AND 45 AND touched = 0"
+                    let predicate = "age = 30 AND sort_key BETWEEN 1 AND 499 AND touched = 0"
 
                     let rows table =
                         match runDefault store $"SELECT id FROM {table} WHERE {predicate}" with
@@ -6272,12 +6281,19 @@ let tests =
                     let plan = runDefault store $"EXPLAIN SELECT id FROM intersected WHERE {predicate}" |> explainRow
                     Expect.equal plan.AccessType (Some "index_merge") "compatible AND leaves use an index intersection"
                     Expect.equal plan.Key (Some "ix_age,ix_sort_key") "EXPLAIN lists each intersected index"
-                    Expect.equal plan.EstimatedRows (Some "6") "the estimate counts the intersected candidates"
+                    Expect.equal plan.EstimatedRows (Some "1") "the estimate counts the intersected candidates"
+
+                    let selectivePlan =
+                        runDefault store "EXPLAIN SELECT id FROM intersected WHERE age = 30 AND sort_key BETWEEN 1 AND 1"
+                        |> explainRow
+
+                    Expect.equal selectivePlan.AccessType (Some "range") "a narrow single index avoids merge overhead"
+                    Expect.equal selectivePlan.Key (Some "ix_sort_key") "the narrower component index wins"
 
                     let unionOfIntersection =
                         runDefault
                             store
-                            "EXPLAIN SELECT id FROM intersected WHERE (age = 30 AND sort_key BETWEEN 35 AND 45) OR id = 100"
+                            "EXPLAIN SELECT id FROM intersected WHERE (age = 30 AND sort_key BETWEEN 1 AND 499) OR id = 1000"
                         |> explainRow
 
                     Expect.equal unionOfIntersection.AccessType (Some "index_merge") "a union can consume an intersected branch"
@@ -6287,22 +6303,22 @@ let tests =
                         (Some "ix_age,ix_sort_key,PRIMARY")
                         "nested merge keys retain expression order"
 
-                    Expect.equal unionOfIntersection.EstimatedRows (Some "7") "nested merge rows remain deduplicated"
+                    Expect.equal unionOfIntersection.EstimatedRows (Some "2") "nested merge rows remain deduplicated"
 
                     let intersectionOfUnion =
                         runDefault
                             store
-                            "EXPLAIN SELECT id FROM intersected WHERE (age = 30 OR id = 100) AND sort_key BETWEEN 35 AND 100"
+                            "EXPLAIN SELECT id FROM intersected WHERE (age = 30 OR id = 1000) AND sort_key BETWEEN 1 AND 499"
                         |> explainRow
 
                     Expect.equal intersectionOfUnion.AccessType (Some "index_merge") "an intersection can consume a union branch"
-                    Expect.equal intersectionOfUnion.EstimatedRows (Some "7") "the nested intersection retains only common rows"
+                    Expect.equal intersectionOfUnion.EstimatedRows (Some "1") "the nested intersection retains only common rows"
 
                     runDefault store "CREATE TABLE anchor (id INT PRIMARY KEY)" |> ignore
                     runDefault store "INSERT INTO anchor VALUES (1)" |> ignore
 
                     let joinedSql =
-                        "SELECT i.id FROM intersected i JOIN anchor a ON a.id = 1 WHERE i.age = 30 AND i.sort_key BETWEEN 35 AND 45 AND i.touched = 0"
+                        "SELECT i.id FROM intersected i JOIN anchor a ON a.id = 1 WHERE i.age = 30 AND i.sort_key BETWEEN 1 AND 499 AND i.touched = 0"
 
                     let joinedPlan =
                         runDefault store $"EXPLAIN {joinedSql}"
@@ -6322,7 +6338,7 @@ let tests =
                         "index-intersection UPDATE matches its scan twin"
 
                     let deleteSql table =
-                        $"DELETE FROM {table} WHERE age = 30 AND sort_key BETWEEN 35 AND 45 AND touched = 1"
+                        $"DELETE FROM {table} WHERE age = 30 AND sort_key BETWEEN 1 AND 499 AND touched = 1"
 
                     let intersectedDelete = deleteSql "intersected"
                     let deletePlan = runDefault store $"EXPLAIN {intersectedDelete}" |> explainRow
