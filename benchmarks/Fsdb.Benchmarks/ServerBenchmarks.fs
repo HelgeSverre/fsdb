@@ -148,6 +148,11 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, name, email, age, meta, created_at FROM users WHERE id = {randomUserId ()}"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.PointSelectByConstantExpression() =
+        this.Query $"SELECT id, name, email, age, meta, created_at FROM users WHERE id = {randomUserId ()} + 0"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Wire")>]
     member this.SelectCompressiblePayload() =
         this.Query "SELECT REPEAT('compressible-', 512)"
