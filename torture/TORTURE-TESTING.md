@@ -100,6 +100,11 @@ servers, then applies a seed-ordered, bounded set of structural mutations. A
 run may chain up to three edits while deduplicating equivalent SQL before
 sampling.
 
+Fixtures may temporarily change session state to create durable input for a
+baseline, then restore it before mutation begins. This lets read-only seeds
+exercise mode-dependent values without making later classifications depend on
+execution order.
+
 Comment mutations replace natural token boundaries with MySQL block, hash,
 dash, executable-version, or future-version comments and never recurse into an
 existing comment. Block and version comments also surround parentheses and

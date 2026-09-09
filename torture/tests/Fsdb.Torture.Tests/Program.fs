@@ -517,7 +517,8 @@ let tests =
                           "collation_cte"
                           "collation_case_between"
                           "collation_join"
-                          "low_cardinality_join" ] do
+                          "low_cardinality_join"
+                          "allow_invalid_dates" ] do
                         Expect.contains features feature feature
 
                     for feature in

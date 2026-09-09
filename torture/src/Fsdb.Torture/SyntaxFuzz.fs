@@ -52,6 +52,8 @@ module SyntaxFuzz =
            "collation_join",
            "SELECT COUNT(*) FROM syntax_collation AS left_side JOIN syntax_collation AS right_side ON left_side.ci = right_side.bin"
            "typed_time", "SELECT MAKETIME(34, 20, 30.123456), SEC_TO_TIME(3661.25), TIME('-34:20:30.123456')"
+           "allow_invalid_dates",
+           "SELECT d, dt, YEAR(d), MONTH(d), DAY(d), DAYOFYEAR(d), LAST_DAY(d), DATE_ADD(d, INTERVAL 1 DAY), TO_DAYS(d), UNIX_TIMESTAMP(d) FROM syntax_invalid_dates"
            "weight_string", "SELECT HEX(WEIGHT_STRING(_utf8mb4'a' COLLATE utf8mb4_bin AS CHAR(3)))"
            "quoted_user_variable", "SET @`syntax.name` := (@'second' := 2) + 1"
            "recursive_cte", "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT SUM(n) FROM c"
@@ -223,6 +225,11 @@ module SyntaxFuzz =
            "CREATE TABLE syntax_log (n INT)"
            "CREATE TABLE syntax_temporal (dt DATETIME, n INT)"
            "INSERT INTO syntax_temporal VALUES ('2026-01-01', 1), ('2026-01-02', 2)"
+           "SET @syntax_saved_sql_mode = @@SESSION.sql_mode"
+           "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ALLOW_INVALID_DATES')"
+           "CREATE TABLE syntax_invalid_dates (d DATE, dt DATETIME(6))"
+           "INSERT INTO syntax_invalid_dates VALUES ('2023-02-31', '2023-04-31 12:34:56.123456')"
+           "SET SESSION sql_mode = @syntax_saved_sql_mode"
            "CREATE TABLE syntax_fulltext (id INT PRIMARY KEY, title VARCHAR(100), body TEXT, FULLTEXT(title, body))"
            "INSERT INTO syntax_fulltext VALUES (1, 'Database tutorial', 'Database security guide'), (2, 'Other notes', 'Unrelated material')"
            "CREATE TABLE syntax_fulltext_notes (article_id INT, body TEXT, FULLTEXT(body))"
