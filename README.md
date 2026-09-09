@@ -365,9 +365,15 @@ different access pattern:
 - **Functional keys.** Composite indexes may contain `LOWER`/`LCASE`,
   `UPPER`/`UCASE`, `TRIM`, `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`,
   `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, or numeric/text/binary `ABS` parts.
-  Text and binary values use MySQL's leading-number conversion and diagnostics.
-  Other expression orderings and full-value ordering through a prefix key
-  still sort.
+  Compatible unary parts can be composed, such as `UPPER(TRIM(name))` or
+  `BIT_LENGTH(REVERSE(name))`. These keys participate in equality,
+  uniqueness, ordering, grouping, mutation, and recovery. Function aliases
+  share a canonical physical identity, while an embedding override of any
+  function in the chain keeps execution on the ordinary scan path.
+
+  Text and binary values use MySQL's leading-number conversion and
+  diagnostics. Arithmetic and other general expression keys retain their DDL
+  and metadata but still scan or sort.
 
 - **Spatial access.** Planar `SPATIAL` and `RTREE` declarations maintain
   immutable minimum-bounding-rectangle entries. They narrow direct

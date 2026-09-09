@@ -81,6 +81,9 @@ spatial unions, including a scan fallback when any branch is uncovered.
 Compatible `AND` predicates verify exact candidate intersections for writes
 and locks, plus the read-cost gate that retains a cheaper single-index plan
 when constructing an intersection would cost more than its row reduction.
+Supported unary functional-key compositions additionally run against scan
+twins across equality, ordering, grouping, mutation, extension overrides, and
+WAL recovery.
 
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and
@@ -613,9 +616,11 @@ to every account but, as in MySQL, remain inactive after `SET ROLE NONE`.
 Accounts select an exact peer address before CIDR/netmask, `localhost`
 loopback, and `%`/`_` patterns; `CURRENT_USER()` reports the selected
 account while `USER()` reports the handshake name and peer host. Accounts
-without a host still default to `'%'`. Hostname accounts are not resolved:
-the server accepts numeric peer addresses and the loopback `localhost`
-alias, avoiding unauthenticated reverse-DNS identity claims.
+without a host still default to `'%'`. Surrounding whitespace in a quoted host
+part is discarded before account matching, as it is by MySQL. Hostname
+accounts are not resolved: the server accepts numeric peer addresses and the
+loopback `localhost` alias, avoiding unauthenticated reverse-DNS identity
+claims.
 
 ### Text-probed statements
 

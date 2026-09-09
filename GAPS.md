@@ -181,7 +181,7 @@ or locking retain the general SELECT pipeline.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range/index-merge scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, grouping, fully covered OR unions, and cost-effective AND intersections use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
+| Secondary-index access paths | ref/eq_ref/range/index-merge scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, grouping, supported unary functional compositions, fully covered OR unions, and cost-effective AND intersections use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; competing access families, complete OR unions, and selective AND intersections use observed cardinalities; general expression folding, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/index_merge/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings, index unions and intersections, and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
@@ -267,8 +267,8 @@ unique key over colliding data returns 1062 without publishing a corrupt index.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality and ordered structures cover common complete-key and left-prefix probes, joins, ranges, ordering, and grouping; unsupported expression orderings and grouping shapes retain scan/sort fallback | high (scale) | divergence |
-| Expression indexes | functional key parts participate in physical access and uniqueness | the [supported functional keys](README.md#indexes-and-joins) have physical equality and ordering paths; other non-unique expressions retain DDL and metadata but scan, while unsupported unique expressions are refused | low | divergence/refusal |
+| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality and ordered structures cover common complete-key and left-prefix probes, joins, ranges, ordering, grouping, and supported unary functional compositions; unsupported expression orderings and grouping shapes retain scan/sort fallback | high (scale) | divergence |
+| Expression indexes | functional key parts participate in physical access and uniqueness | the [supported functional keys](README.md#indexes-and-joins), including compatible unary compositions, have physical equality, uniqueness, ordering, and grouping paths; other non-unique expressions retain DDL and metadata but scan, while unsupported unique expressions are refused | low | divergence/refusal |
 
 ## 6. Charsets and collations
 
