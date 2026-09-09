@@ -1186,6 +1186,31 @@ let tests =
                   }
                   |> Async.RunSynchronously)
 
+          TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE reports out-of-order upload packets"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
+                  async {
+                      let store = Fsdb.Storage.create ()
+                      use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                      let! client, stream = connectRawAsWithCapabilities server.Port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                      use client = client
+                      let query (sql: string) = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                      do! writePacketAsync stream { SeqId = 0uy; Payload = query "CREATE TABLE ordered_load (value INT NOT NULL)" } |> Async.Ignore
+                      let! created = readPacketAsync stream
+                      Expect.equal created.Value.Payload.[0] 0uy "the table is created"
+                      do! writePacketAsync stream { SeqId = 0uy; Payload = query "LOAD DATA LOCAL INFILE 'rows.tsv' INTO TABLE ordered_load" } |> Async.Ignore
+                      let! requested = readPacketAsync stream
+                      Expect.equal requested.Value.Payload.[0] 0xfbuy "the server requests the upload"
+                      do! writePacketAsync stream { SeqId = 7uy; Payload = Text.Encoding.UTF8.GetBytes "1\n" } |> Async.Ignore
+                      let! rejected = readPacketAsync stream
+                      let error = Reader(rejected.Value.Payload)
+                      Expect.equal (error.ReadByte()) 0xffuy "the server returns ERR"
+                      Expect.equal (error.ReadInt16LE()) 1156 "the error identifies packet order"
+                      Expect.equal (error.ReadByte()) (byte '#') "the SQLSTATE marker is present"
+                      Expect.equal (error.ReadBytes 5 |> Text.Encoding.ASCII.GetString) "08S01" "the SQLSTATE is communication failure"
+                  }
+                  |> Async.RunSynchronously)
+
           testCase "TLS upgrades after SSLRequest and reports negotiated session values"
           <| fun _ ->
               async {

@@ -2055,7 +2055,7 @@ let private handleConnection
                                                                     writePacketAsync stream { SeqId = seqId; Payload = localInfileRequestPayload load.FileName }
 
                                                                 match! receiveLocalData client stream readProgress (sessionNetReadTimeout session) uploadSeqId with
-                                                                | Result.Error((code, _), _) when code = 2013 || code = 1156 ->
+                                                                | Result.Error((code, _), _) when code = 2013 ->
                                                                     client.Close()
                                                                     return None
                                                                 | Result.Error((code, message), responseSeqId) -> return Some(session, Err(code, message), responseSeqId)
