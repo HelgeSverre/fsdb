@@ -183,7 +183,7 @@ type private PointEquality =
       Transform: IndexTransform option
       Value: Value }
 
-type private LiteralInProbe =
+type private IndexInProbe =
     { Columns: (string * IndexTransform option) list
       Values: Value list list }
 
@@ -224,6 +224,7 @@ type private IndexPrefixMatch =
 
 type private ResolvedIndexPrefix =
     { Database: string
+      Table: Table
       Match: IndexPrefixMatch
       PinnedValues: Value list
       PredicateCovered: bool }
@@ -9126,13 +9127,13 @@ and private prepareLockingRead
                         tryEqualityCandidates store registry dbName source.Reference select.Where
                         |> Option.map (fun plan -> plan.Rows.Value |> List.map fst)
                         |> Option.orElseWith (fun () ->
-                            tryLiteralInCandidates store registry dbName source.Reference select.Where
+                            tryInCandidates store registry dbName source.Reference select.Where
                             |> Option.map (fun plan -> plan.Rows.Value |> List.map fst))
                         |> Option.orElseWith (fun () ->
                             trySpatialLookup BareOrQualifiedColumn store dbName source.Reference select.Where
                             |> Option.map (fun (_, rows) -> rows |> List.map fst))
                         |> Option.orElseWith (fun () ->
-                            tryRangeLookup store dbName source.Reference select.Where
+                            tryRangeLookup store registry dbName source.Reference select.Where
                             |> Option.map (fun (_, rows) -> rows |> List.map fst))
                         |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
                     else
@@ -9322,7 +9323,7 @@ and private runUnlockedSelectStmt
                     | None ->
                         let indexedLookup =
                             equalityAccess
-                            |> Option.orElseWith (fun () -> tryLiteralInAccess store registry dbName tref select.Where)
+                            |> Option.orElseWith (fun () -> tryInAccess store registry dbName tref select.Where)
                             |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
                         match indexedLookup with
@@ -9342,7 +9343,7 @@ and private runUnlockedSelectStmt
                                     | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
                                     | None ->
                                         let resolved =
-                                            tryRangeLookup store dbName tref select.Where
+                                            tryRangeLookup store registry dbName tref select.Where
                                             |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
                                             |> Option.orElseWith (fun () ->
                                                 tryInformationSchemaNarrow store registry dbName tref select.Where
@@ -9358,7 +9359,7 @@ and private runUnlockedSelectStmt
                     None
                 else
                     trySpatialLookup QualifiedColumn store dbName tref select.Where
-                    |> Option.orElseWith (fun () -> tryQualifiedRangeLookup store dbName tref select.Where)
+                    |> Option.orElseWith (fun () -> tryQualifiedRangeLookup store registry dbName tref select.Where)
 
             match rangeLookup with
             | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
@@ -9398,6 +9399,52 @@ and private literalPointLookupEqualities (registry: Registry) (tref: TableRef) (
                       Value = value })
             | _ -> None)
 
+and private isNumericIndexType = function
+    | TTinyInt _
+    | TBool
+    | TSmallInt _
+    | TMediumInt _
+    | TInt _
+    | TBigInt _
+    | TBit _
+    | TDecimal _
+    | TDouble _
+    | TFloat _
+    | TYear -> true
+    | _ -> false
+
+and private isNumericIndexValue = function
+    | VInt _
+    | VUInt _
+    | VBit _
+    | VDecimal _
+    | VDouble _ -> true
+    | _ -> false
+
+and private numericPlannerConstantEvaluator (store: Store) (registry: Registry) =
+    let rec isSafe = function
+        | Lit _ -> true
+        | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafe left && isSafe right
+        | FuncCall(name, arguments)
+            when FunctionalIndex.tryBuiltin name |> Option.isSome
+                 && Functions.isUnmodifiedBuiltinScalar name registry ->
+            arguments |> List.forall isSafe
+        | _ -> false
+
+    let context = lazy (contextFactory store registry Storage.defaultDatabase Map.empty Map.empty None [||])
+
+    function
+    | Lit value -> Some value |> Option.filter isNumericIndexValue
+    | expression when isSafe expression ->
+        evalExpr context.Value expression |> Result.toOption |> Option.filter isNumericIndexValue
+    | _ -> None
+
+and private isDirectNumericIndexColumn (table: Table) (column: string, transform: IndexTransform option) =
+    transform.IsNone
+    && (table.Columns
+        |> List.tryFind (fun candidate -> equalsIgnoreCase candidate.Name column)
+        |> Option.exists (fun candidate -> isNumericIndexType candidate.Type))
+
 and private pointLookupEqualities
     (store: Store)
     (registry: Registry)
@@ -9405,53 +9452,16 @@ and private pointLookupEqualities
     (tref: TableRef)
     (whereExpr: Expr option)
     : PointEquality list =
-    let isNumericType = function
-        | TTinyInt _
-        | TBool
-        | TSmallInt _
-        | TMediumInt _
-        | TInt _
-        | TBigInt _
-        | TBit _
-        | TDecimal _
-        | TDouble _
-        | TFloat _
-        | TYear -> true
-        | _ -> false
+    let tryNumericConstant = numericPlannerConstantEvaluator store registry
 
-    let isNumericValue = function
-        | VInt _
-        | VUInt _
-        | VBit _
-        | VDecimal _
-        | VDouble _ -> true
-        | _ -> false
-
-    let rec isSafeConstant = function
-        | Lit _ -> true
-        | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafeConstant left && isSafeConstant right
-        | FuncCall(name, arguments)
-            when FunctionalIndex.tryBuiltin name |> Option.isSome
-                 && Functions.isUnmodifiedBuiltinScalar name registry ->
-            arguments |> List.forall isSafeConstant
-        | _ -> false
-
-    let context = lazy (contextFactory store registry Storage.defaultDatabase Map.empty Map.empty None [||])
-
-    let tryPlannerConstant expression =
+    let tryNonLiteralConstant expression =
         match expression with
         | Lit _ -> None
-        | _ when isSafeConstant expression ->
-            evalExpr context.Value expression |> Result.toOption |> Option.filter isNumericValue
-        | _ -> None
+        | _ -> tryNumericConstant expression
 
     let tryNumericColumn expression =
         storedIndexedColumnFor registry tref expression
-        |> Option.filter (fun (name, transform) ->
-            transform.IsNone
-            && table.Columns
-               |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
-               |> Option.exists (fun column -> isNumericType column.Type))
+        |> Option.filter (isDirectNumericIndexColumn table)
 
     let tryPair indexed constant =
         Option.map2
@@ -9460,7 +9470,7 @@ and private pointLookupEqualities
                   Transform = transform
                   Value = value })
             (tryNumericColumn indexed)
-            (tryPlannerConstant constant)
+            (tryNonLiteralConstant constant)
 
     let tryEquality = function
         | BinOp(Eq, left, right) ->
@@ -9495,19 +9505,12 @@ and private storedIndexedColumnFor (registry: Registry) (tref: TableRef) express
     indexedColumnFor tref expression
     |> Option.filter (snd >> transformUsesStoredSemantics registry expression)
 
-and private literalInProbesWith indexedColumn (whereExpr: Expr option) : LiteralInProbe list =
+and private inProbesWith indexedColumn valueFor (whereExpr: Expr option) : IndexInProbe list =
     let candidateTuple indexedExpressions candidate =
         match indexedExpressions, candidate with
         | [ _ ], expression -> Some [ expression ]
         | _ :: _ :: _, Row expressions when sameLength expressions indexedExpressions -> Some expressions
         | _ -> None
-
-    let literalTuple expressions =
-        expressions
-        |> List.map (function
-            | Lit value -> Some value
-            | _ -> None)
-        |> tryAllSome
 
     whereExpr
     |> optionalConjuncts
@@ -9518,18 +9521,38 @@ and private literalInProbesWith indexedColumn (whereExpr: Expr option) : Literal
                 | Row expressions -> expressions
                 | expression -> [ expression ]
 
-            let columns = indexedExpressions |> List.map indexedColumn |> tryAllSome
-
-            let values =
+            indexedExpressions
+            |> List.map indexedColumn
+            |> tryAllSome
+            |> Option.bind (fun columns ->
                 candidates
-                |> List.map (candidateTuple indexedExpressions >> Option.bind literalTuple)
+                |> List.map (candidateTuple indexedExpressions >> Option.bind (List.map2 valueFor columns >> tryAllSome))
                 |> tryAllSome
-
-            Option.map2 (fun columns values -> { Columns = columns; Values = values }) columns values
+                |> Option.map (fun values -> { Columns = columns; Values = values }))
         | _ -> None)
 
-and private literalInProbes (registry: Registry) (tref: TableRef) =
-    literalInProbesWith (storedIndexedColumnFor registry tref)
+and private literalInProbesWith indexedColumn =
+    let literalValue _ = function
+        | Lit value -> Some value
+        | _ -> None
+
+    inProbesWith indexedColumn literalValue
+
+and private plannerInProbes
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : IndexInProbe list =
+    let tryNumericConstant = numericPlannerConstantEvaluator store registry
+
+    let plannerValue column = function
+        | Lit value -> Some value
+        | expression when isDirectNumericIndexColumn table column -> tryNumericConstant expression
+        | _ -> None
+
+    inProbesWith (storedIndexedColumnFor registry tref) plannerValue whereExpr
 
 and private tryLiteralRangePredicate columnName boundValue expression : RangeLookupBounds option =
     let lower name value inclusive =
@@ -9566,20 +9589,41 @@ and private tryLiteralRangePredicate columnName boundValue expression : RangeLoo
             | _ -> None
     | _ -> None
 
-and private literalRangePredicateFor (scope: ColumnReferenceScope) (tref: TableRef) =
+and private rangeColumnNameFor (scope: ColumnReferenceScope) (tref: TableRef) =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
-    let columnName = function
+    function
         | Col name when scope = BareOrQualifiedColumn -> Some name
         | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
             Some name
         | _ -> None
+
+and private literalRangePredicateFor (scope: ColumnReferenceScope) (tref: TableRef) =
+    let columnName = rangeColumnNameFor scope tref
 
     let literalValue = function
         | Lit value -> Some value
         | _ -> None
 
     tryLiteralRangePredicate columnName literalValue
+
+and private plannerRangePredicateFor
+    (scope: ColumnReferenceScope)
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
+    (tref: TableRef)
+    =
+    let columnName = rangeColumnNameFor scope tref
+    let tryNumericConstant = numericPlannerConstantEvaluator store registry
+
+    let numericColumnName expression =
+        columnName expression
+        |> Option.filter (fun name -> isDirectNumericIndexColumn table (name, None))
+
+    fun expression ->
+        literalRangePredicateFor scope tref expression
+        |> Option.orElseWith (fun () -> tryLiteralRangePredicate numericColumnName tryNumericConstant expression)
 
 and private collectClassifiedRangeBounds classify (whereExpr: Expr option) : RangeLookupBounds list =
     let addBound (bounds: Map<string, RangeLookupBounds>) (predicate: RangeLookupBounds) =
@@ -9607,8 +9651,15 @@ and private collectClassifiedRangeBounds classify (whereExpr: Expr option) : Ran
 and private collectRangeBounds columnName boundValue whereExpr =
     collectClassifiedRangeBounds (tryLiteralRangePredicate columnName boundValue) whereExpr
 
-and private rangeLookupBounds (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
-    collectClassifiedRangeBounds (literalRangePredicateFor scope tref) whereExpr
+and private rangeLookupBounds
+    (scope: ColumnReferenceScope)
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : RangeLookupBounds list =
+    collectClassifiedRangeBounds (plannerRangePredicateFor scope store registry table tref) whereExpr
 
 and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : SpatialLookupPredicate list =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -9759,7 +9810,7 @@ and private tryEqualityCandidates
     : EqualityAccessPlan option =
     tryEqualityAccessWith CandidateNarrowing store registry dbName tref whereExpr
 
-and private tryLiteralInAccessInTableWith
+and private tryInAccessInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
     (registry: Registry)
@@ -9770,7 +9821,7 @@ and private tryLiteralInAccessInTableWith
     if not (storedRowsMatchReadRows store table.Columns) then
         None
     else
-        literalInProbes registry tref whereExpr
+        plannerInProbes store registry table tref whereExpr
         |> List.tryPick (fun probe ->
             let values =
                 probe.Values
@@ -9830,7 +9881,7 @@ and private tryLiteralInAccessInTableWith
                         |> Option.map (fun rowIdSets ->
                             rowIdSets |> Set.unionMany |> equalityAccessPlan table index))))
 
-and private tryLiteralInAccessWith
+and private tryInAccessWith
     (policy: IndexAccessPolicy)
     (store: Store)
     (registry: Registry)
@@ -9839,29 +9890,29 @@ and private tryLiteralInAccessWith
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
     physicalFastPathTable store dbName tref
-    |> Option.bind (fun table -> tryLiteralInAccessInTableWith policy store registry table tref whereExpr)
+    |> Option.bind (fun table -> tryInAccessInTableWith policy store registry table tref whereExpr)
 
-and private tryLiteralInAccess
+and private tryInAccess
     (store: Store)
     (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryLiteralInAccessWith CostedRead store registry dbName tref whereExpr
+    tryInAccessWith CostedRead store registry dbName tref whereExpr
 
-and private tryLiteralInCandidates
+and private tryInCandidates
     (store: Store)
     (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryLiteralInAccessWith CandidateNarrowing store registry dbName tref whereExpr
+    tryInAccessWith CandidateNarrowing store registry dbName tref whereExpr
 
 and private tryIndexedLookup (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store registry dbName tref whereExpr
-    |> Option.orElseWith (fun () -> tryLiteralInAccess store registry dbName tref whereExpr)
+    |> Option.orElseWith (fun () -> tryInAccess store registry dbName tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryIndexedCandidates
@@ -9872,7 +9923,7 @@ and private tryIndexedCandidates
     (whereExpr: Expr option)
     : (ColumnDef list * (RowId * Value[]) list) option =
     tryEqualityCandidates store registry dbName tref whereExpr
-    |> Option.orElseWith (fun () -> tryLiteralInCandidates store registry dbName tref whereExpr)
+    |> Option.orElseWith (fun () -> tryInCandidates store registry dbName tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryIndexedLookupInTable
@@ -9883,7 +9934,7 @@ and private tryIndexedLookupInTable
     (whereExpr: Expr option)
     =
     tryEqualityAccessInTableWith CostedRead store registry table tref whereExpr
-    |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CostedRead store registry table tref whereExpr)
+    |> Option.orElseWith (fun () -> tryInAccessInTableWith CostedRead store registry table tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryIndexedCandidatesInTable
@@ -9894,7 +9945,7 @@ and private tryIndexedCandidatesInTable
     (whereExpr: Expr option)
     =
     tryEqualityAccessInTableWith CandidateNarrowing store registry table tref whereExpr
-    |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CandidateNarrowing store registry table tref whereExpr)
+    |> Option.orElseWith (fun () -> tryInAccessInTableWith CandidateNarrowing store registry table tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private correlatedProbeSource qualifier (columns: ColumnDef list) =
@@ -10249,7 +10300,7 @@ and private tryProjectedPhysicalEqualitiesRows
         equalities
         |> List.tryPick (tryProjectedPhysicalEqualityRows policy store registry dbName projection))
 
-and private tryProjectedPhysicalLiteralInRows store registry dbName (projection: PhysicalProjection) (probe: LiteralInProbe) =
+and private tryProjectedPhysicalLiteralInRows store registry dbName (projection: PhysicalProjection) (probe: IndexInProbe) =
     probe.Columns
     |> List.map fst
     |> List.map (tryPhysicalProjectionColumn projection)
@@ -10513,12 +10564,13 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
 and private tryRangeAccessInTable
     (scope: ColumnReferenceScope)
     (store: Store)
+    (registry: Registry)
     (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.RangeLookup option =
     (if storedRowsMatchReadRows store table.Columns then
-         rangeLookupBounds scope tref whereExpr
+         rangeLookupBounds scope store registry table tref whereExpr
      else
          [])
     |> List.tryPick (fun bounds ->
@@ -10529,15 +10581,22 @@ and private tryRangeAccessInTable
 and private tryRangeAccess
     (scope: ColumnReferenceScope)
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.RangeLookup option =
     physicalFastPathTable store dbName tref
-    |> Option.bind (fun table -> tryRangeAccessInTable scope store table tref whereExpr)
+    |> Option.bind (fun table -> tryRangeAccessInTable scope store registry table tref whereExpr)
 
-and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
-    tryRangeAccess BareOrQualifiedColumn store dbName tref whereExpr
+and private tryRangeLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    tryRangeAccess BareOrQualifiedColumn store registry dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
 
 and private trySpatialAccessInTable
@@ -10571,12 +10630,12 @@ and private trySpatialLookup scope store dbName tref whereExpr =
 and private tryPhysicalCandidates store registry dbName tref whereExpr =
     tryIndexedCandidates store registry dbName tref whereExpr
     |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tref whereExpr)
-    |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref whereExpr)
+    |> Option.orElseWith (fun () -> tryRangeLookup store registry dbName tref whereExpr)
 
 and private tryPhysicalReadCandidates store registry dbName tref whereExpr =
     tryIndexedLookup store registry dbName tref whereExpr
     |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tref whereExpr)
-    |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref whereExpr)
+    |> Option.orElseWith (fun () -> tryRangeLookup store registry dbName tref whereExpr)
 
 and private tryPhysicalReadCandidatesInTable store registry table tref whereExpr =
     tryIndexedLookupInTable store registry table tref whereExpr
@@ -10584,7 +10643,7 @@ and private tryPhysicalReadCandidatesInTable store registry table tref whereExpr
         trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
         |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows))
     |> Option.orElseWith (fun () ->
-        tryRangeAccessInTable BareOrQualifiedColumn store table tref whereExpr
+        tryRangeAccessInTable BareOrQualifiedColumn store registry table tref whereExpr
         |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value))
 
 and private tryPhysicalCandidatesInTable store registry table tref whereExpr =
@@ -10593,11 +10652,17 @@ and private tryPhysicalCandidatesInTable store registry table tref whereExpr =
         trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
         |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows))
     |> Option.orElseWith (fun () ->
-        tryRangeAccessInTable BareOrQualifiedColumn store table tref whereExpr
+        tryRangeAccessInTable BareOrQualifiedColumn store registry table tref whereExpr
         |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value))
 
-and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
-    tryRangeAccess QualifiedColumn store dbName tref whereExpr
+and private tryQualifiedRangeLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    tryRangeAccess QualifiedColumn store registry dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
 
 and private resolveOrderAliasValue name outputColumns =
@@ -10733,7 +10798,10 @@ and private tryIndexOrder
                 match orderedColumns with
                 | [ { Transform = None } as term ] ->
                     let lower, upper =
-                        rangeLookupBounds BareOrQualifiedColumn tref select.Where
+                        physicalFastPathTable store dbName tref
+                        |> Option.map (fun table ->
+                            rangeLookupBounds BareOrQualifiedColumn store registry table tref select.Where)
+                        |> Option.defaultValue []
                         |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, term.Column, System.StringComparison.OrdinalIgnoreCase))
                         |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
                         |> Option.defaultValue (None, None)
@@ -11927,6 +11995,9 @@ and private tryDirectSuffixTerm (matched: IndexPrefixMatch) =
     |> Option.filter (fun term -> term.Transform.IsNone)
 
 and private fixedPrefixSuffixBounds
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
     (matched: IndexPrefixMatch)
@@ -11934,12 +12005,19 @@ and private fixedPrefixSuffixBounds
     matched
     |> tryDirectSuffixTerm
     |> Option.bind (fun term ->
-        rangeLookupBounds BareOrQualifiedColumn tref whereExpr
+        rangeLookupBounds BareOrQualifiedColumn store registry table tref whereExpr
         |> List.tryFind (fun bounds -> equalsIgnoreCase bounds.Column term.Column))
     |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
     |> Option.defaultValue (None, None)
 
-and private trySuffixRangeCoverageCount (tref: TableRef) (whereExpr: Expr option) (matched: IndexPrefixMatch) : int option =
+and private trySuffixRangeCoverageCount
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    (matched: IndexPrefixMatch)
+    : int option =
     if matched.PinnedCount = 0 then
         Some 0
     else
@@ -11948,7 +12026,7 @@ and private trySuffixRangeCoverageCount (tref: TableRef) (whereExpr: Expr option
         |> Option.map (fun suffix ->
             whereExpr
             |> optionalConjuncts
-            |> List.choose (literalRangePredicateFor BareOrQualifiedColumn tref)
+            |> List.choose (plannerRangePredicateFor BareOrQualifiedColumn store registry table tref)
             |> List.filter (fun predicate -> equalsIgnoreCase predicate.Column suffix.Column))
         |> Option.defaultValue []
         |> fun predicates ->
@@ -11987,9 +12065,10 @@ and private orderedIndexPrefixMatches
                 |> List.map valueFor
                 |> tryAllSome
                 |> Option.map (fun pinnedValues ->
-                    let coveredRangeCount = trySuffixRangeCoverageCount tref whereExpr matched
+                    let coveredRangeCount = trySuffixRangeCoverageCount store registry table tref whereExpr matched
 
                     { Database = tableDb
+                      Table = table
                       Match = matched
                       PinnedValues = pinnedValues
                       PredicateCovered =
@@ -12030,7 +12109,7 @@ and private tryFixedPrefixIndexOrder
                     List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
                     |> storageOrderTerms
 
-                let lower, upper = fixedPrefixSuffixBounds tref whereExpr matched
+                let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr matched
 
                 Storage.tryOrderedIndexPrefixRangeLookup
                     store
@@ -12054,7 +12133,7 @@ and private tryGroupingIndexOrder
     orderedIndexPrefixMatches store registry dbName tref whereExpr groupTerms
     |> List.tryPick (fun resolved ->
         let terms = resolved.Match.Terms |> storageOrderTerms
-        let lower, upper = fixedPrefixSuffixBounds tref whereExpr resolved.Match
+        let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr resolved.Match
 
         let rangeLookup =
             match resolved.PinnedValues with
@@ -15399,7 +15478,10 @@ let rec private explainJoinBlock
             | None -> false
             | Some plan ->
                 let boundedColumns =
-                    rangeLookupBounds BareOrQualifiedColumn tref whereExpr
+                    physicalFastPathTable store dbName tref
+                    |> Option.map (fun table ->
+                        rangeLookupBounds BareOrQualifiedColumn store registry table tref whereExpr)
+                    |> Option.defaultValue []
                     |> List.map (_.Column >> _.ToLowerInvariant())
                     |> Set.ofList
 
@@ -15446,7 +15528,7 @@ let rec private explainJoinBlock
 
             true
         | None ->
-            match tryLiteralInAccess store registry dbName tref whereExpr with
+            match tryInAccess store registry dbName tref whereExpr with
             | Some plan ->
                 acc.Add
                     { Id = Some id
@@ -15477,7 +15559,7 @@ let rec private explainJoinBlock
                     match indexOrderPlan with
                     | Some _ -> tryExplainIndexOrder ()
                     | None ->
-                        tryRangeAccess BareOrQualifiedColumn store dbName tref whereExpr
+                        tryRangeAccess BareOrQualifiedColumn store registry dbName tref whereExpr
                         |> Option.map (fun lookup ->
                             acc.Add
                                 { Id = Some id
@@ -15606,7 +15688,7 @@ and private explainSelectBlock
                 match tryEqualityPrefixOrder store registry dbName tref select equalityAccess, equalityAccess with
                 | Some plan, _ -> Some plan
                 | None, Some _ -> None
-                | None, None when tryLiteralInAccess store registry dbName tref select.Where |> Option.isNone ->
+                | None, None when tryInAccess store registry dbName tref select.Where |> Option.isNone ->
                     tryIndexOrder store registry dbName tref select
                 | None, _ -> None
         | _ -> None

@@ -1248,6 +1248,14 @@ let tests =
                     | ResultSet(_, [ [ _; _; _; _; Some "ALL"; _; _; _; _; Some "3"; _; Some "Using where" ] ]) -> ()
                     | other -> failtestf "expected an overridden builtin to retain scan access, got %A" other
 
+                    match run store registry "EXPLAIN SELECT id FROM users WHERE id IN (ABS(-9), 3)" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "ALL"; _; _; _; _; Some "3"; _; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected overridden built-ins in IN to retain scan access, got %A" other
+
+                    match run store registry "EXPLAIN SELECT id FROM users WHERE id > ABS(-9)" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "ALL"; _; _; _; _; Some "3"; _; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected overridden built-ins in ranges to retain scan access, got %A" other
+
                     Expect.equal calls 0 "planning does not call extension code"
 
                     match run store registry "SELECT id FROM users WHERE id = ABS(-9) ORDER BY id" with
@@ -1256,7 +1264,7 @@ let tests =
 
                     Expect.isGreaterThan calls 2 "the overridden function remains on the scan path"
 
-                testCase "EXPLAIN reports a primary-key literal IN list as a range"
+                testCase "EXPLAIN reports primary-key literal and constant IN lists as ranges"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE users (id INT PRIMARY KEY, v INT)" |> ignore
@@ -1266,6 +1274,11 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "users"; None; Some "range"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; None; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
                         ()
                     | other -> failtestf "expected a primary-key IN range plan, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE id IN (1 + 0, ABS(-3), 99)" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "range"; _; Some "PRIMARY"; _; _; Some "2"; _; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a constant-expression IN range plan, got %A" other
 
                 testCase "EXPLAIN UPDATE/DELETE by primary key report the same const row a SELECT does"
                 <| fun _ ->
@@ -4246,6 +4259,15 @@ let tests =
                     Expect.equal boundedOrderPlan.Key (Some "ix_tenant_bucket") "bounded ordering uses the composite index"
                     Expect.equal boundedOrderPlan.EstimatedRows (Some "3") "bounded ordering estimates the intersected slice"
 
+                    let constantOrderPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id, bucket FROM indexed WHERE tenant_id = 0 + 1 AND bucket >= 1 + 1 AND bucket < ABS(-4) ORDER BY bucket LIMIT 2"
+                        |> explainRow
+
+                    Expect.equal constantOrderPlan.AccessType (Some "range") "constant bounds retain contiguous ordering"
+                    Expect.equal constantOrderPlan.Key (Some "ix_tenant_bucket") "constant bounds use the composite index"
+
                 testCase "string fixed prefixes require order and equality to share an equivalence class"
                 <| fun _ ->
                     let store = newStore ()
@@ -5757,9 +5779,14 @@ let tests =
                     Expect.equal (runDefault store "DELETE FROM indexed WHERE category IN ('music', NULL)") (runDefault store "DELETE FROM scanned WHERE category IN ('music', NULL)") "indexed and scanned deletes agree"
                     Expect.equal (rows "indexed" "id" "id IN (1, 2, 3, 4, 5)") (rows "scanned" "id" "id IN (1, 2, 3, 4, 5)") "remaining rows agree"
 
+                    Expect.equal
+                        (runDefault store "UPDATE indexed SET score = score + 2 WHERE id IN (1 + 0, ABS(-4))")
+                        (runDefault store "UPDATE scanned SET score = score + 2 WHERE id IN (1 + 0, ABS(-4))")
+                        "constant-expression membership drives the same update"
+
                     match runDefault store "SELECT id FROM indexed WHERE id IN (1 + 0, 4) ORDER BY id" with
                     | ResultSet(_, [ [ Some "1" ]; [ Some "4" ] ]) -> ()
-                    | other -> failtestf "expected a nonliteral IN member to retain scan semantics, got %A" other
+                    | other -> failtestf "expected constant-expression members to preserve IN semantics, got %A" other
 
                 testCase "a composite B-tree narrows fully-bound equality predicates"
                 <| fun _ ->
@@ -5800,7 +5827,7 @@ let tests =
                         (Affected 1UL)
                         "DELETE consumes composite candidates"
 
-                testCase "composite literal row IN lists probe matching B-trees"
+                testCase "composite literal and constant row IN lists probe matching B-trees"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, tenant_id INT NOT NULL, status VARCHAR(20) NOT NULL, score INT, KEY ix_tenant_status (tenant_id, status))" |> ignore
@@ -5839,7 +5866,16 @@ let tests =
 
                     match runDefault store "SELECT id FROM indexed WHERE (tenant_id, status) IN ((1 + 0, 'open'), (2, 'done')) ORDER BY id" with
                     | ResultSet(_, [ [ Some "1" ]; [ Some "4" ] ]) -> ()
-                    | other -> failtestf "expected nonliteral row members to retain scan semantics, got %A" other
+                    | other -> failtestf "expected constant row members to preserve IN semantics, got %A" other
+
+                    let constantPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM indexed WHERE (tenant_id, status) IN ((1 + 0, 'open'), (ABS(-2), 'done'))"
+                        |> explainRow
+
+                    Expect.equal constantPlan.AccessType (Some "range") "constant row members use the composite index"
+                    Expect.equal constantPlan.Key (Some "ix_tenant_status") "constant row members report the composite key"
 
                 testCase "a composite unique key produces a const lookup"
                 <| fun _ ->
@@ -5885,6 +5921,21 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "ix_score"; Some "ix_score"; Some "5"; None; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
                         ()
                     | other -> failtestf "expected a secondary-index range plan, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE score >= 10 + 10 AND score < ABS(-40)" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "range"; _; Some "ix_score"; _; _; Some "2"; _; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected constant-expression bounds to use the range index, got %A" other
+
+                    Expect.equal
+                        (runDefault store "UPDATE indexed SET category = 'bounded' WHERE score >= 10 + 10 AND score < ABS(-40)")
+                        (runDefault store "UPDATE scanned SET category = 'bounded' WHERE score >= 10 + 10 AND score < ABS(-40)")
+                        "constant bounds drive the same update"
+
+                    Expect.equal
+                        (runDefault store "DELETE FROM indexed WHERE score >= 20 + 20")
+                        (runDefault store "DELETE FROM scanned WHERE score >= 20 + 20")
+                        "constant bounds drive the same delete"
 
                 testCase "range planning weighs candidate cardinality against a table scan"
                 <| fun _ ->
