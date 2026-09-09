@@ -39,6 +39,8 @@ type Writer() =
     /// own (platform-dependent) endianness.
     member this.WriteDoubleLE(v: float) = this.WriteInt64LE(BitConverter.DoubleToInt64Bits v)
 
+    member this.WriteSingleLE(v: float32) = this.WriteInt32LE(BitConverter.SingleToInt32Bits v)
+
     member this.WriteNullTerminatedString(s: string) =
         this.WriteBytes(Encoding.UTF8.GetBytes s)
         this.WriteByte 0uy

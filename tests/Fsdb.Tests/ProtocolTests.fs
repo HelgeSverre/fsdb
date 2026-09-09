@@ -425,6 +425,14 @@ let tests =
               Expect.equal (reader.ReadLenEncInt ()) (Some 2UL) "raw byte length"
               Expect.equal (reader.ReadBytes 2) bytes "raw bytes"
 
+          testCase "binary rows use the advertised FLOAT width"
+          <| fun _ ->
+              let columns = [ metadataOfType (TFloat false); metadataOfType TYear ]
+              let reader = Reader(binaryRowPayload columns [ Some "-2.5"; Some "2024" ])
+              reader.ReadBytes 2 |> ignore
+              Expect.equal (BitConverter.ToSingle(reader.ReadBytes 4, 0)) -2.5f "FLOAT occupies four bytes"
+              Expect.equal (reader.ReadInt16LE()) 2024 "the following column remains aligned"
+
           testCase "BLOB column definitions advertise binary collation and flags"
           <| fun _ ->
               let metadata =
@@ -553,7 +561,7 @@ let tests =
                   "SELECT �"
                   "invalid syntax bytes remain parser-visible"
 
-              Expect.equal (SqlState.forCode 1049) "42000" "unknown database state"
+              Expect.equal (sqlStateForCode 1049) "42000" "unknown database state"
 
           testCase "binary protocol geometry parameters retain their SRID and WKB"
           <| fun _ ->

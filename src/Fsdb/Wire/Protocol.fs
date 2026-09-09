@@ -690,6 +690,8 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
             w.WriteInt64LE(Int64.Parse(s, Globalization.CultureInfo.InvariantCulture))
     elif typeId = TypeDouble then
         w.WriteDoubleLE(Double.Parse(s, Globalization.CultureInfo.InvariantCulture))
+    elif typeId = TypeFloat then
+        w.WriteSingleLE(Single.Parse(s, Globalization.CultureInfo.InvariantCulture))
     elif typeId = TypeDate then
         match tryParseDateComponents s with
         | Some date when isAllZeroDate date -> w.WriteByte 0uy
