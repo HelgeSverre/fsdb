@@ -205,7 +205,10 @@ runs:
   [compatible text-prefix cardinality](results/a50142b-quick.md) and the
   [broader correlated planner baseline](results/b9a6895-quick.md);
 - numeric constant probes: the [scan baseline](results/baa1b51-quick.md) and
-  [indexed implementation](results/ede0c8e-quick.md).
+  [indexed implementation](results/ede0c8e-quick.md);
+- constant membership and range probes: the
+  [scan baseline](results/36b0fa8-quick.md) and
+  [indexed implementation](results/e1c2bbe-quick.md).
 
 These reports explain a measured revision pair. They do not replace the live
 compatibility and performance boundaries in [GAPS.md](../GAPS.md).

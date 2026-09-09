@@ -71,7 +71,7 @@ under `torture/findings/`.
 
 ## 1. SQL statements and parser
 
-The SQL core supports full DML, including `INSERT`/`REPLACE ... SET`, ODKU,
+The application-facing DML surface includes `INSERT`/`REPLACE ... SET`, ODKU,
 `IGNORE`, and multi-table forms. `SELECT` covers joins, derived and lateral
 sources, `JSON_TABLE`, expression subqueries, set operations, windows, rollups,
 and ordinary or recursive query-scoped CTEs. CTEs can lead UPDATE or DELETE and
@@ -144,7 +144,8 @@ predicates. `ORDER BY ... LIMIT` uses a bounded top-N sort.
 
 Direct single-table equality predicates likewise use complete keys or safe
 left prefixes for reads and mutations. Literal probes and conservative
-row-independent numeric expressions share that path. Their observed candidate
+row-independent numeric expressions share that path across equality, scalar
+or row-value membership, and direct numeric ranges. Their observed candidate
 count chooses between the index slice and a row-store scan. Compatible
 `ORDER BY` suffixes continue streaming the same composite slice rather than
 sorting the narrowed rows again.
@@ -152,8 +153,8 @@ sorting the narrowed rows again.
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
 tests reuse typed sets and can narrow a directly indexed outer table.
-Compatible direct-column scalar literal lists use the same statement-scoped
-membership representation.
+Compatible direct-column scalar lists use the same statement-scoped membership
+representation.
 
 Correlated equality probes use single keys, complete composite keys, or safe
 ordered left prefixes through direct tables and pass-through derived tables or
@@ -447,14 +448,14 @@ other required children; without one, only positive children seed candidates.
 Bounded AND/OR predicate trees intersect or union MATCH candidates before
 residual evaluation.
 
-Single-table reads and writes intersect compatible equality, literal-IN,
+Single-table reads and writes intersect compatible equality, indexed `IN`,
 range, and spatial candidates before scoring. Physical joins score each owning
 corpus before joining, and multi-table UPDATE/DELETE score each physical source
 before evaluating joins, predicates, and assignments.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, literal-IN, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; cross-source inference and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
+| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, indexed `IN`, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; cross-source inference and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
 | Tunables | innodb_ft_min_token_size, innodb_ft_max_token_size, ft_query_expansion_limit, stopword tables, enable/disable | the three numeric defaults are exposed with MySQL's GLOBAL/read-only scope and drive `FullText` at 3 / 84 / 20; `INNODB_FT_DEFAULT_STOPWORD` exposes the exact duplicate-preserving built-in list, while custom stopword tables and enable/disable behavior remain absent | low | divergence/refusal |
 | CJK | ngram and mecab parsers, WITH PARSER clause | absent; no CJK tokenization | medium (for CJK) | refusal |
 
@@ -487,12 +488,11 @@ Zstandard, and uncompressed negotiation for new connections.
 configured system-variable set, including same-value assignments, plus the
 generic state-change tracker and transaction state/characteristics when enabled.
 
-Physical result columns report
-primary, unique, composite, and non-unique key membership consistently across
-queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`. Prepared
-descriptors derive schema, operator, aggregate, overloaded scalar, temporal,
-JSON, spatial, and registered-extension result families without evaluating
-the statement.
+Physical result columns report primary, unique, composite, and non-unique key
+membership consistently across queries, prepared statements, `COM_FIELD_LIST`,
+and `HANDLER`. Prepared descriptors derive schema, operator, aggregate,
+overloaded scalar, temporal, JSON, spatial, and registered-extension result
+families without evaluating the statement.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -595,6 +595,12 @@ The constant-expression lookup pair records the
 arithmetic and untouched [functional-key built-ins](README.md#indexes-and-joins)
 now use the same physical key path as a literal probe; extension overrides and
 coercive text expressions retain row evaluation.
+
+The follow-up membership-and-range pair records the
+[scan baseline](benchmarks/results/36b0fa8-quick.md) and the
+[indexed implementation](benchmarks/results/e1c2bbe-quick.md). It applies the
+same conservative evaluator to scalar and row-value `IN`, numeric range bounds,
+and compatible ordered composite suffixes.
 
 The engine already avoids several earlier cliffs:
 

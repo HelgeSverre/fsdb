@@ -328,22 +328,23 @@ different access pattern:
   collation-folded keys. Direct equalities may bind a complete key or a safe
   left prefix of a composite B-tree in single-table reads, updates, and
   deletes. Literal probes and conservative row-independent numeric expressions
-  use the same lookup path. Scalar and composite-row literal `IN` lists, plus
-  direct literal ranges, also use maintained indexes where their shape is
-  compatible. `EXPLAIN` reports the corresponding `const`, `ref`, or `range`
-  access.
+  use the same lookup path. Scalar and composite-row `IN` lists and direct
+  ranges also accept those safe numeric expressions where the indexed column
+  is numeric. Compatible shapes use maintained indexes, and `EXPLAIN` reports
+  the corresponding `const`, `ref`, or `range` access.
 
   Candidate cardinalities are checked before row resolution, so broad probes
   fall back to a row-store scan instead of building an all-row union. Folded
   or PAD SPACE text prefixes also retain the scan path when SQL-equal spellings
-  are not one contiguous ordered slice. Compatible scalar literal lists are
-  normalized once per statement, so a scan fallback does not repeat the
-  entire list comparison for every row.
+  are not one contiguous ordered slice. Compatible scalar lists are normalized
+  once per statement, so a scan fallback does not repeat the entire list
+  comparison for every row.
 
 - **Ordering.** Compatible `ORDER BY` operations stream a left index prefix, or
   a suffix whose earlier keys are fixed by exact equalities. Literal bounds on
-  the next key narrow that slice further, and `LIMIT` or `OFFSET` can stop it
-  early. Numeric, binary, `utf8mb4_0900_bin`, and
+  the next key—and safe numeric constant expressions on numeric keys—narrow
+  that slice further. `LIMIT` or `OFFSET` can then stop it early. Numeric,
+  binary, `utf8mb4_0900_bin`, and
   `utf8mb4_0900_as_cs` prefixes support this path. Case- or accent-folded and
   PAD SPACE text prefixes retain the scan/sort path because equal values can
   occupy separate suffix runs.

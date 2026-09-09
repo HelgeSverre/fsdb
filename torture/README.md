@@ -175,8 +175,9 @@ that reaches another MySQL semantic error is classified separately.
 
 The baseline corpus covers implemented features such as HASH partitioning,
 compound stored programs, data-changing stored functions, scheduled events,
-account options, transaction isolation, temporal SQL modes, administration
-statements, and planar spatial operations.
+account options, transaction isolation, temporal SQL modes, planner-safe
+constant expressions, administration statements, and planar spatial
+operations.
 
 A baseline-only run is an executable feature inventory. Any disagreement still
 becomes a finding; a deliberate refusal counts as expected only when its exact

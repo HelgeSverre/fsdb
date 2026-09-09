@@ -68,6 +68,12 @@ row-value, subquery, and aggregate edge behavior. Spatial comparisons use
 topology rather than WKT vertex order and exercise relations, overlays, signed
 default buffers, and independently configured point, join, and end strategies.
 
+Planner regressions pair each accelerated predicate with a scan-only twin and
+check the selected access through `EXPLAIN`. Literal values and the supported
+row-independent numeric expressions are exercised across equality, `IN`,
+range, ordering, and mutation paths. Overridden host functions must remain on
+the ordinary execution path and are never invoked while a plan is selected.
+
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and
 the optimizer-only SELECT modifiers without changing query results.
