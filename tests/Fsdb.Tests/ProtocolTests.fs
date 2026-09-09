@@ -712,6 +712,20 @@ let tests =
                   (VDateTime(DateTime(2024, 3, 5, 13, 45, 9).AddTicks 1234560L))
                   "microseconds survive the binary resultset round-trip"
 
+          testCase "binary resultsets preserve invalid DATE and DATETIME components"
+          <| fun _ ->
+              let roundTrip typeId text =
+                  let payload = binaryRowPayload [ columnMetadata typeId ] [ Some text ]
+                  let reader = Reader payload
+                  reader.ReadByte() |> ignore
+                  reader.ReadByte() |> ignore
+                  readBinaryValue reader typeId false
+
+              let date = tryInvalidDate 2023 2 31 |> Option.get
+              let dateTime = tryZeroDateTime date 12 34 56 123_456 |> Option.get
+              Expect.equal (roundTrip TypeDate "2023-02-31") (VZeroDate date) "date"
+              Expect.equal (roundTrip TypeDateTime "2023-02-31 12:34:56.123456") (VZeroDateTime dateTime) "datetime"
+
           testCase "binary resultset TIME encodes as the TIME wire form, not a string"
           <| fun _ ->
               // A declared TIME column reaches the wire as MySQL's binary TIME
