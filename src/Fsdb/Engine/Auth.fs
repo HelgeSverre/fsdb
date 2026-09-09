@@ -29,6 +29,8 @@ type Account =
       Host: string }
 
 let private canonicalHost (host: string) =
+    let host = host.Trim()
+
     match IPAddress.TryParse host with
     | true, address -> address.ToString()
     | _ -> host

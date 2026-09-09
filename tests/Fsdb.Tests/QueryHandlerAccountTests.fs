@@ -1126,6 +1126,31 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected DROP ROLE to remove default-role rows, got %A" other
 
+          testCase "account host literals ignore surrounding whitespace"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE ROLE 'trimmed_role'@'%'"
+              let root, _ = handle root "CREATE USER 'trimmed_user'@' %\n\t'"
+
+              Expect.equal
+                  (handle root "SELECT HEX(Host) FROM mysql.user WHERE User = 'trimmed_user'" |> snd)
+                  (ResultSet([ "HEX(Host)" ], [ [ Some "25" ] ]))
+                  "the stored host is canonical"
+
+              let root, grantResult = handle root "GRANT 'trimmed_role'@'%' TO 'trimmed_user'@'%'"
+              Expect.equal grantResult (Affected 0UL) "grant the role"
+
+              Expect.equal
+                  (handle root "REVOKE 'trimmed_role'@' % ' FROM 'trimmed_user'@'%\n '" |> snd)
+                  (Affected 0UL)
+                  "surrounding host whitespace identifies the same accounts"
+
+              Expect.equal
+                  (handle root "SELECT COUNT(*) FROM mysql.role_edges WHERE FROM_USER = 'trimmed_role'" |> snd)
+                  (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ]))
+                  "the matching role edge is removed"
+
           testCase "mandatory roles are applicable but remain explicitly activatable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
