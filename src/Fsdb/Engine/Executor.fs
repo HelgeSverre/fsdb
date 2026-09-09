@@ -9554,7 +9554,7 @@ and private plannerInProbes
 
     inProbesWith (storedIndexedColumnFor registry tref) plannerValue whereExpr
 
-and private tryLiteralRangePredicate columnName boundValue expression : RangeLookupBounds option =
+and private tryComparisonRangePredicate columnName boundValue expression : RangeLookupBounds option =
     let lower name value inclusive =
         Some
             { Column = name
@@ -9589,6 +9589,20 @@ and private tryLiteralRangePredicate columnName boundValue expression : RangeLoo
             | _ -> None
     | _ -> None
 
+and private rangePredicatesFor columnName boundValue expression : RangeLookupBounds list =
+    match expression with
+    | Between(indexed, lower, upper) ->
+        match columnName indexed, boundValue lower, boundValue upper with
+        | Some name, Some lowerValue, Some upperValue ->
+            [ { Column = name
+                Lower = Some(lowerValue, true)
+                Upper = None }
+              { Column = name
+                Lower = None
+                Upper = Some(upperValue, true) } ]
+        | _ -> []
+    | _ -> tryComparisonRangePredicate columnName boundValue expression |> Option.toList
+
 and private rangeColumnNameFor (scope: ColumnReferenceScope) (tref: TableRef) =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
@@ -9598,16 +9612,16 @@ and private rangeColumnNameFor (scope: ColumnReferenceScope) (tref: TableRef) =
             Some name
         | _ -> None
 
-and private literalRangePredicateFor (scope: ColumnReferenceScope) (tref: TableRef) =
+and private literalRangePredicatesFor (scope: ColumnReferenceScope) (tref: TableRef) =
     let columnName = rangeColumnNameFor scope tref
 
     let literalValue = function
         | Lit value -> Some value
         | _ -> None
 
-    tryLiteralRangePredicate columnName literalValue
+    rangePredicatesFor columnName literalValue
 
-and private plannerRangePredicateFor
+and private plannerRangePredicatesFor
     (scope: ColumnReferenceScope)
     (store: Store)
     (registry: Registry)
@@ -9622,8 +9636,9 @@ and private plannerRangePredicateFor
         |> Option.filter (fun name -> isDirectNumericIndexColumn table (name, None))
 
     fun expression ->
-        literalRangePredicateFor scope tref expression
-        |> Option.orElseWith (fun () -> tryLiteralRangePredicate numericColumnName tryNumericConstant expression)
+        match literalRangePredicatesFor scope tref expression with
+        | [] -> rangePredicatesFor numericColumnName tryNumericConstant expression
+        | predicates -> predicates
 
 and private collectClassifiedRangeBounds classify (whereExpr: Expr option) : RangeLookupBounds list =
     let addBound (bounds: Map<string, RangeLookupBounds>) (predicate: RangeLookupBounds) =
@@ -9643,13 +9658,13 @@ and private collectClassifiedRangeBounds classify (whereExpr: Expr option) : Ran
 
     whereExpr
     |> optionalConjuncts
-    |> List.choose classify
+    |> List.collect classify
     |> List.fold addBound Map.empty
     |> Map.values
     |> List.ofSeq
 
 and private collectRangeBounds columnName boundValue whereExpr =
-    collectClassifiedRangeBounds (tryLiteralRangePredicate columnName boundValue) whereExpr
+    collectClassifiedRangeBounds (rangePredicatesFor columnName boundValue) whereExpr
 
 and private rangeLookupBounds
     (scope: ColumnReferenceScope)
@@ -9659,7 +9674,7 @@ and private rangeLookupBounds
     (tref: TableRef)
     (whereExpr: Expr option)
     : RangeLookupBounds list =
-    collectClassifiedRangeBounds (plannerRangePredicateFor scope store registry table tref) whereExpr
+    collectClassifiedRangeBounds (plannerRangePredicatesFor scope store registry table tref) whereExpr
 
 and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : SpatialLookupPredicate list =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -12021,19 +12036,24 @@ and private trySuffixRangeCoverageCount
     if matched.PinnedCount = 0 then
         Some 0
     else
-        matched
-        |> tryDirectSuffixTerm
-        |> Option.map (fun suffix ->
-            whereExpr
-            |> optionalConjuncts
-            |> List.choose (plannerRangePredicateFor BareOrQualifiedColumn store registry table tref)
-            |> List.filter (fun predicate -> equalsIgnoreCase predicate.Column suffix.Column))
-        |> Option.defaultValue []
-        |> fun predicates ->
+        match matched |> tryDirectSuffixTerm with
+        | None -> Some 0
+        | Some suffix ->
+            let predicateGroups =
+                whereExpr
+                |> optionalConjuncts
+                |> List.choose (fun conjunct ->
+                    plannerRangePredicatesFor BareOrQualifiedColumn store registry table tref conjunct
+                    |> List.filter (fun predicate -> equalsIgnoreCase predicate.Column suffix.Column)
+                    |> function
+                        | [] -> None
+                        | predicates -> Some predicates)
+
+            let predicates = List.concat predicateGroups
             let lowerCount = predicates |> List.sumBy (fun predicate -> if predicate.Lower.IsSome then 1 else 0)
             let upperCount = predicates.Length - lowerCount
 
-            if lowerCount <= 1 && upperCount <= 1 then Some predicates.Length else None
+            if lowerCount <= 1 && upperCount <= 1 then Some predicateGroups.Length else None
 
 and private orderedIndexPrefixMatches
     (store: Store)

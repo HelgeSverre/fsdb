@@ -1256,6 +1256,10 @@ let tests =
                     | ResultSet(_, [ [ _; _; _; _; Some "ALL"; _; _; _; _; Some "3"; _; Some "Using where" ] ]) -> ()
                     | other -> failtestf "expected overridden built-ins in ranges to retain scan access, got %A" other
 
+                    match run store registry "EXPLAIN SELECT id FROM users WHERE id BETWEEN ABS(-9) AND 9" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "ALL"; _; _; _; _; Some "3"; _; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected overridden built-ins in BETWEEN to retain scan access, got %A" other
+
                     Expect.equal calls 0 "planning does not call extension code"
 
                     match run store registry "SELECT id FROM users WHERE id = ABS(-9) ORDER BY id" with
@@ -4268,6 +4272,16 @@ let tests =
                     Expect.equal constantOrderPlan.AccessType (Some "range") "constant bounds retain contiguous ordering"
                     Expect.equal constantOrderPlan.Key (Some "ix_tenant_bucket") "constant bounds use the composite index"
 
+                    let betweenOrderPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id, bucket FROM indexed WHERE tenant_id = 1 AND bucket BETWEEN 1 + 1 AND ABS(-3) ORDER BY bucket LIMIT 2"
+                        |> explainRow
+
+                    Expect.equal betweenOrderPlan.AccessType (Some "range") "BETWEEN retains contiguous ordering"
+                    Expect.equal betweenOrderPlan.Key (Some "ix_tenant_bucket") "BETWEEN uses the composite index"
+                    Expect.equal betweenOrderPlan.EstimatedRows (Some "3") "BETWEEN estimates the bounded prefix slice"
+
                 testCase "string fixed prefixes require order and equality to share an equivalence class"
                 <| fun _ ->
                     let store = newStore ()
@@ -5927,15 +5941,61 @@ let tests =
                         ()
                     | other -> failtestf "expected constant-expression bounds to use the range index, got %A" other
 
+                    let between tableName bounds =
+                        runDefault
+                            store
+                            (sprintf "SELECT id FROM %s WHERE score BETWEEN %s AND category = 'a'" tableName bounds)
+
+                    Expect.equal
+                        (between "indexed" "20 AND 30")
+                        (between "scanned" "20 AND 30")
+                        "literal BETWEEN retains inclusive endpoints and residual predicates"
+
+                    Expect.equal
+                        (between "indexed" "10 + 10 AND ABS(-30)")
+                        (between "scanned" "10 + 10 AND ABS(-30)")
+                        "constant BETWEEN retains inclusive endpoints and residual predicates"
+
+                    let betweenPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM indexed WHERE score BETWEEN 10 + 10 AND ABS(-30) AND category = 'a'"
+                        |> explainRow
+
+                    Expect.equal betweenPlan.AccessType (Some "range") "constant BETWEEN uses range access"
+                    Expect.equal betweenPlan.Key (Some "ix_score") "constant BETWEEN reports its secondary index"
+                    Expect.equal betweenPlan.EstimatedRows (Some "2") "BETWEEN estimates its inclusive slice"
+
+                    let emptyBetween =
+                        runDefault store "EXPLAIN SELECT id FROM indexed WHERE score BETWEEN 40 AND 20"
+                        |> explainRow
+
+                    Expect.equal emptyBetween.AccessType (Some "range") "inverted BETWEEN stops at the index"
+                    Expect.equal emptyBetween.EstimatedRows (Some "0") "inverted BETWEEN has an empty slice"
+
+                    match runDefault store "SELECT id FROM indexed WHERE score BETWEEN 20 AND NULL" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected a NULL BETWEEN bound to return no rows, got %A" other
+
                     Expect.equal
                         (runDefault store "UPDATE indexed SET category = 'bounded' WHERE score >= 10 + 10 AND score < ABS(-40)")
                         (runDefault store "UPDATE scanned SET category = 'bounded' WHERE score >= 10 + 10 AND score < ABS(-40)")
                         "constant bounds drive the same update"
 
                     Expect.equal
+                        (runDefault store "UPDATE indexed SET category = 'between' WHERE score BETWEEN 10 AND 20")
+                        (runDefault store "UPDATE scanned SET category = 'between' WHERE score BETWEEN 10 AND 20")
+                        "BETWEEN drives the same update"
+
+                    Expect.equal
                         (runDefault store "DELETE FROM indexed WHERE score >= 20 + 20")
                         (runDefault store "DELETE FROM scanned WHERE score >= 20 + 20")
                         "constant bounds drive the same delete"
+
+                    Expect.equal
+                        (runDefault store "DELETE FROM indexed WHERE score BETWEEN 20 + 10 AND ABS(-40)")
+                        (runDefault store "DELETE FROM scanned WHERE score BETWEEN 20 + 10 AND ABS(-40)")
+                        "BETWEEN drives the same delete"
 
                 testCase "range planning weighs candidate cardinality against a table scan"
                 <| fun _ ->
@@ -8782,6 +8842,14 @@ let tests =
                         "WITH candidates AS (SELECT id, user_id, observed FROM orders)"
                         "candidates c"
                         "users.id > c.user_id"
+                        "users.id <= 5"
+
+                    assertIndexedRange
+                        [ 40; 40; 40; 40; 40 ]
+                        300
+                        ""
+                        "(SELECT id, user_id, observed FROM orders) c"
+                        "c.user_id BETWEEN users.id AND users.id + 1"
                         "users.id <= 5"
 
                     assertIndexedRange
