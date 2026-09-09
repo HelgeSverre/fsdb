@@ -64,6 +64,8 @@ module WireCorpus =
            "unknown-command", [| 0xffuy |]
            "empty-query", [| 0x03uy |]
            "delimiter-only-query", query ";"
+           "comment-only-query", query "# comment"
+           "comment-delimiter-query", query "/* comment */;"
            "invalid-query", query "SELECT ("
            "invalid-utf8-query", Array.append (query "SELECT (") [| 0xffuy |]
            "ping-with-trailing-data", [| 0x0euy; 0xaauy; 0x55uy |]
@@ -72,6 +74,7 @@ module WireCorpus =
            "empty-field-list", [| 0x04uy |]
            "empty-statement-prepare", [| 0x16uy |]
            "comment-only-statement-prepare", [| 0x16uy; byte '#' |]
+           "block-comment-statement-prepare", Array.append [| 0x16uy |] (Encoding.ASCII.GetBytes "/* comment */")
            "short-statement-execute", [| 0x17uy; 1uy |]
            "short-statement-fetch", [| 0x1cuy; 1uy |]
            "short-set-option", [| 0x1buy |]
@@ -146,7 +149,7 @@ module WireRunner =
                 return None
         }
 
-    let private connect connectionString timeoutSeconds =
+    let private connect username connectionString timeoutSeconds =
         task {
             let host, port = endpoint connectionString
             let client = new TcpClient()
@@ -164,7 +167,7 @@ module WireRunner =
                 response.WriteUInt32LE 16777216u
                 response.WriteByte 45uy
                 response.WriteBytes(Array.zeroCreate 23)
-                response.WriteNullTerminatedString "torture_wire"
+                response.WriteNullTerminatedString username
                 response.WriteByte 0uy
                 response.WriteNullTerminatedString "caching_sha2_password"
                 let! _ = writePacketAsync stream { SeqId = greeting.SeqId + 1uy; Payload = response.ToArray() } |> Async.StartAsTask
@@ -217,11 +220,11 @@ module WireRunner =
             outcome target stopwatch "error" code state "" 255
         | Some(Some packet) -> outcome target stopwatch "response" 0 "" "" (int packet.Payload.[0])
 
-    let private runCase target connectionString timeoutSeconds payload =
+    let private runCase username target connectionString timeoutSeconds payload =
         task {
             let stopwatch = Stopwatch.StartNew()
 
-            match! connect connectionString timeoutSeconds with
+            match! connect username connectionString timeoutSeconds with
             | Error error -> return outcome target stopwatch "infrastructure" 0 "" error -1
             | Ok(client, stream) ->
                 use client = client
@@ -246,29 +249,35 @@ module WireRunner =
         else
             "pass"
 
-    let private createWireUser target connectionString timeoutSeconds =
+    let private createWireUser username target connectionString timeoutSeconds =
         task {
             use! connection = Database.openConnection connectionString
-            let! dropped = Database.execute target connection timeoutSeconds "DROP USER IF EXISTS 'torture_wire'@'%'"
+            let account = sprintf "'%s'@'%%'" username
+            let! dropped = Database.execute target connection timeoutSeconds ("DROP USER IF EXISTS " + account)
 
             if not (TargetOutcome.succeeded dropped) then
                 return Error dropped.Message
             else
-                let! created = Database.execute target connection timeoutSeconds "CREATE USER 'torture_wire'@'%' IDENTIFIED BY ''"
+                let! created = Database.execute target connection timeoutSeconds ("CREATE USER " + account + " IDENTIFIED BY ''")
 
                 if not (TargetOutcome.succeeded created) then
                     return Error created.Message
                 else
                     let! granted =
-                        Database.execute target connection timeoutSeconds "GRANT ALL PRIVILEGES ON *.* TO 'torture_wire'@'%'"
+                        Database.execute target connection timeoutSeconds ("GRANT ALL PRIVILEGES ON *.* TO " + account)
 
                     return if TargetOutcome.succeeded granted then Ok() else Error granted.Message
         }
 
-    let private dropWireUser target connectionString timeoutSeconds =
+    let private dropWireUser username target connectionString timeoutSeconds =
         task {
             use! connection = Database.openConnection connectionString
-            return! Database.execute target connection timeoutSeconds "DROP USER IF EXISTS 'torture_wire'@'%'"
+            return!
+                Database.execute
+                    target
+                    connection
+                    timeoutSeconds
+                    (sprintf "DROP USER IF EXISTS '%s'@'%%'" username)
         }
 
     let run (options: WireOptions) =
@@ -279,39 +288,39 @@ module WireRunner =
             Directory.CreateDirectory directory |> ignore
             let! revision, dirty = Tooling.gitState ()
             let assemblyPath = typeof<Fsdb.Storage.Store>.Assembly.Location
+            let username = sprintf "fsdb_wire_%d_%s" Environment.ProcessId ((Hashing.text runId).Substring(0, 8))
             Fsdb.Log.silence ()
             use subject = new FsdbSubject()
             let fsdbConnection = Runner.fsdbConnectionString subject.Port
 
-            match! createWireUser "mysql" options.MySqlConnection options.TimeoutSeconds with
+            match! createWireUser username "mysql" options.MySqlConnection options.TimeoutSeconds with
             | Error error -> return Error("could not create MySQL wire user: " + error)
             | Ok() ->
-                match! createWireUser "fsdb" fsdbConnection options.TimeoutSeconds with
-                | Error error -> return Error("could not create fsdb wire user: " + error)
+                match! createWireUser username "fsdb" fsdbConnection options.TimeoutSeconds with
+                | Error error ->
+                    let! _ = dropWireUser username "mysql" options.MySqlConnection options.TimeoutSeconds
+                    return Error("could not create fsdb wire user: " + error)
                 | Ok() ->
-                    use! versionConnection = Database.openConnection options.MySqlConnection
-                    let! mysqlVersion = Database.scalarString versionConnection options.TimeoutSeconds "SELECT VERSION()"
-                    let records = ResizeArray<WireCaseRecord>()
+                    let mutable runResult = Error "wire run did not produce a result"
 
-                    for name, payload in WireCorpus.cases options.Seed options.Cases do
-                        let! mysql = runCase "mysql" options.MySqlConnection options.TimeoutSeconds payload
-                        let! fsdb = runCase "fsdb" fsdbConnection options.TimeoutSeconds payload
-                        let classification = classify mysql fsdb
+                    try
+                        use! versionConnection = Database.openConnection options.MySqlConnection
+                        let! mysqlVersion = Database.scalarString versionConnection options.TimeoutSeconds "SELECT VERSION()"
+                        let records = ResizeArray<WireCaseRecord>()
 
-                        records.Add
-                            { Name = name
-                              PayloadHex = Convert.ToHexString payload
-                              MySql = mysql
-                              Fsdb = fsdb
-                              Classification = classification
-                              Passed = classification = "pass" }
+                        for name, payload in WireCorpus.cases options.Seed options.Cases do
+                            let! mysql = runCase username "mysql" options.MySqlConnection options.TimeoutSeconds payload
+                            let! fsdb = runCase username "fsdb" fsdbConnection options.TimeoutSeconds payload
+                            let classification = classify mysql fsdb
 
-                    let! mysqlCleanup = dropWireUser "mysql" options.MySqlConnection options.TimeoutSeconds
-                    let! fsdbCleanup = dropWireUser "fsdb" fsdbConnection options.TimeoutSeconds
+                            records.Add
+                                { Name = name
+                                  PayloadHex = Convert.ToHexString payload
+                                  MySql = mysql
+                                  Fsdb = fsdb
+                                  Classification = classification
+                                  Passed = classification = "pass" }
 
-                    if not (TargetOutcome.succeeded mysqlCleanup && TargetOutcome.succeeded fsdbCleanup) then
-                        return Error "wire test user cleanup failed"
-                    else
                         let cases = records.ToArray()
                         let firstFailure = cases |> Array.tryFind (fun item -> not item.Passed)
                         let classification = firstFailure |> Option.map _.Classification |> Option.defaultValue "pass"
@@ -338,5 +347,15 @@ module WireRunner =
                               Passed = firstFailure.IsNone }
 
                         Json.write (Path.Combine(directory, "manifest.json")) manifest
-                        return Ok(manifest, directory)
+                        runResult <- Ok(manifest, directory)
+                    with error ->
+                        runResult <- Error error.Message
+
+                    let! mysqlCleanup = dropWireUser username "mysql" options.MySqlConnection options.TimeoutSeconds
+                    let! fsdbCleanup = dropWireUser username "fsdb" fsdbConnection options.TimeoutSeconds
+
+                    if TargetOutcome.succeeded mysqlCleanup && TargetOutcome.succeeded fsdbCleanup then
+                        return runResult
+                    else
+                        return Error "wire test user cleanup failed"
         }

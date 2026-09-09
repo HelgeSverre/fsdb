@@ -3009,6 +3009,15 @@ let tests =
                   do! expectError [| 0x16uy; byte '#' |] 1295 "HY000"
                   do! expectError (Array.append [| 0x03uy |] (Array.append (Text.Encoding.ASCII.GetBytes "SELECT (") [| 0xffuy |])) 1064 "42000"
 
+                  let! _ =
+                      writePacketAsync
+                          stream
+                          { SeqId = 0uy
+                            Payload = Array.append [| 0x03uy |] (Text.Encoding.ASCII.GetBytes "/* comment */;") }
+
+                  let! commentReply = readPacketAsync stream
+                  Expect.equal commentReply.Value.Payload.[0] 0uy "a comment before a delimiter remains a no-op"
+
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
                   let! afterReply = readPacketAsync stream
                   Expect.isTrue afterReply.IsSome "a later query on the same connection still gets a reply"

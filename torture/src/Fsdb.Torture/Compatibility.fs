@@ -227,17 +227,26 @@ module ContractCatalog =
             [| Contract.query "text-type-row" (TypeMatrix.select "contract_types" "1")
                Contract.preparedQuery
                    "prepared-numeric-row"
-                   "SELECT c_tiny, c_bool, c_small, c_medium, c_int, c_big, c_bit, c_decimal, c_double, c_float, c_year FROM contract_types WHERE id = ?"
+                   (TypeMatrix.selectColumns
+                       "contract_types"
+                       "c_tiny, c_bool, c_small, c_medium, c_int, c_big, c_bit, c_decimal, c_double, c_float, c_year"
+                       "?")
                    [| box 1 |]
                Contract.preparedQuery
                    "prepared-text-binary-row"
-                   "SELECT c_char, c_varchar, c_tinytext, c_text, c_mediumtext, c_longtext, c_binary, c_varbinary, c_tinyblob, c_blob, c_mediumblob, c_longblob, c_enum, c_set, c_json FROM contract_types WHERE id = ?"
+                   (TypeMatrix.selectColumns
+                       "contract_types"
+                       "c_char, c_varchar, c_tinytext, c_text, c_mediumtext, c_longtext, c_binary, c_varbinary, c_tinyblob, c_blob, c_mediumblob, c_longblob, c_enum, c_set, c_json"
+                       "?")
                    [| box 1 |]
                Contract.preparedQuery
                    "prepared-temporal-row"
-                   "SELECT c_date, c_datetime, c_timestamp, c_time FROM contract_types WHERE id = ?"
+                   (TypeMatrix.selectColumns "contract_types" "c_date, c_datetime, c_timestamp, c_time" "?")
                    [| box 1 |]
-               Contract.preparedQuery "prepared-geometry-row" "SELECT c_geometry FROM contract_types WHERE id = ?" [| box 1 |] |]
+               Contract.preparedQuery
+                   "prepared-geometry-row"
+                   (TypeMatrix.selectColumns "contract_types" "c_geometry" "?")
+                   [| box 1 |] |]
           Cleanup = [| "DROP TABLE IF EXISTS contract_types" |]
           Coverage =
             TypeMatrix.capabilities
@@ -738,49 +747,56 @@ module CompatibilityRunner =
                 Fsdb.Log.silence ()
                 use subject = new FsdbSubject()
                 let fsdbConnection = Runner.fsdbConnectionString subject.Port
-                use! versionConnection = Database.openConnection oracleConnection
-                let! mysqlVersion = Database.scalarString versionConnection options.TimeoutSeconds "SELECT VERSION()"
-                let records = ResizeArray<ContractCaseRecord>()
+                let mutable runResult = Error "compatibility run did not produce a result"
 
-                for case in ContractCatalog.all do
-                    let! record = runCase oracleConnection fsdbConnection options.TimeoutSeconds case
-                    records.Add record
+                try
+                    use! versionConnection = Database.openConnection oracleConnection
+                    let! mysqlVersion = Database.scalarString versionConnection options.TimeoutSeconds "SELECT VERSION()"
+                    let records = ResizeArray<ContractCaseRecord>()
 
-                let cases = records.ToArray()
-                let firstStepFailure = cases |> Array.collect _.Steps |> Array.tryFind (fun step -> not step.Passed)
-                let firstStateFailure = cases |> Array.tryFind (fun case -> not case.MySqlStateRestored || not case.FsdbStateRestored)
+                    for case in ContractCatalog.all do
+                        let! record = runCase oracleConnection fsdbConnection options.TimeoutSeconds case
+                        records.Add record
 
-                let classification =
-                    match firstStepFailure, firstStateFailure with
-                    | Some failure, _ -> failure.Classification
-                    | None, Some _ -> "state_leak"
-                    | None, None -> "pass"
+                    let cases = records.ToArray()
+                    let firstStepFailure = cases |> Array.collect _.Steps |> Array.tryFind (fun step -> not step.Passed)
+                    let firstStateFailure = cases |> Array.tryFind (fun case -> not case.MySqlStateRestored || not case.FsdbStateRestored)
 
-                let signature =
-                    match firstStepFailure, firstStateFailure with
-                    | Some step, _ -> Hashing.combine [ step.Name; step.Classification; Hashing.text step.Sql; step.Detail ]
-                    | None, Some case -> Hashing.combine [ case.Name; "state_leak"; case.StateDetail ]
-                    | None, None -> ""
+                    let classification =
+                        match firstStepFailure, firstStateFailure with
+                        | Some failure, _ -> failure.Classification
+                        | None, Some _ -> "state_leak"
+                        | None, None -> "pass"
 
-                let manifest =
-                    { SchemaVersion = 1
-                      RunId = runId
-                      StartedUtc = started.ToString("O")
-                      FinishedUtc = DateTimeOffset.UtcNow.ToString("O")
-                      FsdbRevision = revision
-                      FsdbDirty = dirty
-                      FsdbAssemblySha256 = Hashing.file assemblyPath
-                      MySqlVersion = mysqlVersion
-                      Cases = cases
-                      Classification = classification
-                      FailureSignature = signature
-                      Passed = cases |> Array.forall _.Passed }
+                    let signature =
+                        match firstStepFailure, firstStateFailure with
+                        | Some step, _ -> Hashing.combine [ step.Name; step.Classification; Hashing.text step.Sql; step.Detail ]
+                        | None, Some case -> Hashing.combine [ case.Name; "state_leak"; case.StateDetail ]
+                        | None, None -> ""
 
-                Json.write (Path.Combine(directory, "manifest.json")) manifest
+                    let manifest =
+                        { SchemaVersion = 1
+                          RunId = runId
+                          StartedUtc = started.ToString("O")
+                          FinishedUtc = DateTimeOffset.UtcNow.ToString("O")
+                          FsdbRevision = revision
+                          FsdbDirty = dirty
+                          FsdbAssemblySha256 = Hashing.file assemblyPath
+                          MySqlVersion = mysqlVersion
+                          Cases = cases
+                          Classification = classification
+                          FailureSignature = signature
+                          Passed = cases |> Array.forall _.Passed }
+
+                    Json.write (Path.Combine(directory, "manifest.json")) manifest
+                    runResult <- Ok(manifest, directory)
+                with error ->
+                    runResult <- Error error.Message
+
                 let! dropped = Database.dropOracleDatabase options.MySqlConnection databaseName options.TimeoutSeconds
 
                 if not (TargetOutcome.succeeded dropped) then
                     return Error("could not remove oracle database: " + dropped.Message)
                 else
-                    return Ok(manifest, directory)
+                    return runResult
         }

@@ -41,20 +41,37 @@ module TypeMatrix =
         + "c_date, c_datetime, c_timestamp, c_time, c_year, c_json, c_geometry"
 
     let createTable table =
-        "CREATE TABLE "
-        + table
-        + " (id INT PRIMARY KEY, c_tiny TINYINT, c_bool BOOLEAN, c_small SMALLINT, c_medium MEDIUMINT, c_int INT, c_big BIGINT, "
-        + "c_bit BIT(9), c_char CHAR(4), c_varchar VARCHAR(10), c_tinytext TINYTEXT, c_text TEXT, c_mediumtext MEDIUMTEXT, c_longtext LONGTEXT, "
-        + "c_binary BINARY(4), c_varbinary VARBINARY(4), c_tinyblob TINYBLOB, c_blob BLOB, c_mediumblob MEDIUMBLOB, c_longblob LONGBLOB, "
-        + "c_enum ENUM('red','blue'), c_set SET('a','b'), c_decimal DECIMAL(10,3), c_double DOUBLE, c_float FLOAT, "
-        + "c_date DATE, c_datetime DATETIME(6), c_timestamp TIMESTAMP(6) NULL, c_time TIME(6), c_year YEAR, c_json JSON, c_geometry GEOMETRY NOT NULL SRID 0)"
+        sprintf
+            """CREATE TABLE %s (
+                id INT PRIMARY KEY,
+                c_tiny TINYINT, c_bool BOOLEAN, c_small SMALLINT,
+                c_medium MEDIUMINT, c_int INT, c_big BIGINT, c_bit BIT(9),
+                c_char CHAR(4), c_varchar VARCHAR(10), c_tinytext TINYTEXT,
+                c_text TEXT, c_mediumtext MEDIUMTEXT, c_longtext LONGTEXT,
+                c_binary BINARY(4), c_varbinary VARBINARY(4), c_tinyblob TINYBLOB,
+                c_blob BLOB, c_mediumblob MEDIUMBLOB, c_longblob LONGBLOB,
+                c_enum ENUM('red','blue'), c_set SET('a','b'),
+                c_decimal DECIMAL(10,3), c_double DOUBLE, c_float FLOAT,
+                c_date DATE, c_datetime DATETIME(6), c_timestamp TIMESTAMP(6) NULL,
+                c_time TIME(6), c_year YEAR, c_json JSON,
+                c_geometry GEOMETRY NOT NULL SRID 0
+            )"""
+            table
 
     let insert table =
-        "INSERT INTO "
-        + table
-        + " VALUES (1, -8, TRUE, -32000, 8000000, -2000000000, 9000000000, "
-        + "b'100000001', 'ab', 'blå', 'tiny', 'text', 'medium', 'long', X'00FF', X'0102', X'03', X'0405', X'0607', X'0809', "
-        + "'blue', 'a,b', 12345.678, 1.25, -2.5, '2024-02-29', '2024-02-29 12:34:56.123456', "
-        + "'2024-02-29 12:34:56.654321', '-34:20:30.123456', 2024, JSON_OBJECT('b', 2, 'a', 1), ST_GeomFromText('POINT(1 2)', 0))"
+        sprintf
+            """INSERT INTO %s VALUES (
+                1, -8, TRUE, -32000, 8000000, -2000000000, 9000000000,
+                b'100000001', 'ab', 'blå', 'tiny', 'text', 'medium', 'long',
+                X'00FF', X'0102', X'03', X'0405', X'0607', X'0809',
+                'blue', 'a,b', 12345.678, 1.25, -2.5, '2024-02-29',
+                '2024-02-29 12:34:56.123456', '2024-02-29 12:34:56.654321',
+                '-34:20:30.123456', 2024, JSON_OBJECT('b', 2, 'a', 1),
+                ST_GeomFromText('POINT(1 2)', 0)
+            )"""
+            table
 
-    let select table parameter = sprintf "SELECT %s FROM %s WHERE id = %s" columns table parameter
+    let selectColumns table selectedColumns parameter =
+        sprintf "SELECT %s FROM %s WHERE id = %s" selectedColumns table parameter
+
+    let select table parameter = selectColumns table columns parameter

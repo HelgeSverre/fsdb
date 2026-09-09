@@ -333,16 +333,20 @@ let private commandStatus = function
     | Unsupported _
     | Malformed _ -> None
 
+let private commandsWithStructuredPayloads =
+    set
+        [ byte CommandByte.FieldList
+          byte CommandByte.StatementExecute
+          byte CommandByte.StatementClose
+          byte CommandByte.StatementReset
+          byte CommandByte.SetOption
+          byte CommandByte.StatementFetch ]
+
 let private malformedCommandError command =
-    match command with
-    | value when value = byte CommandByte.FieldList
-                 || value = byte CommandByte.StatementExecute
-                 || value = byte CommandByte.StatementClose
-                 || value = byte CommandByte.StatementReset
-                 || value = byte CommandByte.SetOption
-                 || value = byte CommandByte.StatementFetch ->
+    if Set.contains command commandsWithStructuredPayloads then
         1835, "Malformed communication packet."
-    | _ -> 1047, "Unknown command"
+    else
+        1047, "Unknown command"
 
 let private isDelimiterOnlyQuery (sql: string) =
     sql |> Seq.forall (fun value -> Char.IsWhiteSpace value || value = ';')
@@ -1989,7 +1993,7 @@ let private handleConnection
                                             |> Async.Ignore
 
                                         return! loop session
-                                    | Result.Ok [] when sql.Contains ';' ->
+                                    | Result.Ok [] when sql.TrimStart().StartsWith ';' ->
                                         do!
                                             writePacketAsync
                                                 stream
