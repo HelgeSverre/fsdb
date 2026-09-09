@@ -130,8 +130,13 @@ type private EqualityAccessPlan =
       TableRowCount: int
       Rows: Lazy<(RowId * Value[]) list> }
 
-type private IndexUnionAccessPlan =
-    { KeyNames: string list
+type private IndexMergeKind =
+    | MergeUnion
+    | MergeIntersection
+
+type private IndexMergeAccessPlan =
+    { Operation: IndexMergeKind
+      KeyNames: string list
       Columns: ColumnDef list
       CandidateRowIds: Set<RowId>
       Rows: Lazy<(RowId * Value[]) list> }
@@ -141,7 +146,7 @@ type private PhysicalAccessPlan =
     | MembershipAccess of EqualityAccessPlan
     | SpatialAccess of Storage.SpatialLookup
     | RangeAccess of Storage.RangeLookup
-    | IndexUnionAccess of IndexUnionAccessPlan
+    | IndexMergeAccess of IndexMergeAccessPlan
 
 let private equalityAccessPlan (table: Table) (index: EqualityIndex) rowIds =
     { KeyName = index.Name
@@ -10604,35 +10609,61 @@ and private physicalAccessCandidateCount = function
     | MembershipAccess plan -> plan.CandidateRowIds.Count
     | SpatialAccess plan -> plan.SpatialRows.Length
     | RangeAccess plan -> plan.RangeRowCount
-    | IndexUnionAccess plan -> plan.CandidateRowIds.Count
+    | IndexMergeAccess plan -> plan.CandidateRowIds.Count
 
 and private physicalAccessPreference = function
     | EqualityAccess _ -> 0
     | MembershipAccess _ -> 1
     | SpatialAccess _ -> 2
     | RangeAccess _ -> 3
-    | IndexUnionAccess _ -> 4
+    | IndexMergeAccess _ -> 4
 
 and private physicalAccessRows = function
     | EqualityAccess plan
     | MembershipAccess plan -> plan.Columns, plan.Rows.Value
     | SpatialAccess plan -> plan.SpatialColumns, plan.SpatialRows
     | RangeAccess plan -> plan.RangeColumns, plan.RangeRows.Value
-    | IndexUnionAccess plan -> plan.Columns, plan.Rows.Value
+    | IndexMergeAccess plan -> plan.Columns, plan.Rows.Value
 
 and private physicalAccessRowIds = function
     | EqualityAccess plan
     | MembershipAccess plan -> plan.CandidateRowIds
     | SpatialAccess plan -> plan.SpatialRows |> List.map fst |> Set.ofList
     | RangeAccess plan -> plan.RangeRows.Value |> List.map fst |> Set.ofList
-    | IndexUnionAccess plan -> plan.CandidateRowIds
+    | IndexMergeAccess plan -> plan.CandidateRowIds
 
 and private physicalAccessKeyNames = function
     | EqualityAccess plan
     | MembershipAccess plan -> [ plan.KeyName ]
     | SpatialAccess plan -> [ plan.SpatialIndexName ]
     | RangeAccess plan -> [ plan.RangeIndexName ]
-    | IndexUnionAccess plan -> plan.KeyNames
+    | IndexMergeAccess plan -> plan.KeyNames
+
+and private tryIndexMergeAccessPlan policy kind (table: Table) accesses =
+    let rowIdSets = accesses |> List.map physicalAccessRowIds
+
+    let rowIds =
+        match kind with
+        | MergeUnion -> Set.unionMany rowIdSets
+        | MergeIntersection -> rowIdSets |> List.reduce Set.intersect
+
+    let accepted =
+        match policy with
+        | CandidateNarrowing -> true
+        | CostedRead ->
+            QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
+
+    if not accepted then
+        None
+    else
+        let keyNames = accesses |> List.collect physicalAccessKeyNames |> List.distinct
+
+        Some
+            { Operation = kind
+              KeyNames = keyNames
+              Columns = table.Columns
+              CandidateRowIds = rowIds
+              Rows = lazy (Storage.rowsForRowIds table rowIds) }
 
 and private tryIndexUnionAccessInTableWith
     (policy: IndexAccessPolicy)
@@ -10641,7 +10672,7 @@ and private tryIndexUnionAccessInTableWith
     (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
-    : IndexUnionAccessPlan option =
+    : IndexMergeAccessPlan option =
     let planFor expression =
         match disjuncts expression with
         | [ _ ] -> None
@@ -10650,25 +10681,7 @@ and private tryIndexUnionAccessInTableWith
             |> List.map (fun branch ->
                 tryPhysicalAccessInTableWith CandidateNarrowing store registry table tref (Some branch))
             |> tryAllSome
-            |> Option.bind (fun accesses ->
-                let rowIds = accesses |> List.map physicalAccessRowIds |> Set.unionMany
-
-                let accepted =
-                    match policy with
-                    | CandidateNarrowing -> true
-                    | CostedRead ->
-                        QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
-
-                if not accepted then
-                    None
-                else
-                    let keyNames = accesses |> List.collect physicalAccessKeyNames |> List.distinct
-
-                    Some
-                        { KeyNames = keyNames
-                          Columns = table.Columns
-                          CandidateRowIds = rowIds
-                          Rows = lazy (Storage.rowsForRowIds table rowIds) })
+            |> Option.bind (tryIndexMergeAccessPlan policy MergeUnion table)
 
     whereExpr
     |> optionalConjuncts
@@ -10676,6 +10689,26 @@ and private tryIndexUnionAccessInTableWith
     |> function
         | [] -> None
         | plans -> plans |> List.minBy (_.CandidateRowIds.Count) |> Some
+
+and private tryIndexIntersectionAccessInTableWith
+    (policy: IndexAccessPolicy)
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : IndexMergeAccessPlan option =
+    whereExpr
+    |> Option.bind (fun expression ->
+        match conjuncts expression with
+        | _ :: _ :: _ as conjuncts ->
+            conjuncts
+            |> List.choose (fun conjunct ->
+                tryPhysicalAccessInTableWith CandidateNarrowing store registry table tref (Some conjunct))
+            |> function
+                | _ :: _ :: _ as accesses -> tryIndexMergeAccessPlan policy MergeIntersection table accesses
+                | _ -> None
+        | _ -> None)
 
 and private physicalAccessCandidatesInTableWith
     (policy: IndexAccessPolicy)
@@ -10694,7 +10727,9 @@ and private physicalAccessCandidatesInTableWith
       tryRangeAccessInTableWith policy BareOrQualifiedColumn store registry table tref whereExpr
       |> Option.map RangeAccess
       tryIndexUnionAccessInTableWith policy store registry table tref whereExpr
-      |> Option.map IndexUnionAccess ]
+      |> Option.map IndexMergeAccess
+      tryIndexIntersectionAccessInTableWith policy store registry table tref whereExpr
+      |> Option.map IndexMergeAccess ]
     |> List.choose id
 
 and private choosePhysicalAccess candidates =
@@ -15664,8 +15699,13 @@ let rec private explainJoinBlock
                       Ref = None
                       Rows = Some(uint64 plan.RangeRowCount)
                       Extra = accessExtra }
-            | IndexUnionAccess plan ->
+            | IndexMergeAccess plan ->
                 let keyNames = String.concat "," plan.KeyNames
+
+                let operation =
+                    match plan.Operation with
+                    | MergeUnion -> "union"
+                    | MergeIntersection -> "intersect"
 
                 acc.Add
                     { Id = Some id
@@ -15675,7 +15715,7 @@ let rec private explainJoinBlock
                       Key = explainKeys plan.KeyNames None
                       Ref = None
                       Rows = Some(uint64 plan.CandidateRowIds.Count)
-                      Extra = sprintf "Using union(%s)" keyNames :: accessExtra }
+                      Extra = sprintf "Using %s(%s)" operation keyNames :: accessExtra }
 
             true
 
