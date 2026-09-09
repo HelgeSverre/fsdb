@@ -684,7 +684,13 @@ let tests =
                         manifest.Capabilities
                         |> Array.find (fun capability -> capability.Id = "function:json_extract")
 
-                    Expect.contains jsonExtract.MissingAxes "prepared-protocol" "unproven axes remain visible" ]
+                    Expect.isTrue
+                        (jsonExtract.Evidence |> Array.exists (fun item -> item.Axis = "prepared-protocol"))
+                        "function contracts contribute prepared evidence"
+
+                    Expect.isTrue
+                        (manifest.Capabilities |> Array.exists (fun capability -> not (Array.isEmpty capability.MissingAxes)))
+                        "unproven axes remain visible" ]
 
           testList
               "Compatibility contracts"

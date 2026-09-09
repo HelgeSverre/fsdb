@@ -4,6 +4,7 @@ open System
 open System.Collections.Generic
 open System.Diagnostics
 open System.IO
+open System.Text.Json
 open System.Threading.Tasks
 open MySqlConnector
 
@@ -17,6 +18,7 @@ type ContractOperation =
 
 type OracleExpectation =
     | OracleSuccess
+    | OracleValueSuccessIgnoringLabels
     | OracleError of code: int * sqlState: string
 
 type ContractAction =
@@ -126,6 +128,9 @@ module Contract =
     let fails code sqlState (step: ContractStep) : ContractStep =
         { step with Expectation = OracleError(code, sqlState) }
 
+    let comparingValues (step: ContractStep) : ContractStep =
+        { step with Expectation = OracleValueSuccessIgnoringLabels }
+
     let on connection (step: ContractStep) : ContractStep = { step with Connection = connection }
 
     let send pending (step: ContractStep) : ContractStep =
@@ -170,6 +175,18 @@ module Contract =
 
 [<RequireQualifiedAccess>]
 module ContractCatalog =
+    let private functionProbe (name: string) (names: string array) sql =
+        [| Contract.query (name + "-text") sql |> Contract.comparingValues
+           Contract.preparedQuery (name + "-prepared") sql [||] |> Contract.comparingValues |],
+        (names
+         |> Array.map (fun functionName ->
+             "function:" + functionName.ToLowerInvariant(),
+             [| "parser"; "text-differential"; "prepared-protocol" |]))
+
+    let private functionError name (functionName: string) code sqlState sql =
+        Contract.query name sql |> Contract.fails code sqlState,
+        ("function:" + functionName.ToLowerInvariant(), [| "error-contract" |])
+
     let private comments =
         { Name = "comments-and-precedence"
           Setup = [||]
@@ -251,6 +268,161 @@ module ContractCatalog =
           Coverage =
             TypeMatrix.capabilities
             |> Array.map (fun name -> "column-type:" + name, [| "parser"; "text-differential"; "prepared-protocol" |]) }
+
+    let private functionFamilies =
+        let numericSteps, numericCoverage =
+            functionProbe
+                "numeric-functions"
+                [| "ABS"; "CEIL"; "CEILING"; "FLOOR"; "POW"; "POWER"; "SQRT"; "LOG"; "LN"; "LOG2"; "LOG10"
+                   "EXP"; "PI"; "SIN"; "COS"; "TAN"; "ASIN"; "ACOS"; "ATAN"; "ATAN2"; "DEGREES"; "RADIANS"
+                   "SIGN"; "TRUNCATE"; "ROUND"; "MOD"; "GREATEST"; "LEAST"; "NULLIF"; "ISNULL"; "CONV"; "BIN"
+                   "BIT_COUNT"; "OCT"; "CRC32" |]
+                """SELECT ABS(-2), CEIL(1.2), CEILING(1.2), FLOOR(1.8), POW(2, 3), POWER(2, 3), SQRT(4),
+                          LOG(EXP(1)), LN(EXP(1)), LOG2(8), LOG10(100), EXP(0), PI() > 3, SIN(0), COS(0), TAN(0),
+                          ASIN(0), ACOS(1), ATAN(0), ATAN2(0, 1), DEGREES(PI()), RADIANS(180) > 3,
+                          SIGN(-2), TRUNCATE(1.29, 1), ROUND(1.25, 1), MOD(7, 3), GREATEST(1, 3, 2),
+                          LEAST(1, 3, 2), NULLIF(1, 1), ISNULL(NULL), CONV('ff', 16, 10), BIN(5), BIT_COUNT(7),
+                          OCT(8), CRC32('abc')"""
+
+        let stringSteps, stringCoverage =
+            functionProbe
+                "string-functions"
+                [| "CONCAT"; "CONCAT_WS"; "UPPER"; "UCASE"; "LOWER"; "LCASE"; "LENGTH"; "OCTET_LENGTH"
+                   "BIT_LENGTH"; "CHAR_LENGTH"; "CHARACTER_LENGTH"; "ASCII"; "ORD"; "HEX"; "UNHEX"; "LEFT"
+                   "RIGHT"; "SUBSTRING"; "SUBSTR"; "MID"; "REPLACE"; "REVERSE"; "REPEAT"; "SPACE"; "LPAD"
+                   "RPAD"; "LTRIM"; "RTRIM"; "TRIM"; "INSTR"; "LOCATE"; "POSITION"; "SUBSTRING_INDEX"; "ELT"
+                   "FIELD"; "FIND_IN_SET"; "MAKE_SET"; "EXPORT_SET"; "FORMAT"; "QUOTE"; "STRCMP"; "MD5"; "SHA"
+                   "SHA1"; "SHA2"; "TO_BASE64"; "FROM_BASE64"; "COMPRESS"; "UNCOMPRESS"; "UNCOMPRESSED_LENGTH"
+                   "SOUNDEX"; "CHAR" |]
+                """SELECT CONCAT('a', 'b'), CONCAT_WS('-', 'a', 'b'), UPPER('ab'), UCASE('ab'), LOWER('AB'), LCASE('AB'),
+                          LENGTH('blå'), OCTET_LENGTH('blå'), BIT_LENGTH('A'), CHAR_LENGTH('blå'), CHARACTER_LENGTH('blå'),
+                          ASCII('A'), ORD('A'), HEX('A'), HEX(UNHEX('41')), LEFT('abcd', 2), RIGHT('abcd', 2),
+                          SUBSTRING('abcd', 2, 2), SUBSTR('abcd', 2, 2), MID('abcd', 2, 2), REPLACE('abc', 'b', 'x'),
+                          REVERSE('abc'), REPEAT('ab', 2), LENGTH(SPACE(3)), LPAD('a', 3, '0'), RPAD('a', 3, '0'),
+                          LTRIM('  a'), RTRIM('a  '), TRIM('  a  '), INSTR('abc', 'b'), LOCATE('b', 'abc'),
+                          POSITION('b' IN 'abc'), SUBSTRING_INDEX('a,b,c', ',', 2), ELT(2, 'a', 'b'),
+                          FIELD('b', 'a', 'b'), FIND_IN_SET('b', 'a,b'), MAKE_SET(3, 'a', 'b'),
+                          EXPORT_SET(5, 'Y', 'N', ',', 4), FORMAT(1234.5, 2, 'en_US'), QUOTE('a''b'), STRCMP('a', 'b'),
+                          MD5('abc'), SHA('abc'), SHA1('abc'), SHA2('abc', 256), TO_BASE64('abc'),
+                          HEX(FROM_BASE64('YWJj')), UNCOMPRESSED_LENGTH(COMPRESS('abc')), HEX(UNCOMPRESS(COMPRESS('abc'))),
+                          SOUNDEX('Robert'), CHAR(65, 66)"""
+
+        let temporalSteps, temporalCoverage =
+            functionProbe
+                "temporal-functions"
+                [| "DATE"; "TIME"; "YEAR"; "MONTH"; "DAY"; "DAYOFMONTH"; "DAYOFWEEK"; "DAYOFYEAR"; "WEEKDAY"
+                   "WEEK"; "WEEKOFYEAR"; "YEARWEEK"; "QUARTER"; "HOUR"; "MINUTE"; "SECOND"; "MICROSECOND"
+                   "DATEDIFF"; "TIMEDIFF"; "ADDTIME"; "SUBTIME"; "DATE_ADD"; "ADDDATE"; "DATE_SUB"; "SUBDATE"
+                   "LAST_DAY"; "MAKEDATE"; "MAKETIME"; "SEC_TO_TIME"; "TO_DAYS"; "FROM_DAYS"; "UNIX_TIMESTAMP"
+                   "FROM_UNIXTIME"; "DATE_FORMAT"; "TIME_FORMAT"; "STR_TO_DATE"; "TIMESTAMPADD"; "TIMESTAMPDIFF" |]
+                """SELECT DATE('2024-02-29 12:34:56'), TIME('12:34:56.123456'), YEAR('2024-02-29'), MONTH('2024-02-29'),
+                          DAY('2024-02-29'), DAYOFMONTH('2024-02-29'), DAYOFWEEK('2024-02-29'), DAYOFYEAR('2024-02-29'),
+                          WEEKDAY('2024-02-29'), WEEK('2024-02-29', 3), WEEKOFYEAR('2024-02-29'), YEARWEEK('2024-02-29', 3),
+                          QUARTER('2024-05-01'), HOUR('-34:20:30.123456'), MINUTE('-34:20:30.123456'),
+                          SECOND('-34:20:30.123456'), MICROSECOND('-34:20:30.123456'), DATEDIFF('2024-03-02', '2024-02-29'),
+                          TIMEDIFF('12:00:01', '12:00:00'), ADDTIME('12:00:00', '01:02:03'), SUBTIME('12:00:00', '01:02:03'),
+                          DATE_ADD('2024-02-29', INTERVAL 1 DAY), ADDDATE('2024-02-29', INTERVAL 1 DAY),
+                          DATE_SUB('2024-03-01', INTERVAL 1 DAY), SUBDATE('2024-03-01', INTERVAL 1 DAY),
+                          LAST_DAY('2024-02-10'), MAKEDATE(2024, 60), MAKETIME(12, 34, 56), SEC_TO_TIME(3661),
+                          TO_DAYS('2024-02-29'), FROM_DAYS(739310), UNIX_TIMESTAMP('2024-01-01 00:00:00'),
+                          FROM_UNIXTIME(1704067200), DATE_FORMAT('2024-02-29', '%Y-%m-%d'), TIME_FORMAT('12:34:56', '%H:%i:%s'),
+                          STR_TO_DATE('2024-02-29', '%Y-%m-%d'), TIMESTAMPADD(DAY, 1, '2024-02-29'),
+                          TIMESTAMPDIFF(DAY, '2024-02-29', '2024-03-02')"""
+
+        let jsonSteps, jsonCoverage =
+            functionProbe
+                "json-functions"
+                [| "JSON_ARRAY"; "JSON_OBJECT"; "JSON_VALID"; "JSON_TYPE"; "JSON_DEPTH"; "JSON_LENGTH"; "JSON_EXTRACT"
+                   "JSON_UNQUOTE"; "JSON_QUOTE"; "JSON_KEYS"; "JSON_CONTAINS"; "JSON_CONTAINS_PATH"; "JSON_OVERLAPS"
+                   "JSON_INSERT"; "JSON_REPLACE"; "JSON_SET"; "JSON_REMOVE"; "JSON_ARRAY_APPEND"; "JSON_ARRAY_INSERT"
+                   "JSON_MERGE_PATCH"; "JSON_MERGE_PRESERVE"; "JSON_PRETTY"; "JSON_STORAGE_SIZE"; "JSON_STORAGE_FREE"
+                   "JSON_SCHEMA_VALID"; "JSON_SCHEMA_VALIDATION_REPORT" |]
+                """SELECT JSON_ARRAY(1, 'a'), JSON_OBJECT('a', 1), JSON_VALID('{\"a\":1}'), JSON_TYPE('{\"a\":1}'),
+                          JSON_DEPTH('{\"a\":[1]}'), JSON_LENGTH('{\"a\":1}'), JSON_EXTRACT('{\"a\":1}', '$.a'),
+                          JSON_UNQUOTE('\"a\"'), JSON_QUOTE('a'), JSON_KEYS('{\"a\":1}'),
+                          JSON_CONTAINS('[1,2]', '2'), JSON_CONTAINS_PATH('{\"a\":1}', 'one', '$.a'),
+                          JSON_OVERLAPS('[1,2]', '[2,3]'), JSON_INSERT('{\"a\":1}', '$.b', 2),
+                          JSON_REPLACE('{\"a\":1}', '$.a', 2), JSON_SET('{\"a\":1}', '$.b', 2),
+                          JSON_REMOVE('{\"a\":1,\"b\":2}', '$.b'), JSON_ARRAY_APPEND('[1]', '$', 2),
+                          JSON_ARRAY_INSERT('[1,3]', '$[1]', 2), JSON_MERGE_PATCH('{\"a\":1}', '{\"b\":2}'),
+                          JSON_MERGE_PRESERVE('[1]', '[2]'), JSON_PRETTY('{\"a\":1}'),
+                          JSON_STORAGE_SIZE('{\"a\":1}'), JSON_STORAGE_FREE('{\"a\":1}'),
+                          JSON_SCHEMA_VALID('{\"type\":\"integer\"}', '1'),
+                          JSON_SCHEMA_VALIDATION_REPORT('{\"type\":\"integer\"}', '\"x\"')"""
+
+        let spatialSteps, spatialCoverage =
+            functionProbe
+                "spatial-functions"
+                [| "ST_GEOMFROMTEXT"; "ST_GEOMETRYFROMTEXT"; "ST_POINTFROMTEXT"; "ST_ASTEXT"; "ST_ASWKT"; "ST_ASBINARY"
+                   "ST_ASWKB"; "ST_GEOMETRYTYPE"; "ST_DIMENSION"; "ST_ISEMPTY"; "ST_ISVALID"; "ST_X"; "ST_Y"
+                   "ST_DISTANCE"; "ST_CONTAINS"; "ST_WITHIN"; "ST_INTERSECTS"; "ST_DISJOINT"
+                   "ST_TOUCHES"; "ST_EQUALS"; "ST_ENVELOPE"; "ST_CONVEXHULL"; "MBRCONTAINS"; "MBRWITHIN"; "MBRINTERSECTS" |]
+                """SELECT ST_AsText(ST_GeomFromText('POINT(1 2)')), ST_AsText(ST_GeometryFromText('POINT(1 2)')),
+                          ST_AsText(ST_PointFromText('POINT(1 2)')), ST_AsText(ST_GeomFromText('POINT(1 2)')),
+                          ST_AsWKT(ST_GeomFromText('POINT(1 2)')), HEX(ST_AsBinary(ST_GeomFromText('POINT(1 2)'))),
+                          HEX(ST_AsWKB(ST_GeomFromText('POINT(1 2)'))), ST_GeometryType(ST_GeomFromText('POINT(1 2)')),
+                          ST_Dimension(ST_GeomFromText('POINT(1 2)')), ST_IsEmpty(ST_GeomFromText('POINT(1 2)')),
+                          ST_IsValid(ST_GeomFromText('POINT(1 2)')), ST_X(ST_GeomFromText('POINT(1 2)')),
+                          ST_Y(ST_GeomFromText('POINT(1 2)')),
+                          ST_Distance(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(3 4)')),
+                          ST_Contains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POINT(2 2)')),
+                          ST_Within(ST_GeomFromText('POINT(2 2)'), ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))')),
+                          ST_Intersects(ST_GeomFromText('POINT(1 1)'), ST_GeomFromText('POINT(1 1)')),
+                          ST_Disjoint(ST_GeomFromText('POINT(1 1)'), ST_GeomFromText('POINT(2 2)')),
+                          ST_Touches(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('LINESTRING(0 0,1 0)')),
+                          ST_Equals(ST_GeomFromText('POINT(1 1)'), ST_GeomFromText('POINT(1 1)')),
+                          ST_AsText(ST_Envelope(ST_GeomFromText('LINESTRING(0 0,2 2)'))),
+                          ST_AsText(ST_ConvexHull(ST_GeomFromText('MULTIPOINT((0 0),(2 0),(0 2))'))),
+                          MBRContains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POINT(2 2)')),
+                          MBRWithin(ST_GeomFromText('POINT(2 2)'), ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))')),
+                          MBRIntersects(ST_GeomFromText('POINT(1 1)'), ST_GeomFromText('POINT(1 1)'))"""
+
+        let aggregateSteps, aggregateCoverage =
+            functionProbe
+                "aggregate-functions"
+                [| "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "STD"; "STDDEV"; "STDDEV_POP"; "STDDEV_SAMP"; "VARIANCE"
+                   "VAR_POP"; "VAR_SAMP"; "BIT_AND"; "BIT_OR"; "BIT_XOR" |]
+                """SELECT COUNT(*), SUM(n), AVG(n), MIN(n), MAX(n), STD(n), STDDEV(n), STDDEV_POP(n), STDDEV_SAMP(n),
+                          VARIANCE(n), VAR_POP(n), VAR_SAMP(n), BIT_AND(n), BIT_OR(n), BIT_XOR(n)
+                   FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3) AS valueset"""
+
+        let errorSpecs =
+            [| "abs-arity", "ABS", 1582, "42000", "SELECT ABS()"
+               "pow-arity", "POW", 1582, "42000", "SELECT POW(2)"
+               "char-length-arity", "CHAR_LENGTH", 1582, "42000", "SELECT CHAR_LENGTH()"
+               "json-extract-arity", "JSON_EXTRACT", 1582, "42000", "SELECT JSON_EXTRACT('{}')"
+               "regexp-like-arity", "REGEXP_LIKE", 1582, "42000", "SELECT REGEXP_LIKE('a')"
+               "date-format-arity", "DATE_FORMAT", 1582, "42000", "SELECT DATE_FORMAT('2024-01-01')"
+               "sec-to-time-arity", "SEC_TO_TIME", 1582, "42000", "SELECT SEC_TO_TIME()"
+               "spatial-distance-arity", "ST_DISTANCE", 1582, "42000", "SELECT ST_DISTANCE(ST_GeomFromText('POINT(0 0)'))"
+               "aggregate-sum-arity", "SUM", 1064, "42000", "SELECT SUM(1, 2)" |]
+
+        let errorSteps, errorCoverage =
+            errorSpecs
+            |> Array.map (fun (name, functionName, code, sqlState, sql) -> functionError name functionName code sqlState sql)
+            |> Array.unzip
+
+        { Name = "function-family-contracts"
+          Setup = [| "SET SESSION time_zone = '+00:00'" |]
+          Steps =
+            Array.concat
+                [ numericSteps
+                  stringSteps
+                  temporalSteps
+                  jsonSteps
+                  spatialSteps
+                  aggregateSteps
+                  errorSteps ]
+          Cleanup = [||]
+          Coverage =
+            Array.concat
+                [ numericCoverage
+                  stringCoverage
+                  temporalCoverage
+                  jsonCoverage
+                  spatialCoverage
+                  aggregateCoverage
+                  errorCoverage ] }
 
     let private preparedInvalidation =
         { Name = "prepared-ddl-invalidation"
@@ -409,6 +581,7 @@ module ContractCatalog =
            prepared
            preparedDml
            columnTypes
+           functionFamilies
            preparedInvalidation
            implicitCommit
            concurrentSessions
@@ -645,8 +818,40 @@ module CompatibilityRunner =
 
     let private expectationMatches expectation (outcome: ContractTargetOutcome) =
         match expectation with
-        | OracleSuccess -> outcome.Status = "success"
+        | OracleSuccess
+        | OracleValueSuccessIgnoringLabels -> outcome.Status = "success"
         | OracleError(code, sqlState) -> outcome.Status = "server_error" && outcome.ErrorCode = code && outcome.SqlState = sqlState
+
+    let private ignoresLabels = function
+        | OracleValueSuccessIgnoringLabels -> true
+        | _ -> false
+
+    let private normalizeValueType = function
+        | "TINYINT"
+        | "SMALLINT"
+        | "MEDIUMINT"
+        | "INT"
+        | "BIGINT"
+        | "DECIMAL"
+        | "FLOAT"
+        | "DOUBLE" -> "NUMBER"
+        | "CHAR"
+        | "VARCHAR"
+        | "TEXT" -> "TEXT"
+        | columnType when columnType.StartsWith("CHAR(", StringComparison.Ordinal) -> "TEXT"
+        | columnType -> columnType
+
+    let private normalizeNumericRow (row: string) =
+        JsonSerializer.Deserialize<string array>(row)
+        |> Array.map (fun value ->
+            if value.StartsWith("integer:", StringComparison.Ordinal) then
+                "number:" + value.Substring(8)
+            elif value.StartsWith("decimal:", StringComparison.Ordinal) then
+                "number:" + value.Substring(8)
+            elif value.StartsWith("float:", StringComparison.Ordinal) then
+                "number:" + value.Substring(6)
+            else
+                value)
 
     let private compare expectation (mysql: ContractTargetOutcome) (fsdb: ContractTargetOutcome) =
         if mysql.Status = "sent" && fsdb.Status = "sent" then
@@ -664,8 +869,20 @@ module CompatibilityRunner =
                 "error_contract_mismatch", sprintf "mysql=%d/%s fsdb=%d/%s" mysql.ErrorCode mysql.SqlState fsdb.ErrorCode fsdb.SqlState
         elif mysql.Status <> "success" then
             "infrastructure", if mysql.Status <> "success" then mysql.Message else fsdb.Message
-        elif mysql.Columns <> fsdb.Columns then
+        elif not (ignoresLabels expectation) && mysql.Columns <> fsdb.Columns then
             "result_schema_mismatch", sprintf "mysql=%A fsdb=%A" mysql.Columns fsdb.Columns
+        elif expectation = OracleValueSuccessIgnoringLabels then
+            let mysqlTypes = mysql.ColumnTypes |> Array.map normalizeValueType
+            let fsdbTypes = fsdb.ColumnTypes |> Array.map normalizeValueType
+            let mysqlRows = mysql.Rows |> Array.map normalizeNumericRow
+            let fsdbRows = fsdb.Rows |> Array.map normalizeNumericRow
+
+            if mysqlTypes <> fsdbTypes then
+                "result_type_mismatch", sprintf "mysql=%A fsdb=%A" mysqlTypes fsdbTypes
+            elif mysqlRows <> fsdbRows then
+                "result_mismatch", sprintf "mysql=%A fsdb=%A" mysql.Rows fsdb.Rows
+            else
+                "pass", "labels and compatible value type families ignored; values and remaining types matched"
         elif mysql.ColumnTypes.Length > 0 then
             let mysqlProbe =
                 { ProbeOutcome.notRun "mysql" with
@@ -685,7 +902,11 @@ module CompatibilityRunner =
 
             match Runner.compareProbeTypes mysqlProbe fsdbProbe with
             | Some detail -> "result_type_mismatch", detail
-            | None when mysql.DataSha256 <> fsdb.DataSha256 -> "result_mismatch", sprintf "mysql=%A fsdb=%A" mysql.Rows fsdb.Rows
+            | None when
+                (ignoresLabels expectation && mysql.Rows <> fsdb.Rows)
+                || (not (ignoresLabels expectation) && mysql.DataSha256 <> fsdb.DataSha256)
+                ->
+                "result_mismatch", sprintf "mysql=%A fsdb=%A" mysql.Rows fsdb.Rows
             | None -> "pass", "columns, types, and ordered rows matched"
         elif mysql.AffectedRows <> fsdb.AffectedRows then
             "affected_rows_mismatch", sprintf "mysql=%d fsdb=%d" mysql.AffectedRows fsdb.AffectedRows

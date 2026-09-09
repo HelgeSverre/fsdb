@@ -2148,24 +2148,26 @@ module Runner =
                             // set; the first failure alone defines the case
                             // classification and signature.
                             for name, sql in ScenarioProbes.all options.Scenario do
-                                    let parserStatus, parserDetail =
-                                        match Fsdb.Parser.parse sql with
-                                        | Ok _ -> "ok", ""
-                                        | Error error -> "error", error
+                                let parserStatus, parserDetail =
+                                    match Fsdb.Parser.parse sql with
+                                    | Ok _ -> "ok", ""
+                                    | Error error -> "error", error
 
-                                    let! mysqlOutcome = Database.query "mysql" mysql options.TimeoutSeconds sql
+                                for protocol, query in [ "text", Database.query; "prepared", Database.queryPrepared ] do
+                                    let probeName = if protocol = "text" then name else name + "-prepared"
+                                    let! mysqlOutcome = query "mysql" mysql options.TimeoutSeconds sql
 
                                     let! fsdbOutcome =
                                         if ProbeOutcome.succeeded mysqlOutcome && parserStatus = "ok" then
-                                            Database.query "fsdb" fsdb options.TimeoutSeconds sql
+                                            query "fsdb" fsdb options.TimeoutSeconds sql
                                         else
                                             Task.FromResult(ProbeOutcome.notRun "fsdb")
 
                                     let result = classifyProbe parserStatus mysqlOutcome fsdbOutcome
-                                    let detail = probeDetail name parserDetail mysqlOutcome fsdbOutcome result
+                                    let detail = probeDetail probeName parserDetail mysqlOutcome fsdbOutcome result
 
                                     probeRecords.Add
-                                        { Name = name
+                                        { Name = probeName
                                           Sql = sql
                                           SqlSha256 = Hashing.text sql
                                           ParserStatus = parserStatus

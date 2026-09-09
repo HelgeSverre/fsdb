@@ -119,6 +119,14 @@ module Coverage =
         let sql = corpusSql () |> Seq.toArray
         sql, sql |> Seq.collect functionCalls |> Set.ofSeq
 
+    let private scenarioFunctionCalls =
+        seq {
+            for scenario in ScenarioName.all do
+                yield! ScenarioProbes.all scenario |> Seq.map snd
+        }
+        |> Seq.collect functionCalls
+        |> Set.ofSeq
+
     let private protocolCapabilities () =
         let source = Path.Combine(Paths.repoRoot (), "src", "Fsdb", "Wire", "Protocol.fs")
         let supported = Fsdb.Protocol.serverCapabilities true ||| Fsdb.Protocol.ClientLocalFiles
@@ -245,8 +253,15 @@ module Coverage =
         |> Set.toArray
         |> Array.map (fun name ->
             let invoked = allFunctionCalls.Contains name
-            let textEvidence = if invoked then [| evidence "parser" "torture-corpus"; evidence "text-differential" "torture-corpus" |] else [||]
-            item "function" name [| "parser"; "text-differential"; "error-contract"; "prepared-protocol" |] textEvidence)
+            let evidenceItems =
+                [| if invoked then
+                       yield evidence "parser" "torture-corpus"
+                       yield evidence "text-differential" "torture-corpus"
+
+                   if scenarioFunctionCalls.Contains name then
+                       yield evidence "prepared-protocol" "scenario-probe" |]
+
+            item "function" name [| "parser"; "text-differential"; "error-contract"; "prepared-protocol" |] evidenceItems)
 
     let private protocolCapabilitiesItems () =
         protocolCapabilities ()
