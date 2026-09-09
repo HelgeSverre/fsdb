@@ -9513,6 +9513,14 @@ and private pointLookupEqualities
 and private indexedColumnFor (tref: TableRef) =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
+    let physicalExpression expression =
+        FunctionalIndex.tryPhysicalExpression expression
+        |> Option.filter (fun physical ->
+            physical.Qualifier
+            |> Option.forall (fun qualifier ->
+                System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase)))
+        |> Option.map (fun physical -> physical.Column, Some physical.Transform)
+
     function
     | Col name -> Some(name, None)
     | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
@@ -9523,7 +9531,7 @@ and private indexedColumnFor (tref: TableRef) =
     | FuncCall(name, [ QualifiedCol(qualifier, column) ])
         when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
         FunctionalIndex.tryBuiltin name |> Option.map (fun transform -> column, Some transform)
-    | _ -> None
+    | expression -> physicalExpression expression
 
 and private storedIndexedColumnFor (registry: Registry) (tref: TableRef) expression =
     indexedColumnFor tref expression
@@ -10798,6 +10806,12 @@ and private resolveOrderAliasValue name outputColumns =
 
 and private transformUsesStoredSemantics (registry: Registry) expression = function
     | None -> true
+    | Some(Expression storedExpression) ->
+        match FunctionalIndex.tryPhysicalExpression expression, FunctionalIndex.tryPhysicalExpression storedExpression with
+        | Some requested, Some stored when requested.Transform = stored.Transform ->
+            requested.Calls
+            |> List.forall (fun (name, _) -> Functions.isUnmodifiedBuiltinScalar name registry)
+        | _ -> false
     | Some transform ->
         match expression with
         | FuncCall(name, _) when FunctionalIndex.tryBuiltin name = Some transform ->
@@ -12039,19 +12053,28 @@ and private exactStoredKeyPins (store: Store) (registry: Registry) (table: Table
         && equalityPinsOneStoredKey table equality.Column equality.Value)
 
 and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
-    let tryCandidate (index: IndexDef) =
-        if
-            index.Visible
-            && index.Kind = BTree
-            && (index.KeyColumns |> List.forall (fun column -> column.Name <> "" && column.PrefixLength.IsNone))
-        then
+    let tryTerm (column: IndexColumn) =
+        match column.Transform with
+        | Some(Expression expression) ->
+            FunctionalIndex.tryPhysicalExpression expression
+            |> Option.filter (fun physical -> physical.Qualifier.IsNone)
+            |> Option.map (fun physical ->
+                { Column = physical.Column
+                  Transform = Some physical.Transform
+                  Direction = column.Direction })
+        | _ when column.Name <> "" ->
             Some
-                { Terms =
-                    index.KeyColumns
-                    |> List.map (fun column ->
-                        { Column = column.Name
-                          Transform = column.Transform
-                          Direction = column.Direction }) }
+                { Column = column.Name
+                  Transform = column.Transform
+                  Direction = column.Direction }
+        | _ -> None
+
+    let tryCandidate (index: IndexDef) =
+        if index.Visible && index.Kind = BTree && (index.KeyColumns |> List.forall (_.PrefixLength >> Option.isNone)) then
+            index.KeyColumns
+            |> List.map tryTerm
+            |> tryAllSome
+            |> Option.map (fun terms -> { Terms = terms })
         else
             None
 

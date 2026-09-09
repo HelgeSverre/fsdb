@@ -63,7 +63,43 @@ let tryBuiltinName transform =
     |> List.tryPick (fun definition ->
         if definition.Transform = transform then Some definition.CanonicalName else None)
 
-let isBuiltin transform = tryBuiltinName transform |> Option.isSome
+type PhysicalExpression =
+    { Qualifier: string option
+      Column: string
+      Calls: (string * IndexTransform) list
+      Transform: IndexTransform }
+
+let private canonicalExpression (column: string) (calls: (string * IndexTransform) list) =
+    calls
+    |> List.fold
+        (fun expression (_, transform) ->
+            let name = transform |> tryBuiltinName |> Option.defaultWith (fun () -> invalidArg (nameof transform) "Not a built-in index transform")
+            FuncCall(name, [ expression ]))
+        (Col(column.ToLowerInvariant()))
+
+let tryPhysicalExpression expression =
+    let rec collect calls = function
+        | Col column -> Some(None, column, calls)
+        | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, calls)
+        | FuncCall(name, [ argument ]) ->
+            tryBuiltin name
+            |> Option.bind (fun transform -> collect ((name, transform) :: calls) argument)
+        | _ -> None
+
+    collect [] expression
+    |> Option.bind (fun (qualifier, column, calls) ->
+        match calls with
+        | [] -> None
+        | calls ->
+            Some
+                { Qualifier = qualifier
+                  Column = column
+                  Calls = calls
+                  Transform = Expression(canonicalExpression column calls) })
+
+let isBuiltin = function
+    | Expression expression -> tryPhysicalExpression expression |> Option.isSome
+    | transform -> tryBuiltinName transform |> Option.isSome
 
 let private isTextOrBinary =
     function
@@ -96,7 +132,7 @@ let private isNumeric =
     | TYear -> true
     | _ -> false
 
-let supportsColumnType transform columnType =
+let private supportsSingleTransform transform columnType =
     match transform with
     | Lowercase
     | Uppercase
@@ -119,11 +155,44 @@ let supportsColumnType transform columnType =
         isNumeric columnType || isTextOrBinary columnType
     | Expression _ -> false
 
-let fixedKeyLength =
-    function
+let private isTextTransform = function
+    | Lowercase
+    | Uppercase
+    | Trimmed
+    | Reversed -> true
+    | _ -> false
+
+let private isLengthTransform = function
+    | CharacterLength
+    | ByteLength
+    | BitLength -> true
+    | _ -> false
+
+let supportsColumnType transform columnType =
+    match transform with
+    | Expression expression ->
+        tryPhysicalExpression expression
+        |> Option.exists (fun physical ->
+            let transforms = physical.Calls |> List.map snd
+
+            match List.rev transforms with
+            | length :: inner when isLengthTransform length && List.forall isTextTransform inner ->
+                match List.rev inner with
+                | [] -> supportsSingleTransform length columnType
+                | first :: _ -> supportsSingleTransform first columnType
+            | _ when List.forall isTextTransform transforms ->
+                transforms |> List.head |> fun first -> supportsSingleTransform first columnType
+            | _ when List.forall ((=) AbsoluteValue) transforms -> supportsSingleTransform AbsoluteValue columnType
+            | _ -> false)
+    | transform -> supportsSingleTransform transform columnType
+
+let rec fixedKeyLength = function
     | CharacterLength
     | ByteLength
     | BitLength -> Some 8
+    | Expression expression ->
+        tryPhysicalExpression expression
+        |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> fixedKeyLength))
     | _ -> None
 
 let private trimBinarySpaces (bytes: byte[]) =
@@ -207,7 +276,7 @@ let private tryExactUInt64 =
     | VBytes bytes -> bytes |> Text.Encoding.Latin1.GetString |> ofText
     | _ -> None
 
-let tryNormalizeProbe columnType transform normalizeStored value =
+let rec tryNormalizeProbe columnType transform normalizeStored value =
     match transform, value with
     | Some AbsoluteValue, VNull -> Some VNull
     | Some AbsoluteValue, _ when isTextOrBinary columnType ->
@@ -228,6 +297,17 @@ let tryNormalizeProbe columnType transform normalizeStored value =
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _ -> tryExactInt64 value |> Option.map VInt
+    | Some(Expression expression), _ ->
+        tryPhysicalExpression expression
+        |> Option.bind (fun physical ->
+            let transforms = physical.Calls |> List.map snd
+
+            match List.tryLast transforms with
+            | Some transform when isLengthTransform transform -> tryExactInt64 value |> Option.map VInt
+            | Some AbsoluteValue when List.forall ((=) AbsoluteValue) transforms ->
+                tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
+            | Some _ -> normalizeStored value
+            | None -> None)
     | _ -> normalizeStored value
 
 let private mapTextOrBytes mapText mapBytes value =
@@ -235,7 +315,7 @@ let private mapTextOrBytes mapText mapBytes value =
     | Some bytes -> VBytes(mapBytes bytes)
     | None -> value |> toText |> Option.defaultValue "" |> mapText |> VString
 
-let projectValueWithStatus encodeText transform value =
+let rec projectValueWithStatus encodeText transform value =
     match transform, value with
     | Some _, VNull -> VNull, None
     | Some Lowercase, value -> mapTextOrBytes _.ToLowerInvariant() id value, None
@@ -256,6 +336,16 @@ let projectValueWithStatus encodeText transform value =
         let number, truncated = coerceLeadingDouble text
         VDouble(abs number), (if truncated then Some text else None)
     | Some AbsoluteValue, value -> VDouble(abs (toDouble value)), None
+    | Some(Expression expression), value ->
+        match tryPhysicalExpression expression with
+        | None -> value, None
+        | Some physical ->
+            physical.Calls
+            |> List.fold
+                (fun (current, firstTruncation) (_, step) ->
+                    let projected, truncated = projectValueWithStatus encodeText (Some step) current
+                    projected, (firstTruncation |> Option.orElse truncated))
+                (value, None)
     | _ -> value, None
 
 let projectValueWith encodeText transform value =

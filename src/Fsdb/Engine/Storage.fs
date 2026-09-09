@@ -2450,11 +2450,29 @@ let private trySingleColumnKeyGroup group =
     | _ -> None
 
 let private tryIndexKeyGroup (table: Table) (index: IndexDef) =
+    let resolveKeyColumn (column: IndexColumn) =
+        match column.Transform with
+        | Some(Expression expression) ->
+            FunctionalIndex.tryPhysicalExpression expression
+            |> Option.filter (fun physical -> physical.Qualifier.IsNone)
+            |> Option.bind (fun physical ->
+                resolveColumn table.Columns physical.Column
+                |> Result.toOption
+                |> Option.filter (fun resolved ->
+                    FunctionalIndex.supportsColumnType physical.Transform table.Columns.[resolved].Type)
+                |> Option.map (fun resolved ->
+                    resolved,
+                    { column with
+                        Name = physical.Column
+                        Transform = Some physical.Transform }))
+        | _ ->
+            resolveColumn table.Columns column.Name
+            |> Result.toOption
+            |> Option.map (fun resolved -> resolved, column)
+
     index.KeyColumns
-    |> traverse (fun column ->
-        resolveColumn table.Columns column.Name
-        |> Result.map (fun resolved -> resolved, column))
-    |> Result.toOption
+    |> List.map resolveKeyColumn
+    |> tryAllSome
     |> Option.bind (fun columns ->
         if columns.IsEmpty then
             None
@@ -5770,21 +5788,29 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
         | _ -> None
 
     let partLength (index: IndexDef) (column: IndexColumn) =
-        match column.Transform with
-        | Some(Expression _) when index.Unique -> Error(ExpressionError(1235, "This version of fsdb doesn't yet support this unique expression index"))
-        | Some(Expression _) -> Ok 0
-        | _ ->
-            match columns |> List.tryFind (fun definition -> String.Equals(definition.Name, column.Name, StringComparison.OrdinalIgnoreCase)) with
-            | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column.Name))
+        let physicalColumn =
+            match column.Transform with
+            | Some(Expression expression) ->
+                FunctionalIndex.tryPhysicalExpression expression
+                |> Option.filter (fun physical -> physical.Qualifier.IsNone)
+                |> Option.map (fun physical -> physical.Column, Some physical.Transform)
+            | transform -> Some(column.Name, transform)
+
+        match physicalColumn with
+        | None when index.Unique -> Error(ExpressionError(1235, "This version of fsdb doesn't yet support this unique expression index"))
+        | None -> Ok 0
+        | Some(columnName, transform) ->
+            match columns |> List.tryFind (fun definition -> String.Equals(definition.Name, columnName, StringComparison.OrdinalIgnoreCase)) with
+            | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" columnName))
             | Some definition
-                when column.Transform
+                when transform
                      |> Option.exists (fun transform -> FunctionalIndex.supportsColumnType transform definition.Type) ->
-                column.Transform
+                transform
                 |> Option.bind FunctionalIndex.fixedKeyLength
                 |> Option.orElseWith (fun () -> fullLength definition)
                 |> Option.defaultValue 0
                 |> Ok
-            | Some _ when column.Transform |> Option.exists FunctionalIndex.isBuiltin ->
+            | Some _ when transform |> Option.exists FunctionalIndex.isBuiltin ->
                 Error(ExpressionError(3757, "Cannot create a functional index on this expression."))
             | Some definition ->
                 match column.PrefixLength, fullLength definition with

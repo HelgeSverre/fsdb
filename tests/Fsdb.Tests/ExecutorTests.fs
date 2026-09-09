@@ -7664,6 +7664,95 @@ let tests =
 
                     Expect.equal (rows "indexed" "ASC") (rows "scanned" "ASC") "updates and deletes maintain transformed order"
 
+                testCase "composed expression indexes narrow and order matching expressions"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, keep_row INT, KEY ix_normalized ((UPPER(TRIM(name)))))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, keep_row INT)"
+                    |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault
+                            store
+                            $"INSERT INTO {table} VALUES (1, ' beta ', 1), (2, 'Alpha', 1), (3, NULL, 1), (4, ' gamma', 0), (5, 'delta ', 1)"
+                        |> ignore
+
+                    let select table suffix =
+                        runDefault store $"SELECT id, UPPER(TRIM(name)) FROM {table} {suffix}"
+
+                    for direction in [ "ASC"; "DESC" ] do
+                        Expect.equal
+                            (select "indexed" $"WHERE keep_row = 1 ORDER BY UPPER(TRIM(name)) {direction}")
+                            (select "scanned" $"WHERE keep_row = 1 ORDER BY UPPER(TRIM(name)) {direction}")
+                            $"the {direction} composed order matches a filesort"
+
+                    Expect.equal
+                        (select "indexed" "WHERE UPPER(TRIM(name)) = 'BETA'")
+                        (select "scanned" "WHERE UPPER(TRIM(name)) = 'BETA'")
+                        "the composed equality lookup matches a scan"
+
+                    let equalityPlan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed WHERE UPPER(TRIM(name)) = 'BETA'"
+                        |> explainRow
+
+                    Expect.equal equalityPlan.AccessType (Some "ref") "the composed equality uses its bucket"
+                    Expect.equal equalityPlan.Key (Some "ix_normalized") "the composed equality reports its key"
+
+                    let orderPlan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed WHERE keep_row = 1 ORDER BY UPPER(TRIM(name))"
+                        |> explainRow
+
+                    Expect.equal orderPlan.AccessType (Some "index") "the composed expression streams its order"
+                    Expect.equal orderPlan.Key (Some "ix_normalized") "the composed ordering reports its key"
+                    Expect.isFalse (orderPlan.Extra |> Option.exists (_.Contains("filesort"))) "the composed ordering avoids a filesort"
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "SELECT UPPER(TRIM(name)), COUNT(*) FROM indexed GROUP BY UPPER(TRIM(name)) ORDER BY UPPER(TRIM(name))")
+                        (runDefault
+                            store
+                            "SELECT UPPER(TRIM(name)), COUNT(*) FROM scanned GROUP BY UPPER(TRIM(name)) ORDER BY UPPER(TRIM(name))")
+                        "composed index grouping matches a scan"
+
+                    let groupPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT UPPER(TRIM(name)), COUNT(*) FROM indexed GROUP BY UPPER(TRIM(name))"
+                        |> explainRow
+
+                    Expect.equal groupPlan.AccessType (Some "index") "the composed expression streams its groups"
+                    Expect.equal groupPlan.Key (Some "ix_normalized") "the composed grouping reports its key"
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store $"UPDATE {table} SET name = ' aardvark ' WHERE id = 5" |> ignore
+                        runDefault store $"DELETE FROM {table} WHERE id = 2" |> ignore
+
+                    Expect.equal
+                        (select "indexed" "ORDER BY UPPER(TRIM(name))")
+                        (select "scanned" "ORDER BY UPPER(TRIM(name))")
+                        "mutations maintain the composed key"
+
+                    for overriddenName in [ "UPPER"; "TRIM" ] do
+                        let overridden = builtins |> registerScalar overriddenName (fun _ -> VString "same")
+
+                        Expect.equal
+                            (run store overridden "SELECT id FROM indexed ORDER BY UPPER(TRIM(name))")
+                            (run store overridden "SELECT id FROM scanned ORDER BY UPPER(TRIM(name))")
+                            $"an {overriddenName} override bypasses the stored composition"
+
+                        let overriddenPlan =
+                            run store overridden "EXPLAIN SELECT id FROM indexed ORDER BY UPPER(TRIM(name))"
+                            |> explainRow
+
+                        Expect.equal overriddenPlan.AccessType (Some "ALL") $"an {overriddenName} override reports a scan"
+                        Expect.equal overriddenPlan.Key None $"an {overriddenName} override does not claim the composed key"
+
                 testCase "a fixed stored prefix exposes a functional ordering suffix"
                 <| fun _ ->
                     let store = newStore ()
