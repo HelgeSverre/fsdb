@@ -170,6 +170,13 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, name, age FROM users WHERE id IN ({ids})"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "LiteralIn", "Planner")>]
+    member this.FilterByPrimaryKeyConstantList() =
+        let first = rng.Next(1, max 2 (Schema.userCount - 7))
+        let ids = [ first .. first + 7 ] |> List.map (sprintf "%d + 0") |> String.concat ","
+        this.Query $"SELECT id, name, age FROM users WHERE id IN ({ids})"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.FilterScanOrderLimit() =
         this.Query
@@ -185,6 +192,12 @@ type ServerBenchmarks() =
     member this.FilterBySecondaryRange() =
         let lower = randomUserId () - 1
         this.Query $"SELECT id, name FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 1}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryRange", "Planner")>]
+    member this.FilterByConstantSecondaryRange() =
+        let lower = randomUserId () - 1
+        this.Query $"SELECT id, name FROM users WHERE sort_key >= {lower} + 0 AND sort_key < {lower + 1} + 0"
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
