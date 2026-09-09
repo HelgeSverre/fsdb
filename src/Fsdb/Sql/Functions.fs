@@ -306,6 +306,20 @@ let private req (v: Value) : string = v |> toText |> Option.defaultValue ""
 let private nativeParameterCountError (name: string) : 'a =
     raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
 
+let private exactArity name expected (invoke: Scalar) : Scalar =
+    fun arguments ->
+        if List.length arguments = expected then
+            invoke arguments
+        else
+            nativeParameterCountError name
+
+let private minimumArity name minimum (invoke: Scalar) : Scalar =
+    fun arguments ->
+        if List.length arguments >= minimum then
+            invoke arguments
+        else
+            nativeParameterCountError name
+
 /// A value as the 64-bit pattern MySQL's bit-oriented functions (BIN, OCT,
 /// CONV, HEX) read it as: those treat their argument as `BIGINT UNSIGNED`,
 /// so `BIN(-1)` is 64 ones. `toDouble` can't be the route for the top half
@@ -5699,7 +5713,7 @@ let private mbrPredicateFn functionName predicate =
 
 let private registerJsonBuiltins registry =
     registry
-    |> registerScalarResult "JSON_EXTRACT" jsonResult jsonExtractFn
+    |> registerScalarResult "JSON_EXTRACT" jsonResult (minimumArity "JSON_EXTRACT" 2 jsonExtractFn)
     |> registerScalarResult "JSON_VALUE" (FixedCollation("utf8mb4_0900_bin", 4)) jsonValueFn
     |> registerScalarResult "JSON_UNQUOTE" jsonTextResult jsonUnquoteFn
     |> registerScalar "JSON_CONTAINS" jsonContainsFn
@@ -5794,20 +5808,29 @@ let private registerFunctionalString transform registry =
     FunctionalIndex.names transform
     |> List.fold
         (fun registry name ->
-            registerStringScalar name firstArgument (InheritArgument 0) (functionalIndexScalar transform) registry)
+            registerStringScalar
+                name
+                firstArgument
+                (InheritArgument 0)
+                (exactArity name 1 (functionalIndexScalar transform))
+                registry)
         registry
 
 let private registerFunctionalText transform registry =
     FunctionalIndex.names transform
-    |> List.fold (fun registry name -> registerTextScalar name firstArgument (functionalIndexScalar transform) registry) registry
+    |> List.fold
+        (fun registry name -> registerTextScalar name firstArgument (exactArity name 1 (functionalIndexScalar transform)) registry)
+        registry
 
 let private registerFunctionalByteText transform registry =
     FunctionalIndex.names transform
-    |> List.fold (fun registry name -> registerByteTextScalar name firstArgument (functionalIndexScalar transform) registry) registry
+    |> List.fold
+        (fun registry name -> registerByteTextScalar name firstArgument (exactArity name 1 (functionalIndexScalar transform)) registry)
+        registry
 
 let private registerFunctionalScalar transform registry =
     FunctionalIndex.names transform
-    |> List.fold (fun registry name -> registerScalar name (functionalIndexScalar transform) registry) registry
+    |> List.fold (fun registry name -> registerScalar name (exactArity name 1 (functionalIndexScalar transform)) registry) registry
 
 let private registerTemporalBuiltins registry =
     registry
@@ -5853,7 +5876,7 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "ADDTIME" (addTimeFn 1L)
     |> registerScalar "SUBTIME" (addTimeFn -1L)
     |> registerScalar "TIMEDIFF" timeDiffFn
-    |> registerScalar "SEC_TO_TIME" secToTimeFn
+    |> registerScalar "SEC_TO_TIME" (exactArity "SEC_TO_TIME" 1 secToTimeFn)
     |> registerScalar "MAKETIME" makeTimeFn
     |> registerScalar "TIME_FORMAT" timeFormatFn
     |> registerScalar "GET_FORMAT" getFormatFn
@@ -5934,8 +5957,8 @@ let private registerNumericBuiltins registry =
     |> registerScalar "CEIL" ceilFn
     |> registerScalar "CEILING" ceilFn
     |> registerScalar "FLOOR" floorFn
-    |> registerScalar "POW" powFn
-    |> registerScalar "POWER" powFn
+    |> registerScalar "POW" (exactArity "POW" 2 powFn)
+    |> registerScalar "POWER" (exactArity "POWER" 2 powFn)
     |> registerScalar "SQRT" sqrtFn
     |> registerScalar "LOG" logFn
     |> registerScalar "LN" (positiveLog "ln" Math.Log)

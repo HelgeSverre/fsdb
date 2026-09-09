@@ -1237,6 +1237,7 @@ let private depthGuard (p: Parser<'a, unit>) : Parser<'a, unit> =
 // into the full expression grammar, which is itself built on top of them —
 // tie the knot with a forward reference.
 let private expr, exprRef = createParserForwardedToRef<Expr, unit> ()
+let private positionOperand, positionOperandRef = createParserForwardedToRef<Expr, unit> ()
 
 /// `SELECT`'s own clauses recurse into `expr` (projections, `WHERE`, ...),
 /// and `expr`'s `Exists` case recurses back into a `SELECT` — tie that knot
@@ -1332,6 +1333,10 @@ let private rowConstructorAtom: Parser<Expr, unit> =
         | _ :: _ :: _ as values -> preturn (Row values)
         | _ -> fail "ROW requires at least two expressions"
 
+let private positionAtom: Parser<Expr, unit> =
+    attempt (functionKeyword "POSITION" >>. positionOperand .>> keyword "IN" .>>. positionOperand .>> sym ")")
+    |>> fun (needle, haystack) -> FuncCall("POSITION", [ needle; haystack ])
+
 let private genericFuncCall: Parser<Expr, unit> =
     let reservedNames = set [ "any"; "select"; "some"; "regexp" ]
     let rawIdentifier = backtickIdent <|> many1Satisfy2 isIdentStart isIdentChar
@@ -1385,7 +1390,7 @@ let private trimAtom: Parser<Expr, unit> =
     )
 
 let private funcCallAtom: Parser<Expr, unit> =
-    choice [ attempt convertUsingAtom; attempt weightStringAtom; trimAtom; rowConstructorAtom; genericFuncCall ]
+    choice [ attempt convertUsingAtom; attempt weightStringAtom; trimAtom; rowConstructorAtom; positionAtom; genericFuncCall ]
 
 /// `GROUP_CONCAT([DISTINCT] expr [ORDER BY key [ASC|DESC], ...] [SEPARATOR
 /// 'str'])` — parsed separately from `funcCallAtom` rather than folding
@@ -2142,6 +2147,8 @@ opp.AddOperator(
         (fun a b -> FuncCall("CONCAT", [ a; b ]))
     )
 )
+
+do positionOperandRef.Value <- arithExpr
 
 /// `IN (SELECT ...)` vs. `IN (expr, expr, ...)` — both start with `(`, so
 /// the subquery form is tried first (`attempt`ed since `selectWithCtes`

@@ -4049,9 +4049,10 @@ let tests =
 
           testCase "POSITION accepts the standard IN argument separator"
           <| fun _ ->
-              match Fsdb.Parser.parse "SELECT POSITION(('ood') IN ('Moodle'))" with
-              | Ok(Select { Projections = [ FuncCall("POSITION", [ Lit(VString "ood"); Lit(VString "Moodle") ]), None ] }) -> ()
-              | other -> failtestf "unexpected POSITION parse: %A" other
+              for sql in [ "SELECT POSITION('ood' IN 'Moodle')"; "SELECT POSITION(('ood') IN ('Moodle'))" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Ok(Select { Projections = [ FuncCall("POSITION", [ Lit(VString "ood"); Lit(VString "Moodle") ]), None ] }) -> ()
+                  | other -> failtestf "unexpected POSITION parse for %s: %A" sql other
 
           testCase "binary-introduced hexadecimal literals allow adjacent introducers"
           <| fun _ ->

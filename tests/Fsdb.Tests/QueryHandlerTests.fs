@@ -1991,6 +1991,17 @@ let tests =
               | Err(1582, "Incorrect parameter count in the call to native function 'DATE_FORMAT'") -> ()
               | other -> failtestf "expected DATE_FORMAT to validate its arity, got %A" other
 
+              for sql, functionName in
+                  [ "SELECT ABS()", "ABS"
+                    "SELECT POW(2)", "POW"
+                    "SELECT CHAR_LENGTH()", "CHAR_LENGTH"
+                    "SELECT JSON_EXTRACT('{}')", "JSON_EXTRACT"
+                    "SELECT SEC_TO_TIME()", "SEC_TO_TIME" ] do
+                  match handle first sql |> snd with
+                  | Err(1582, message) ->
+                      Expect.stringContains message functionName "the error identifies the function"
+                  | other -> failtestf "expected %s to validate its arity, got %A" functionName other
+
           testCase "time_zone drives session-local temporal functions"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

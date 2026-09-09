@@ -178,6 +178,7 @@ let tests =
           <| fun _ ->
               Expect.equal (sqlStateForCode 1071) "42000" "key length"
               Expect.equal (sqlStateForCode 1074) "42000" "column length"
+              Expect.equal (sqlStateForCode 1582) "42000" "native function parameter count"
 
           testCase "cardinality errors carry their standard SQLSTATE classes"
           <| fun _ ->
