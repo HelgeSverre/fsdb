@@ -185,6 +185,11 @@ let tests =
               Expect.equal (sqlStateForCode 1241) "21000" "row operand arity"
               Expect.equal (sqlStateForCode 1242) "21000" "scalar subquery cardinality"
 
+          testCase "empty command errors carry their MySQL SQLSTATE classes"
+          <| fun _ ->
+              Expect.equal (sqlStateForCode 1046) "3D000" "no database selected"
+              Expect.equal (sqlStateForCode 1065) "42000" "empty query"
+
           testCase "ERR payload for an unmapped code falls back to HY000"
           <| fun _ ->
               let payload = errPayload ClientProtocol41 9999 "whatever"
@@ -543,9 +548,12 @@ let tests =
 
               Expect.equal (stringValueOfBytes value) (VBytes value) "raw value remains binary"
 
-              Expect.throwsT<Text.DecoderFallbackException>
-                  (fun () -> decodeSqlBytes (Array.append (Text.Encoding.ASCII.GetBytes "SELECT ") [| 0xffuy |]) |> ignore)
-                  "invalid syntax bytes"
+              Expect.equal
+                  (decodeSqlBytes (Array.append (Text.Encoding.ASCII.GetBytes "SELECT ") [| 0xffuy |]))
+                  "SELECT �"
+                  "invalid syntax bytes remain parser-visible"
+
+              Expect.equal (SqlState.forCode 1049) "42000" "unknown database state"
 
           testCase "binary protocol geometry parameters retain their SRID and WKB"
           <| fun _ ->

@@ -712,6 +712,35 @@ let tests =
                         "prepared SELECT contract is visible" ]
 
           testList
+              "Wire mutations"
+              [ testCase "corpus is deterministic, bounded, and unique"
+                <| fun _ ->
+                    let first = WireCorpus.cases 42UL 128
+                    let repeated = WireCorpus.cases 42UL 128
+                    let changed = WireCorpus.cases 43UL 128
+                    Expect.equal first repeated "same seed"
+                    Expect.notEqual first changed "different seed"
+                    Expect.equal
+                        (first |> Array.distinctBy (snd >> Convert.ToHexString) |> Array.length)
+                        first.Length
+                        "payloads are unique"
+                    Expect.equal (first.Length - WireCorpus.baselines.Length) 128 "requested mutation count"
+
+                testCase "wire evidence contributes to generated coverage"
+                <| fun _ ->
+                    let manifest: CoverageManifest = Fsdb.Torture.Coverage.create ()
+
+                    let protocol41 =
+                        manifest.Capabilities
+                        |> Array.find (fun capability -> capability.Id = "protocol-capability:client_protocol41")
+
+                    for axis in [ "wire-success"; "malformed-input" ] do
+                        Expect.isTrue
+                            (protocol41.Evidence
+                             |> Array.exists (fun item -> item.Axis = axis && item.Source = "wire-corpus"))
+                            axis ]
+
+          testList
               "Catalog invariants"
               [ testCase "accepts a valid primary key and auto-id"
                 <| fun _ ->

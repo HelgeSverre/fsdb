@@ -135,8 +135,15 @@ module Coverage =
     let private evidence axis source = { Axis = axis; Source = source }
 
     let private contractEvidence =
-        ContractCatalog.coverage
-        |> Seq.collect (fun (capability, axes) -> axes |> Seq.map (fun axis -> capability, evidence axis "compatibility-contract"))
+        seq {
+            for capability, axes in ContractCatalog.coverage do
+                for axis in axes do
+                    yield capability, evidence axis "compatibility-contract"
+
+            for capability, axes in WireCorpus.coverage do
+                for axis in axes do
+                    yield capability, evidence axis "wire-corpus"
+        }
         |> Seq.groupBy fst
         |> Seq.map (fun (capability, entries) -> capability, entries |> Seq.map snd |> Seq.toArray)
         |> Map.ofSeq

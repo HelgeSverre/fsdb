@@ -24,6 +24,7 @@ they are understood and minimized.
 - [Crash recovery](#crash-recovery)
 - [Syntax mutation](#syntax-mutation)
 - [Compatibility contracts](#compatibility-contracts)
+- [Wire mutation](#wire-mutation)
 - [Capability coverage](#capability-coverage)
 - [Scale and toolchain](#scale-and-toolchain)
 - [Scenarios](#scenarios)
@@ -51,6 +52,7 @@ The command selects one independent lane:
 | `suite` / `run` | Generated schema, data, queries, and final state | MySQL 8.4 |
 | `syntax` | Valid baselines plus bounded syntax and comment mutations | MySQL 8.4 |
 | `contracts` | Declarative behavior, error, prepared-protocol, and connection schedules | MySQL 8.4 |
+| `wire` | Authenticated malformed command-packet mutations | MySQL 8.4 |
 | `coverage` | Generated inventory of capabilities and unexercised test axes | Source and executable corpus |
 | `concurrency` | Contended prepared transactions and fault schedules | MySQL 8.4 plus deterministic invariants |
 | `multidb` | Isolation and scaling across independent databases | MySQL 8.4 plus a single-database fsdb baseline |
@@ -210,6 +212,21 @@ DDL commit behavior, SQLSTATE-sensitive semantic errors, independent writers,
 and a contended row-lock schedule. Add compact regressions here when a behavior
 spans protocol or session state; keep isolated parser or executor regressions
 in Expecto.
+
+## Wire mutation
+
+Exercise malformed command payloads over freshly authenticated raw TCP
+connections:
+
+```bash
+./scripts/run.sh wire --seed 101 --wire-cases 1000 --timeout-seconds 10
+```
+
+The bounded deterministic corpus truncates, extends, and replaces bytes in
+valid and malformed command shapes. Each payload gets a new connection so a
+disconnect cannot hide later evidence. The runner compares response kind,
+first response byte, and exact error code and SQLSTATE. A timeout is an
+infrastructure failure rather than a compatible result.
 
 ## Capability coverage
 

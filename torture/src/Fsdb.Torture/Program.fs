@@ -12,6 +12,7 @@ type private Command =
     | Syntax
     | Coverage
     | Contracts
+    | Wire
     | Replay
     | CheckTools
     | Help
@@ -36,6 +37,7 @@ type private Cli =
       ScalingFactor: float
       SyntaxCases: int
       SyntaxDepth: int
+      WireCases: int
       Artifacts: string
       MySql: string
       SqlSplitter: string
@@ -55,6 +57,7 @@ Usage:
   fsdb-torture syntax [options]
   fsdb-torture coverage [options]
   fsdb-torture contracts [options]
+  fsdb-torture wire [options]
   fsdb-torture replay --case <artifact-directory> [options]
   fsdb-torture check-tools [--sql-splitter <path>]
 
@@ -76,6 +79,7 @@ Options:
   --scaling-factor <n>       multidb: multi-db wall-clock must be <= this fraction of the serial-projected cost (default 0.65)
   --syntax-cases <n>          syntax: deterministic mutations; 0 runs baselines only (default 64)
   --syntax-depth <1..3>       syntax: maximum chained mutations per statement (default 1)
+  --wire-cases <n>            wire: deterministic malformed-packet mutations (default 64)
   --artifacts <directory>    Artifact root (default torture/artifacts/runs)
   --mysql <connection>       MySQL admin connection string
   --sql-splitter <path>      SQL Splitter executable
@@ -117,6 +121,7 @@ Options:
             | Some "syntax" -> Syntax, 1
             | Some "coverage" -> Coverage, 1
             | Some "contracts" -> Contracts, 1
+            | Some "wire" -> Wire, 1
             | Some "replay" -> Replay, 1
             | Some "check-tools" -> CheckTools, 1
             | Some "--help"
@@ -142,6 +147,7 @@ Options:
         let mutable scalingFactor = 0.65
         let mutable syntaxCases = 64
         let mutable syntaxDepth = 1
+        let mutable wireCases = 64
         let mutable artifacts = Paths.defaultArtifactRoot ()
         let mutable mysql = ""
         let mutable sqlSplitter = ""
@@ -236,6 +242,10 @@ Options:
                 match parseRange flag 1 3 (nextValue flag) with
                 | Ok value -> syntaxDepth <- value
                 | Error error -> failure <- Some error
+            | "--wire-cases" ->
+                match parseRange flag 0 10000 (nextValue flag) with
+                | Ok value -> wireCases <- value
+                | Error error -> failure <- Some error
             | "--artifacts" -> artifacts <- nextValue flag |> Path.GetFullPath
             | "--mysql" -> mysql <- nextValue flag
             | "--sql-splitter" -> sqlSplitter <- nextValue flag
@@ -253,8 +263,8 @@ Options:
         | None when (command = Concurrency || command = MultiDb) && hotAccounts < 2 -> Error "concurrency/multidb requires --hot-accounts of at least 2"
         | None when (command = Concurrency || command = MultiDb) && hotAccounts > accounts -> Error "--hot-accounts cannot exceed --accounts"
         | None when command = MultiDb && databases < 1 -> Error "multidb requires --databases of at least 1"
-        | None when (command = Run || command = Suite || command = Replay || command = Concurrency || command = MultiDb || command = Syntax || command = Contracts) && String.IsNullOrWhiteSpace mysql ->
-            Error "run, suite, concurrency, multidb, syntax, contracts, and replay require --mysql (torture/scripts/run.sh supplies it automatically)"
+        | None when (command = Run || command = Suite || command = Replay || command = Concurrency || command = MultiDb || command = Syntax || command = Contracts || command = Wire) && String.IsNullOrWhiteSpace mysql ->
+            Error "run, suite, concurrency, multidb, syntax, contracts, wire, and replay require --mysql (torture/scripts/run.sh supplies it automatically)"
         | None ->
             Ok
                 { Command = command
@@ -276,6 +286,7 @@ Options:
                   ScalingFactor = scalingFactor
                   SyntaxCases = syntaxCases
                   SyntaxDepth = syntaxDepth
+                  WireCases = wireCases
                   Artifacts = artifacts
                   MySql = mysql
                   SqlSplitter = sqlSplitter
@@ -336,6 +347,13 @@ Options:
 
     let compatibilityOptions cli : CompatibilityOptions =
         { TimeoutSeconds = cli.TimeoutSeconds
+          ArtifactRoot = cli.Artifacts
+          MySqlConnection = cli.MySql }
+
+    let wireOptions cli : WireOptions =
+        { Seed = cli.Seed
+          Cases = cli.WireCases
+          TimeoutSeconds = cli.TimeoutSeconds
           ArtifactRoot = cli.Artifacts
           MySqlConnection = cli.MySql }
 
@@ -507,6 +525,25 @@ module Program =
         |> Array.tryHead
         |> Option.iter (fun failure -> printfn "  first difference: %s/%s — %s" failure.Name failure.Classification failure.Detail)
 
+    let private printWire (report: WireManifest) directory =
+        let failures = report.Cases |> Array.filter (fun item -> not item.Passed)
+        printfn "wire mutations: %s — %s" report.Classification directory
+        printfn "  cases=%d differences=%d" report.Cases.Length failures.Length
+
+        failures
+        |> Array.tryHead
+        |> Option.iter (fun failure ->
+            printfn
+                "  first difference: %s/%s mysql=%s/%d/%s fsdb=%s/%d/%s"
+                failure.Name
+                failure.Classification
+                failure.MySql.Status
+                failure.MySql.ErrorCode
+                failure.MySql.SqlState
+                failure.Fsdb.Status
+                failure.Fsdb.ErrorCode
+                failure.Fsdb.SqlState)
+
     let private printDurability (report: DurabilityManifest) directory =
         printfn "%s: %s — %s" report.CaseId report.Classification directory
         printfn
@@ -555,6 +592,18 @@ module Program =
                         return if report.Passed then 0 else 2
                 with error ->
                     eprintfn "compatibility infrastructure exception: %O" error
+                    return 1
+            | Ok cli when cli.Command = Wire ->
+                try
+                    match! WireRunner.run (Cli.wireOptions cli) with
+                    | Error error ->
+                        eprintfn "wire infrastructure failure: %s" error
+                        return 1
+                    | Ok(report, directory) ->
+                        printWire report directory
+                        return if report.Passed then 0 else 2
+                with error ->
+                    eprintfn "wire infrastructure exception: %O" error
                     return 1
             | Ok cli when cli.Command = Concurrency ->
                 try

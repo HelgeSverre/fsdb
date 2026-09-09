@@ -10,6 +10,7 @@
     <Compile Include="Harness.fs" />
     <Compile Include="SyntaxFuzz.fs" />
     <Compile Include="Compatibility.fs" />
+    <Compile Include="WireFuzz.fs" />
     <Compile Include="Coverage.fs" />
     <Compile Include="Concurrency.fs" />
     <Compile Include="MultiDb.fs" />

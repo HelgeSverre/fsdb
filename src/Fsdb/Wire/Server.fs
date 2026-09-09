@@ -275,11 +275,9 @@ let private cursorRequest = function
 
 let private stmtExecuteHeaderLength = 9
 let private stmtLongDataHeaderLength = 6
-/// Empty command packets signal disconnect; malformed non-empty packets
-/// remain protocol errors on the live connection.
 let private parseCommand (capabilities: uint32) (payload: byte[]) : Command option =
     match Array.tryHead payload with
-    | None -> None
+    | None -> Some(Malformed 0uy)
     | Some commandByte ->
         let rest () = Encoding.UTF8.GetString(payload, 1, payload.Length - 1)
         let sql () = payload.[1..] |> decodeSqlBytes
@@ -334,6 +332,17 @@ let private commandStatus = function
     | ProcessKill _
     | Unsupported _
     | Malformed _ -> None
+
+let private malformedCommandError command =
+    match command with
+    | value when value = byte CommandByte.FieldList
+                 || value = byte CommandByte.StatementExecute
+                 || value = byte CommandByte.StatementClose
+                 || value = byte CommandByte.StatementReset
+                 || value = byte CommandByte.SetOption
+                 || value = byte CommandByte.StatementFetch ->
+        1835, "Malformed communication packet."
+    | _ -> 1047, "Unknown command"
 
 let private isShutdownStatement (sql: string) : bool =
     let text = sql.Trim()
@@ -1786,6 +1795,14 @@ let private handleConnection
                                     |> Async.Ignore
 
                                 return! loop session
+                            | Some(InitDb db) when String.IsNullOrEmpty db ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId; Payload = errPayload capabilities 1046 "No database selected" }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(ChangeUser request) ->
                                 let supportsPluginAuth = hasCapability ClientPluginAuth capabilities
                                 let changeAuthData = if supportsPluginAuth then randomAuthPluginData () else authData
@@ -1908,6 +1925,14 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
+                            | Some(Query sql) when String.IsNullOrWhiteSpace sql ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId; Payload = errPayload capabilities 1065 "Query was empty" }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(Query sql) ->
                                 InformationSchema.recordQuestion session.StatusCounters
                                 if isShutdownStatement sql then
@@ -2182,6 +2207,14 @@ let private handleConnection
                                     |> Async.Ignore
 
                                 return! loop session
+                            | Some(StmtPrepare sql) when String.IsNullOrWhiteSpace sql ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId; Payload = errPayload capabilities 1065 "Query was empty" }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(StmtPrepare sql) ->
                                 match QueryHandler.prepareStatementForSession session sql with
                                 | Result.Error(code, message) ->
@@ -2237,7 +2270,7 @@ let private handleConnection
                                 do!
                                     writePacketAsync
                                         stream
-                                        { SeqId = seqId; Payload = errPayload capabilities 1047 "Malformed command packet" }
+                                        { SeqId = seqId; Payload = errPayload capabilities 1835 "Malformed communication packet." }
                                     |> Async.Ignore
 
                                 return! loop session
@@ -2555,7 +2588,7 @@ let private handleConnection
                                         writePacketAsync
                                             stream
                                             { SeqId = seqId
-                                              Payload = errPayload capabilities 1231 "Variable 'option' can't be set to the value supplied" }
+                                              Payload = errPayload capabilities 1047 "Unknown command" }
                                         |> Async.Ignore
 
                                     return! loop session
@@ -2598,14 +2631,15 @@ let private handleConnection
                                     |> Async.Ignore
 
                                 return! loop session
-                            | Some(Malformed _) ->
+                            | Some(Malformed command) ->
                                 // Reply ERR and keep the connection alive —
                                 // see `Malformed`'s doc.
+                                let code, message = malformedCommandError command
+
                                 do!
                                     writePacketAsync
                                         stream
-                                        { SeqId = seqId
-                                          Payload = errPayload capabilities 1047 "Malformed command packet" }
+                                        { SeqId = seqId; Payload = errPayload capabilities code message }
                                     |> Async.Ignore
 
                                 return! loop session

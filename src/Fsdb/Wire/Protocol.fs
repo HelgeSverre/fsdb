@@ -11,6 +11,7 @@ open Fsdb.Value
 open Fsdb.Temporal
 
 let private strictUtf8 = UTF8Encoding(false, true)
+let private replacementUtf8 = UTF8Encoding(false, false)
 
 let stringValueOfBytes (bytes: byte[]) : Value =
     try
@@ -28,7 +29,7 @@ let decodeSqlBytes (bytes: byte[]) : string =
 
         let appendUtf8 start count =
             if count > 0 then
-                sql.Append(strictUtf8.GetString(bytes, start, count)) |> ignore
+                sql.Append(replacementUtf8.GetString(bytes, start, count)) |> ignore
 
         while index < bytes.Length do
             if bytes.[index] <> byte '\'' then

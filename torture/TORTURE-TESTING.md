@@ -161,6 +161,7 @@ Passwords and the MySQL connection string are intentionally not persisted.
 | Parser | `fsdb_parser_gap`, `fsdb_probe_parser_gap` | MySQL accepted SQL that fsdb cannot parse |
 | Syntax mutation | `matched_syntax_error`, `accepted_mutation`, `fsdb_syntax_acceptance_gap`, `fsdb_syntax_rejection_gap`, `syntax_error_contract_mismatch` | Mutated syntax matched, remained valid, or exposed an acceptance/error-contract difference |
 | Compatibility contracts | `pass`, `oracle_contract_drift`, `status_mismatch`, `error_contract_mismatch`, `result_schema_mismatch`, `result_type_mismatch`, `result_mismatch`, `affected_rows_mismatch` | A declarative text, prepared-protocol, error, or named-connection contract matched or exposed a focused difference |
+| Wire mutation | `pass`, `response_kind_mismatch`, `error_contract_mismatch`, `response_header_mismatch`, `oracle_infrastructure`, `fsdb_infrastructure` | An authenticated raw command payload matched MySQL's response contract or exposed a protocol difference |
 | Subject execution | `fsdb_execution_gap`, `fsdb_probe_execution_gap`, `contained_internal_error` | Parsed SQL failed in fsdb; error 1105 remains separately visible |
 | Wire/deadline | `protocol_fault`, `fsdb_timeout` | Driver/protocol failure or subject deadline |
 | Internal state | `invariant_failure` | fsdb committed a structurally invalid catalog/data state |

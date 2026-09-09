@@ -2958,11 +2958,7 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          // A truncated COM_STMT_CLOSE (needs a 4-byte statement id, gets
-          // none) must answer ERR and leave the connection usable — a
-          // `Reader` throw inside `parseCommand` must not escape the
-          // command loop and drop the socket with no reply.
-          testCase "a malformed short command packet gets an ERR, not a dropped connection"
+          testCase "malformed command packets return MySQL errors and keep the connection usable"
           <| fun _ ->
               async {
                   use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
@@ -2988,11 +2984,24 @@ let tests =
                   let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
                   let! _ = readPacketAsync stream // connection OK
 
-                  // COM_STMT_CLOSE (0x19) with no statement id bytes at all.
-                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x19uy |] }
-                  let! errReply = readPacketAsync stream
-                  Expect.isTrue errReply.IsSome "the connection survives a truncated command"
-                  Expect.equal errReply.Value.Payload.[0] 0xffuy "server replies ERR, not silence/close"
+                  let expectError payload expectedCode expectedState =
+                      async {
+                          let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload }
+                          let! reply = readPacketAsync stream
+                          Expect.isTrue reply.IsSome "the connection survives malformed input"
+                          Expect.equal reply.Value.Payload.[0] 0xffuy "server replies ERR"
+                          let reader = Reader(reply.Value.Payload.[1..])
+                          Expect.equal (reader.ReadInt16LE()) expectedCode "error code"
+                          Expect.equal (char (reader.ReadByte())) '#' "SQLSTATE marker"
+                          Expect.equal (Text.Encoding.ASCII.GetString(reader.ReadBytes 5)) expectedState "SQLSTATE"
+                      }
+
+                  do! expectError [||] 1047 "08S01"
+                  do! expectError [| 0x03uy |] 1065 "42000"
+                  do! expectError [| 0x02uy |] 1046 "3D000"
+                  do! expectError [| 0x19uy |] 1835 "HY000"
+                  do! expectError [| 0x1buy; 2uy; 0uy |] 1047 "08S01"
+                  do! expectError (Array.append [| 0x03uy |] (Array.append (Text.Encoding.ASCII.GetBytes "SELECT (") [| 0xffuy |])) 1064 "42000"
 
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
                   let! afterReply = readPacketAsync stream
