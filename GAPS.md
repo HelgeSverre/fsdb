@@ -142,6 +142,12 @@ access paths. Full-result plans compare the prefix's observed candidate count
 with one hash build, while remaining equality conditions stay residual
 predicates. `ORDER BY ... LIMIT` uses a bounded top-N sort.
 
+Direct single-table equality predicates likewise use complete keys or safe
+left prefixes for reads and mutations. Their observed candidate count chooses
+between the index slice and a row-store scan. Compatible `ORDER BY` suffixes
+continue streaming the same composite slice rather than sorting the narrowed
+rows again.
+
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
 tests reuse typed sets and can narrow a directly indexed outer table.
@@ -162,7 +168,7 @@ or locking retain the general SELECT pipeline.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | common composite equality, literal membership, range, complete-key or left-prefix join, ordering, and grouping shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
+| Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, and grouping shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; outer/lateral joins, ambiguous bare references, and plans needing persisted statistics retain source order or conservative execution | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
@@ -245,7 +251,7 @@ unique key over colliding data returns 1062 without publishing a corrupt index.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality and ordered structures cover common composite probes, joins, ranges, ordering, and grouping; unsupported expression orderings and grouping shapes retain scan/sort fallback | high (scale) | divergence |
+| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality and ordered structures cover common complete-key and left-prefix probes, joins, ranges, ordering, and grouping; unsupported expression orderings and grouping shapes retain scan/sort fallback | high (scale) | divergence |
 | Expression indexes | functional key parts participate in physical access and uniqueness | the [supported functional keys](README.md#indexes-and-joins) have physical equality and ordering paths; other non-unique expressions retain DDL and metadata but scan, while unsupported unique expressions are refused | low | divergence/refusal |
 
 ## 6. Charsets and collations
@@ -555,6 +561,11 @@ routines, events, and administrative probes.
 The remaining campaign is planner constant factors. Indexed joins,
 equality/`IN`, and secondary ranges retain measurable fixed overhead compared
 with MySQL.
+
+The [composite-prefix profile](benchmarks/results/582cff7-quick.md) compares a
+maintained left-prefix lookup with an expression-forced scan on the same data.
+It confirms that the bounded access path removes the scan cliff while also
+showing the remaining per-candidate gap to MySQL.
 
 The engine already avoids several earlier cliffs:
 

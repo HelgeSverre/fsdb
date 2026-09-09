@@ -322,13 +322,18 @@ The engine maintains several immutable index structures, each serving a
 different access pattern:
 
 - **Equality and ranges.** Primary, unique, and secondary equality maps use
-  collation-folded keys. Scalar and composite-row literal `IN` lists, plus
-  direct literal ranges in single-table reads and writes, can seek matching
-  indexes. `EXPLAIN` reports the corresponding `const`, `ref`, or `range`
-  access. Candidate cardinalities are checked before row resolution, so broad
-  probes fall back to a row-store scan instead of building an all-row union.
-  Compatible scalar literal lists are normalized once per statement, so that
-  fallback does not repeat the entire list comparison for every row.
+  collation-folded keys. Direct equalities may bind a complete key or a safe
+  left prefix of a composite B-tree in single-table reads, updates, and
+  deletes. Scalar and composite-row literal `IN` lists, plus direct literal
+  ranges, use the same maintained indexes where their shape is compatible.
+  `EXPLAIN` reports the corresponding `const`, `ref`, or `range` access.
+
+  Candidate cardinalities are checked before row resolution, so broad probes
+  fall back to a row-store scan instead of building an all-row union. Folded
+  or PAD SPACE text prefixes also retain the scan path when SQL-equal spellings
+  are not one contiguous ordered slice. Compatible scalar literal lists are
+  normalized once per statement, so a scan fallback does not repeat the
+  entire list comparison for every row.
 
 - **Ordering.** Compatible `ORDER BY` operations stream a left index prefix, or
   a suffix whose earlier keys are fixed by literal equalities. Literal bounds
