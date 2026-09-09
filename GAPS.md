@@ -577,8 +577,8 @@ It confirms that the bounded access path removes the scan cliff while also
 showing the remaining per-candidate gap to MySQL.
 
 The [correlated composite-prefix profile](benchmarks/results/b2b0bca-quick.md)
-measures the same access shape through a pass-through derived table and records
-the previous executor as a control. The follow-up
+measures the same access shape through a pass-through derived table and includes
+an executor control. The follow-up
 [text-prefix cardinality profile](benchmarks/results/a50142b-quick.md) shows the
 fully covered `COUNT(*)` path reading a compatible index bucket directly.
 Collation-changing and coercive comparisons deliberately retain row evaluation.

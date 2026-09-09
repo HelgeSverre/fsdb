@@ -202,7 +202,8 @@ runs:
 - direct and correlated access:
   [single-table composite prefixes](results/582cff7-quick.md) and
   [projected correlated prefixes](results/b2b0bca-quick.md), followed by
-  [compatible text-prefix cardinality](results/a50142b-quick.md).
+  [compatible text-prefix cardinality](results/a50142b-quick.md) and the
+  [broader correlated planner baseline](results/b9a6895-quick.md).
 
 These reports explain a measured revision pair. They do not replace the live
 compatibility and performance boundaries in [GAPS.md](../GAPS.md).

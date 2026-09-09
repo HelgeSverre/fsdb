@@ -12,7 +12,7 @@ important operational detail. This is not a blanket compatibility claim:
 - [GUI clients and introspection](#gui-clients-and-introspection)
 - [TLS transport](#tls-transport)
 - [Bulk wire commands](#bulk-wire-commands)
-- [Temporal zones and offsets](#temporal-zones-and-offsets)
+- [Temporal values, zones, and offsets](#temporal-values-zones-and-offsets)
 - [Schema moves](#schema-moves)
 - [Views and triggers](#views-and-triggers)
   - [Writable views](#writable-views)
@@ -190,7 +190,7 @@ enclosure and escape markers, `REPLACE` or `IGNORE`, header-line skipping,
 target columns or user variables, and ordered `SET` transformations.
 Server-side `LOAD DATA INFILE` remains unsupported.
 
-## Temporal zones and offsets
+## Temporal values, zones, and offsets
 
 The session `time_zone` accepts MySQL's numeric offsets and `SYSTEM`. It drives
 current-time functions, Unix timestamp conversion, TIMESTAMP storage, and
@@ -245,7 +245,7 @@ materialized-view object. See the MySQL 8.4 documentation for
 [view creation](https://dev.mysql.com/doc/refman/8.4/en/create-view.html) and
 [view processing algorithms](https://dev.mysql.com/doc/refman/8.4/en/view-algorithms.html).
 
-fsdb supports stored queries broadly and a narrow writable subset:
+fsdb supports stored queries broadly and a shape-checked writable surface:
 
 - `CREATE [OR REPLACE] [ALGORITHM=...] [DEFINER=...] [SQL SECURITY ...]
   VIEW`, `ALTER VIEW`, and `DROP VIEW [IF EXISTS]`.
