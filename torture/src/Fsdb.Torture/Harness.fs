@@ -234,7 +234,7 @@ module CommitEvents =
                 (events |> Seq.map summarize |> Hashing.combine)
         | XaRolledBack xid -> sprintf "xa_rolled_back format=%u" xid.FormatId
 
-type FsdbSubject(?captureEvents: bool) =
+type FsdbSubject(?captureEvents: bool, ?serverOptions: Fsdb.ServerOptions.Settings) =
     let store = Fsdb.Storage.create ()
     let events = ConcurrentQueue<string>()
 
@@ -244,7 +244,8 @@ type FsdbSubject(?captureEvents: bool) =
 
     let listener = Fsdb.Server.startListening IPAddress.Loopback 0
     let port = Fsdb.Server.port listener
-    let serveTask = Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.StartAsTask
+    let options = defaultArg serverOptions Fsdb.ServerOptions.defaults
+    let serveTask = Fsdb.Server.serveWithOptions options listener store Fsdb.Functions.empty |> Async.StartAsTask
 
     member _.Store = store
     member _.Port = port
