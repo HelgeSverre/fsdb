@@ -12054,20 +12054,11 @@ and private exactStoredKeyPins (store: Store) (registry: Registry) (table: Table
 
 and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
     let tryTerm (column: IndexColumn) =
-        match column.Transform with
-        | Some(Expression expression) ->
-            FunctionalIndex.tryPhysicalExpression expression
-            |> Option.filter (fun physical -> physical.Qualifier.IsNone)
-            |> Option.map (fun physical ->
-                { Column = physical.Column
-                  Transform = Some physical.Transform
-                  Direction = column.Direction })
-        | _ when column.Name <> "" ->
-            Some
-                { Column = column.Name
-                  Transform = column.Transform
-                  Direction = column.Direction }
-        | _ -> None
+        FunctionalIndex.tryKeyPart column
+        |> Option.map (fun (columnName, transform) ->
+            { Column = columnName
+              Transform = transform
+              Direction = column.Direction })
 
     let tryCandidate (index: IndexDef) =
         if index.Visible && index.Kind = BTree && (index.KeyColumns |> List.forall (_.PrefixLength >> Option.isNone)) then

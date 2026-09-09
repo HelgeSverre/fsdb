@@ -97,6 +97,15 @@ let tryPhysicalExpression expression =
                   Calls = calls
                   Transform = Expression(canonicalExpression column calls) })
 
+let tryKeyPart (column: IndexColumn) =
+    match column.Transform with
+    | Some(Expression expression) ->
+        tryPhysicalExpression expression
+        |> Option.filter (fun physical -> physical.Qualifier.IsNone)
+        |> Option.map (fun physical -> physical.Column, Some physical.Transform)
+    | transform when column.Name <> "" -> Some(column.Name, transform)
+    | _ -> None
+
 let isBuiltin = function
     | Expression expression -> tryPhysicalExpression expression |> Option.isSome
     | transform -> tryBuiltinName transform |> Option.isSome
@@ -175,14 +184,14 @@ let supportsColumnType transform columnType =
         |> Option.exists (fun physical ->
             let transforms = physical.Calls |> List.map snd
 
-            match List.rev transforms with
-            | length :: inner when isLengthTransform length && List.forall isTextTransform inner ->
-                match List.rev inner with
-                | [] -> supportsSingleTransform length columnType
-                | first :: _ -> supportsSingleTransform first columnType
-            | _ when List.forall isTextTransform transforms ->
-                transforms |> List.head |> fun first -> supportsSingleTransform first columnType
-            | _ when List.forall ((=) AbsoluteValue) transforms -> supportsSingleTransform AbsoluteValue columnType
+            match transforms, List.rev transforms with
+            | first :: _, length :: inner when isLengthTransform length && List.forall isTextTransform inner ->
+                if inner.IsEmpty then
+                    supportsSingleTransform length columnType
+                else
+                    supportsSingleTransform first columnType
+            | first :: _, _ when List.forall isTextTransform transforms -> supportsSingleTransform first columnType
+            | _ :: _, _ when List.forall ((=) AbsoluteValue) transforms -> supportsSingleTransform AbsoluteValue columnType
             | _ -> false)
     | transform -> supportsSingleTransform transform columnType
 

@@ -2451,24 +2451,19 @@ let private trySingleColumnKeyGroup group =
 
 let private tryIndexKeyGroup (table: Table) (index: IndexDef) =
     let resolveKeyColumn (column: IndexColumn) =
-        match column.Transform with
-        | Some(Expression expression) ->
-            FunctionalIndex.tryPhysicalExpression expression
-            |> Option.filter (fun physical -> physical.Qualifier.IsNone)
-            |> Option.bind (fun physical ->
-                resolveColumn table.Columns physical.Column
-                |> Result.toOption
-                |> Option.filter (fun resolved ->
-                    FunctionalIndex.supportsColumnType physical.Transform table.Columns.[resolved].Type)
-                |> Option.map (fun resolved ->
-                    resolved,
-                    { column with
-                        Name = physical.Column
-                        Transform = Some physical.Transform }))
-        | _ ->
-            resolveColumn table.Columns column.Name
+        FunctionalIndex.tryKeyPart column
+        |> Option.bind (fun (columnName, transform) ->
+            resolveColumn table.Columns columnName
             |> Result.toOption
-            |> Option.map (fun resolved -> resolved, column)
+            |> Option.filter (fun resolved ->
+                transform
+                |> Option.forall (fun physical ->
+                    FunctionalIndex.supportsColumnType physical table.Columns.[resolved].Type))
+            |> Option.map (fun resolved ->
+                resolved,
+                { column with
+                    Name = columnName
+                    Transform = transform }))
 
     index.KeyColumns
     |> List.map resolveKeyColumn
@@ -5788,15 +5783,7 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
         | _ -> None
 
     let partLength (index: IndexDef) (column: IndexColumn) =
-        let physicalColumn =
-            match column.Transform with
-            | Some(Expression expression) ->
-                FunctionalIndex.tryPhysicalExpression expression
-                |> Option.filter (fun physical -> physical.Qualifier.IsNone)
-                |> Option.map (fun physical -> physical.Column, Some physical.Transform)
-            | transform -> Some(column.Name, transform)
-
-        match physicalColumn with
+        match FunctionalIndex.tryKeyPart column with
         | None when index.Unique -> Error(ExpressionError(1235, "This version of fsdb doesn't yet support this unique expression index"))
         | None -> Ok 0
         | Some(columnName, transform) ->
