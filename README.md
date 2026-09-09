@@ -367,6 +367,12 @@ different access pattern:
   the observed candidate counts to avoid repeated broad probes; queries that
   may stop at `LIMIT` retain the lazy index path.
 
+  Correlated predicates use the same complete-key and safe left-prefix probes
+  through direct tables and pass-through derived tables or CTEs. Literal and
+  outer-row equalities may supply different key parts; projection aliases are
+  mapped back to their stored columns before the lookup. More complex derived
+  shapes retain the materialized or row-by-row path.
+
 Equality buckets and ordered entries remain separate derived structures. That
 trade spends memory and incremental write work to keep point probes direct and
 range seeks bounded.

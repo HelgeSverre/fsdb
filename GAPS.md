@@ -152,10 +152,11 @@ Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
 tests reuse typed sets and can narrow a directly indexed outer table.
 Compatible direct-column scalar literal lists use the same statement-scoped
-membership representation. Correlated equality probes use single or composite
-keys through pass-through derived tables and CTEs, including keys assembled
-from outer values and literals. Correlated forms preserve MySQL NULL and
-multi-column error semantics.
+membership representation. Correlated equality probes use single keys,
+complete composite keys, or safe ordered left prefixes through direct tables
+and pass-through derived tables or CTEs. Outer values and literals may bind
+different key parts. Correlated forms preserve MySQL NULL and multi-column
+error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,
@@ -566,6 +567,12 @@ The [composite-prefix profile](benchmarks/results/582cff7-quick.md) compares a
 maintained left-prefix lookup with an expression-forced scan on the same data.
 It confirms that the bounded access path removes the scan cliff while also
 showing the remaining per-candidate gap to MySQL.
+
+The [correlated composite-prefix profile](benchmarks/results/b2b0bca-quick.md)
+measures the same access shape through a pass-through derived table. It also
+records the previous executor as a control: the maintained prefix reduces
+candidate work, but correlated-query setup remains far more expensive than
+MySQL's execution.
 
 The engine already avoids several earlier cliffs:
 
