@@ -772,7 +772,23 @@ let tests =
                         Expect.isTrue
                             (protocol41.Evidence
                              |> Array.exists (fun item -> item.Axis = axis && item.Source = "wire-corpus"))
-                            axis ]
+                            axis
+
+                testCase "optional capability profiles carry lifecycle evidence"
+                <| fun _ ->
+                    let names = WireCorpus.capabilityProfiles |> Array.map fst
+                    Expect.equal (Array.distinct names) names "profile names are unique"
+
+                    let manifest: CoverageManifest = Fsdb.Torture.Coverage.create ()
+
+                    let multiStatements =
+                        manifest.Capabilities
+                        |> Array.find (fun capability -> capability.Id = "protocol-capability:client_multi_statements")
+
+                    Expect.isTrue
+                        (multiStatements.Evidence
+                         |> Array.exists (fun item -> item.Axis = "connection-lifecycle" && item.Source = "wire-corpus"))
+                        "profile evidence is visible" ]
 
           testList
               "Catalog invariants"

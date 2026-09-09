@@ -43,10 +43,13 @@ has a distinct contract:
 | Lane | What it establishes |
 |---|---|
 | Differential suite | Generated SQL produces the same typed results, affected rows, and final state on fsdb and MySQL 8.4. |
+| Compatibility contracts | Declarative text, prepared, error, lifecycle, and named-connection schedules match exact MySQL outcomes. |
 | Syntax mutation | Valid feature statements and bounded token/comment mutations agree on acceptance, error code, and SQLSTATE. |
+| Wire mutation | Authenticated command packets and client-capability profiles agree on response framing, errors, and connection survival. |
 | Transaction concurrency | Prepared transactions preserve balances, ledger identity, rollback, and lock reuse under contention and disconnects. |
 | Multi-database concurrency | Independent databases do not leak state and publish without an unnecessary catalog-wide bottleneck. |
 | Durability | Acknowledged commits survive forced crashes; transactions remain atomic across WAL tails and snapshot rotation. |
+| Capability inventory | Source-discovered statements, types, functions, and protocol flags expose every evidence axis the corpus has not yet exercised. |
 
 Every divergence produces a replayable artifact. Exit code 0 means parity or
 only hand-reviewed known gaps; 2 means a new fsdb finding. Exact commands and

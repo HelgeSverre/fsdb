@@ -32,6 +32,7 @@ type WireOutcome =
 [<CLIMutable>]
 type WireCaseRecord =
     { Name: string
+      Capabilities: uint32
       PayloadHex: string
       MySql: WireOutcome
       Fsdb: WireOutcome
@@ -57,6 +58,20 @@ type WireManifest =
 
 [<RequireQualifiedAccess>]
 module WireCorpus =
+    let requiredCapabilities = ClientLongPassword ||| ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+
+    let capabilityProfiles =
+        [| "client_found_rows", ClientFoundRows
+           "client_long_flag", ClientLongFlag
+           "client_connect_with_db", ClientConnectWithDb
+           "client_interactive", ClientInteractive
+           "client_transactions", ClientTransactions
+           "client_multi_statements", ClientMultiStatements
+           "client_multi_results", ClientMultiResults
+           "client_can_handle_expired_passwords", ClientCanHandleExpiredPasswords
+           "client_session_track", ClientSessionTrack
+           "client_deprecate_eof", ClientDeprecateEof |]
+
     let private query (sql: string) = Array.append [| 0x03uy |] (Encoding.UTF8.GetBytes sql)
 
     let baselines =
@@ -81,10 +96,11 @@ module WireCorpus =
            "reset-with-trailing-data", [| 0x1fuy; 1uy |] |]
 
     let coverage =
-        [| "protocol-capability:client_long_password", [| "wire-success"; "malformed-input" |]
-           "protocol-capability:client_protocol41", [| "wire-success"; "malformed-input" |]
-           "protocol-capability:client_secure_connection", [| "wire-success"; "malformed-input" |]
-           "protocol-capability:client_plugin_auth", [| "wire-success"; "malformed-input" |] |]
+        [| for name in [ "client_long_password"; "client_protocol41"; "client_secure_connection"; "client_plugin_auth" ] do
+               yield "protocol-capability:" + name, [| "wire-success"; "malformed-input"; "connection-lifecycle" |]
+
+           for name, _ in capabilityProfiles do
+               yield "protocol-capability:" + name, [| "wire-success"; "connection-lifecycle" |] |]
 
     let private nextUInt64 (state: byref<uint64>) =
         state <- state ^^^ (state <<< 13)
@@ -132,7 +148,7 @@ module WireCorpus =
 
 [<RequireQualifiedAccess>]
 module WireRunner =
-    let private capabilities = ClientLongPassword ||| ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+    let private hasCapability capability capabilities = capabilities &&& capability <> 0u
 
     let private endpoint (connectionString: string) =
         let builder = MySqlConnectionStringBuilder connectionString
@@ -149,7 +165,7 @@ module WireRunner =
                 return None
         }
 
-    let private connect username connectionString timeoutSeconds =
+    let private connect username capabilities connectionString timeoutSeconds =
         task {
             let host, port = endpoint connectionString
             let client = new TcpClient()
@@ -169,7 +185,12 @@ module WireRunner =
                 response.WriteBytes(Array.zeroCreate 23)
                 response.WriteNullTerminatedString username
                 response.WriteByte 0uy
-                response.WriteNullTerminatedString "caching_sha2_password"
+
+                if hasCapability ClientConnectWithDb capabilities then
+                    response.WriteNullTerminatedString "mysql"
+
+                if hasCapability ClientPluginAuth capabilities then
+                    response.WriteNullTerminatedString "caching_sha2_password"
                 let! _ = writePacketAsync stream { SeqId = greeting.SeqId + 1uy; Payload = response.ToArray() } |> Async.StartAsTask
 
                 let rec authenticated () =
@@ -220,11 +241,11 @@ module WireRunner =
             outcome target stopwatch "error" code state "" 255
         | Some(Some packet) -> outcome target stopwatch "response" 0 "" "" (int packet.Payload.[0])
 
-    let private runCase username target connectionString timeoutSeconds payload =
+    let private runCase username capabilities target connectionString timeoutSeconds payload =
         task {
             let stopwatch = Stopwatch.StartNew()
 
-            match! connect username connectionString timeoutSeconds with
+            match! connect username capabilities connectionString timeoutSeconds with
             | Error error -> return outcome target stopwatch "infrastructure" 0 "" error -1
             | Ok(client, stream) ->
                 use client = client
@@ -308,18 +329,31 @@ module WireRunner =
                         let! mysqlVersion = Database.scalarString versionConnection options.TimeoutSeconds "SELECT VERSION()"
                         let records = ResizeArray<WireCaseRecord>()
 
-                        for name, payload in WireCorpus.cases options.Seed options.Cases do
-                            let! mysql = runCase username "mysql" options.MySqlConnection options.TimeoutSeconds payload
-                            let! fsdb = runCase username "fsdb" fsdbConnection options.TimeoutSeconds payload
-                            let classification = classify mysql fsdb
+                        let runInput name capabilities payload =
+                            task {
+                                let! mysql = runCase username capabilities "mysql" options.MySqlConnection options.TimeoutSeconds payload
+                                let! fsdb = runCase username capabilities "fsdb" fsdbConnection options.TimeoutSeconds payload
+                                let classification = classify mysql fsdb
 
-                            records.Add
-                                { Name = name
-                                  PayloadHex = Convert.ToHexString payload
-                                  MySql = mysql
-                                  Fsdb = fsdb
-                                  Classification = classification
-                                  Passed = classification = "pass" }
+                                records.Add
+                                    { Name = name
+                                      Capabilities = capabilities
+                                      PayloadHex = Convert.ToHexString payload
+                                      MySql = mysql
+                                      Fsdb = fsdb
+                                      Classification = classification
+                                      Passed = classification = "pass" }
+                            }
+
+                        for name, capability in WireCorpus.capabilityProfiles do
+                            do!
+                                runInput
+                                    ("capability-" + name)
+                                    (WireCorpus.requiredCapabilities ||| capability)
+                                    [| 0x0euy |]
+
+                        for name, payload in WireCorpus.cases options.Seed options.Cases do
+                            do! runInput name WireCorpus.requiredCapabilities payload
 
                         let cases = records.ToArray()
                         let firstFailure = cases |> Array.tryFind (fun item -> not item.Passed)
@@ -331,7 +365,7 @@ module WireRunner =
                             |> Option.defaultValue ""
 
                         let manifest =
-                            { SchemaVersion = 1
+                            { SchemaVersion = 2
                               RunId = runId
                               Seed = options.Seed
                               RequestedMutations = options.Cases

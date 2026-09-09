@@ -232,6 +232,12 @@ disconnect cannot hide later evidence. The runner compares response kind,
 first response byte, and exact error code and SQLSTATE. A timeout is an
 infrastructure failure rather than a compatible result.
 
+Before mutation, the runner authenticates once for each non-transport client
+capability profile and verifies that the connection remains usable. TLS,
+compression, and `LOCAL INFILE` framing stay in their dedicated integration
+paths because merely advertising those flags without switching transports
+would not exercise the protocol they select.
+
 ## Capability coverage
 
 Generate a machine-readable inventory without starting either database:
