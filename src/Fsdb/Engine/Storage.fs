@@ -4368,16 +4368,6 @@ let compareHandlerIndexValues (index: HandlerIndexRows) (left: Value list) (righ
     let collations = index.ColumnIndices |> List.take count |> List.map (fun column -> index.Columns.[column].Collation)
     compareIndexedKeys collations (List.replicate count Asc) (List.take count left) (List.take count right)
 
-type EqualityLookup =
-    { IndexName: string
-      ColumnIndices: int list
-      PrefixLengths: int option list
-      Unique: bool
-      LookupColumns: ColumnDef list
-      LookupRowIds: Set<RowId>
-      TableRowCount: int
-      LookupRows: Lazy<(RowId * Value[]) list> }
-
 type EqualityIndex =
     { Name: string
       ColumnIndices: int list
@@ -4669,58 +4659,6 @@ let trySpatialLookup
     tableAt store dbName tableName
     |> Option.bind (fun table -> trySpatialLookupInTable table columnName relation geometry)
 
-/// Uses a fully-bound composite key. Residual predicate evaluation remains
-/// responsible for contradictory or repeated equalities.
-let tryCompositeEqualityLookupInTable
-    (store: Store)
-    (table: Table)
-    (equalities: (string * Value) list)
-    : EqualityLookup option =
-    let literalFor index =
-        equalities
-        |> List.tryPick (fun (name, value) ->
-            if System.String.Equals(name, table.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase) then
-                exactProbeValue store table index value
-            else
-                None)
-
-    let probe unique (group: IndexKeyGroup) =
-        if List.length group.Indices < 2 || group.Transforms |> List.exists Option.isSome then
-            None
-        else
-            group.Indices
-            |> traverse (fun index ->
-                match literalFor index with
-                | Some value -> Ok value
-                | None -> Error())
-            |> Result.toOption
-            |> Option.bind (fun values ->
-                let index = equalityIndex unique group
-
-                equalityLookupRowIds store table index StoredValues values
-                |> Option.map (fun rowIds ->
-                    { IndexName = group.Name
-                      ColumnIndices = group.Indices
-                      PrefixLengths = group.PrefixLengths
-                      Unique = unique
-                      LookupColumns = table.Columns
-                      LookupRowIds = rowIds
-                      TableRowCount = table.RowsArray.Count
-                      LookupRows = lazy (rowsForRowIds table rowIds) }))
-
-    (uniqueKeyGroups table |> visibleGroups |> List.map (fun group -> true, group))
-    @ (secondaryKeyGroups table |> visibleGroups |> List.map (fun group -> false, group))
-    |> List.tryPick (fun (unique, group) -> probe unique group)
-
-let tryCompositeEqualityLookup
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (equalities: (string * Value) list)
-    : EqualityLookup option =
-    tableAt store dbName tableName
-    |> Option.bind (fun table -> tryCompositeEqualityLookupInTable store table equalities)
-
 let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : EqualityIndex option =
     columnNames
     |> traverse (resolveColumn table.Columns)
@@ -4736,7 +4674,7 @@ let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : Equal
         |> List.tryFind matches
         |> Option.map (fun (unique, group) -> equalityIndex unique group))
 
-let private equalityIndexesCoveredByColumns (table: Table) (columnNames: string list) =
+let internal equalityIndexMatchesCoveredByColumns (table: Table) (columnNames: string list) =
     columnNames
     |> traverse (resolveColumn table.Columns)
     |> Result.map (fun requested ->
@@ -4759,28 +4697,12 @@ let private equalityIndexesCoveredByColumns (table: Table) (columnNames: string 
                     { Index = equalityIndex unique group
                       KeyColumnCount = keyColumnCount }))
     |> Result.defaultValue []
-
-let private bestEqualityIndexMatch (matches: EqualityIndexMatch list) : EqualityIndexMatch option =
-    matches
     |> List.sortBy (fun matched -> not matched.Unique, -matched.KeyColumnCount, not matched.UsesFullKey)
-    |> List.tryHead
 
 /// Finds the best complete or leading key covered by bound columns.
 let tryEqualityIndexCoveredByColumns (table: Table) (columnNames: string list) : EqualityIndexMatch option =
-    equalityIndexesCoveredByColumns table columnNames
-    |> bestEqualityIndexMatch
-
-let internal tryEqualityIndexCoveredByColumnsStartingWith
-    (table: Table)
-    (columnNames: string list)
-    (leadingColumnName: string)
-    : EqualityIndexMatch option =
-    resolveColumn table.Columns leadingColumnName
-    |> Result.toOption
-    |> Option.bind (fun leadingColumn ->
-        equalityIndexesCoveredByColumns table columnNames
-        |> List.filter (fun matched -> matched.ColumnIndices.Head = leadingColumn)
-        |> bestEqualityIndexMatch)
+    equalityIndexMatchesCoveredByColumns table columnNames
+    |> List.tryHead
 
 let tryEqualityLookupForIndex
     (store: Store)

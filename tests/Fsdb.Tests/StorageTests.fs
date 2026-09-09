@@ -2235,17 +2235,22 @@ let tests =
                     |> ignore
 
                     let lookup name age =
-                        tryCompositeEqualityLookup store defaultDatabase "users" [ "name", VString name; "age", VInt age ]
+                        let table = store.Catalog.[defaultDatabase].["users"]
+
+                        let index =
+                            tryEqualityIndexCoveredByColumns table [ "name"; "age" ]
+                            |> Option.defaultWith (fun () -> failtest "expected a composite index")
+
+                        tryEqualityLookupForMatch store table index [ VString name; VInt age ]
                         |> Option.defaultWith (fun () -> failtest "expected a composite lookup")
 
                     let inserted = lookup "alice" 30L
-                    Expect.equal inserted.LookupRowIds.Count 1 "the composite bucket exposes its cardinality"
-                    Expect.equal inserted.TableRowCount 2 "the lookup exposes the table cardinality"
-                    Expect.isFalse inserted.LookupRows.IsValueCreated "counting the bucket does not resolve its rows"
+                    Expect.equal inserted.CandidateCount 1 "the composite bucket exposes its cardinality"
 
                     let ids name age =
-                        (lookup name age).LookupRows.Value
-                        |> List.map (fun (_, row) -> row.[0])
+                        (lookup name age).CandidateRows
+                        |> Seq.map (fun (_, row) -> row.[0])
+                        |> List.ofSeq
 
                     Expect.equal (ids "alice" 30L) [ VInt 1L ] "inserted rows enter the composite bucket"
 

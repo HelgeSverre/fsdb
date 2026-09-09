@@ -9582,6 +9582,38 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
             | _ -> None
         | _ -> None)
 
+and private tryStoredEqualityMatchLookup
+    (store: Store)
+    (table: Table)
+    (equalities: (string * Value) list)
+    : (Storage.EqualityIndexMatch * Storage.EqualityIndexMatchLookup) option =
+    let columnNames, values = List.unzip equalities
+    let matches = Storage.equalityIndexMatchesCoveredByColumns table columnNames
+
+    let pinsOneOrderedKey (matched: Storage.EqualityIndexMatch) =
+        matched.UsesFullKey
+        || matched.ColumnIndices
+           |> List.forall (fun columnIndex ->
+               let columnName = table.Columns.[columnIndex].Name
+
+               equalities
+               |> List.tryFind (fst >> equalsIgnoreCase columnName)
+               |> Option.exists (fun (_, value) -> equalityPinsOneStoredKey table columnName value))
+
+    columnNames
+    |> List.tryPick (fun leadingColumnName ->
+        resolveColumn table.Columns leadingColumnName
+        |> Result.toOption
+        |> Option.bind (fun leadingColumn ->
+            matches
+            |> List.tryFind (fun matched ->
+                matched.ColumnIndices.Head = leadingColumn
+                && pinsOneOrderedKey matched)))
+    |> Option.bind (fun matched ->
+        orderedValuesForColumns table matched.ColumnIndices columnNames values
+        |> Option.bind (Storage.tryEqualityLookupForMatch store table matched)
+        |> Option.map (fun lookup -> matched, lookup))
+
 and private tryEqualityAccessInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
@@ -9600,23 +9632,9 @@ and private tryEqualityAccessInTableWith
                 if equality.Transform.IsNone then Some(equality.Column, equality.Value) else None)
 
         let covered =
-            let columnNames, values = List.unzip storedEqualities
-
-            columnNames
-            |> List.tryPick (Storage.tryEqualityIndexCoveredByColumnsStartingWith table columnNames)
-            |> Option.filter (fun matched ->
-                matched.UsesFullKey
-                || matched.ColumnIndices
-                   |> List.forall (fun columnIndex ->
-                       let columnName = table.Columns.[columnIndex].Name
-
-                       storedEqualities
-                       |> List.tryFind (fst >> equalsIgnoreCase columnName)
-                       |> Option.exists (fun (_, value) -> equalityPinsOneStoredKey table columnName value)))
-            |> Option.bind (fun matched ->
-                orderedValuesForColumns table matched.ColumnIndices columnNames values
-                |> Option.bind (Storage.tryEqualityLookupForMatch store table matched)
-                |> Option.bind (equalityAccessPlanForMatch policy table matched))
+            tryStoredEqualityMatchLookup store table storedEqualities
+            |> Option.bind (fun (matched, lookup) ->
+                equalityAccessPlanForMatch policy table matched lookup)
 
         covered
         |> Option.orElseWith (fun () ->
@@ -9906,8 +9924,8 @@ and private tryCorrelatedEqualityLookup
         |> Option.bind (fun equalities ->
             let tableDb = tref.Database |> Option.defaultValue dbName
 
-            Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
-            |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows.Value)
+            tryStoredEqualityMatchLookup store table equalities
+            |> Option.map (fun (_, lookup) -> table.Columns, lookup.CandidateRows |> List.ofSeq)
             |> Option.orElseWith (fun () ->
                 equalities
                 |> List.tryPick (fun (column, value) ->
@@ -10128,21 +10146,24 @@ and private tryProjectedPhysicalEqualitiesRows
     (projection: PhysicalProjection)
     (equalities: (string * Value) list)
     =
-    let composite =
+    let matched =
         equalities
         |> List.map (fun (column, value) ->
             tryPhysicalProjectionColumn projection column
             |> Option.map (fun sourceColumn -> sourceColumn.Name, value))
         |> tryAllSome
-        |> Option.filter (fun physicalEqualities -> physicalEqualities.Length > 1)
-        |> Option.bind (Storage.tryCompositeEqualityLookupInTable store projection.PhysicalTable)
-        |> Option.filter (fun lookup ->
-            policy = CandidateNarrowing
-            || isUsefulEqualityCardinality lookup.TableRowCount lookup.LookupRowIds.Count)
-        |> Option.bind (fun lookup ->
-            projectPhysicalLookupRows store registry dbName projection lookup.LookupRows.Value)
+        |> Option.bind (tryStoredEqualityMatchLookup store projection.PhysicalTable)
+        |> Option.filter (fun (_, lookup) ->
+            match policy with
+            | CandidateNarrowing -> true
+            | CostedRead ->
+                isUsefulEqualityCardinality projection.PhysicalTable.RowsArray.Count lookup.CandidateCount)
+        |> Option.bind (fun (_, lookup) ->
+            lookup.CandidateRows
+            |> List.ofSeq
+            |> projectPhysicalLookupRows store registry dbName projection)
 
-    composite
+    matched
     |> Option.orElseWith (fun () ->
         equalities
         |> List.tryPick (tryProjectedPhysicalEqualityRows policy store registry dbName projection))
@@ -10249,8 +10270,11 @@ and private tryProjectedPhysicalLiteralLookup
             let equality =
                 whereExpr
                 |> optionalConjuncts
-                |> List.tryPick (tryEqualityPredicate (tryCorrelatedInnerColumn probeSource) literalValue)
-                |> Option.bind (tryProjectedPhysicalEqualityRows CostedRead store registry dbName projection)
+                |> List.choose (tryEqualityPredicate (tryCorrelatedInnerColumn probeSource) literalValue)
+                |> function
+                    | [] -> None
+                    | equalities ->
+                        tryProjectedPhysicalEqualitiesRows CostedRead store registry dbName projection equalities
 
             equality
             |> Option.orElseWith (fun () ->
@@ -10345,18 +10369,10 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
         elif equalities |> List.exists (snd >> (=) VNull) then
             Some 0
         else
-            match equalities with
-            | [ column, value ] ->
-                Storage.tryEqualityIndex projection.PhysicalTable column.Name
-                |> Option.bind (fun index ->
-                    Storage.tryEqualityRowIdsForIndex outer.Store projection.PhysicalTable index [ value ])
-                |> Option.map Set.count
-            | _ :: _ :: _ ->
-                equalities
-                |> List.map (fun (column, value) -> column.Name, value)
-                |> Storage.tryCompositeEqualityLookupInTable outer.Store projection.PhysicalTable
-                |> Option.map (fun lookup -> lookup.LookupRowIds.Count)
-            | [] -> None
+            equalities
+            |> List.map (fun (column, value) -> column.Name, value)
+            |> tryStoredEqualityMatchLookup outer.Store projection.PhysicalTable
+            |> Option.map (snd >> _.CandidateCount)
 
     tryPhysicalProjection outer.Store outer.Registry outer.DbName source
     |> Option.filter (fun projection -> storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)

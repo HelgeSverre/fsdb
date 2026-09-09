@@ -8186,7 +8186,8 @@ let tests =
                     run
                         store
                         registry
-                        "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, observed INT AS (TOUCH(id)) VIRTUAL, KEY ix_orders_user (user_id))"
+                        ("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, "
+                         + "observed INT AS (TOUCH(id)) VIRTUAL, KEY ix_orders_user_id (user_id, id))")
                     |> ignore
 
                     runDefault store "INSERT INTO users VALUES (1), (2), (3)" |> ignore
@@ -8276,7 +8277,7 @@ let tests =
 
                     runDefault
                         store
-                        "CREATE TABLE candidates (id INT PRIMARY KEY, tenant_id INT, bucket INT, KEY ix_pair (tenant_id, bucket))"
+                        "CREATE TABLE candidates (id INT PRIMARY KEY, tenant_id INT, bucket INT, KEY ix_pair_id (tenant_id, bucket, id))"
                     |> ignore
 
                     [ 1..50 ]
@@ -8320,6 +8321,27 @@ let tests =
                         "WITH projected(candidate_id, tenant_key, bucket_key) AS (SELECT id, tenant_id, bucket FROM candidates)"
                         "(SELECT candidate_id AS id, tenant_key AS tenant_id, bucket_key AS bucket FROM projected) c"
 
+                    let assertLiteralProbe prefix source =
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                ($"{prefix} SELECT c.id FROM {source} "
+                                 + "WHERE c.bucket = 3 AND c.tenant_id = 2 AND TOUCH(c.id) = c.id")
+                        with
+                        | ResultSet(_, rows) -> Expect.equal rows.Length 20 "the literal prefix retains its physical rows"
+                        | other -> failtestf "expected projected literal rows, got %A" other
+
+                        Expect.isLessThan calls 100 "the literal prefix resolves only its physical index slice"
+
+                    assertLiteralProbe "" "(SELECT id, tenant_id, bucket FROM candidates) c"
+
+                    assertLiteralProbe
+                        "WITH projected AS (SELECT id, tenant_id, bucket FROM candidates)"
+                        "projected c"
+
                 testCase "correlated and literal equalities share a composite probe"
                 <| fun _ ->
                     let mutable calls = 0
@@ -8335,7 +8357,9 @@ let tests =
 
                     runDefault
                         store
-                        "CREATE TABLE candidates (id INT PRIMARY KEY, tenant_id INT, status VARCHAR(10), KEY ix_tenant_status (tenant_id, status))"
+                        ("CREATE TABLE candidates (id INT PRIMARY KEY, tenant_id INT, "
+                         + "status VARCHAR(10) COLLATE utf8mb4_0900_bin, "
+                         + "KEY ix_tenant_status_id (tenant_id, status, id))")
                     |> ignore
 
                     [ 1..50 ]
