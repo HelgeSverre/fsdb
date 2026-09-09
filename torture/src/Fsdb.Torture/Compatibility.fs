@@ -117,6 +117,12 @@ module Contract =
           Action = Run(Query, PreparedProtocol, sql, parameters)
           Expectation = OracleSuccess }
 
+    let preparedExecute name sql parameters : ContractStep =
+        { Name = name
+          Connection = "main"
+          Action = Run(Execute, PreparedProtocol, sql, parameters)
+          Expectation = OracleSuccess }
+
     let fails code sqlState (step: ContractStep) : ContractStep =
         { step with Expectation = OracleError(code, sqlState) }
 
@@ -254,6 +260,37 @@ module ContractCatalog =
                "statement:alter_table", [| "prepared-protocol" |]
                "statement:drop_table", [| "prepared-protocol" |] |] }
 
+    let private preparedDml =
+        { Name = "prepared-dml"
+          Setup =
+            [| "DROP TABLE IF EXISTS contract_dml_target"
+               "DROP TABLE IF EXISTS contract_dml_source"
+               "CREATE TABLE contract_dml_target (id INT PRIMARY KEY, label VARCHAR(20))"
+               "CREATE TABLE contract_dml_source (id INT PRIMARY KEY, label VARCHAR(20))"
+               "INSERT INTO contract_dml_source VALUES (2, 'two'), (3, 'three')" |]
+          Steps =
+            [| Contract.preparedExecute "prepared-insert" "INSERT INTO contract_dml_target VALUES (?, ?)" [| box 1; box "one" |]
+               Contract.preparedExecute
+                   "prepared-insert-select"
+                   "INSERT INTO contract_dml_target SELECT id, label FROM contract_dml_source WHERE id = ?"
+                   [| box 2 |]
+               Contract.preparedExecute
+                   "prepared-update"
+                   "UPDATE contract_dml_target SET label = ? WHERE id = ?"
+                   [| box "ONE"; box 1 |]
+               Contract.preparedExecute "prepared-replace" "REPLACE INTO contract_dml_target VALUES (?, ?)" [| box 1; box "replaced" |]
+               Contract.preparedExecute
+                   "prepared-replace-select"
+                   "REPLACE INTO contract_dml_target SELECT id, label FROM contract_dml_source WHERE id = ?"
+                   [| box 3 |]
+               Contract.query "prepared-dml-state" "SELECT id, label FROM contract_dml_target ORDER BY id"
+               Contract.preparedExecute "prepared-delete" "DELETE FROM contract_dml_target WHERE id = ?" [| box 2 |]
+               Contract.preparedQuery "prepared-dml-final" "SELECT id, label FROM contract_dml_target WHERE id >= ? ORDER BY id" [| box 1 |] |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_dml_target"; "DROP TABLE IF EXISTS contract_dml_source" |]
+          Coverage =
+            [| for statement in [ "insert"; "insert_select"; "update"; "replace"; "replace_select"; "delete" ] do
+                   yield "statement:" + statement, [| "prepared-protocol" |] |] }
+
     let private implicitCommit =
         { Name = "implicit-ddl-commit"
           Setup = [| "DROP TABLE IF EXISTS contract_commit"; "DROP TABLE IF EXISTS contract_ddl"; "CREATE TABLE contract_commit (id INT PRIMARY KEY)" |]
@@ -323,16 +360,51 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS contract_lock" |]
           Coverage = [| "statement:update", [| "concurrency" |]; "statement:select", [| "concurrency" |] |] }
 
+    let private contendedDeleteAndInsert =
+        { Name = "contended-delete-and-insert"
+          Setup =
+            [| "DROP TABLE IF EXISTS contract_lock_mix"
+               "CREATE TABLE contract_lock_mix (id INT PRIMARY KEY, n INT NOT NULL)"
+               "INSERT INTO contract_lock_mix VALUES (1, 10)" |]
+          Steps =
+            [| Contract.execute "delete-owner-begin" "START TRANSACTION" |> Contract.on "delete-owner"
+               Contract.execute "delete-owner-lock" "UPDATE contract_lock_mix SET n = n + 1 WHERE id = 1" |> Contract.on "delete-owner"
+               Contract.execute "delete-waiter-begin" "START TRANSACTION" |> Contract.on "delete-waiter"
+               Contract.execute "delete-waits" "DELETE FROM contract_lock_mix WHERE id = 1"
+               |> Contract.on "delete-waiter"
+               |> Contract.send "blocked-delete"
+               Contract.awaitPending "delete-is-blocked" "blocked-delete"
+               Contract.execute "delete-owner-commit" "COMMIT" |> Contract.on "delete-owner"
+               Contract.reap "delete-completes" "delete-waiter" "blocked-delete" OracleSuccess
+               Contract.execute "delete-waiter-commit" "COMMIT" |> Contract.on "delete-waiter"
+               Contract.execute "insert-owner-begin" "START TRANSACTION" |> Contract.on "insert-owner"
+               Contract.execute "insert-owner-reserves-key" "INSERT INTO contract_lock_mix VALUES (2, 20)" |> Contract.on "insert-owner"
+               Contract.execute "insert-waiter-begin" "START TRANSACTION" |> Contract.on "insert-waiter"
+               Contract.execute "insert-waits" "INSERT INTO contract_lock_mix VALUES (2, 21)"
+               |> Contract.on "insert-waiter"
+               |> Contract.send "blocked-insert"
+               Contract.awaitPending "insert-is-blocked" "blocked-insert"
+               Contract.execute "insert-owner-rolls-back" "ROLLBACK" |> Contract.on "insert-owner"
+               Contract.reap "insert-completes" "insert-waiter" "blocked-insert" OracleSuccess
+               Contract.execute "insert-waiter-commit" "COMMIT" |> Contract.on "insert-waiter"
+               Contract.query "contended-mixed-state" "SELECT id, n FROM contract_lock_mix ORDER BY id" |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_lock_mix" |]
+          Coverage =
+            [| "statement:delete", [| "concurrency" |]
+               "statement:insert", [| "concurrency" |] |] }
+
     let all =
         [| comments
            exactErrors
            semanticErrors
            prepared
+           preparedDml
            columnTypes
            preparedInvalidation
            implicitCommit
            concurrentSessions
-           contendedSchedule |]
+           contendedSchedule
+           contendedDeleteAndInsert |]
 
     let coverage = all |> Array.collect _.Coverage
 
