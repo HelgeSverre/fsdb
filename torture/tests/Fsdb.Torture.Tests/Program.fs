@@ -637,6 +637,32 @@ let tests =
                         "a rejected baseline is a feature gap" ]
 
           testList
+              "Capability coverage"
+              [ testCase "discovers runtime capabilities without hand-maintained totals"
+                <| fun _ ->
+                    let manifest = Coverage.create ()
+                    let capabilities = manifest.Capabilities |> Array.map _.Id |> Set.ofArray
+
+                    for capability in
+                        [ "statement:select"
+                          "statement:insert_select"
+                          "column-type:t_time"
+                          "column-type:t_vector"
+                          "function:json_extract"
+                          "function:st_intersects" ] do
+                        Expect.contains capabilities capability capability
+
+                    Expect.equal capabilities.Count manifest.Capabilities.Length "capability ids are unique"
+
+                testCase "reports evidence and missing axes separately"
+                <| fun _ ->
+                    let manifest = Coverage.create ()
+                    let select = manifest.Capabilities |> Array.find (fun capability -> capability.Id = "statement:select")
+                    Expect.contains select.ApplicableAxes "parser" "parser applies"
+                    Expect.isTrue (select.Evidence |> Array.exists (fun item -> item.Axis = "parser")) "syntax baseline is evidence"
+                    Expect.contains select.MissingAxes "prepared-protocol" "unproven axes remain visible" ]
+
+          testList
               "Catalog invariants"
               [ testCase "accepts a valid primary key and auto-id"
                 <| fun _ ->

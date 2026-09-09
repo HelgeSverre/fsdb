@@ -23,6 +23,7 @@ they are understood and minimized.
 - [Cross-database concurrency](#cross-database-concurrency)
 - [Crash recovery](#crash-recovery)
 - [Syntax mutation](#syntax-mutation)
+- [Capability coverage](#capability-coverage)
 - [Scale and toolchain](#scale-and-toolchain)
 - [Scenarios](#scenarios)
 - [Artifacts and classification](#artifacts-and-classification)
@@ -48,6 +49,7 @@ The command selects one independent lane:
 |---|---|---|
 | `suite` / `run` | Generated schema, data, queries, and final state | MySQL 8.4 |
 | `syntax` | Valid baselines plus bounded syntax and comment mutations | MySQL 8.4 |
+| `coverage` | Generated inventory of capabilities and unexercised test axes | Source and executable corpus |
 | `concurrency` | Contended prepared transactions and fault schedules | MySQL 8.4 plus deterministic invariants |
 | `multidb` | Isolation and scaling across independent databases | MySQL 8.4 plus a single-database fsdb baseline |
 | `durability` | Crash, WAL-tail, and snapshot recovery | Acknowledged/ambiguous commit sets |
@@ -182,6 +184,20 @@ operations.
 A baseline-only run is an executable feature inventory. Any disagreement still
 becomes a finding; a deliberate refusal counts as expected only when its exact
 signature is present in the hand-reviewed known-gap ledger.
+
+## Capability coverage
+
+Generate a machine-readable inventory without starting either database:
+
+```bash
+./scripts/run.sh coverage
+```
+
+The report discovers statement and column-type union cases, registered scalar
+and aggregate functions, and advertised protocol capabilities from the current
+checkout. It relates those capabilities to evidence in the executable torture
+corpus and leaves every unexercised applicable axis visible in `coverage.json`.
+It is an inventory, not a claim that one example exhausts a feature's behavior.
 
 ## Scale and toolchain
 

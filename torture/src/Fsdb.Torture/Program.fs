@@ -10,6 +10,7 @@ type private Command =
     | MultiDb
     | Durability
     | Syntax
+    | Coverage
     | Replay
     | CheckTools
     | Help
@@ -51,6 +52,7 @@ Usage:
   fsdb-torture multidb [options]
   fsdb-torture durability [options]
   fsdb-torture syntax [options]
+  fsdb-torture coverage [options]
   fsdb-torture replay --case <artifact-directory> [options]
   fsdb-torture check-tools [--sql-splitter <path>]
 
@@ -111,6 +113,7 @@ Options:
             | Some "multidb" -> MultiDb, 1
             | Some "durability" -> Durability, 1
             | Some "syntax" -> Syntax, 1
+            | Some "coverage" -> Coverage, 1
             | Some "replay" -> Replay, 1
             | Some "check-tools" -> CheckTools, 1
             | Some "--help"
@@ -477,6 +480,15 @@ module Program =
             printfn "  detail: %s" report.ClassificationDetail
             printfn "  signature: %s" report.FailureSignature
 
+    let private printCoverage (report: CoverageManifest) directory =
+        printfn "capability coverage — %s" directory
+
+        for area, discovered, complete in Coverage.summary report do
+            printfn "  %s: %d discovered, %d cover every applicable axis" area discovered complete
+
+        let missing = report.Capabilities |> Array.filter (fun capability -> not (Array.isEmpty capability.MissingAxes))
+        printfn "  inspect coverage.json for %d capabilities with unexercised axes" missing.Length
+
     let private printDurability (report: DurabilityManifest) directory =
         printfn "%s: %s — %s" report.CaseId report.Classification directory
         printfn
@@ -508,6 +520,11 @@ module Program =
                 return 1
             | Ok cli when cli.Command = Help ->
                 printf "%s" Cli.usage
+                return 0
+            | Ok cli when cli.Command = Coverage ->
+                let directory = Path.Combine(cli.Artifacts, Paths.uniqueRunId (), "coverage")
+                let report = Coverage.write directory
+                printCoverage report directory
                 return 0
             | Ok cli when cli.Command = Concurrency ->
                 try
