@@ -4857,6 +4857,7 @@ let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry
 
 type EqualityIndexMatchLookup =
     { CandidateCount: int
+      CandidateRowIds: Lazy<Set<RowId>>
       CandidateRows: (RowId * Value[]) seq }
 
 let internal tryEqualityLookupForMatch
@@ -4866,15 +4867,17 @@ let internal tryEqualityLookupForMatch
     (values: Value list)
     : EqualityIndexMatchLookup option =
     if matched.UsesFullKey then
-        equalityLookupRows store table matched.Index StoredValues values
-        |> Option.map (fun rows ->
-            { CandidateCount = rows.Length
-              CandidateRows = rows })
+        equalityLookupRowIds store table matched.Index StoredValues values
+        |> Option.map (fun rowIds ->
+            { CandidateCount = rowIds.Count
+              CandidateRowIds = lazy rowIds
+              CandidateRows = rowIds |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)) })
     elif values.Length <> matched.KeyColumnCount then
         None
     elif values |> List.contains VNull then
         Some
             { CandidateCount = 0
+              CandidateRowIds = lazy Set.empty
               CandidateRows = Seq.empty }
     else
         List.zip3 matched.ColumnIndices matched.PrefixLengths matched.Transforms
@@ -4898,10 +4901,12 @@ let internal tryEqualityLookupForMatch
             |> Option.map (fun entries ->
                 let first, afterLast = orderedPrefixBounds entries prefix
                 let count = afterLast - first
+                let candidates = Seq.init count (fun offset -> entries.[first + offset])
 
                 { CandidateCount = count
+                  CandidateRowIds = lazy (candidates |> Seq.map _.RowId |> Set.ofSeq)
                   CandidateRows =
-                    Seq.init count (fun offset -> entries.[first + offset])
+                    candidates
                     |> Seq.choose (fun entry ->
                         table.RowsArray.TryFind entry.RowId
                         |> Option.map (fun row -> entry.RowId, row)) }))
@@ -5037,6 +5042,7 @@ type RangeLookup =
       RangeColumns: ColumnDef list
       RangeRowCount: int
       TableRowCount: int
+      RangeRowIds: Lazy<Set<RowId>>
       RangeRows: Lazy<(RowId * Value[]) list> }
 
 let internal trySecondaryRangeLookupInTable
@@ -5052,12 +5058,13 @@ let internal trySecondaryRangeLookupInTable
         | [ columnIndex ], [ prefixLength ] ->
             let count = max 0 (slice.AfterLast - slice.First)
 
-            let rows =
+            let rowIds =
                 lazy
-                    (Seq.init count (fun offset -> slice.Entries.[slice.First + offset])
-                     |> Seq.sortBy (fun entry -> RowId.value entry.RowId)
-                     |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
-                     |> List.ofSeq)
+                    (Seq.init count (fun offset -> slice.Entries.[slice.First + offset].RowId)
+                     |> Set.ofSeq)
+
+            let rows =
+                lazy (rowsForRowIds table rowIds.Value)
 
             Some
                 { RangeIndexName = slice.IndexName
@@ -5066,6 +5073,7 @@ let internal trySecondaryRangeLookupInTable
                   RangeColumns = table.Columns
                   RangeRowCount = count
                   TableRowCount = table.RowsArray.Count
+                  RangeRowIds = rowIds
                   RangeRows = rows }
         | _ -> None)
 

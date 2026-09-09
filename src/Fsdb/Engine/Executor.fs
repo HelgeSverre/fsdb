@@ -126,7 +126,8 @@ type private EqualityAccessPlan =
       Columns: ColumnDef list
       Unique: bool
       UsesFullKey: bool
-      CandidateRowIds: Set<RowId>
+      CandidateCount: int
+      CandidateRowIds: Lazy<Set<RowId>>
       TableRowCount: int
       Rows: Lazy<(RowId * Value[]) list> }
 
@@ -148,14 +149,15 @@ type private PhysicalAccessPlan =
     | RangeAccess of Storage.RangeLookup
     | IndexMergeAccess of IndexMergeAccessPlan
 
-let private equalityAccessPlan (table: Table) (index: EqualityIndex) rowIds =
+let private equalityAccessPlan (table: Table) (index: EqualityIndex) (rowIds: Set<RowId>) =
     { KeyName = index.Name
       ColumnIndices = index.ColumnIndices
       PrefixLengths = index.PrefixLengths
       Columns = table.Columns
       Unique = index.Unique
       UsesFullKey = true
-      CandidateRowIds = rowIds
+      CandidateCount = rowIds.Count
+      CandidateRowIds = lazy rowIds
       TableRowCount = table.RowsArray.Count
       Rows = lazy (Storage.rowsForRowIds table rowIds) }
 
@@ -163,7 +165,7 @@ let private isUsefulEqualityCardinality tableRows candidateRows =
     QueryPlanner.chooseEquality tableRows candidateRows = QueryPlanner.IndexLookup
 
 let private isUsefulEqualityAccess (plan: EqualityAccessPlan) =
-    isUsefulEqualityCardinality plan.TableRowCount plan.CandidateRowIds.Count
+    isUsefulEqualityCardinality plan.TableRowCount plan.CandidateCount
 
 type private IndexAccessPolicy =
     | CostedRead
@@ -183,8 +185,6 @@ let private equalityAccessPlanForMatch
     match policy with
     | CostedRead when not (isUsefulEqualityCardinality table.RowsArray.Count lookup.CandidateCount) -> None
     | _ ->
-        let rows = lookup.CandidateRows |> List.ofSeq
-
         Some
             { KeyName = matched.Name
               ColumnIndices = matched.ColumnIndices
@@ -192,9 +192,10 @@ let private equalityAccessPlanForMatch
               Columns = table.Columns
               Unique = matched.Unique
               UsesFullKey = matched.UsesFullKey
-              CandidateRowIds = rows |> List.map fst |> Set.ofList
+              CandidateCount = lookup.CandidateCount
+              CandidateRowIds = lookup.CandidateRowIds
               TableRowCount = table.RowsArray.Count
-              Rows = lazy rows }
+              Rows = lazy (lookup.CandidateRows |> List.ofSeq) }
 
 type private PointEquality =
     { Column: string
@@ -10606,7 +10607,7 @@ and private trySpatialLookup scope store dbName tref whereExpr =
 
 and private physicalAccessCandidateCount = function
     | EqualityAccess plan
-    | MembershipAccess plan -> plan.CandidateRowIds.Count
+    | MembershipAccess plan -> plan.CandidateCount
     | SpatialAccess plan -> plan.SpatialRows.Length
     | RangeAccess plan -> plan.RangeRowCount
     | IndexMergeAccess plan -> plan.CandidateRowIds.Count
@@ -10627,9 +10628,9 @@ and private physicalAccessRows = function
 
 and private physicalAccessRowIds = function
     | EqualityAccess plan
-    | MembershipAccess plan -> plan.CandidateRowIds
+    | MembershipAccess plan -> plan.CandidateRowIds.Value
     | SpatialAccess plan -> plan.SpatialRows |> List.map fst |> Set.ofList
-    | RangeAccess plan -> plan.RangeRows.Value |> List.map fst |> Set.ofList
+    | RangeAccess plan -> plan.RangeRowIds.Value
     | IndexMergeAccess plan -> plan.CandidateRowIds
 
 and private physicalAccessKeyNames = function
@@ -15646,7 +15647,7 @@ let rec private explainJoinBlock
 
         let emitAccess access =
             match access with
-            | EqualityAccess plan when plan.Unique && plan.CandidateRowIds.IsEmpty ->
+            | EqualityAccess plan when plan.Unique && plan.CandidateCount = 0 ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
@@ -15664,7 +15665,7 @@ let rec private explainJoinBlock
                       Type = Some(if plan.Unique then "const" else "ref")
                       Key = explainKey plan.KeyName (explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
                       Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
-                      Rows = Some(uint64 plan.CandidateRowIds.Count)
+                      Rows = Some(uint64 plan.CandidateCount)
                       Extra = if plan.Unique then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
             | MembershipAccess plan ->
                 acc.Add
@@ -15674,7 +15675,7 @@ let rec private explainJoinBlock
                       Type = Some "range"
                       Key = explainKey plan.KeyName (explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
                       Ref = None
-                      Rows = Some(uint64 plan.CandidateRowIds.Count)
+                      Rows = Some(uint64 plan.CandidateCount)
                       Extra = accessExtra }
             | SpatialAccess plan ->
                 acc.Add
