@@ -210,12 +210,12 @@ contracts compare affected rows. Before and after fingerprints ensure cleanup
 restores tables, views, triggers, routines, and events; the temporary oracle
 database is removed when the lane finishes.
 
-The initial contracts cover comment and precedence boundaries, parser errors,
-typed prepared parameters, prepared-handle invalidation across DDL, implicit
-DDL commit behavior, SQLSTATE-sensitive semantic errors, independent writers,
-and a contended row-lock schedule. Add compact regressions here when a behavior
-spans protocol or session state; keep isolated parser or executor regressions
-in Expecto.
+The contracts cover comment and precedence boundaries, parser errors, every
+MySQL 8.4 column family over text and prepared results, prepared DML and handle
+invalidation across DDL, implicit DDL commit behavior, SQLSTATE-sensitive
+semantic errors, independent writers, and contended update/delete/insert lock
+schedules. Add compact regressions here when behavior spans protocol or session
+state; keep isolated parser or executor regressions in Expecto.
 
 ## Wire mutation
 
