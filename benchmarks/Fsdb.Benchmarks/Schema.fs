@@ -73,7 +73,8 @@ let createSchema (conn: MySqlConnection) =
             created_at DATETIME NOT NULL,
             sort_key INT NOT NULL DEFAULT 0,
             KEY ix_users_age (age),
-            KEY ix_users_sort_key (sort_key)
+            KEY ix_users_sort_key (sort_key),
+            KEY ix_users_normalized_name ((UPPER(TRIM(name))))
         )
         """
 
