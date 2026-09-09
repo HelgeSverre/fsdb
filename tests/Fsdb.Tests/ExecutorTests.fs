@@ -6274,6 +6274,30 @@ let tests =
                     Expect.equal plan.Key (Some "ix_age,ix_sort_key") "EXPLAIN lists each intersected index"
                     Expect.equal plan.EstimatedRows (Some "6") "the estimate counts the intersected candidates"
 
+                    let unionOfIntersection =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM intersected WHERE (age = 30 AND sort_key BETWEEN 35 AND 45) OR id = 100"
+                        |> explainRow
+
+                    Expect.equal unionOfIntersection.AccessType (Some "index_merge") "a union can consume an intersected branch"
+
+                    Expect.equal
+                        unionOfIntersection.Key
+                        (Some "ix_age,ix_sort_key,PRIMARY")
+                        "nested merge keys retain expression order"
+
+                    Expect.equal unionOfIntersection.EstimatedRows (Some "7") "nested merge rows remain deduplicated"
+
+                    let intersectionOfUnion =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM intersected WHERE (age = 30 OR id = 100) AND sort_key BETWEEN 35 AND 100"
+                        |> explainRow
+
+                    Expect.equal intersectionOfUnion.AccessType (Some "index_merge") "an intersection can consume a union branch"
+                    Expect.equal intersectionOfUnion.EstimatedRows (Some "7") "the nested intersection retains only common rows"
+
                     runDefault store "CREATE TABLE anchor (id INT PRIMARY KEY)" |> ignore
                     runDefault store "INSERT INTO anchor VALUES (1)" |> ignore
 
