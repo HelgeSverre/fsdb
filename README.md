@@ -341,7 +341,10 @@ different access pattern:
   once per statement, so a scan fallback does not repeat the entire list
   comparison for every row. When equality, membership, spatial, and range
   predicates offer competing physical paths, the smallest observed candidate
-  set wins. Reads, mutations, locking reads, and `EXPLAIN` share that choice.
+  set wins. Fully indexable `OR` branches union and deduplicate those candidates;
+  if any branch lacks a safe physical superset, the whole disjunction retains
+  the scan path. Reads, mutations, locking reads, and `EXPLAIN` share those
+  choices.
 
 - **Ordering.** Compatible `ORDER BY` operations stream a left index prefix, or
   a suffix whose earlier keys are fixed by exact equalities. Literal bounds on

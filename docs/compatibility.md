@@ -75,7 +75,9 @@ comparison ranges, `BETWEEN`, ordering, and mutation paths. Overridden host
 functions must remain on the ordinary execution path and are never invoked
 while a plan is selected. Competing equality, membership, spatial, and range
 paths are also checked for one shared cardinality choice across SELECT, DML,
-locking reads, join-source narrowing, and `EXPLAIN`.
+locking reads, join-source narrowing, and `EXPLAIN`. Fully covered `OR`
+predicates additionally verify deduplicated equality, membership, range, and
+spatial unions, including a scan fallback when any branch is uncovered.
 
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and

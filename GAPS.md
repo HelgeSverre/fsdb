@@ -149,6 +149,8 @@ or row-value membership, direct numeric ranges, and `BETWEEN`. Their observed
 candidate count chooses between the index slice and a row-store scan. When
 several supported access families apply, the narrowest observed candidate set
 is used consistently by reads, mutations, locking reads, and `EXPLAIN`.
+Fully covered `OR` branches union their equality, membership, range, or spatial
+candidates. One uncovered branch keeps the whole disjunction on the scan path.
 Compatible `ORDER BY` suffixes continue streaming the same composite slice
 rather than sorting the narrowed rows again.
 
@@ -175,9 +177,9 @@ or locking retain the general SELECT pipeline.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, and grouping shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
-| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; competing equality, membership, spatial, and range families choose the smallest observed candidate set, while general expression folding, index merge, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
-| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
+| Secondary-index access paths | ref/eq_ref/range/index-merge scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, grouping, and fully covered OR-union shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
+| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; competing equality, membership, spatial, and range families choose the smallest observed candidate set, and fully covered OR groups use index union; general expression folding, index intersection, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
+| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/index_merge/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings, index unions, and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | sql_mode | MySQL 8.4 modes affect parsing and execution | recognized modes are validated, deduplicated, expanded, and reported in MySQL order; every accepted mode has its relevant parser or execution effect except `NO_DIR_IN_CREATE`, which is reporting-only because DATA/INDEX DIRECTORY table options are unsupported | low | divergence |
@@ -616,6 +618,13 @@ an equality bucket and a single-row range that both satisfy one predicate. The
 planner selects the narrower physical family consistently; the recorded short
 run is effectively flat because parsing and wire overhead dominate this small
 candidate difference.
+
+The [indexed-disjunction profile](benchmarks/results/ba86713-quick.md) pairs a
+fully covered equality-or-range union with an expression-forced scan. On the
+recorded corpus, fsdb's union is an order of magnitude faster than its scan and
+within the same latency order as MySQL's indexed path. This removes the
+table-size cliff while leaving planner setup as the next constant-factor
+target.
 
 The engine already avoids several earlier cliffs:
 
