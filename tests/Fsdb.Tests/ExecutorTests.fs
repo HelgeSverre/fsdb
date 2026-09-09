@@ -6120,6 +6120,74 @@ let tests =
 
                     Expect.isLessThan calls 4 "DELETE resolves only the narrowest index candidates"
 
+                testCase "fully indexed disjunctions union their physical candidates"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE unioned (id INT PRIMARY KEY, age INT, sort_key INT, touched INT, KEY ix_age (age), KEY ix_sort_key (sort_key))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, age INT, sort_key INT, touched INT)"
+                    |> ignore
+
+                    let values =
+                        [ for id in 1..100 -> sprintf "(%d, %d, %d, 0)" id (if id <= 20 then 30 else 40) id ]
+                        |> String.concat ", "
+
+                    runDefault store $"INSERT INTO unioned VALUES {values}" |> ignore
+                    runDefault store $"INSERT INTO scanned VALUES {values}" |> ignore
+
+                    let rows table predicate =
+                        match runDefault store $"SELECT id FROM {table} WHERE {predicate}" with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected disjunctive rows from %s, got %A" table other
+
+                    let predicate = "age = 30 OR sort_key BETWEEN 90 AND 92"
+
+                    Expect.equal
+                        (rows "unioned" predicate)
+                        (rows "scanned" predicate)
+                        "the candidate union retains row-store order and final predicate semantics"
+
+                    let plan = runDefault store $"EXPLAIN SELECT id FROM unioned WHERE {predicate}" |> explainRow
+                    Expect.equal plan.AccessType (Some "index_merge") "compatible OR branches use an index union"
+                    Expect.equal plan.Key (Some "ix_age,ix_sort_key") "EXPLAIN lists each contributing index"
+                    Expect.equal plan.EstimatedRows (Some "23") "the estimate counts the deduplicated candidate union"
+
+                    let overlapping =
+                        runDefault store "EXPLAIN SELECT id FROM unioned WHERE age = 30 OR sort_key BETWEEN 10 AND 12"
+                        |> explainRow
+
+                    Expect.equal overlapping.EstimatedRows (Some "20") "rows found by both branches are counted once"
+
+                    let partial =
+                        runDefault store "EXPLAIN SELECT id FROM unioned WHERE age = 30 OR touched + 0 = 1"
+                        |> explainRow
+
+                    Expect.equal partial.AccessType (Some "ALL") "one unindexable OR branch keeps the safe scan path"
+
+                    let updateSql table = $"UPDATE {table} SET touched = 1 WHERE {predicate}"
+                    let unionedUpdate = updateSql "unioned"
+                    let updatePlan = runDefault store $"EXPLAIN {unionedUpdate}" |> explainRow
+                    Expect.equal updatePlan.AccessType (Some "index_merge") "UPDATE uses the complete candidate union"
+
+                    Expect.equal
+                        (runDefault store unionedUpdate)
+                        (runDefault store (updateSql "scanned"))
+                        "index-union UPDATE matches its scan twin"
+
+                    let deleteSql table = $"DELETE FROM {table} WHERE touched = 1 AND ({predicate})"
+                    let unionedDelete = deleteSql "unioned"
+                    let deletePlan = runDefault store $"EXPLAIN {unionedDelete}" |> explainRow
+                    Expect.equal deletePlan.AccessType (Some "index_merge") "DELETE uses the disjunctive candidate union"
+
+                    Expect.equal
+                        (runDefault store unionedDelete)
+                        (runDefault store (deleteSql "scanned"))
+                        "index-union DELETE matches its scan twin"
+
                 testCase "equality planning avoids broad index bucket unions"
                 <| fun _ ->
                     let store = newStore ()
