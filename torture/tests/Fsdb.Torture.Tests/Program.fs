@@ -519,6 +519,8 @@ let tests =
                           "collation_join"
                           "low_cardinality_join"
                           "constant_expression_lookup"
+                          "constant_expression_membership"
+                          "constant_expression_range"
                           "allow_invalid_dates" ] do
                         Expect.contains features feature feature
 

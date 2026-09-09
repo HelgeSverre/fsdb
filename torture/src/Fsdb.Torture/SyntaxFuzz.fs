@@ -73,6 +73,8 @@ module SyntaxFuzz =
            "low_cardinality_join", "SELECT COUNT(*) FROM syntax_target AS l JOIN syntax_target AS r ON r.n = l.n"
            "joined_source_filter", "SELECT COUNT(*) FROM syntax_target AS l JOIN syntax_target AS r ON r.n = l.n WHERE r.id <= 2"
            "constant_expression_lookup", "SELECT id, n FROM syntax_target WHERE id = 1 + 0 AND n = ABS(-10)"
+           "constant_expression_membership", "SELECT id, n FROM syntax_target WHERE id IN (0 + 1, ABS(-99))"
+           "constant_expression_range", "SELECT id, n FROM syntax_target WHERE n >= 5 + 5 AND n < ABS(-11)"
            "straight_join",
            "SELECT STRAIGHT_JOIN t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1"
            "correlated_index", "SELECT t.id, (SELECT COUNT(*) FROM syntax_source AS s WHERE s.n = t.n) FROM syntax_target AS t"
