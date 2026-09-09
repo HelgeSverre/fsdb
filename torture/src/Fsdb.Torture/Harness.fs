@@ -571,6 +571,14 @@ module Database =
                     return Ok builder.ConnectionString
         }
 
+    let dropOracleDatabase baseConnectionString databaseName timeoutSeconds =
+        task {
+            let builder = MySqlConnectionStringBuilder(baseConnectionString)
+            builder.Database <- ""
+            use! admin = openConnection builder.ConnectionString
+            return! execute "mysql" admin timeoutSeconds (sprintf "DROP DATABASE IF EXISTS %s" (quoteIdentifier databaseName))
+        }
+
     let scalarString (connection: MySqlConnection) timeoutSeconds sql =
         task {
             use command = connection.CreateCommand()

@@ -70,6 +70,9 @@ type ContractStepRecord =
 type ContractCaseRecord =
     { Name: string
       Steps: ContractStepRecord array
+      MySqlStateRestored: bool
+      FsdbStateRestored: bool
+      StateDetail: string
       Passed: bool }
 
 [<CLIMutable>]
@@ -324,6 +327,27 @@ module CompatibilityRunner =
         | InvokeHandle _
         | CloseHandle _ -> ""
 
+    let private stateQueries =
+        [| "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME"
+           "SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() ORDER BY TRIGGER_NAME"
+           "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = DATABASE() ORDER BY ROUTINE_NAME"
+           "SELECT EVENT_NAME, STATUS FROM information_schema.EVENTS WHERE EVENT_SCHEMA = DATABASE() ORDER BY EVENT_NAME" |]
+
+    let private stateFingerprint target timeoutSeconds connection =
+        task {
+            let parts = ResizeArray<string>()
+
+            for sql in stateQueries do
+                let! outcome = Database.query target connection timeoutSeconds sql
+
+                if not (ProbeOutcome.succeeded outcome) then
+                    failwithf "%s state probe failed: %s" target outcome.Message
+
+                parts.Add outcome.DataSha256
+
+            return Hashing.combine parts
+        }
+
     let private runTarget target connectionString timeoutSeconds (case: ContractCase) =
         task {
             let connections = Dictionary<string, MySqlConnection>(StringComparer.Ordinal)
@@ -344,6 +368,7 @@ module CompatibilityRunner =
 
             try
                 let! setup = getConnection "main"
+                let! stateBefore = stateFingerprint target timeoutSeconds setup
 
                 for sql in case.Setup do
                     let! outcome = Database.execute target setup timeoutSeconds sql
@@ -430,7 +455,8 @@ module CompatibilityRunner =
                     if not (TargetOutcome.succeeded outcome) then
                         failwithf "%s cleanup failed for %s: %s" target case.Name outcome.Message
 
-                return outcomes.ToArray()
+                let! stateAfter = stateFingerprint target timeoutSeconds cleanup
+                return outcomes.ToArray(), stateBefore = stateAfter
             finally
                 for handle in prepared.Values do
                     handle.Command.Dispose()
@@ -488,8 +514,8 @@ module CompatibilityRunner =
 
     let private runCase mysqlConnection fsdbConnection timeoutSeconds case =
         task {
-            let! mysql = runTarget "mysql" mysqlConnection timeoutSeconds case
-            let! fsdb = runTarget "fsdb" fsdbConnection timeoutSeconds case
+            let! mysql, mysqlStateRestored = runTarget "mysql" mysqlConnection timeoutSeconds case
+            let! fsdb, fsdbStateRestored = runTarget "fsdb" fsdbConnection timeoutSeconds case
 
             let steps =
                 Array.map3
@@ -509,7 +535,20 @@ module CompatibilityRunner =
                     mysql
                     fsdb
 
-            return { Name = case.Name; Steps = steps; Passed = steps |> Array.forall _.Passed }
+            let stateDetail =
+                match mysqlStateRestored, fsdbStateRestored with
+                | true, true -> "database objects returned to their pre-case state"
+                | false, true -> "MySQL contract cleanup leaked database objects"
+                | true, false -> "fsdb contract cleanup leaked database objects"
+                | false, false -> "both targets leaked database objects"
+
+            return
+                { Name = case.Name
+                  Steps = steps
+                  MySqlStateRestored = mysqlStateRestored
+                  FsdbStateRestored = fsdbStateRestored
+                  StateDetail = stateDetail
+                  Passed = mysqlStateRestored && fsdbStateRestored && (steps |> Array.forall _.Passed) }
         }
 
     let run (options: CompatibilityOptions) =
@@ -537,13 +576,20 @@ module CompatibilityRunner =
                     records.Add record
 
                 let cases = records.ToArray()
-                let firstFailure = cases |> Array.collect _.Steps |> Array.tryFind (fun step -> not step.Passed)
-                let classification = firstFailure |> Option.map _.Classification |> Option.defaultValue "pass"
+                let firstStepFailure = cases |> Array.collect _.Steps |> Array.tryFind (fun step -> not step.Passed)
+                let firstStateFailure = cases |> Array.tryFind (fun case -> not case.MySqlStateRestored || not case.FsdbStateRestored)
+
+                let classification =
+                    match firstStepFailure, firstStateFailure with
+                    | Some failure, _ -> failure.Classification
+                    | None, Some _ -> "state_leak"
+                    | None, None -> "pass"
 
                 let signature =
-                    firstFailure
-                    |> Option.map (fun step -> Hashing.combine [ step.Name; step.Classification; Hashing.text step.Sql; step.Detail ])
-                    |> Option.defaultValue ""
+                    match firstStepFailure, firstStateFailure with
+                    | Some step, _ -> Hashing.combine [ step.Name; step.Classification; Hashing.text step.Sql; step.Detail ]
+                    | None, Some case -> Hashing.combine [ case.Name; "state_leak"; case.StateDetail ]
+                    | None, None -> ""
 
                 let manifest =
                     { SchemaVersion = 1
@@ -557,8 +603,13 @@ module CompatibilityRunner =
                       Cases = cases
                       Classification = classification
                       FailureSignature = signature
-                      Passed = firstFailure.IsNone }
+                      Passed = cases |> Array.forall _.Passed }
 
                 Json.write (Path.Combine(directory, "manifest.json")) manifest
-                return Ok(manifest, directory)
+                let! dropped = Database.dropOracleDatabase options.MySqlConnection databaseName options.TimeoutSeconds
+
+                if not (TargetOutcome.succeeded dropped) then
+                    return Error("could not remove oracle database: " + dropped.Message)
+                else
+                    return Ok(manifest, directory)
         }

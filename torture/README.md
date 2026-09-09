@@ -200,7 +200,9 @@ which named connection owns it, and whether MySQL must succeed or return an
 exact error code and SQLSTATE. `send` and `reap` actions allow overlapping work
 without making wall-clock sleeps part of the expected behavior. Query contracts
 compare names, compatible result types, and ordered typed rows; mutation
-contracts compare affected rows.
+contracts compare affected rows. Before and after fingerprints ensure cleanup
+restores tables, views, triggers, routines, and events; the temporary oracle
+database is removed when the lane finishes.
 
 The initial contracts cover comment and precedence boundaries, parser errors,
 typed prepared parameters, prepared-handle invalidation across DDL, implicit
