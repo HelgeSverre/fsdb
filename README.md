@@ -329,9 +329,10 @@ different access pattern:
   left prefix of a composite B-tree in single-table reads, updates, and
   deletes. Literal probes and conservative row-independent numeric expressions
   use the same lookup path. Scalar and composite-row `IN` lists and direct
-  ranges also accept those safe numeric expressions where the indexed column
-  is numeric. Compatible shapes use maintained indexes, and `EXPLAIN` reports
-  the corresponding `const`, `ref`, or `range` access.
+  comparison ranges and `BETWEEN` also accept those safe numeric expressions
+  where the indexed column is numeric. Compatible shapes use maintained
+  indexes, and `EXPLAIN` reports the corresponding `const`, `ref`, or `range`
+  access.
 
   Candidate cardinalities are checked before row resolution, so broad probes
   fall back to a row-store scan instead of building an all-row union. Folded

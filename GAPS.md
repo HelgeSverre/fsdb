@@ -145,10 +145,10 @@ predicates. `ORDER BY ... LIMIT` uses a bounded top-N sort.
 Direct single-table equality predicates likewise use complete keys or safe
 left prefixes for reads and mutations. Literal probes and conservative
 row-independent numeric expressions share that path across equality, scalar
-or row-value membership, and direct numeric ranges. Their observed candidate
-count chooses between the index slice and a row-store scan. Compatible
-`ORDER BY` suffixes continue streaming the same composite slice rather than
-sorting the narrowed rows again.
+or row-value membership, direct numeric ranges, and `BETWEEN`. Their observed
+candidate count chooses between the index slice and a row-store scan.
+Compatible `ORDER BY` suffixes continue streaming the same composite slice
+rather than sorting the narrowed rows again.
 
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
@@ -601,6 +601,12 @@ The follow-up membership-and-range pair records the
 [indexed implementation](benchmarks/results/e1c2bbe-quick.md). It applies the
 same conservative evaluator to scalar and row-value `IN`, numeric range bounds,
 and compatible ordered composite suffixes.
+
+The `BETWEEN` pair records the
+[scan baseline](benchmarks/results/c54f2f0-quick.md) and the
+[indexed implementation](benchmarks/results/89b9846-quick.md). Inclusive
+literal and safe numeric-expression bounds now use the same range path in
+reads, mutations, correlated probes, and compatible ordered composite suffixes.
 
 The engine already avoids several earlier cliffs:
 

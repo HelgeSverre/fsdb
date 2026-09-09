@@ -208,7 +208,9 @@ runs:
   [indexed implementation](results/ede0c8e-quick.md);
 - constant membership and range probes: the
   [scan baseline](results/36b0fa8-quick.md) and
-  [indexed implementation](results/e1c2bbe-quick.md).
+  [indexed implementation](results/e1c2bbe-quick.md);
+- indexed `BETWEEN`: the [scan baseline](results/c54f2f0-quick.md) and
+  [indexed implementation](results/89b9846-quick.md).
 
 These reports explain a measured revision pair. They do not replace the live
 compatibility and performance boundaries in [GAPS.md](../GAPS.md).
