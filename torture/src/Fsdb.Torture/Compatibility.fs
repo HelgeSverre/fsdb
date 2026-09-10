@@ -350,7 +350,7 @@ module ContractCatalog =
 
         let nullValue = box DBNull.Value
 
-        let specs =
+        let establishedSpecs =
             [| spec
                    "aes-roundtrip"
                    [| "AES_ENCRYPT"; "AES_DECRYPT" |]
@@ -503,6 +503,201 @@ module ContractCatalog =
                    [||]
                    None
                    [||] |]
+
+        let stringSpecs =
+            [| spec
+                   "string-case-and-length"
+                   [| "UPPER"; "LOWER"; "LENGTH"; "CHAR_LENGTH" |]
+                   "UPPER('Abc'), LOWER('AbC'), LENGTH('blå'), CHAR_LENGTH('blå')"
+                   "UPPER(?), LOWER(?), LENGTH(?), CHAR_LENGTH(?)"
+                   [| box "Abc"; box "AbC"; box "blå"; box "blå" |]
+                   (Some(
+                       [| "UPPER"; "LOWER"; "LENGTH"; "CHAR_LENGTH" |],
+                       "UPPER(?), LOWER(?), LENGTH(?), CHAR_LENGTH(?)",
+                       [| nullValue; nullValue; nullValue; nullValue |]
+                   ))
+                   [| "UPPER", "UPPER()"
+                      "LOWER", "LOWER()"
+                      "LENGTH", "LENGTH()"
+                      "CHAR_LENGTH", "CHAR_LENGTH()" |]
+               spec
+                   "string-byte-functions"
+                   [| "ASCII"; "ORD"; "HEX"; "UNHEX"; "MD5"; "SHA1"; "SHA2"; "TO_BASE64"; "FROM_BASE64" |]
+                   "ASCII('A'), ORD('Å'), HEX('A'), UNHEX('41'), MD5('abc'), SHA1('abc'), SHA2('abc', 256), TO_BASE64('abc'), FROM_BASE64('YWJj')"
+                   "ASCII(?), ORD(?), HEX(?), UNHEX(?), MD5(?), SHA1(?), SHA2(?, ?), TO_BASE64(?), FROM_BASE64(?)"
+                   [| box "A"
+                      box "Å"
+                      box "A"
+                      box "41"
+                      box "abc"
+                      box "abc"
+                      box "abc"
+                      box 256
+                      box "abc"
+                      box "YWJj" |]
+                   (Some(
+                       [| "ASCII"; "ORD"; "HEX"; "UNHEX"; "MD5"; "SHA1"; "SHA2"; "TO_BASE64"; "FROM_BASE64" |],
+                       "ASCII(?), ORD(?), HEX(?), UNHEX(?), MD5(?), SHA1(?), SHA2(?, 256), TO_BASE64(?), FROM_BASE64(?)",
+                       [| nullValue
+                          nullValue
+                          nullValue
+                          nullValue
+                          nullValue
+                          nullValue
+                          nullValue
+                          nullValue
+                          nullValue |]
+                   ))
+                   [| "ORD", "ORD()"
+                      "HEX", "HEX()"
+                      "UNHEX", "UNHEX()"
+                      "MD5", "MD5()"
+                      "SHA1", "SHA1()"
+                      "SHA2", "SHA2('abc')"
+                      "TO_BASE64", "TO_BASE64()"
+                      "FROM_BASE64", "FROM_BASE64()" |]
+               spec
+                   "string-slicing-and-search"
+                   [| "LEFT"; "RIGHT"; "SUBSTRING"; "INSTR"; "LOCATE"; "REPLACE"; "SUBSTRING_INDEX" |]
+                   "LEFT('abcd', 2), RIGHT('abcd', 2), SUBSTRING('abcd', 2, 2), INSTR('abcd', 'bc'), LOCATE('bc', 'abcd'), REPLACE('abcd', 'bc', 'X'), SUBSTRING_INDEX('a,b,c', ',', 2)"
+                   "LEFT(?, ?), RIGHT(?, ?), SUBSTRING(?, ?, ?), INSTR(?, ?), LOCATE(?, ?), REPLACE(?, ?, ?), SUBSTRING_INDEX(?, ?, ?)"
+                   [| box "abcd"
+                      box 2
+                      box "abcd"
+                      box 2
+                      box "abcd"
+                      box 2
+                      box 2
+                      box "abcd"
+                      box "bc"
+                      box "bc"
+                      box "abcd"
+                      box "abcd"
+                      box "bc"
+                      box "X"
+                      box "a,b,c"
+                      box ","
+                      box 2 |]
+                   (Some(
+                       [| "LEFT"; "RIGHT"; "SUBSTRING"; "INSTR"; "LOCATE"; "REPLACE"; "SUBSTRING_INDEX" |],
+                       "LEFT(?, 2), RIGHT(?, 2), SUBSTRING(?, 2, 2), INSTR(?, 'b'), LOCATE('b', ?), REPLACE(?, 'b', 'x'), SUBSTRING_INDEX(?, ',', 2)",
+                       [| nullValue; nullValue; nullValue; nullValue; nullValue; nullValue; nullValue |]
+                   ))
+                   [| "INSTR", "INSTR('abc')"
+                      "LOCATE", "LOCATE('a')"
+                      "SUBSTRING_INDEX", "SUBSTRING_INDEX('a,b', ',')" |]
+               spec
+                   "string-padding-and-repeat"
+                   [| "REVERSE"; "REPEAT"; "SPACE"; "LPAD"; "RPAD"; "LTRIM"; "RTRIM" |]
+                   "REVERSE('abc'), REPEAT('ab', 2), SPACE(3), LPAD('a', 3, '0'), RPAD('a', 3, '0'), LTRIM('  a'), RTRIM('a  ')"
+                   "REVERSE(?), REPEAT(?, ?), SPACE(?), LPAD(?, ?, ?), RPAD(?, ?, ?), LTRIM(?), RTRIM(?)"
+                   [| box "abc"
+                      box "ab"
+                      box 2
+                      box 3
+                      box "a"
+                      box 3
+                      box "0"
+                      box "a"
+                      box 3
+                      box "0"
+                      box "  a"
+                      box "a  " |]
+                   (Some(
+                       [| "REVERSE"; "REPEAT"; "SPACE"; "LPAD"; "RPAD"; "LTRIM"; "RTRIM" |],
+                       "REVERSE(?), REPEAT(?, 2), SPACE(?), LPAD(?, 3, '0'), RPAD(?, 3, '0'), LTRIM(?), RTRIM(?)",
+                       [| nullValue; nullValue; nullValue; nullValue; nullValue; nullValue; nullValue |]
+                   ))
+                   [| "SPACE", "SPACE()"
+                      "LPAD", "LPAD('a', 3)"
+                      "RPAD", "RPAD('a', 3)"
+                      "LTRIM", "LTRIM()"
+                      "RTRIM", "RTRIM()" |]
+               spec
+                   "concat-null-contracts"
+                   [| "CONCAT" |]
+                   "CONCAT('a', 'b')"
+                   "CONCAT(?, ?)"
+                   [| box "a"; box "b" |]
+                   (Some([| "CONCAT" |], "CONCAT(?, 'b')", [| nullValue |]))
+                   [| "CONCAT", "CONCAT()" |]
+               spec
+                   "concat-ws-null-contracts"
+                   [| "CONCAT_WS" |]
+                   "CONCAT_WS('-', 'a', 'b')"
+                   "CONCAT_WS(?, ?, ?)"
+                   [| box "-"; box "a"; box "b" |]
+                   (Some([| "CONCAT_WS" |], "CONCAT_WS('-', ?, 'b')", [| nullValue |]))
+                   [| "CONCAT_WS", "CONCAT_WS('-')" |] |]
+
+        let jsonSpecs =
+            [| spec
+                   "json-inspection"
+                   [| "JSON_TYPE"; "JSON_VALID"; "JSON_DEPTH"; "JSON_LENGTH"; "JSON_STORAGE_SIZE"; "JSON_STORAGE_FREE" |]
+                   "JSON_TYPE('{\"a\":[1,2]}'), JSON_VALID('{\"a\":1}'), JSON_DEPTH('{\"a\":[1,2]}'), JSON_LENGTH('{\"a\":[1,2]}'), JSON_STORAGE_SIZE('{\"a\":1}'), JSON_STORAGE_FREE('{\"a\":1}')"
+                   "JSON_TYPE(?), JSON_VALID(?), JSON_DEPTH(?), JSON_LENGTH(?), JSON_STORAGE_SIZE(?), JSON_STORAGE_FREE(?)"
+                   [| box "{\"a\":[1,2]}"
+                      box "{\"a\":1}"
+                      box "{\"a\":[1,2]}"
+                      box "{\"a\":[1,2]}"
+                      box "{\"a\":1}"
+                      box "{\"a\":1}" |]
+                   (Some(
+                       [| "JSON_TYPE"; "JSON_VALID"; "JSON_DEPTH"; "JSON_LENGTH"; "JSON_STORAGE_SIZE"; "JSON_STORAGE_FREE" |],
+                       "JSON_TYPE(?), JSON_VALID(?), JSON_DEPTH(?), JSON_LENGTH(?), JSON_STORAGE_SIZE(?), JSON_STORAGE_FREE(?)",
+                       [| nullValue; nullValue; nullValue; nullValue; nullValue; nullValue |]
+                   ))
+                   [| "JSON_TYPE", "JSON_TYPE()"
+                      "JSON_VALID", "JSON_VALID()"
+                      "JSON_DEPTH", "JSON_DEPTH()"
+                      "JSON_LENGTH", "JSON_LENGTH()"
+                      "JSON_STORAGE_SIZE", "JSON_STORAGE_SIZE()"
+                      "JSON_STORAGE_FREE", "JSON_STORAGE_FREE()" |]
+               spec
+                   "json-text-results"
+                   [| "JSON_UNQUOTE"; "JSON_QUOTE"; "JSON_PRETTY"; "JSON_KEYS" |]
+                   "JSON_UNQUOTE('\"hello\"'), JSON_QUOTE('hello'), JSON_PRETTY('{\"a\":1}'), JSON_KEYS('{\"a\":1}')"
+                   "JSON_UNQUOTE(?), JSON_QUOTE(?), JSON_PRETTY(?), JSON_KEYS(?)"
+                   [| box "\"hello\""; box "hello"; box "{\"a\":1}"; box "{\"a\":1}" |]
+                   (Some(
+                       [| "JSON_UNQUOTE"; "JSON_QUOTE"; "JSON_PRETTY"; "JSON_KEYS" |],
+                       "JSON_UNQUOTE(?), JSON_QUOTE(?), JSON_PRETTY(?), JSON_KEYS(?)",
+                       [| nullValue; nullValue; nullValue; nullValue |]
+                   ))
+                   [| "JSON_UNQUOTE", "JSON_UNQUOTE()"
+                      "JSON_QUOTE", "JSON_QUOTE()"
+                      "JSON_PRETTY", "JSON_PRETTY()"
+                      "JSON_KEYS", "JSON_KEYS()" |]
+               spec
+                   "json-predicates"
+                   [| "JSON_CONTAINS"; "JSON_OVERLAPS" |]
+                   "JSON_CONTAINS('[1,2]', '2'), JSON_OVERLAPS('[1,2]', '[2,3]')"
+                   "JSON_CONTAINS(?, ?), JSON_OVERLAPS(?, ?)"
+                   [| box "[1,2]"; box "2"; box "[1,2]"; box "[2,3]" |]
+                   (Some(
+                       [| "JSON_CONTAINS"; "JSON_OVERLAPS" |],
+                       "JSON_CONTAINS(?, '2'), JSON_OVERLAPS(?, '[2,3]')",
+                       [| nullValue; nullValue |]
+                   ))
+                   [| "JSON_CONTAINS", "JSON_CONTAINS('[1,2]')"; "JSON_OVERLAPS", "JSON_OVERLAPS('[1,2]')" |]
+               spec
+                   "json-schema-validation"
+                   [| "JSON_SCHEMA_VALID"; "JSON_SCHEMA_VALIDATION_REPORT" |]
+                   "JSON_SCHEMA_VALID('{\"type\":\"integer\"}', '7'), JSON_SCHEMA_VALIDATION_REPORT('{\"type\":\"integer\"}', '7')"
+                   "JSON_SCHEMA_VALID(JSON_EXTRACT(?, '$'), JSON_EXTRACT(?, '$')), JSON_SCHEMA_VALIDATION_REPORT(JSON_EXTRACT(?, '$'), JSON_EXTRACT(?, '$'))"
+                   [| box "{\"type\":\"integer\"}"
+                      box "7"
+                      box "{\"type\":\"integer\"}"
+                      box "7" |]
+                   (Some(
+                       [| "JSON_SCHEMA_VALID"; "JSON_SCHEMA_VALIDATION_REPORT" |],
+                       "JSON_SCHEMA_VALID(JSON_EXTRACT(?, '$'), JSON_EXTRACT('7', '$')), JSON_SCHEMA_VALIDATION_REPORT(JSON_EXTRACT(?, '$'), JSON_EXTRACT('7', '$'))",
+                       [| nullValue; nullValue |]
+                   ))
+                   [| "JSON_SCHEMA_VALID", "JSON_SCHEMA_VALID('{}')"
+                      "JSON_SCHEMA_VALIDATION_REPORT", "JSON_SCHEMA_VALIDATION_REPORT('{}')" |] |]
+
+        let specs = Array.concat [ establishedSpecs; stringSpecs; jsonSpecs ]
 
         let steps, coverage = generatedFunctionContracts specs
 
