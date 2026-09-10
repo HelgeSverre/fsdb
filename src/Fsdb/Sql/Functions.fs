@@ -5902,7 +5902,7 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "DAYOFYEAR" (exactArity "DAYOFYEAR" 1 (datePartFn (fun d -> d.DayOfYear)))
     |> registerScalar "DAYNAME" (dayNameFn defaultTimeLocale)
     |> registerScalar "MONTHNAME" (monthNameFn defaultTimeLocale)
-    |> registerScalar "WEEK" (arityRange "WEEK" 1 2 (weekFn 0))
+    |> registerScalar "WEEK" (weekFn 0)
     |> registerScalar "WEEKDAY" (exactArity "WEEKDAY" 1 weekdayFn)
     |> registerScalar "WEEKOFYEAR" (exactArity "WEEKOFYEAR" 1 weekOfYearFn)
     |> registerScalar "YEARWEEK" (arityRange "YEARWEEK" 1 2 yearWeekFn)
@@ -5928,8 +5928,8 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "PERIOD_DIFF" (exactArity "PERIOD_DIFF" 2 periodDiffFn)
     |> registerScalar "FROM_DAYS" (exactArity "FROM_DAYS" 1 fromDaysFn)
     |> registerScalar "TO_DAYS" (exactArity "TO_DAYS" 1 toDaysFn)
-    |> registerScalar "UNIX_TIMESTAMP" (arityRange "UNIX_TIMESTAMP" 0 1 (unixTimestampFn SystemTimeZone))
-    |> registerScalar "FROM_UNIXTIME" (arityRange "FROM_UNIXTIME" 1 2 (fromUnixTimeFn SystemTimeZone defaultTimeLocale))
+    |> registerScalar "UNIX_TIMESTAMP" (unixTimestampFn SystemTimeZone)
+    |> registerScalar "FROM_UNIXTIME" (fromUnixTimeFn SystemTimeZone defaultTimeLocale)
     |> registerScalar "TIMESTAMPDIFF" timestampDiffFn
     |> registerScalar "EXTRACT" extractFn
     |> registerScalar "LAST_DAY" (exactArity "LAST_DAY" 1 lastDayFn)
