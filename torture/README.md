@@ -214,8 +214,14 @@ The contracts cover comment and precedence boundaries, parser errors, every
 MySQL 8.4 column family over text and prepared results, prepared DML and handle
 invalidation across DDL, implicit DDL commit behavior, SQLSTATE-sensitive
 semantic errors, independent writers, and contended update/delete/insert lock
-schedules. Add compact regressions here when behavior spans protocol or session
-state; keep isolated parser or executor regressions in Expecto.
+schedules.
+
+Function descriptors generate isolated literal and bound-parameter calls,
+NULL inputs, result-type observations, and exact wrong-arity errors. Coverage is
+credited to the individual function and behavior that each descriptor actually
+observes, including when several functions appear in one expression. Add compact
+regressions here when behavior spans protocol or session state; keep isolated
+parser or executor regressions in Expecto.
 
 ## Wire mutation
 

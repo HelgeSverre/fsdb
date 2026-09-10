@@ -688,6 +688,16 @@ let tests =
                         (jsonExtract.Evidence |> Array.exists (fun item -> item.Axis = "prepared-protocol"))
                         "function contracts contribute prepared evidence"
 
+                    let inetAton =
+                        manifest.Capabilities
+                        |> Array.find (fun capability -> capability.Id = "function:inet_aton")
+
+                    for axis in [ "prepared-protocol"; "null-semantics"; "error-contract"; "result-type" ] do
+                        Expect.isTrue
+                            (inetAton.Evidence
+                             |> Array.exists (fun item -> item.Axis = axis && item.Source = "compatibility-contract"))
+                            ("generated function contracts contribute " + axis)
+
                     Expect.isTrue
                         (manifest.Capabilities |> Array.exists (fun capability -> not (Array.isEmpty capability.MissingAxes)))
                         "unproven axes remain visible" ]

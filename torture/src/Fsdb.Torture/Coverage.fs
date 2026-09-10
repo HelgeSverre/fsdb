@@ -261,7 +261,11 @@ module Coverage =
                    if scenarioFunctionCalls.Contains name then
                        yield evidence "prepared-protocol" "scenario-probe" |]
 
-            item "function" name [| "parser"; "text-differential"; "error-contract"; "prepared-protocol" |] evidenceItems)
+            item
+                "function"
+                name
+                [| "parser"; "text-differential"; "null-semantics"; "error-contract"; "prepared-protocol"; "result-type" |]
+                evidenceItems)
 
     let private protocolCapabilitiesItems () =
         protocolCapabilities ()

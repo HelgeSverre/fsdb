@@ -175,6 +175,16 @@ module Contract =
 
 [<RequireQualifiedAccess>]
 module ContractCatalog =
+    type private FunctionContractSpec =
+        { Name: string
+          Functions: string array
+          TextExpression: string
+          PreparedExpression: string
+          Parameters: obj array
+          ResultTypes: string array
+          NullPrepared: (string array * string * obj array) option
+          WrongArityExpressions: (string * string) array }
+
     let private functionProbe (name: string) (names: string array) sql =
         [| Contract.query (name + "-text") sql |> Contract.comparingValues
            Contract.preparedQuery (name + "-prepared") sql [||] |> Contract.comparingValues |],
@@ -186,6 +196,61 @@ module ContractCatalog =
     let private functionError name (functionName: string) code sqlState sql =
         Contract.query name sql |> Contract.fails code sqlState,
         ("function:" + functionName.ToLowerInvariant(), [| "error-contract" |])
+
+    let private generatedFunctionContracts specs =
+        let steps =
+            specs
+            |> Array.collect (fun spec ->
+                [| yield Contract.query (spec.Name + "-text") ("SELECT " + spec.TextExpression) |> Contract.comparingValues
+                   yield
+                       Contract.preparedQuery
+                           (spec.Name + "-prepared")
+                           ("SELECT " + spec.PreparedExpression)
+                           spec.Parameters
+                       |> Contract.comparingValues
+
+                   match spec.NullPrepared with
+                   | Some(_, expression, parameters) ->
+                       yield
+                           Contract.preparedQuery (spec.Name + "-null") ("SELECT " + expression) parameters
+                           |> Contract.comparingValues
+                   | None -> ()
+
+                   for functionName, expression in spec.WrongArityExpressions do
+                       let errorName = spec.Name + "-" + functionName.ToLowerInvariant() + "-error"
+                       yield Contract.query (errorName + "-text") ("SELECT " + expression) |> Contract.fails 1582 "42000"
+                       yield
+                           Contract.preparedQuery (errorName + "-prepared") ("SELECT " + expression) [||]
+                           |> Contract.fails 1582 "42000" |])
+
+        let coverage =
+            specs
+            |> Array.collect (fun spec ->
+                let functionsWithErrors = spec.WrongArityExpressions |> Array.map fst |> Set.ofArray
+                let functionsWithNulls =
+                    spec.NullPrepared
+                    |> Option.map (fun (names, _, _) -> Set.ofArray names)
+                    |> Option.defaultValue Set.empty
+                let functionsWithResultTypes = Set.ofArray spec.ResultTypes
+
+                spec.Functions
+                |> Array.map (fun name ->
+                    let axes =
+                        [| yield "parser"
+                           yield "text-differential"
+                           yield "prepared-protocol"
+                           if functionsWithResultTypes.Contains name then
+                               yield "result-type"
+
+                           if functionsWithNulls.Contains name then
+                               yield "null-semantics"
+
+                           if functionsWithErrors.Contains name then
+                               yield "error-contract" |]
+
+                    "function:" + name.ToLowerInvariant(), axes))
+
+        steps, coverage
 
     let private comments =
         { Name = "comments-and-precedence"
@@ -268,6 +333,184 @@ module ContractCatalog =
           Coverage =
             TypeMatrix.capabilities
             |> Array.map (fun name -> "column-type:" + name, [| "parser"; "text-differential"; "prepared-protocol" |]) }
+
+    let private generatedFunctionFamilies =
+        let spec name functions text prepared parameters nullPrepared wrongArityExpressions =
+            { Name = name
+              Functions = functions
+              TextExpression = text
+              PreparedExpression = prepared
+              Parameters = parameters
+              ResultTypes = functions
+              NullPrepared = nullPrepared
+              WrongArityExpressions = wrongArityExpressions }
+
+        let shapeSpec name functions text prepared parameters nullPrepared wrongArityExpressions =
+            { spec name functions text prepared parameters nullPrepared wrongArityExpressions with ResultTypes = [||] }
+
+        let nullValue = box DBNull.Value
+
+        let specs =
+            [| spec
+                   "aes-roundtrip"
+                   [| "AES_ENCRYPT"; "AES_DECRYPT" |]
+                   "AES_ENCRYPT('hello', 'secret'), AES_DECRYPT(AES_ENCRYPT('hello', 'secret'), 'secret')"
+                   "AES_ENCRYPT(?, ?), AES_DECRYPT(AES_ENCRYPT(?, ?), ?)"
+                   [| box "hello"; box "secret"; box "hello"; box "secret"; box "secret" |]
+                   (Some([| "AES_ENCRYPT" |], "AES_ENCRYPT(?, ?)", [| nullValue; box "secret" |]))
+                   [| "AES_ENCRYPT", "AES_ENCRYPT('hello')"; "AES_DECRYPT", "AES_DECRYPT('hello')" |]
+               spec
+                   "uuid-binary-roundtrip"
+                   [| "UUID_TO_BIN"; "BIN_TO_UUID" |]
+                   "UUID_TO_BIN('6ccd780c-baba-1026-9564-5b8c656024db', 1), BIN_TO_UUID(UUID_TO_BIN('6ccd780c-baba-1026-9564-5b8c656024db', 1), 1)"
+                   "UUID_TO_BIN(?, ?), BIN_TO_UUID(UUID_TO_BIN(?, ?), ?)"
+                   [| box "6ccd780c-baba-1026-9564-5b8c656024db"
+                      box 1
+                      box "6ccd780c-baba-1026-9564-5b8c656024db"
+                      box 1
+                      box 1 |]
+                   (Some([| "UUID_TO_BIN" |], "UUID_TO_BIN(?)", [| nullValue |]))
+                   [| "UUID_TO_BIN", "UUID_TO_BIN()"; "BIN_TO_UUID", "BIN_TO_UUID()" |]
+               spec
+                   "uuid-validation"
+                   [| "IS_UUID" |]
+                   "IS_UUID('6ccd780c-baba-1026-9564-5b8c656024db')"
+                   "IS_UUID(?)"
+                   [| box "6ccd780c-baba-1026-9564-5b8c656024db" |]
+                   (Some([| "IS_UUID" |], "IS_UUID(?)", [| nullValue |]))
+                   [| "IS_UUID", "IS_UUID()" |]
+               spec
+                   "ipv4-roundtrip"
+                   [| "INET_ATON"; "INET_NTOA" |]
+                   "INET_ATON('192.0.2.7'), INET_NTOA(3221225991)"
+                   "INET_ATON(?), INET_NTOA(?)"
+                   [| box "192.0.2.7"; box 3221225991L |]
+                   (Some([| "INET_ATON" |], "INET_ATON(?)", [| nullValue |]))
+                   [| "INET_ATON", "INET_ATON()"; "INET_NTOA", "INET_NTOA()" |]
+               spec
+                   "ipv6-roundtrip"
+                   [| "INET6_ATON"; "INET6_NTOA" |]
+                   "INET6_NTOA(INET6_ATON('2001:db8::7'))"
+                   "INET6_NTOA(INET6_ATON(?))"
+                   [| box "2001:db8::7" |]
+                   (Some([| "INET6_ATON" |], "INET6_ATON(?)", [| nullValue |]))
+                   [| "INET6_ATON", "INET6_ATON()"; "INET6_NTOA", "INET6_NTOA()" |]
+               spec
+                   "ip-predicates"
+                   [| "IS_IPV4"; "IS_IPV6"; "IS_IPV4_COMPAT"; "IS_IPV4_MAPPED" |]
+                   "IS_IPV4('192.0.2.7'), IS_IPV6('2001:db8::7'), IS_IPV4_COMPAT(INET6_ATON('::192.0.2.7')), IS_IPV4_MAPPED(INET6_ATON('::ffff:192.0.2.7'))"
+                   "IS_IPV4(?), IS_IPV6(?), IS_IPV4_COMPAT(INET6_ATON(?)), IS_IPV4_MAPPED(INET6_ATON(?))"
+                   [| box "192.0.2.7"; box "2001:db8::7"; box "::192.0.2.7"; box "::ffff:192.0.2.7" |]
+                   (Some([| "IS_IPV4" |], "IS_IPV4(?)", [| nullValue |]))
+                   [| "IS_IPV4", "IS_IPV4()"
+                      "IS_IPV6", "IS_IPV6()"
+                      "IS_IPV4_COMPAT", "IS_IPV4_COMPAT()"
+                      "IS_IPV4_MAPPED", "IS_IPV4_MAPPED()" |]
+               spec
+                   "json-value"
+                   [| "JSON_VALUE" |]
+                   "JSON_VALUE('{\"a\":7}', '$.a')"
+                   "JSON_VALUE(JSON_EXTRACT(?, '$'), '$.a')"
+                   [| box "{\"a\":7}" |]
+                   (Some([| "JSON_VALUE" |], "JSON_VALUE(JSON_EXTRACT(?, '$'), '$.a')", [| nullValue |]))
+                   [||]
+               spec
+                   "json-member-of"
+                   [| "JSON_MEMBER_OF" |]
+                   "2 MEMBER OF('[1,2]')"
+                   "? MEMBER OF(?)"
+                   [| box 2; box "[1,2]" |]
+                   (Some([| "JSON_MEMBER_OF" |], "? MEMBER OF(?)", [| nullValue; box "[1,2]" |]))
+                   [||]
+               spec
+                   "json-search"
+                   [| "JSON_SEARCH" |]
+                   "JSON_SEARCH('{\"a\":\"needle\"}', 'one', 'needle')"
+                   "JSON_SEARCH(?, 'one', ?)"
+                   [| box "{\"a\":\"needle\"}"; box "needle" |]
+                   (Some([| "JSON_SEARCH" |], "JSON_SEARCH(?, 'one', ?)", [| nullValue; box "needle" |]))
+                   [| "JSON_SEARCH", "JSON_SEARCH('{}', 'one')" |]
+               spec
+                   "calendar-names"
+                   [| "DAYNAME"; "MONTHNAME" |]
+                   "DAYNAME('2024-02-29'), MONTHNAME('2024-02-29')"
+                   "DAYNAME(?), MONTHNAME(?)"
+                   [| box "2024-02-29"; box "2024-02-29" |]
+                   (Some([| "DAYNAME"; "MONTHNAME" |], "DAYNAME(?), MONTHNAME(?)", [| nullValue; nullValue |]))
+                   [| "DAYNAME", "DAYNAME()"; "MONTHNAME", "MONTHNAME()" |]
+               spec
+                   "temporal-formats"
+                   [| "GET_FORMAT" |]
+                   "GET_FORMAT(DATE, 'EUR')"
+                   "GET_FORMAT(DATE, ?)"
+                   [| box "EUR" |]
+                   (Some([| "GET_FORMAT" |], "GET_FORMAT(DATE, ?)", [| nullValue |]))
+                   [||]
+               spec
+                   "period-arithmetic"
+                   [| "PERIOD_ADD"; "PERIOD_DIFF" |]
+                   "PERIOD_ADD(202312, 2), PERIOD_DIFF(202402, 202312)"
+                   "PERIOD_ADD(?, ?), PERIOD_DIFF(?, ?)"
+                   [| box 202312; box 2; box 202402; box 202312 |]
+                   (Some([| "PERIOD_ADD" |], "PERIOD_ADD(?, ?)", [| nullValue; box 2 |]))
+                   [| "PERIOD_ADD", "PERIOD_ADD(202312)"; "PERIOD_DIFF", "PERIOD_DIFF(202402)" |]
+               shapeSpec
+                   "cotangent"
+                   [| "COT" |]
+                   "ABS(COT(1) - 0.6420926159343306) < 0.000000000001"
+                   "ABS(COT(?) - 0.6420926159343306) < 0.000000000001"
+                   [| box 1 |]
+                   (Some([| "COT" |], "COT(?)", [| nullValue |]))
+                   [| "COT", "COT()" |]
+               spec
+                   "named-constant"
+                   [| "NAME_CONST" |]
+                   "NAME_CONST('answer', 42)"
+                   "NAME_CONST('answer', 42) + ?"
+                   [| box 0 |]
+                   (Some([| "NAME_CONST" |], "NAME_CONST('answer', NULL)", [||]))
+                   [| "NAME_CONST", "NAME_CONST('answer')" |]
+               shapeSpec
+                   "random-bytes-shape"
+                   [| "RANDOM_BYTES" |]
+                   "LENGTH(RANDOM_BYTES(8))"
+                   "LENGTH(RANDOM_BYTES(?))"
+                   [| box 8 |]
+                   None
+                   [| "RANDOM_BYTES", "RANDOM_BYTES()" |]
+               shapeSpec
+                   "random-shape"
+                   [| "RAND" |]
+                   "RAND(7) BETWEEN 0 AND 1"
+                   "RAND(?) BETWEEN 0 AND 1"
+                   [| box 7 |]
+                   None
+                   [| "RAND", "RAND(1, 2)" |]
+               shapeSpec
+                   "uuid-shape"
+                   [| "UUID"; "UUID_SHORT" |]
+                   "IS_UUID(UUID()), UUID_SHORT() > 0"
+                   "IS_UUID(UUID()), UUID_SHORT() > ?"
+                   [| box 0 |]
+                   None
+                   [| "UUID", "UUID(1)"; "UUID_SHORT", "UUID_SHORT(1)" |]
+               shapeSpec
+                   "current-temporal-aliases"
+                   [| "CURDATE"; "CURRENT_DATE"; "CURTIME"; "CURRENT_TIME"; "NOW"; "CURRENT_TIMESTAMP"; "LOCALTIME"
+                      "LOCALTIMESTAMP"; "UTC_DATE"; "UTC_TIME"; "UTC_TIMESTAMP"; "SYSDATE" |]
+                   "CURDATE() = CURRENT_DATE(), CURTIME() = CURRENT_TIME(), NOW() = CURRENT_TIMESTAMP(), LOCALTIME() = LOCALTIMESTAMP(), UTC_DATE() = DATE(UTC_TIMESTAMP()), UTC_TIME() = TIME(UTC_TIMESTAMP()), SYSDATE() IS NOT NULL"
+                   "CURDATE() = CURRENT_DATE(), CURTIME() = CURRENT_TIME(), NOW() = CURRENT_TIMESTAMP(), LOCALTIME() = LOCALTIMESTAMP(), UTC_DATE() = DATE(UTC_TIMESTAMP()), UTC_TIME() = TIME(UTC_TIMESTAMP()), SYSDATE() IS NOT NULL"
+                   [||]
+                   None
+                   [||] |]
+
+        let steps, coverage = generatedFunctionContracts specs
+
+        { Name = "generated-function-contracts"
+          Setup = [| "SET SESSION time_zone = '+00:00'" |]
+          Steps = steps
+          Cleanup = [||]
+          Coverage = coverage }
 
     let private functionFamilies =
         let numericSteps, numericCoverage =
@@ -581,6 +824,7 @@ module ContractCatalog =
            prepared
            preparedDml
            columnTypes
+           generatedFunctionFamilies
            functionFamilies
            preparedInvalidation
            implicitCommit
