@@ -2675,7 +2675,9 @@ let internal weekFn defaultMode: Scalar =
         asDateOnly v |> Option.map (weekOf defaultMode >> fst >> int64 >> VInt) |> Option.defaultValue VNull
     | [ v; m ] when not (anyNull [ v; m ]) ->
         asDateOnly v |> Option.map (weekOf (int (toDouble m)) >> fst >> int64 >> VInt) |> Option.defaultValue VNull
-    | _ -> VNull
+    | [ _ ]
+    | [ _; _ ] -> VNull
+    | _ -> nativeParameterCountError "WEEK"
 
 let private weekdayFn: Scalar =
     function
@@ -2964,7 +2966,8 @@ let internal unixTimestampFn (zone: SqlTimeZone) : Scalar =
             let seconds = decimal (utc - unixEpoch).Ticks / decimal TimeSpan.TicksPerSecond
             if seconds = Decimal.Truncate seconds then VInt(int64 seconds) else VDecimal seconds)
         |> Option.defaultValue VNull
-    | _ -> VNull
+    | [ _ ] -> VNull
+    | _ -> nativeParameterCountError "UNIX_TIMESTAMP"
 
 let private fromUnixSeconds (zone: SqlTimeZone) (ts: Value) : DateTime option =
     let secs = toDouble ts
@@ -2983,7 +2986,9 @@ let internal fromUnixTimeFn (zone: SqlTimeZone) (locale: TemporalLocale.Names) :
             |> Option.map VString
             |> Option.defaultValue VNull
         | _ -> VNull
-    | _ -> VNull
+    | [ _ ]
+    | [ _; _ ] -> VNull
+    | _ -> nativeParameterCountError "FROM_UNIXTIME"
 
 let private timestampDiffFn: Scalar =
     function
@@ -5877,7 +5882,7 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "DATE_SUB" (dateAddCore -1.0)
     |> registerScalar "SUBDATE" (addSubDateCore -1.0)
     |> registerScalar "INTERVAL" intervalFn
-    |> registerScalar "DATEDIFF" dateDiffFn
+    |> registerScalar "DATEDIFF" (exactArity "DATEDIFF" 2 dateDiffFn)
     |> registerScalar "DATE_FORMAT" (dateFormatFn defaultTimeLocale)
     |> registerTextScalar "CONVERT" firstArgument convertFn
     |> registerScalar "DATE" dateFn
@@ -5886,19 +5891,21 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "YEAR" (zeroAwareDatePart (fun date -> let year, _, _ = zeroDateParts date in year) (fun d -> d.Year))
     |> registerScalar "MONTH" (zeroAwareDatePart (fun date -> let _, month, _ = zeroDateParts date in month) (fun d -> d.Month))
     |> registerScalar "DAY" (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day))
-    |> registerScalar "DAYOFMONTH" (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day))
+    |> registerScalar
+        "DAYOFMONTH"
+        (exactArity "DAYOFMONTH" 1 (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day)))
     |> registerScalar "HOUR" (zeroAwareTimePart (fun dateTime -> let _, hour, _, _, _ = zeroDateTimeParts dateTime in hour) timeHour (fun d -> d.Hour))
     |> registerScalar "MINUTE" (zeroAwareTimePart (fun dateTime -> let _, _, minute, _, _ = zeroDateTimeParts dateTime in minute) timeMinute (fun d -> d.Minute))
     |> registerScalar "SECOND" (zeroAwareTimePart (fun dateTime -> let _, _, _, second, _ = zeroDateTimeParts dateTime in second) timeSecond (fun d -> d.Second))
     |> registerScalar "MICROSECOND" (zeroAwareTimePart (fun dateTime -> let _, _, _, _, microseconds = zeroDateTimeParts dateTime in microseconds) timeMicroseconds (fun d -> int (d.Ticks % TimeSpan.TicksPerSecond / 10L)))
-    |> registerScalar "DAYOFWEEK" (datePartFn (fun d -> int d.DayOfWeek + 1))
-    |> registerScalar "DAYOFYEAR" (datePartFn (fun d -> d.DayOfYear))
+    |> registerScalar "DAYOFWEEK" (exactArity "DAYOFWEEK" 1 (datePartFn (fun d -> int d.DayOfWeek + 1)))
+    |> registerScalar "DAYOFYEAR" (exactArity "DAYOFYEAR" 1 (datePartFn (fun d -> d.DayOfYear)))
     |> registerScalar "DAYNAME" (dayNameFn defaultTimeLocale)
     |> registerScalar "MONTHNAME" (monthNameFn defaultTimeLocale)
-    |> registerScalar "WEEK" (weekFn 0)
-    |> registerScalar "WEEKDAY" weekdayFn
-    |> registerScalar "WEEKOFYEAR" weekOfYearFn
-    |> registerScalar "YEARWEEK" yearWeekFn
+    |> registerScalar "WEEK" (arityRange "WEEK" 1 2 (weekFn 0))
+    |> registerScalar "WEEKDAY" (exactArity "WEEKDAY" 1 weekdayFn)
+    |> registerScalar "WEEKOFYEAR" (exactArity "WEEKOFYEAR" 1 weekOfYearFn)
+    |> registerScalar "YEARWEEK" (arityRange "YEARWEEK" 1 2 yearWeekFn)
     |> registerScalar "QUARTER" (datePartFn (fun d -> (d.Month - 1) / 3 + 1))
     |> registerScalar "CURDATE" curDateFn
     |> registerScalar "CURRENT_DATE" curDateFn
@@ -5910,25 +5917,25 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "UTC_DATE" utcDateFn
     |> registerScalar "UTC_TIME" utcTimeFn
     |> registerScalar "UTC_TIMESTAMP" utcTimestampFn
-    |> registerScalar "ADDTIME" (addTimeFn 1L)
-    |> registerScalar "SUBTIME" (addTimeFn -1L)
-    |> registerScalar "TIMEDIFF" timeDiffFn
+    |> registerScalar "ADDTIME" (exactArity "ADDTIME" 2 (addTimeFn 1L))
+    |> registerScalar "SUBTIME" (exactArity "SUBTIME" 2 (addTimeFn -1L))
+    |> registerScalar "TIMEDIFF" (exactArity "TIMEDIFF" 2 timeDiffFn)
     |> registerScalar "SEC_TO_TIME" (exactArity "SEC_TO_TIME" 1 secToTimeFn)
-    |> registerScalar "MAKETIME" makeTimeFn
-    |> registerScalar "TIME_FORMAT" timeFormatFn
+    |> registerScalar "MAKETIME" (exactArity "MAKETIME" 3 makeTimeFn)
+    |> registerScalar "TIME_FORMAT" (exactArity "TIME_FORMAT" 2 timeFormatFn)
     |> registerScalar "GET_FORMAT" (exactArity "GET_FORMAT" 2 getFormatFn)
     |> registerScalar "PERIOD_ADD" (exactArity "PERIOD_ADD" 2 periodAddFn)
     |> registerScalar "PERIOD_DIFF" (exactArity "PERIOD_DIFF" 2 periodDiffFn)
-    |> registerScalar "FROM_DAYS" fromDaysFn
-    |> registerScalar "TO_DAYS" toDaysFn
-    |> registerScalar "UNIX_TIMESTAMP" (unixTimestampFn SystemTimeZone)
-    |> registerScalar "FROM_UNIXTIME" (fromUnixTimeFn SystemTimeZone defaultTimeLocale)
+    |> registerScalar "FROM_DAYS" (exactArity "FROM_DAYS" 1 fromDaysFn)
+    |> registerScalar "TO_DAYS" (exactArity "TO_DAYS" 1 toDaysFn)
+    |> registerScalar "UNIX_TIMESTAMP" (arityRange "UNIX_TIMESTAMP" 0 1 (unixTimestampFn SystemTimeZone))
+    |> registerScalar "FROM_UNIXTIME" (arityRange "FROM_UNIXTIME" 1 2 (fromUnixTimeFn SystemTimeZone defaultTimeLocale))
     |> registerScalar "TIMESTAMPDIFF" timestampDiffFn
     |> registerScalar "EXTRACT" extractFn
-    |> registerScalar "LAST_DAY" lastDayFn
-    |> registerScalar "MAKEDATE" makeDateFn
-    |> registerScalar "CONVERT_TZ" convertTzFn
-    |> registerScalar "STR_TO_DATE" strToDateFn
+    |> registerScalar "LAST_DAY" (exactArity "LAST_DAY" 1 lastDayFn)
+    |> registerScalar "MAKEDATE" (exactArity "MAKEDATE" 2 makeDateFn)
+    |> registerScalar "CONVERT_TZ" (exactArity "CONVERT_TZ" 3 convertTzFn)
+    |> registerScalar "STR_TO_DATE" (exactArity "STR_TO_DATE" 2 strToDateFn)
 
 let private registerStringBuiltins registry =
     registry
