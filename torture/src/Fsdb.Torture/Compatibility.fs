@@ -953,8 +953,76 @@ module ContractCatalog =
                    [| "ST_BUFFER", "ST_BUFFER(ST_POINTFROMTEXT('POINT(0 0)'))"
                       "ST_BUFFER_STRATEGY", "ST_BUFFER_STRATEGY()" |] |]
 
+        let temporalSyntaxSpecs =
+            [| spec
+                   "temporal-syntax-functions"
+                   [| "DATE_ADD"; "DATE_SUB"; "TIMESTAMP"; "TIMESTAMPADD"; "TIMESTAMPDIFF"; "DATE_FORMAT" |]
+                   "DATE_ADD('2024-02-28', INTERVAL 1 DAY), DATE_SUB('2024-03-01', INTERVAL 1 DAY), TIMESTAMP('2024-02-29 12:34:56'), TIMESTAMPADD(DAY, 2, '2024-02-28'), TIMESTAMPDIFF(DAY, '2024-02-28', '2024-03-01'), DATE_FORMAT('2024-02-29 12:34:56', '%Y-%m-%d')"
+                   "DATE_ADD(CAST(? AS DATE), INTERVAL ? DAY), DATE_SUB(CAST(? AS DATE), INTERVAL ? DAY), TIMESTAMP(?), TIMESTAMPADD(DAY, ?, CAST(? AS DATE)), TIMESTAMPDIFF(DAY, ?, ?), DATE_FORMAT(?, ?)"
+                   [| box "2024-02-28"
+                      box 1
+                      box "2024-03-01"
+                      box 1
+                      box "2024-02-29 12:34:56"
+                      box 2
+                      box "2024-02-28"
+                      box "2024-02-28"
+                      box "2024-03-01"
+                      box "2024-02-29 12:34:56"
+                      box "%Y-%m-%d" |]
+                   (Some(
+                       [| "DATE_ADD"; "DATE_SUB"; "TIMESTAMP"; "TIMESTAMPADD"; "TIMESTAMPDIFF"; "DATE_FORMAT" |],
+                       "DATE_ADD(CAST(? AS DATE), INTERVAL 1 DAY), DATE_SUB(CAST(? AS DATE), INTERVAL 1 DAY), TIMESTAMP(?), TIMESTAMPADD(DAY, 2, CAST(? AS DATE)), TIMESTAMPDIFF(DAY, ?, '2024-03-01'), DATE_FORMAT(?, '%Y-%m-%d')",
+                       Array.create 6 nullValue
+                   ))
+                   [||] |]
+
+        let spatialAliasSpecs =
+            [| spec
+                   "spatial-text-aliases"
+                   [| "ST_GEOMETRYFROMTEXT"; "ST_LINESTRINGFROMTEXT"; "ST_POLYGONFROMTEXT"; "ST_ASWKT"; "ST_ASBINARY" |]
+                   "ST_GEOMETRYFROMTEXT('POINT(1 2)'), ST_LINESTRINGFROMTEXT('LINESTRING(0 0, 2 2)'), ST_POLYGONFROMTEXT('POLYGON((0 0, 2 0, 0 2, 0 0))'), ST_ASWKT(ST_POINTFROMTEXT('POINT(1 2)')), ST_ASBINARY(ST_POINTFROMTEXT('POINT(1 2)'))"
+                   "ST_GEOMETRYFROMTEXT(?), ST_LINESTRINGFROMTEXT(?), ST_POLYGONFROMTEXT(?), ST_ASWKT(ST_POINTFROMTEXT(?)), ST_ASBINARY(ST_POINTFROMTEXT(?))"
+                   [| box "POINT(1 2)"
+                      box "LINESTRING(0 0, 2 2)"
+                      box "POLYGON((0 0, 2 0, 0 2, 0 0))"
+                      box "POINT(1 2)"
+                      box "POINT(1 2)" |]
+                   (Some(
+                       [| "ST_GEOMETRYFROMTEXT"; "ST_LINESTRINGFROMTEXT"; "ST_POLYGONFROMTEXT"; "ST_ASWKT"; "ST_ASBINARY" |],
+                       "ST_GEOMETRYFROMTEXT(?), ST_LINESTRINGFROMTEXT(?), ST_POLYGONFROMTEXT(?), ST_ASWKT(?), ST_ASBINARY(?)",
+                       Array.create 5 nullValue
+                   ))
+                   [| "ST_GEOMETRYFROMTEXT", "ST_GEOMETRYFROMTEXT()"
+                      "ST_LINESTRINGFROMTEXT", "ST_LINESTRINGFROMTEXT()"
+                      "ST_POLYGONFROMTEXT", "ST_POLYGONFROMTEXT()"
+                      "ST_ASWKT", "ST_ASWKT()"
+                      "ST_ASBINARY", "ST_ASBINARY()" |]
+               spec
+                   "spatial-wkb-construction"
+                   [| "ST_GEOMFROMWKB"; "ST_GEOMETRYFROMWKB"; "ST_POINTFROMWKB" |]
+                   "ST_GEOMFROMWKB(X'0101000000000000000000F03F0000000000000040'), ST_GEOMETRYFROMWKB(X'0101000000000000000000F03F0000000000000040'), ST_POINTFROMWKB(X'0101000000000000000000F03F0000000000000040')"
+                   "ST_GEOMFROMWKB(?), ST_GEOMETRYFROMWKB(?), ST_POINTFROMWKB(?)"
+                   (Array.create 3 (box (Convert.FromHexString "0101000000000000000000F03F0000000000000040")))
+                   (Some(
+                       [| "ST_GEOMFROMWKB"; "ST_GEOMETRYFROMWKB"; "ST_POINTFROMWKB" |],
+                       "ST_GEOMFROMWKB(?), ST_GEOMETRYFROMWKB(?), ST_POINTFROMWKB(?)",
+                       Array.create 3 nullValue
+                   ))
+                   [| "ST_GEOMFROMWKB", "ST_GEOMFROMWKB()"
+                      "ST_GEOMETRYFROMWKB", "ST_GEOMETRYFROMWKB()"
+                      "ST_POINTFROMWKB", "ST_POINTFROMWKB()" |] |]
+
         let specs =
-            Array.concat [ establishedSpecs; stringSpecs; jsonSpecs; temporalSpecs; spatialSpecs; spatialResultSpecs ]
+            Array.concat
+                [ establishedSpecs
+                  stringSpecs
+                  jsonSpecs
+                  temporalSpecs
+                  temporalSyntaxSpecs
+                  spatialSpecs
+                  spatialResultSpecs
+                  spatialAliasSpecs ]
 
         let steps, coverage = generatedFunctionContracts specs
 
