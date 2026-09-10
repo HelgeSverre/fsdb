@@ -822,7 +822,139 @@ module ContractCatalog =
                       "STR_TO_DATE", "STR_TO_DATE('2024-02-29')"
                       "CONVERT_TZ", "CONVERT_TZ('2024-02-29', '+00:00')" |] |]
 
-        let specs = Array.concat [ establishedSpecs; stringSpecs; jsonSpecs; temporalSpecs ]
+        let spatialSpecs =
+            [| spec
+                   "spatial-construction-and-serialization"
+                   [| "ST_GEOMFROMTEXT"; "ST_POINTFROMTEXT"; "ST_ASTEXT"; "ST_ASWKB" |]
+                   "ST_GEOMFROMTEXT('LINESTRING(0 0, 2 2)'), ST_POINTFROMTEXT('POINT(1 2)'), ST_ASTEXT(ST_GEOMFROMTEXT('LINESTRING(0 0, 2 2)')), ST_ASWKB(ST_POINTFROMTEXT('POINT(1 2)'))"
+                   "ST_GEOMFROMTEXT(?), ST_POINTFROMTEXT(?), ST_ASTEXT(ST_GEOMFROMTEXT(?)), ST_ASWKB(ST_POINTFROMTEXT(?))"
+                   [| box "LINESTRING(0 0, 2 2)"; box "POINT(1 2)"; box "LINESTRING(0 0, 2 2)"; box "POINT(1 2)" |]
+                   (Some(
+                       [| "ST_GEOMFROMTEXT"; "ST_POINTFROMTEXT"; "ST_ASTEXT"; "ST_ASWKB" |],
+                       "ST_GEOMFROMTEXT(?), ST_POINTFROMTEXT(?), ST_ASTEXT(?), ST_ASWKB(?)",
+                       Array.create 4 nullValue
+                   ))
+                   [| "ST_GEOMFROMTEXT", "ST_GEOMFROMTEXT()"
+                      "ST_POINTFROMTEXT", "ST_POINTFROMTEXT()"
+                      "ST_ASTEXT", "ST_ASTEXT()"
+                      "ST_ASWKB", "ST_ASWKB()" |]
+               spec
+                   "spatial-inspection"
+                   [| "ST_GEOMETRYTYPE"; "ST_DIMENSION"; "ST_ISEMPTY"; "ST_ISVALID"; "ST_SRID"; "ST_X"; "ST_Y" |]
+                   "ST_GEOMETRYTYPE(ST_GEOMFROMTEXT('LINESTRING(0 0, 2 2)')), ST_DIMENSION(ST_GEOMFROMTEXT('LINESTRING(0 0, 2 2)')), ST_ISEMPTY(ST_GEOMFROMTEXT('GEOMETRYCOLLECTION EMPTY')), ST_ISVALID(ST_GEOMFROMTEXT('POLYGON((0 0, 2 0, 2 2, 0 0))')), ST_SRID(ST_GEOMFROMTEXT('POINT(1 2)')), ST_X(ST_POINTFROMTEXT('POINT(1 2)')), ST_Y(ST_POINTFROMTEXT('POINT(1 2)'))"
+                   "ST_GEOMETRYTYPE(ST_GEOMFROMTEXT(?)), ST_DIMENSION(ST_GEOMFROMTEXT(?)), ST_ISEMPTY(ST_GEOMFROMTEXT(?)), ST_ISVALID(ST_GEOMFROMTEXT(?)), ST_SRID(ST_GEOMFROMTEXT(?)), ST_X(ST_POINTFROMTEXT(?)), ST_Y(ST_POINTFROMTEXT(?))"
+                   [| box "LINESTRING(0 0, 2 2)"
+                      box "LINESTRING(0 0, 2 2)"
+                      box "GEOMETRYCOLLECTION EMPTY"
+                      box "POLYGON((0 0, 2 0, 2 2, 0 0))"
+                      box "POINT(1 2)"
+                      box "POINT(1 2)"
+                      box "POINT(1 2)" |]
+                   (Some(
+                       [| "ST_GEOMETRYTYPE"; "ST_DIMENSION"; "ST_ISEMPTY"; "ST_ISVALID"; "ST_SRID"; "ST_X"; "ST_Y" |],
+                       "ST_GEOMETRYTYPE(?), ST_DIMENSION(?), ST_ISEMPTY(?), ST_ISVALID(?), ST_SRID(?), ST_X(?), ST_Y(?)",
+                       Array.create 7 nullValue
+                   ))
+                   [| "ST_GEOMETRYTYPE", "ST_GEOMETRYTYPE()"
+                      "ST_DIMENSION", "ST_DIMENSION()"
+                      "ST_ISEMPTY", "ST_ISEMPTY()"
+                      "ST_ISVALID", "ST_ISVALID()"
+                      "ST_SRID", "ST_SRID()"
+                      "ST_X", "ST_X()"
+                      "ST_Y", "ST_Y()" |]
+               spec
+                   "spatial-relations"
+                   [| "ST_DISTANCE"
+                      "ST_EQUALS"
+                      "ST_CONTAINS"
+                      "ST_WITHIN"
+                      "ST_INTERSECTS"
+                      "ST_DISJOINT"
+                      "ST_TOUCHES"
+                      "MBRCONTAINS"
+                      "MBRWITHIN"
+                      "MBRINTERSECTS" |]
+                   "ST_DISTANCE(ST_POINTFROMTEXT('POINT(0 0)'), ST_POINTFROMTEXT('POINT(3 4)')), ST_EQUALS(ST_POINTFROMTEXT('POINT(1 1)'), ST_POINTFROMTEXT('POINT(1 1)')), ST_CONTAINS(ST_GEOMFROMTEXT('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))'), ST_POINTFROMTEXT('POINT(2 2)')), ST_WITHIN(ST_POINTFROMTEXT('POINT(2 2)'), ST_GEOMFROMTEXT('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))')), ST_INTERSECTS(ST_GEOMFROMTEXT('LINESTRING(0 0, 2 2)'), ST_GEOMFROMTEXT('LINESTRING(0 2, 2 0)')), ST_DISJOINT(ST_POINTFROMTEXT('POINT(0 0)'), ST_POINTFROMTEXT('POINT(1 1)')), ST_TOUCHES(ST_GEOMFROMTEXT('LINESTRING(0 0, 1 0)'), ST_GEOMFROMTEXT('LINESTRING(1 0, 2 0)')), MBRCONTAINS(ST_GEOMFROMTEXT('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))'), ST_POINTFROMTEXT('POINT(2 2)')), MBRWITHIN(ST_POINTFROMTEXT('POINT(2 2)'), ST_GEOMFROMTEXT('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))')), MBRINTERSECTS(ST_GEOMFROMTEXT('LINESTRING(0 0, 2 2)'), ST_GEOMFROMTEXT('LINESTRING(0 2, 2 0)'))"
+                   "ST_DISTANCE(ST_POINTFROMTEXT(?), ST_POINTFROMTEXT(?)), ST_EQUALS(ST_POINTFROMTEXT(?), ST_POINTFROMTEXT(?)), ST_CONTAINS(ST_GEOMFROMTEXT(?), ST_POINTFROMTEXT(?)), ST_WITHIN(ST_POINTFROMTEXT(?), ST_GEOMFROMTEXT(?)), ST_INTERSECTS(ST_GEOMFROMTEXT(?), ST_GEOMFROMTEXT(?)), ST_DISJOINT(ST_POINTFROMTEXT(?), ST_POINTFROMTEXT(?)), ST_TOUCHES(ST_GEOMFROMTEXT(?), ST_GEOMFROMTEXT(?)), MBRCONTAINS(ST_GEOMFROMTEXT(?), ST_POINTFROMTEXT(?)), MBRWITHIN(ST_POINTFROMTEXT(?), ST_GEOMFROMTEXT(?)), MBRINTERSECTS(ST_GEOMFROMTEXT(?), ST_GEOMFROMTEXT(?))"
+                   [| box "POINT(0 0)"
+                      box "POINT(3 4)"
+                      box "POINT(1 1)"
+                      box "POINT(1 1)"
+                      box "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))"
+                      box "POINT(2 2)"
+                      box "POINT(2 2)"
+                      box "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))"
+                      box "LINESTRING(0 0, 2 2)"
+                      box "LINESTRING(0 2, 2 0)"
+                      box "POINT(0 0)"
+                      box "POINT(1 1)"
+                      box "LINESTRING(0 0, 1 0)"
+                      box "LINESTRING(1 0, 2 0)"
+                      box "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))"
+                      box "POINT(2 2)"
+                      box "POINT(2 2)"
+                      box "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))"
+                      box "LINESTRING(0 0, 2 2)"
+                      box "LINESTRING(0 2, 2 0)" |]
+                   (Some(
+                       [| "ST_DISTANCE"
+                          "ST_EQUALS"
+                          "ST_CONTAINS"
+                          "ST_WITHIN"
+                          "ST_INTERSECTS"
+                          "ST_DISJOINT"
+                          "ST_TOUCHES"
+                          "MBRCONTAINS"
+                          "MBRWITHIN"
+                          "MBRINTERSECTS" |],
+                       "ST_DISTANCE(?, ST_POINTFROMTEXT('POINT(0 0)')), ST_EQUALS(?, ST_POINTFROMTEXT('POINT(1 1)')), ST_CONTAINS(?, ST_POINTFROMTEXT('POINT(2 2)')), ST_WITHIN(?, ST_GEOMFROMTEXT('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))')), ST_INTERSECTS(?, ST_GEOMFROMTEXT('LINESTRING(0 2, 2 0)')), ST_DISJOINT(?, ST_POINTFROMTEXT('POINT(1 1)')), ST_TOUCHES(?, ST_GEOMFROMTEXT('LINESTRING(1 0, 2 0)')), MBRCONTAINS(?, ST_POINTFROMTEXT('POINT(2 2)')), MBRWITHIN(?, ST_GEOMFROMTEXT('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))')), MBRINTERSECTS(?, ST_GEOMFROMTEXT('LINESTRING(0 2, 2 0)'))",
+                       Array.create 10 nullValue
+                   ))
+                   [| "ST_DISTANCE", "ST_DISTANCE(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "ST_EQUALS", "ST_EQUALS(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "ST_CONTAINS", "ST_CONTAINS(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "ST_WITHIN", "ST_WITHIN(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "ST_INTERSECTS", "ST_INTERSECTS(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "ST_DISJOINT", "ST_DISJOINT(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "ST_TOUCHES", "ST_TOUCHES(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "MBRCONTAINS", "MBRCONTAINS(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "MBRWITHIN", "MBRWITHIN(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "MBRINTERSECTS", "MBRINTERSECTS(ST_POINTFROMTEXT('POINT(0 0)'))" |] |]
+
+        let spatialResultSpecs =
+            [| spec
+                   "spatial-overlay-results"
+                   [| "ST_INTERSECTION"; "ST_UNION"; "ST_DIFFERENCE"; "ST_SYMDIFFERENCE"; "ST_CONVEXHULL"; "ST_ENVELOPE" |]
+                   "ST_INTERSECTION(ST_POINTFROMTEXT('POINT(1 1)'), ST_POINTFROMTEXT('POINT(1 1)')), ST_UNION(ST_POINTFROMTEXT('POINT(1 1)'), ST_POINTFROMTEXT('POINT(1 1)')), ST_DIFFERENCE(ST_POINTFROMTEXT('POINT(1 1)'), ST_POINTFROMTEXT('POINT(1 1)')), ST_SYMDIFFERENCE(ST_POINTFROMTEXT('POINT(1 1)'), ST_POINTFROMTEXT('POINT(1 1)')), ST_CONVEXHULL(ST_POINTFROMTEXT('POINT(1 1)')), ST_ENVELOPE(ST_POINTFROMTEXT('POINT(1 1)'))"
+                   "ST_INTERSECTION(ST_POINTFROMTEXT(?), ST_POINTFROMTEXT(?)), ST_UNION(ST_POINTFROMTEXT(?), ST_POINTFROMTEXT(?)), ST_DIFFERENCE(ST_POINTFROMTEXT(?), ST_POINTFROMTEXT(?)), ST_SYMDIFFERENCE(ST_POINTFROMTEXT(?), ST_POINTFROMTEXT(?)), ST_CONVEXHULL(ST_POINTFROMTEXT(?)), ST_ENVELOPE(ST_POINTFROMTEXT(?))"
+                   (Array.create 10 (box "POINT(1 1)"))
+                   (Some(
+                       [| "ST_INTERSECTION"; "ST_UNION"; "ST_DIFFERENCE"; "ST_SYMDIFFERENCE"; "ST_CONVEXHULL"; "ST_ENVELOPE" |],
+                       "ST_INTERSECTION(?, ST_POINTFROMTEXT('POINT(1 1)')), ST_UNION(?, ST_POINTFROMTEXT('POINT(1 1)')), ST_DIFFERENCE(?, ST_POINTFROMTEXT('POINT(1 1)')), ST_SYMDIFFERENCE(?, ST_POINTFROMTEXT('POINT(1 1)')), ST_CONVEXHULL(?), ST_ENVELOPE(?)",
+                       Array.create 6 nullValue
+                   ))
+                   [| "ST_INTERSECTION", "ST_INTERSECTION(ST_POINTFROMTEXT('POINT(1 1)'))"
+                      "ST_UNION", "ST_UNION(ST_POINTFROMTEXT('POINT(1 1)'))"
+                      "ST_DIFFERENCE", "ST_DIFFERENCE(ST_POINTFROMTEXT('POINT(1 1)'))"
+                      "ST_SYMDIFFERENCE", "ST_SYMDIFFERENCE(ST_POINTFROMTEXT('POINT(1 1)'))"
+                      "ST_CONVEXHULL", "ST_CONVEXHULL()"
+                      "ST_ENVELOPE", "ST_ENVELOPE()" |]
+               shapeSpec
+                   "spatial-buffer-shapes"
+                   [| "ST_BUFFER"; "ST_BUFFER_STRATEGY" |]
+                   "ST_CONTAINS(ST_BUFFER(ST_POINTFROMTEXT('POINT(0 0)'), 2), ST_POINTFROMTEXT('POINT(0 0)')), LENGTH(ST_BUFFER_STRATEGY('point_square')) > 0"
+                   "ST_CONTAINS(ST_BUFFER(ST_POINTFROMTEXT(?), ?), ST_POINTFROMTEXT(?)), LENGTH(ST_BUFFER_STRATEGY(?)) > 0"
+                   [| box "POINT(0 0)"; box 2; box "POINT(0 0)"; box "point_square" |]
+                   (Some(
+                       [| "ST_BUFFER"; "ST_BUFFER_STRATEGY" |],
+                       "ST_BUFFER(?, 2), ST_BUFFER_STRATEGY(?)",
+                       [| nullValue; nullValue |]
+                   ))
+                   [| "ST_BUFFER", "ST_BUFFER(ST_POINTFROMTEXT('POINT(0 0)'))"
+                      "ST_BUFFER_STRATEGY", "ST_BUFFER_STRATEGY()" |] |]
+
+        let specs =
+            Array.concat [ establishedSpecs; stringSpecs; jsonSpecs; temporalSpecs; spatialSpecs; spatialResultSpecs ]
 
         let steps, coverage = generatedFunctionContracts specs
 
