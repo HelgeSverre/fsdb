@@ -505,7 +505,8 @@ and `HANDLER`. Prepared descriptors derive schema, operator, aggregate,
 overloaded scalar, temporal, JSON, spatial, and registered-extension result
 families without evaluating the statement. Typed numeric builtin and cast
 arguments are coerced before expression evaluation for both protocol and SQL
-prepared statements.
+prepared statements. `LIMIT` and `OFFSET` retain MySQL's distinct binary-
+protocol and SQL user-variable validation rules.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|

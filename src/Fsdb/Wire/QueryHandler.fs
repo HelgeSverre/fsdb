@@ -4720,12 +4720,13 @@ let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
 let bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
     mapPlaceholders (fun i -> Lit(List.item i values)) stmt
 
-let private bindPreparedPlaceholders (session: Session) statement values =
+let private bindPreparedPlaceholders source (session: Session) statement values =
     let store = Session.currentStore session
     let registry = registryFor session
     let schema = session.Database |> Option.defaultValue defaultDatabase
-    let coerced = PreparedMetadata.coerceParameters store registry schema statement values
-    bindPlaceholders statement coerced
+
+    PreparedMetadata.bindParameters source store registry schema statement values
+    |> Result.map (bindPlaceholders statement)
 
 /// Renumbers surviving `Placeholder` nodes densely in traversal (= source)
 /// order, returning the statement and the true parameter count. FParsec's
@@ -6356,7 +6357,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 | Some ast ->
                     withStatementHints parserOptions statement.Sql (fun () ->
                         withStoredFunctionRegistry dispatch session (fun current ->
-                            executeParsed current (bindPreparedPlaceholders current ast values)))
+                            match bindPreparedPlaceholders PreparedMetadata.UserVariables current ast values with
+                            | Ok bound -> executeParsed current bound
+                            | Error(code, message) -> current, Err(code, message)))
                 | None ->
                     dispatch
                         session
@@ -7470,37 +7473,39 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
             recordDiagnostics session false (fun () ->
                 try
                     withStatementHints (parserOptionsForSession session) stmt.Sql (fun () ->
-                        let statement = bindPreparedPlaceholders session ast values
-                        let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
+                        match bindPreparedPlaceholders PreparedMetadata.ProtocolValues session ast values with
+                        | Error(code, message) -> session, Err(code, message)
+                        | Ok statement ->
+                            let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
 
-                        if session.PasswordExpired && not resetsPassword then
-                            session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
-                        elif isRoleSessionStatement statement then
-                            applyRoleStatement session statement
-                        else
-                            let accountStatement = ParsedAccountStatement statement
-                            let account = accountOf session
-                            let store = Session.currentStore session
+                            if session.PasswordExpired && not resetsPassword then
+                                session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
+                            elif isRoleSessionStatement statement then
+                                applyRoleStatement session statement
+                            else
+                                let accountStatement = ParsedAccountStatement statement
+                                let account = accountOf session
+                                let store = Session.currentStore session
 
-                            match
-                                Auth.tryConsumeAccountStatementWithLimits
-                                    store
-                                    account
-                                    (Auth.tryAccountLimits store account)
-                                    (accountStatementCountsAsUpdate accountStatement
-                                     && accountUpdateIsAuthorized session accountStatement)
-                            with
-                            | Error(code, message) -> session, Err(code, message)
-                            | Ok() ->
-                                let executed, result =
-                                    withTriggerTextExecution session (fun () ->
-                                        withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
+                                match
+                                    Auth.tryConsumeAccountStatementWithLimits
+                                        store
+                                        account
+                                        (Auth.tryAccountLimits store account)
+                                        (accountStatementCountsAsUpdate accountStatement
+                                         && accountUpdateIsAuthorized session accountStatement)
+                                with
+                                | Error(code, message) -> session, Err(code, message)
+                                | Ok() ->
+                                    let executed, result =
+                                        withTriggerTextExecution session (fun () ->
+                                            withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
 
-                                (if resetsPassword && terminalErrorInfo result |> Option.isNone then
-                                     { executed with PasswordExpired = false }
-                                 else
-                                     executed),
-                                result)
+                                    (if resetsPassword && terminalErrorInfo result |> Option.isNone then
+                                         { executed with PasswordExpired = false }
+                                     else
+                                         executed),
+                                    result)
                 with
                 | PlaceholderCountMismatch(expected, got) ->
                     session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)

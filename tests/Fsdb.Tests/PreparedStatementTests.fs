@@ -221,6 +221,78 @@ let tests =
               | ResultSet(_, [ [ Some "bcdef" ] ]) -> ()
               | other -> failtestf "expected SQL EXECUTE to use the inferred integer context, got %A" other
 
+          testCase "prepared protocol LIMIT and OFFSET enforce MySQL value families"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE prepared_limits (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO prepared_limits VALUES (1), (2), (3)"
+
+              let execute sql value =
+                  match prepareStatement sql with
+                  | Result.Ok(Some ast, 1) ->
+                      executePrepared
+                          session
+                          { Ast = Some ast
+                            Sql = sql
+                            ParamCount = 1
+                            LastParamTypes = None }
+                          [ value ]
+                      |> snd
+                  | other -> failtestf "expected one LIMIT parameter in %s, got %A" sql other
+
+              let limitedStatements =
+                  [ "SELECT id FROM prepared_limits ORDER BY id LIMIT ?"
+                    "SELECT id FROM prepared_limits ORDER BY id LIMIT 1 OFFSET ?"
+                    "UPDATE prepared_limits SET id = id LIMIT ?"
+                    "DELETE FROM prepared_limits LIMIT ?" ]
+
+              for sql in limitedStatements do
+                  for invalid in [ VDouble 1.0; VDecimal 1M ] do
+                      match execute sql invalid with
+                      | Err(1210, _) -> ()
+                      | other -> failtestf "expected error 1210 for %A in %s, got %A" invalid sql other
+
+                  match execute sql (VInt -1L) with
+                  | Err(1690, _) -> ()
+                  | other -> failtestf "expected error 1690 for a negative limit in %s, got %A" sql other
+
+              let selectSql = "SELECT id FROM prepared_limits ORDER BY id LIMIT ?"
+
+              match execute selectSql (VInt 2L) with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected a non-negative integer LIMIT to execute, got %A" other
+
+              match execute selectSql (VString "1.9") with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected protocol text to retain numeric-string conversion, got %A" other
+
+              for emptyLimit in [ VString "abc"; VNull ] do
+                  match execute selectSql emptyLimit with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected %A to produce an empty limited result, got %A" emptyLimit other
+
+          testCase "SQL EXECUTE enforces prepared LIMIT parameter types"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @row_count = '2'"
+              let session, _ = handle session "PREPARE limited FROM 'SELECT 1 LIMIT ?'"
+
+              match handle session "EXECUTE limited USING @row_count" |> snd with
+              | Err(1210, _) -> ()
+              | other -> failtestf "expected error 1210 for a string LIMIT, got %A" other
+
+              let session, _ = handle session "SET @row_count = NULL"
+
+              match handle session "EXECUTE limited USING @row_count" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected a NULL user-variable LIMIT to produce no rows, got %A" other
+
+              let session, _ = handle session "SET @row_count = -1"
+
+              match handle session "EXECUTE limited USING @row_count" |> snd with
+              | Err(1690, _) -> ()
+              | other -> failtestf "expected error 1690 for a negative user-variable LIMIT, got %A" other
+
           testCase "a prepared CTE update binds source and assignment parameters"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

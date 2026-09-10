@@ -295,7 +295,42 @@ module ContractCatalog =
                Contract.preparedQuery
                    "prepared-comments"
                    "SELECT /* before */ id FROM contract_prepared WHERE id /* operator */ = /* parameter */ ?"
-                   [| box 1 |] |]
+                   [| box 1 |]
+               Contract.preparedQuery
+                   "prepared-limit-integer"
+                   "SELECT id FROM contract_prepared ORDER BY id LIMIT ?"
+                   [| box 1 |]
+               Contract.preparedQuery
+                   "prepared-limit-integral-text"
+                   "SELECT id FROM contract_prepared ORDER BY id LIMIT ?"
+                   [| box "1" |]
+               Contract.preparedQuery
+                   "prepared-limit-fractional-text"
+                   "SELECT id FROM contract_prepared ORDER BY id LIMIT ?"
+                   [| box "1.9" |]
+               Contract.preparedQuery
+                   "prepared-limit-nonnumeric-text"
+                   "SELECT id FROM contract_prepared ORDER BY id LIMIT ?"
+                   [| box "abc" |]
+               Contract.preparedQuery
+                   "prepared-offset-rejects-double"
+                   "SELECT id FROM contract_prepared ORDER BY id LIMIT 1 OFFSET ?"
+                   [| box 1.0 |]
+               |> Contract.fails 1210 "HY000"
+               Contract.preparedExecute
+                   "prepared-update-limit-rejects-decimal"
+                   "UPDATE contract_prepared SET label = 'changed' LIMIT ?"
+                   [| box 1M |]
+               |> Contract.fails 1210 "HY000"
+               Contract.preparedExecute
+                   "prepared-delete-limit-null"
+                   "DELETE FROM contract_prepared LIMIT ?"
+                   [| box DBNull.Value |]
+               Contract.preparedQuery
+                   "prepared-limit-negative"
+                   "SELECT id FROM contract_prepared ORDER BY id LIMIT ?"
+                   [| box -1 |]
+               |> Contract.fails 1690 "22003" |]
           Cleanup = [| "DROP TABLE IF EXISTS contract_prepared" |]
           Coverage =
             [| "statement:select", [| "prepared-protocol" |]

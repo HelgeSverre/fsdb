@@ -14,10 +14,19 @@ type private BoundColumn =
 type private ParameterTreatment =
     | DescribeOnly
     | CoerceNumeric
+    | ValidateUnsignedInteger
+
+type private ParameterBinding =
+    | CoerceNumericAs of ColumnMetadata
+    | UnsignedIntegerOnly
+
+type internal BindingSource =
+    | ProtocolValues
+    | UserVariables
 
 type private ParameterAnalysis =
     { Definitions: ColumnMetadata option list
-      Coercions: ColumnMetadata option list }
+      Bindings: ParameterBinding option list }
 
 let private sameName (left: string) (right: string) =
     left.Equals(right, StringComparison.OrdinalIgnoreCase)
@@ -158,7 +167,7 @@ let private inferParameters
     (parameterCount: int)
     : ParameterAnalysis =
     let parameters = Array.create parameterCount None
-    let coercions = Array.create parameterCount None
+    let bindings = Array.create parameterCount None
 
     let tryColumn scope expression =
         let matches =
@@ -194,8 +203,11 @@ let private inferParameters
         if index >= 0 && index < parameters.Length then
             parameters.[index] <- Some metadata
 
-            if treatment = CoerceNumeric then
-                coercions.[index] <- Some metadata
+            bindings.[index] <-
+                match treatment with
+                | DescribeOnly -> bindings.[index]
+                | CoerceNumeric -> Some(CoerceNumericAs metadata)
+                | ValidateUnsignedInteger -> Some UnsignedIntegerOnly
 
     let statementOfBody =
         function
@@ -353,8 +365,8 @@ let private inferParameters
         select.GroupBy |> List.iter infer
         select.Having |> Option.iter infer
         select.OrderBy |> List.iter (fst >> infer)
-        select.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
-        select.Offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
+        select.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
+        select.Offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
 
     and inferBody scope =
         function
@@ -363,8 +375,8 @@ let private inferParameters
             inferSelect scope first
             rest |> List.iter (snd >> inferSelect scope)
             orderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
-            limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
-            offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
+            limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
+            offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
 
     let targetColumns (table: string) (names: string list) =
         let columns = tableColumns None table
@@ -439,22 +451,22 @@ let private inferParameters
 
         update.Where |> Option.iter (inferExpression scope None DescribeOnly)
         update.OrderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
-        update.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
+        update.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
     | Delete delete ->
         let scope = inferScope [] delete.Ctes (Some(FromTable delete.From)) delete.Joins
         delete.Where |> Option.iter (inferExpression scope None DescribeOnly)
         delete.OrderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
-        delete.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
+        delete.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
     | _ -> ()
 
     { Definitions = List.ofArray parameters
-      Coercions = List.ofArray coercions }
+      Bindings = List.ofArray bindings }
 
 let private parameterExpectations store registry schema statement parameterCount =
     (inferParameters store registry schema statement parameterCount).Definitions
 
-let private parameterCoercions store registry schema statement parameterCount =
-    (inferParameters store registry schema statement parameterCount).Coercions
+let private parameterBindings store registry schema statement parameterCount =
+    (inferParameters store registry schema statement parameterCount).Bindings
 
 /// Infers the parameter descriptors advertised by COM_STMT_PREPARE.
 let parameterDefinitions store registry schema statement parameterCount : ColumnMetadata list =
@@ -492,25 +504,45 @@ let private parameterColumn columnType : ColumnDef =
       Charset = None
       Srid = None }
 
-/// Converts bound values in typed numeric function and cast contexts.
-/// The protocol's supplied type only describes the bytes on the wire;
-/// non-numeric contexts already consume those values through their own SQL
-/// coercion rules and must retain the dynamic type of an unconstrained marker.
-let coerceParameters store registry schema statement values =
+/// Applies the binding rules that are stricter than ordinary expression
+/// coercion. Typed numeric function and cast arguments convert before
+/// evaluation. LIMIT/OFFSET reject floating and decimal values; protocol
+/// strings retain MySQL's numeric-string conversion, while SQL user-variable
+/// strings are refused. Other contexts retain the client's dynamic type.
+let internal bindParameters source store registry schema statement values =
     let mode =
         { Storage.temporalCoercionMode store with
             Strict = false }
 
-    let coerce expectation value =
-        match expectation |> Option.bind numericParameterType with
-        | None -> value
-        | Some columnType ->
-            match
-                Diagnostics.suppress (fun () ->
-                    Storage.coerceValueWithMode mode (parameterColumn columnType) value)
-            with
-            | Ok coerced -> coerced
-            | Error _ -> value
+    let bind binding value =
+        match binding with
+        | None -> Ok value
+        | Some UnsignedIntegerOnly ->
+            match value with
+            | VInt number when number >= 0L -> Ok value
+            | VInt _ -> Error(1690, "signed integer value is out of range in 'EXECUTE'")
+            | VUInt _ -> Ok value
+            | VNull -> Ok value
+            | VString _ when source = ProtocolValues -> Ok value
+            | _ -> Error(1210, "Incorrect arguments to EXECUTE")
+        | Some(CoerceNumericAs expectation) ->
+            match numericParameterType expectation with
+            | None -> Ok value
+            | Some columnType ->
+                match
+                    Diagnostics.suppress (fun () ->
+                        Storage.coerceValueWithMode mode (parameterColumn columnType) value)
+                with
+                | Ok coerced -> Ok coerced
+                | Error _ -> Ok value
 
-    let expectations = parameterCoercions store registry schema statement (List.length values)
-    List.map2 coerce expectations values
+    let rec bindAll bindings values bound =
+        match bindings, values with
+        | [], [] -> Ok(List.rev bound)
+        | binding :: remainingBindings, value :: remainingValues ->
+            bind binding value
+            |> Result.bind (fun value -> bindAll remainingBindings remainingValues (value :: bound))
+        | _ -> Error(1210, "Incorrect arguments to EXECUTE")
+
+    let bindings = parameterBindings store registry schema statement (List.length values)
+    bindAll bindings values []
