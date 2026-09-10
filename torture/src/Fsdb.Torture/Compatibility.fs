@@ -980,6 +980,59 @@ module ContractCatalog =
                       "ST_X", "ST_X()"
                       "ST_Y", "ST_Y()" |]
                spec
+                   "spatial-property-accessors"
+                   [| "ST_ISCLOSED"
+                      "ST_NUMPOINTS"
+                      "ST_STARTPOINT"
+                      "ST_ENDPOINT"
+                      "ST_POINTN"
+                      "ST_NUMINTERIORRING"
+                      "ST_NUMINTERIORRINGS"
+                      "ST_EXTERIORRING"
+                      "ST_INTERIORRINGN"
+                      "ST_NUMGEOMETRIES"
+                      "ST_GEOMETRYN" |]
+                   "ST_ISCLOSED(ST_GEOMFROMTEXT('LINESTRING(0 0,1 1,0 0)')), ST_NUMPOINTS(ST_GEOMFROMTEXT('LINESTRING(0 0,1 1,2 3)')), ST_ASTEXT(ST_STARTPOINT(ST_GEOMFROMTEXT('LINESTRING(0 0,1 1,2 3)'))), ST_ASTEXT(ST_ENDPOINT(ST_GEOMFROMTEXT('LINESTRING(0 0,1 1,2 3)'))), ST_ASTEXT(ST_POINTN(ST_GEOMFROMTEXT('LINESTRING(0 0,1 1,2 3)'), 2)), ST_NUMINTERIORRING(ST_GEOMFROMTEXT('POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,1 2,1 1))')), ST_NUMINTERIORRINGS(ST_GEOMFROMTEXT('POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,1 2,1 1))')), ST_ASTEXT(ST_EXTERIORRING(ST_GEOMFROMTEXT('POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,1 2,1 1))'))), ST_ASTEXT(ST_INTERIORRINGN(ST_GEOMFROMTEXT('POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,1 2,1 1))'), 1)), ST_NUMGEOMETRIES(ST_GEOMFROMTEXT('GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))')), ST_ASTEXT(ST_GEOMETRYN(ST_GEOMFROMTEXT('GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))'), 2))"
+                   "ST_ISCLOSED(ST_GEOMFROMTEXT(?)), ST_NUMPOINTS(ST_GEOMFROMTEXT(?)), ST_ASTEXT(ST_STARTPOINT(ST_GEOMFROMTEXT(?))), ST_ASTEXT(ST_ENDPOINT(ST_GEOMFROMTEXT(?))), ST_ASTEXT(ST_POINTN(ST_GEOMFROMTEXT(?), ?)), ST_NUMINTERIORRINGS(ST_GEOMFROMTEXT(?)), ST_ASTEXT(ST_EXTERIORRING(ST_GEOMFROMTEXT(?))), ST_ASTEXT(ST_INTERIORRINGN(ST_GEOMFROMTEXT(?), ?)), ST_NUMGEOMETRIES(ST_GEOMFROMTEXT(?)), ST_ASTEXT(ST_GEOMETRYN(ST_GEOMFROMTEXT(?), ?))"
+                   [| box "LINESTRING(0 0,1 1,0 0)"
+                      box "LINESTRING(0 0,1 1,2 3)"
+                      box "LINESTRING(0 0,1 1,2 3)"
+                      box "LINESTRING(0 0,1 1,2 3)"
+                      box "LINESTRING(0 0,1 1,2 3)"
+                      box 2
+                      box "POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,1 2,1 1))"
+                      box "POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,1 2,1 1))"
+                      box "POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,1 2,1 1))"
+                      box 1
+                      box "MULTIPOINT((1 2),(3 4))"
+                      box "MULTIPOINT((1 2),(3 4))"
+                      box 2 |]
+                   (Some(
+                       [| "ST_ISCLOSED"
+                          "ST_NUMPOINTS"
+                          "ST_STARTPOINT"
+                          "ST_ENDPOINT"
+                          "ST_POINTN"
+                          "ST_NUMINTERIORRINGS"
+                          "ST_EXTERIORRING"
+                          "ST_INTERIORRINGN"
+                          "ST_NUMGEOMETRIES"
+                          "ST_GEOMETRYN" |],
+                       "ST_ISCLOSED(?), ST_NUMPOINTS(?), ST_STARTPOINT(?), ST_ENDPOINT(?), ST_POINTN(?, 1), ST_NUMINTERIORRINGS(?), ST_EXTERIORRING(?), ST_INTERIORRINGN(?, 1), ST_NUMGEOMETRIES(?), ST_GEOMETRYN(?, 1)",
+                       Array.create 10 nullValue
+                   ))
+                   [| "ST_ISCLOSED", "ST_ISCLOSED()"
+                      "ST_NUMPOINTS", "ST_NUMPOINTS()"
+                      "ST_STARTPOINT", "ST_STARTPOINT()"
+                      "ST_ENDPOINT", "ST_ENDPOINT()"
+                      "ST_POINTN", "ST_POINTN(ST_GEOMFROMTEXT('LINESTRING(0 0,1 1)'))"
+                      "ST_NUMINTERIORRING", "ST_NUMINTERIORRING()"
+                      "ST_NUMINTERIORRINGS", "ST_NUMINTERIORRINGS()"
+                      "ST_EXTERIORRING", "ST_EXTERIORRING()"
+                      "ST_INTERIORRINGN", "ST_INTERIORRINGN(ST_GEOMFROMTEXT('POLYGON((0 0,1 0,1 1,0 0))'))"
+                      "ST_NUMGEOMETRIES", "ST_NUMGEOMETRIES()"
+                      "ST_GEOMETRYN", "ST_GEOMETRYN(ST_GEOMFROMTEXT('MULTIPOINT((1 2))'))" |]
+               spec
                    "spatial-relations"
                    [| "ST_DISTANCE"
                       "ST_EQUALS"
@@ -1258,6 +1311,16 @@ module ContractCatalog =
                           MBRWithin(ST_GeomFromText('POINT(2 2)'), ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))')),
                           MBRIntersects(ST_GeomFromText('POINT(1 1)'), ST_GeomFromText('POINT(1 1)'))"""
 
+        let spatialPropertyEdgeSteps =
+            [| Contract.query
+                   "spatial-property-family-and-index-rules"
+                   "SELECT ST_IsClosed(ST_GeomFromText('POINT(1 2)')), ST_NumPoints(ST_GeomFromText('MULTILINESTRING((0 0,1 1))')), ST_NumGeometries(ST_GeomFromText('POINT(1 2)')), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(0 0,1 1,2 2)'), -1)), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(0 0,1 1,2 2)'), 1.5)), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(0 0,1 1,2 2)'), '1.9')), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(0 0,1 1,2 2)'), CAST(3.9 AS DOUBLE)))"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-property-srid-retention"
+                   "SELECT ST_Srid(ST_PointN(ST_GeomFromText('LINESTRING(10 20,11 21)', 4326, 'axis-order=long-lat'), 1)), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(10 20,11 21)', 4326, 'axis-order=long-lat'), 1))"
+               |> Contract.comparingValues |]
+
         let aggregateSteps, aggregateCoverage =
             functionProbe
                 "aggregate-functions"
@@ -1292,6 +1355,7 @@ module ContractCatalog =
                   temporalSteps
                   jsonSteps
                   spatialSteps
+                  spatialPropertyEdgeSteps
                   aggregateSteps
                   errorSteps ]
           Cleanup = [||]

@@ -181,6 +181,84 @@ let tests =
                     Expect.equal (call "ST_Dimension" [ geometry ]) (VInt 1L) "highest member dimension"
                     Expect.equal (call "ST_IsEmpty" [ geometry ]) (VInt 0L) "not empty"
 
+                testCase "geometry property accessors preserve members and SRIDs"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let asText value = call "ST_AsText" [ value ]
+                    let line = geometry "LINESTRING(0 0,1 1,2 3)"
+                    let polygon = geometry "POLYGON((0 0,4 0,4 4,0 0),(1 1,2 1,1 2,1 1))"
+                    let collection = geometry "GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))"
+
+                    Expect.equal (call "ST_IsClosed" [ line ]) (VInt 0L) "open line"
+                    Expect.equal
+                        (call "ST_IsClosed" [ geometry "MULTILINESTRING((0 0,1 1,0 0),(2 2,3 3,2 2))" ])
+                        (VInt 1L)
+                        "closed multiline"
+                    Expect.equal (call "ST_NumPoints" [ line ]) (VInt 3L) "point count"
+                    Expect.equal (call "ST_StartPoint" [ line ] |> asText) (VString "POINT(0 0)") "start point"
+                    Expect.equal (call "ST_EndPoint" [ line ] |> asText) (VString "POINT(2 3)") "end point"
+                    Expect.equal (call "ST_PointN" [ line; VInt 2L ] |> asText) (VString "POINT(1 1)") "indexed point"
+                    Expect.equal (call "ST_NumInteriorRing" [ polygon ]) (VInt 1L) "singular ring-count name"
+                    Expect.equal (call "ST_NumInteriorRings" [ polygon ]) (VInt 1L) "plural ring-count name"
+                    Expect.equal
+                        (call "ST_ExteriorRing" [ polygon ] |> asText)
+                        (VString "LINESTRING(0 0,4 0,4 4,0 0)")
+                        "exterior ring"
+                    Expect.equal
+                        (call "ST_InteriorRingN" [ polygon; VInt 1L ] |> asText)
+                        (VString "LINESTRING(1 1,2 1,1 2,1 1)")
+                        "interior ring"
+                    Expect.equal (call "ST_NumGeometries" [ collection ]) (VInt 2L) "collection member count"
+                    Expect.equal
+                        (call "ST_GeometryN" [ collection; VInt 2L ] |> asText)
+                        (VString "LINESTRING(0 0,1 1)")
+                        "collection member"
+
+                    let geographic =
+                        call
+                            "ST_GeomFromText"
+                            [ VString "LINESTRING(10 20,11 21)"
+                              VInt 4326L
+                              VString "axis-order=long-lat" ]
+
+                    Expect.equal
+                        (call "ST_PointN" [ geographic; VInt 1L ] |> fun point -> call "ST_Srid" [ point ])
+                        (VInt 4326L)
+                        "extracted point SRID"
+
+                testCase "geometry property accessors follow MySQL family and index rules"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let line = geometry "LINESTRING(0 0,1 1,2 2)"
+                    let multipoint = geometry "MULTIPOINT((1 2),(3 4))"
+
+                    Expect.equal (call "ST_PointN" [ line; VInt 0L ]) VNull "zero index"
+                    Expect.equal (call "ST_PointN" [ line; VInt -1L ]) VNull "negative index"
+                    Expect.equal (call "ST_PointN" [ line; VInt 99L ]) VNull "large index"
+                    Expect.equal
+                        (call "ST_PointN" [ line; VDecimal 1.5M ] |> fun point -> call "ST_AsText" [ point ])
+                        (VString "POINT(1 1)")
+                        "decimal indexes round"
+                    Expect.equal
+                        (call "ST_PointN" [ line; VDouble 1.5 ] |> fun point -> call "ST_AsText" [ point ])
+                        (VString "POINT(0 0)")
+                        "double indexes truncate"
+                    Expect.equal
+                        (call "ST_PointN" [ line; VString "1.9" ] |> fun point -> call "ST_AsText" [ point ])
+                        (VString "POINT(0 0)")
+                        "string indexes truncate"
+                    Expect.equal
+                        (call "ST_PointN" [ line; VDouble 3.9 ] |> fun point -> call "ST_AsText" [ point ])
+                        (VString "POINT(2 2)")
+                        "truncation happens before bounds checks"
+                    Expect.equal (call "ST_NumPoints" [ multipoint ]) VNull "wrong point-count family"
+                    Expect.equal (call "ST_NumGeometries" [ geometry "POINT(1 2)" ]) VNull "single geometry has no member count"
+                    Expect.equal (call "ST_GeometryN" [ multipoint; VInt 0L ]) VNull "invalid member index"
+                    Expect.equal
+                        (call "ST_NumGeometries" [ geometry "GEOMETRYCOLLECTION EMPTY" ])
+                        (VInt 0L)
+                        "empty collection member count"
+
                 testCase "an empty geometry collection retains its type"
                 <| fun _ ->
                     let geometry = call "ST_GeomFromText" [ VString "GEOMETRYCOLLECTION EMPTY" ]

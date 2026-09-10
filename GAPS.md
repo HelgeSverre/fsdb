@@ -203,7 +203,9 @@ or locking retain the general SELECT pipeline.
 - AES encryption and decryption across MySQL block modes, HKDF, PBKDF2-HMAC,
   hashing, and UUIDs;
 - IPv4 and IPv6 conversion and predicates;
-- NULL-selection, comparison, and session identity functions.
+- NULL-selection, comparison, and session identity functions;
+- OGC geometry inspection and member access, including line endpoints and
+  indexing, polygon rings, multi-geometry members, and closure checks.
 
 | Missing family | Functions | Impact |
 |---|---|---|
@@ -250,7 +252,7 @@ metadata paths. Virtual generated values are recomputed when queried.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes and geographic SRS rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays and independently configurable square/circle point, flat/round end, and miter/round join buffer strategies work; EPSG 4326 constructors honor MySQL axis options and coordinate domains, point distance and line length use MySQL's Andoyer strategy and linear-unit registry, and `ST_DISTANCE_SPHERE` supports point and multipoint inputs with MySQL's default, SRS-derived, or explicit radius; broader non-point geographic distance/topology and other SRS definitions remain absent, and the internal augmented interval tree is not an R-tree | low | subset |
+| Spatial indexes and operations | R-tree indexes and geographic SRS rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays, geometry property/member accessors, and independently configurable square/circle point, flat/round end, and miter/round join buffer strategies work; EPSG 4326 constructors honor MySQL axis options and coordinate domains, point distance and line length use MySQL's Andoyer strategy and linear-unit registry, and `ST_DISTANCE_SPHERE` supports point and multipoint inputs with MySQL's default, SRS-derived, or explicit radius; broader non-point geographic distance/topology and other SRS definitions remain absent, and the internal augmented interval tree is not an R-tree | low | subset |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
@@ -504,6 +506,7 @@ families without evaluating the statement.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
+| Contextual parameter coercion | inferred parameter-marker types coerce each execution value before expression evaluation | descriptors infer and advertise expression context, but some builtin argument slots still evaluate the client's binary-protocol value type directly; fractional strings and numeric ties can therefore differ when the inferred type is integral | low | divergence |
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |

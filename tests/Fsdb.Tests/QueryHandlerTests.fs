@@ -979,7 +979,11 @@ let tests =
                   + "ST_Difference(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(1 1)')), "
                   + "ST_SymDifference(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(1 1)')), "
                   + "ST_Buffer_Strategy('point_square'), "
-                  + "ST_IsValid(ST_GeomFromText('POINT(0 0)')) LIMIT 0"
+                  + "ST_IsValid(ST_GeomFromText('POINT(0 0)')), "
+                  + "ST_StartPoint(ST_GeomFromText('LINESTRING(0 0,1 1)')), "
+                  + "ST_NumPoints(ST_GeomFromText('LINESTRING(0 0,1 1)')), "
+                  + "ST_GeometryN(ST_GeomFromText('MULTIPOINT((0 0),(1 1))'), 1), "
+                  + "ST_NumGeometries(ST_GeomFromText('MULTIPOINT((0 0),(1 1))')) LIMIT 0"
 
               match handle session statement with
               | session, ResultSet(_, []) ->
@@ -997,6 +1001,10 @@ let tests =
                         TypeGeometry
                         TypeGeometry
                         TypeVarString
+                        TypeLongLong
+                        TypeGeometry
+                        TypeLongLong
+                        TypeGeometry
                         TypeLongLong ]
                       "function metadata"
               | _, other -> failtestf "expected empty resultset, got %A" other

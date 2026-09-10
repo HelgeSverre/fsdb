@@ -2771,9 +2771,12 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                     ColumnLength = 16u
                     Decimals = 31uy
                     Flags = BinaryFlag }
-        | ("ST_ENVELOPE" | "ST_CONVEXHULL" | "ST_BUFFER" | "ST_INTERSECTION" | "ST_UNION" | "ST_DIFFERENCE" | "ST_SYMDIFFERENCE"), _ ->
+        | ("ST_ENVELOPE" | "ST_CONVEXHULL" | "ST_BUFFER" | "ST_INTERSECTION" | "ST_UNION" | "ST_DIFFERENCE" | "ST_SYMDIFFERENCE"
+          | "ST_STARTPOINT" | "ST_ENDPOINT" | "ST_POINTN" | "ST_EXTERIORRING" | "ST_INTERIORRINGN" | "ST_GEOMETRYN"), _ ->
             geometry
-        | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY" | "ST_ISVALID"), _ -> simple TypeLongLong
+        | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY" | "ST_ISVALID" | "ST_ISCLOSED" | "ST_NUMPOINTS"
+          | "ST_NUMINTERIORRING" | "ST_NUMINTERIORRINGS" | "ST_NUMGEOMETRIES"), _ ->
+            simple TypeLongLong
         | ("ST_CONTAINS" | "ST_WITHIN" | "ST_INTERSECTS" | "ST_DISJOINT" | "ST_TOUCHES" | "ST_EQUALS" | "MBRCONTAINS" | "MBRWITHIN"
           | "MBRINTERSECTS"), _ -> simple TypeLongLong
         | ("ST_X" | "ST_Y" | "X" | "Y" | "ST_DISTANCE" | "ST_DISTANCE_SPHERE" | "ST_LENGTH"), _ -> simple TypeDouble

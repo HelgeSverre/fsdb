@@ -5667,6 +5667,116 @@ let private geometrySridFn: Scalar =
     | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
     | _ -> nativeParameterCountError "st_srid"
 
+let private geometryPropertyFn functionName property: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        geometryArgument functionName value
+        |> property
+        |> Option.defaultValue VNull
+    | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
+
+let private indexedGeometryPropertyFn functionName property: Scalar =
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ value; index ] ->
+        geometryArgument functionName value
+        |> fun geometry -> property geometry index
+        |> Option.defaultValue VNull
+    | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
+
+let private tryOneBasedItem index items =
+    let numericIndex =
+        match index with
+        | VDecimal value -> Math.Round(value, MidpointRounding.AwayFromZero) |> float
+        | value -> value |> toDouble |> Math.Truncate
+
+    if Double.IsFinite numericIndex && numericIndex >= 1.0 && numericIndex <= float (List.length items) then
+        List.tryItem (int numericIndex - 1) items
+    else
+        None
+
+let private geometryMember (geometry: Geometry) shape =
+    VGeometry { Srid = geometry.Srid; Shape = shape }
+
+let private geometryIsClosedFn =
+    let isClosed = function
+        | first :: _ as points -> first = List.last points
+        | [] -> false
+
+    geometryPropertyFn "ST_ISCLOSED" (fun geometry ->
+        match geometry.Shape with
+        | GLineString points -> Some(VInt(if isClosed points then 1L else 0L))
+        | GMultiLineString lines -> Some(VInt(if List.forall isClosed lines then 1L else 0L))
+        | _ -> None)
+
+let private geometryNumPointsFn =
+    geometryPropertyFn "ST_NUMPOINTS" (fun geometry ->
+        match geometry.Shape with
+        | GLineString points -> Some(VInt(int64 (List.length points)))
+        | _ -> None)
+
+let private geometryEndpointFn functionName endpoint =
+    geometryPropertyFn functionName (fun geometry ->
+        match geometry.Shape with
+        | GLineString points -> endpoint points |> Option.map (GPoint >> geometryMember geometry)
+        | _ -> None)
+
+let private geometryPointNFn =
+    indexedGeometryPropertyFn "ST_POINTN" (fun geometry index ->
+        match geometry.Shape with
+        | GLineString points ->
+            points
+            |> tryOneBasedItem index
+            |> Option.map (GPoint >> geometryMember geometry)
+        | _ -> None)
+
+let private geometryNumInteriorRingsFn functionName =
+    geometryPropertyFn functionName (fun geometry ->
+        match geometry.Shape with
+        | GPolygon rings -> Some(VInt(int64 (max 0 (List.length rings - 1))))
+        | _ -> None)
+
+let private geometryExteriorRingFn =
+    geometryPropertyFn "ST_EXTERIORRING" (fun geometry ->
+        match geometry.Shape with
+        | GPolygon(exterior :: _) -> Some(geometryMember geometry (GLineString exterior))
+        | _ -> None)
+
+let private geometryInteriorRingNFn =
+    indexedGeometryPropertyFn "ST_INTERIORRINGN" (fun geometry index ->
+        match geometry.Shape with
+        | GPolygon(_ :: interiors) ->
+            interiors
+            |> tryOneBasedItem index
+            |> Option.map (GLineString >> geometryMember geometry)
+        | _ -> None)
+
+let private geometryNumGeometriesFn =
+    geometryPropertyFn "ST_NUMGEOMETRIES" (fun geometry ->
+        match geometry.Shape with
+        | GEmpty -> Some(VInt 0L)
+        | GMultiPoint points -> Some(VInt(int64 (List.length points)))
+        | GMultiLineString lines -> Some(VInt(int64 (List.length lines)))
+        | GMultiPolygon polygons -> Some(VInt(int64 (List.length polygons)))
+        | GGeometryCollection geometries -> Some(VInt(int64 (List.length geometries)))
+        | _ -> None)
+
+let private geometryNFn =
+    indexedGeometryPropertyFn "ST_GEOMETRYN" (fun geometry index ->
+        let shapes =
+            match geometry.Shape with
+            | GMultiPoint points -> points |> List.map GPoint
+            | GMultiLineString lines -> lines |> List.map GLineString
+            | GMultiPolygon polygons -> polygons |> List.map GPolygon
+            | GGeometryCollection geometries -> geometries |> List.map _.Shape
+            | _ -> []
+
+        shapes
+        |> tryOneBasedItem index
+        |> Option.map (geometryMember geometry))
+
 let private geometryDistanceFn: Scalar =
     let distance firstValue secondValue unit =
         let first = geometryArgument "ST_DISTANCE" firstValue
@@ -6046,6 +6156,17 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_Y" (pointCoordinateFn "ST_Y" (fun _ y -> y))
     |> registerScalar "X" (pointCoordinateFn "X" (fun x _ -> x))
     |> registerScalar "Y" (pointCoordinateFn "Y" (fun _ y -> y))
+    |> registerScalar "ST_ISCLOSED" geometryIsClosedFn
+    |> registerScalar "ST_NUMPOINTS" geometryNumPointsFn
+    |> registerScalar "ST_STARTPOINT" (geometryEndpointFn "ST_STARTPOINT" List.tryHead)
+    |> registerScalar "ST_ENDPOINT" (geometryEndpointFn "ST_ENDPOINT" List.tryLast)
+    |> registerScalar "ST_POINTN" geometryPointNFn
+    |> registerScalar "ST_NUMINTERIORRING" (geometryNumInteriorRingsFn "ST_NUMINTERIORRING")
+    |> registerScalar "ST_NUMINTERIORRINGS" (geometryNumInteriorRingsFn "ST_NUMINTERIORRINGS")
+    |> registerScalar "ST_EXTERIORRING" geometryExteriorRingFn
+    |> registerScalar "ST_INTERIORRINGN" geometryInteriorRingNFn
+    |> registerScalar "ST_NUMGEOMETRIES" geometryNumGeometriesFn
+    |> registerScalar "ST_GEOMETRYN" geometryNFn
     |> registerScalar "ST_DISTANCE" geometryDistanceFn
     |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
     |> registerScalar "ST_LENGTH" geometryLengthFn
