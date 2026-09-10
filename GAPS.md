@@ -602,6 +602,12 @@ nested derived tables, chained CTEs, source filters, and range predicates.
 Equality probes retain a small fixed setup cost; the filtered and range shapes
 already avoid the scan cliff on the recorded corpus.
 
+The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
+extends that coverage to compatible unary and composed expression indexes.
+Direct physical sources and pass-through projections now probe the maintained
+bucket; collation-changing comparisons and embedding overrides retain ordinary
+row evaluation.
+
 The constant-expression lookup pair records the
 [scan baseline](benchmarks/results/baa1b51-quick.md) and the
 [indexed implementation](benchmarks/results/ede0c8e-quick.md). Safe numeric
