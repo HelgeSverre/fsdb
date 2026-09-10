@@ -280,6 +280,20 @@ module ContractCatalog =
           Cleanup = [||]
           Coverage = [| "statement:select", [| "error-contract" |]; "syntax:comments", [| "error-contract" |] |] }
 
+    let private noDirInCreate =
+        { Name = "no-dir-in-create"
+          Setup = [| "DROP TABLE IF EXISTS contract_no_dir" |]
+          Steps =
+            [| Contract.execute "enable-portable-create" "SET SESSION sql_mode = 'NO_DIR_IN_CREATE'"
+               Contract.execute
+                   "create-with-ignored-directories"
+                   "CREATE TABLE contract_no_dir (id INT) INDEX DIRECTORY='/first' DATA DIRECTORY='/data' INDEX DIRECTORY='/index' PARTITION BY HASH(id) PARTITIONS 2"
+               Contract.query "ignored-directory-table-exists" "SELECT COUNT(*) FROM contract_no_dir" |]
+          Cleanup = [| "SET SESSION sql_mode = DEFAULT"; "DROP TABLE IF EXISTS contract_no_dir" |]
+          Coverage =
+            [| "statement:create_table", [| "parser"; "text-differential" |]
+               "sql-mode:no_dir_in_create", [| "execution"; "text-differential" |] |] }
+
     let private prepared =
         { Name = "prepared-binary-protocol"
           Setup = [| "DROP TABLE IF EXISTS contract_prepared"; "CREATE TABLE contract_prepared (id INT PRIMARY KEY, label VARCHAR(20))"; "INSERT INTO contract_prepared VALUES (1, 'one'), (2, 'two')" |]
@@ -1848,6 +1862,7 @@ module ContractCatalog =
     let all =
         [| comments
            exactErrors
+           noDirInCreate
            semanticErrors
            prepared
            preparedDml

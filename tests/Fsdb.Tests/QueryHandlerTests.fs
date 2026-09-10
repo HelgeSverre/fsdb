@@ -1362,6 +1362,57 @@ let tests =
               | ResultSet(_, [ [ Some modes ] ]) -> Expect.equal modes Fsdb.Sql.SqlMode.defaultText "compiled default"
               | other -> failtestf "expected the reset global mode, got %A" other
 
+          testCase "NO_DIR_IN_CREATE discards physical directory options with MySQL diagnostics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode = 'NO_DIR_IN_CREATE'"
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE TABLE portable_dump (id INT) INDEX DIRECTORY='/first' DATA DIRECTORY='/data' INDEX DIRECTORY='/index' PARTITION BY HASH(id) PARTITIONS 2"
+
+              Expect.equal created (Affected 0UL) "the portability mode ignores both physical paths"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1618, "<DATA DIRECTORY> option ignored"
+                    1618, "<INDEX DIRECTORY> option ignored" ]
+                  "one warning is reported per option kind in MySQL order"
+
+              match handle session "SHOW CREATE TABLE portable_dump" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.isFalse (ddl.Contains("DIRECTORY", StringComparison.OrdinalIgnoreCase)) "ignored paths are not retained"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+              let session, existing =
+                  handle
+                      session
+                      "CREATE TABLE IF NOT EXISTS portable_dump (other INT) DATA DIRECTORY='/other' INDEX DIRECTORY='/other'"
+
+              Expect.equal existing (Affected 0UL) "conditional creation short-circuits option processing"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1050, "Table 'portable_dump' already exists" ]
+                  "an existing table reports only the conditional-DDL note"
+
+          testCase "directory options require NO_DIR_IN_CREATE in the in-memory engine"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode = ''"
+              let session, result = handle session "CREATE TABLE physical_path (id INT) INDEX DIRECTORY='/index'"
+
+              match result with
+              | Err(1031, message) -> Expect.stringContains message "physical_path" "the unsupported table is named"
+              | other -> failtestf "expected the engine-option error, got %A" other
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1478, "InnoDB: INDEX DIRECTORY is not supported"
+                    1031, "Table storage engine for 'physical_path' doesn't have this option" ]
+                  "the statement diagnostics preserve MySQL's warning then error"
+
           testCase "ONLY_FULL_GROUP_BY is enabled by default and scoped to the session"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

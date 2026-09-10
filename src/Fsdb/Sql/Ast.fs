@@ -885,6 +885,10 @@ type CreateTableSpec =
       /// The table-option seed restored before any row is inserted.
       AutoIncrementSeed: int64 option
       Comment: string option
+      /// Syntax-only physical placement requests. The in-memory row store
+      /// never persists these paths as table metadata.
+      DataDirectory: string option
+      IndexDirectory: string option
       Partitioning: HashPartitioning option
       Deprecations: SyntaxDeprecation list }
 

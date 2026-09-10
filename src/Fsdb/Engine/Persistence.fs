@@ -957,6 +957,8 @@ let private decodeStatement (format: SnapshotFormat) (columnsForTable: string ->
               Collation = tableCollation
               AutoIncrementSeed = autoIncrementSeed
               Comment = tableComment
+              DataDirectory = None
+              IndexDirectory = None
               Partitioning = partitioning
               Deprecations = [] }
     | 0x04uy -> DropTable(readStrList r, readBool r)

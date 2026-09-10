@@ -1534,6 +1534,23 @@ let private validateAlterEngine (store: Store) tableName =
         Diagnostics.warning 1286 (sprintf "Unknown storage engine '%s'" engine)
         None
 
+let private validateCreateDirectories (store: Store) tableName (table: CreateTableSpec) =
+    match table.DataDirectory, table.IndexDirectory with
+    | None, None -> None
+    | dataDirectory, indexDirectory when store.ExecutionSettings.SqlMode.NoDirInCreate ->
+        dataDirectory
+        |> Option.iter (fun _ -> Diagnostics.warning 1618 "<DATA DIRECTORY> option ignored")
+
+        indexDirectory
+        |> Option.iter (fun _ -> Diagnostics.warning 1618 "<INDEX DIRECTORY> option ignored")
+
+        None
+    | _, indexDirectory ->
+        indexDirectory
+        |> Option.iter (fun _ -> Diagnostics.warning 1478 "InnoDB: INDEX DIRECTORY is not supported")
+
+        Some(Err(1031, sprintf "Table storage engine for '%s' doesn't have this option" tableName))
+
 /// The leading numeric run of `s`, the way MySQL's numeric `CAST`/implicit
 /// string-to-number conversion reads a string — `"12abc"` yields
 /// `Some "12"`, `"abc"` yields `None`. Unlike `Storage.coerceValue`'s
@@ -18836,6 +18853,8 @@ let rec executeAs
                               Collation = table.TableCollation
                               AutoIncrementSeed = None
                               Comment = if table.TableComment = "" then None else Some table.TableComment
+                              DataDirectory = None
+                              IndexDirectory = None
                               Partitioning = table.Partitioning
                               Deprecations = [] })
 
@@ -18851,23 +18870,24 @@ let rec executeAs
                 ids, Affected 0UL
             | Some _ -> ids, storageErr (TableExists name)
             | None ->
-                let error =
-                    [ rejectUnsafeGeneratedExpressions registry table.Columns
-                      validateGeneratedDefinitions registry db table.Columns
-                      rejectUnsafePartitionExpression registry table.Partitioning
-                      validateFunctionalDefaults registry table.Columns |> validationErrorOption id
-                      validateIndexExpressions registry table.Columns table.Indexes |> validationErrorOption storageErr ]
-                    |> List.tryPick id
+                let alreadyExists = scan store db name |> Result.isOk
 
-                match error with
-                | Some error -> ids, error
-                | None ->
-                    let alreadyExists = scan store db name |> Result.isOk
+                if alreadyExists && table.IfNotExists then
+                    noteTableExists name
+                    ids, Affected 0UL
+                else
+                    let error =
+                        [ validateCreateDirectories store name table
+                          rejectUnsafeGeneratedExpressions registry table.Columns
+                          validateGeneratedDefinitions registry db table.Columns
+                          rejectUnsafePartitionExpression registry table.Partitioning
+                          validateFunctionalDefaults registry table.Columns |> validationErrorOption id
+                          validateIndexExpressions registry table.Columns table.Indexes |> validationErrorOption storageErr ]
+                        |> List.tryPick id
 
-                    if alreadyExists && table.IfNotExists then
-                        noteTableExists name
-                        ids, Affected 0UL
-                    else
+                    match error with
+                    | Some error -> ids, error
+                    | None ->
                         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
                         Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 

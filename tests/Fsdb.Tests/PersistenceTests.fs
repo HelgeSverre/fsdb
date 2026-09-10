@@ -2465,6 +2465,8 @@ let tests =
                         Collation = None
                         AutoIncrementSeed = None
                         Comment = None
+                        DataDirectory = None
+                        IndexDirectory = None
                         Partitioning = None
                         Deprecations = [] }
               File.WriteAllBytes(walPath dir, encodeWalRecord (SchemaChanged(defaultDatabase, statement)))

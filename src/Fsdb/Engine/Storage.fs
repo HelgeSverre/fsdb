@@ -6051,6 +6051,8 @@ let createTableSeeded
                   Collation = tableCollation
                   AutoIncrementSeed = autoIncrementSeed
                   Comment = tableComment
+                  DataDirectory = None
+                  IndexDirectory = None
                   Partitioning = partitioning
                   Deprecations = [] }
 

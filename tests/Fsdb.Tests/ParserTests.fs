@@ -28,6 +28,8 @@ let private createTableSpec name columns =
       Collation = None
       AutoIncrementSeed = None
       Comment = None
+      DataDirectory = None
+      IndexDirectory = None
       Partitioning = None
       Deprecations = [] }
 
@@ -1256,6 +1258,18 @@ let tests =
                           Charset = Some "utf8mb4" } ->
                         ()
                     | other -> failtestf "expected the final repeated table options, got %A" other
+
+                testCase "table directory options parse and the final spelling wins"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "CREATE TABLE external_rows (id INT) INDEX DIRECTORY '/first-index' DATA DIRECTORY='/first-data' DATA DIRECTORY '/data' INDEX DIRECTORY='/index'"
+                    with
+                    | CreateTable
+                        { DataDirectory = Some "/data"
+                          IndexDirectory = Some "/index" } ->
+                        ()
+                    | other -> failtestf "expected the final table directory options, got %A" other
 
                 testCase "application-generated indexes, negative defaults, and comma-separated table options parse"
                 <| fun _ ->

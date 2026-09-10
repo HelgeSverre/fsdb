@@ -110,7 +110,7 @@ refuses it through the prepared-statement protocol.
 | Server-side files | `LOAD DATA INFILE`, `SELECT … INTO OUTFILE/DUMPFILE`, and `IMPORT TABLE` are unsupported | medium | refusal |
 | Table maintenance | `CHECKSUM TABLE` uses a stable fsdb row checksum rather than MySQL's engine-specific value; supported `FLUSH` forms operate on fsdb state rather than InnoDB internals | low | divergence |
 | ALTER execution | Accepted changes publish one immutable root; MySQL's COPY/INPLACE/INSTANT algorithms and lock durations do not exist | low | divergence |
-| Storage engines | Known engine names still use fsdb's shared InnoDB-shaped row store | low | divergence |
+| Storage engines | Known engine names still use fsdb's shared InnoDB-shaped row store; physical DATA/INDEX DIRECTORY placement is rejected unless `NO_DIR_IN_CREATE` discards it | low | divergence |
 | HASH partitions | Definitions and logical maintenance use the shared row store; physical pruning and `REORGANIZE PARTITION` renames remain absent | low | divergence/refusal |
 | Administration and replication | Replication source, binlog purge/reset, plugin/component installation, instance, and tablespace statements are unsupported | low | refusal |
 | EXPLAIN | JSON/TREE expose the logical plan without MySQL's cost model; ANALYZE reports aggregate rather than per-iterator observations | low | divergence |
@@ -186,7 +186,6 @@ or locking retain the general SELECT pipeline.
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/index_merge/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings, index unions and intersections, and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
-| sql_mode | MySQL 8.4 modes affect parsing and execution | recognized modes are validated, deduplicated, expanded, and reported in MySQL order; every accepted mode has its relevant parser or execution effect except `NO_DIR_IN_CREATE`, which is reporting-only because DATA/INDEX DIRECTORY table options are unsupported | low | divergence |
 
 ## 3. Built-in functions
 

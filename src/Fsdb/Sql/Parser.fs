@@ -2676,6 +2676,8 @@ type private TableOption =
     | TableCollate of string
     | TableAutoIncrement of int64
     | TableComment of string
+    | TableDataDirectory of string
+    | TableIndexDirectory of string
     | TablePartitioning of HashPartitioning
     | IgnoredTableOption
 
@@ -2685,6 +2687,8 @@ type private ParsedTableOptions =
       Collation: string option
       AutoIncrementSeed: int64 option
       Comment: string option
+      DataDirectory: string option
+      IndexDirectory: string option
       Partitioning: HashPartitioning option
       Deprecations: SyntaxDeprecation list }
 
@@ -2696,6 +2700,8 @@ module private ParsedTableOptions =
           Collation = None
           AutoIncrementSeed = None
           Comment = None
+          DataDirectory = None
+          IndexDirectory = None
           Partitioning = None
           Deprecations = [] }
 
@@ -2709,6 +2715,8 @@ module private ParsedTableOptions =
         | TableCollate value -> { options with Collation = Some value }
         | TableAutoIncrement value -> { options with AutoIncrementSeed = Some value }
         | TableComment value -> { options with Comment = Some value }
+        | TableDataDirectory value -> { options with DataDirectory = Some value }
+        | TableIndexDirectory value -> { options with IndexDirectory = Some value }
         | TablePartitioning value -> { options with Partitioning = Some value }
         | IgnoredTableOption -> options
 
@@ -2741,12 +2749,18 @@ let private ignoredTableOption names =
     >>. identOrString
     >>% IgnoredTableOption
 
+let private tableOptionString =
+    stringLit |>> (toText >> Option.defaultValue "")
+
 let private tableOption: Parser<TableOption, unit> =
     choice
         [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString |>> TableEngine
           attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> TableAutoIncrement
-          keyword "COMMENT" >>. opt (sym "=") >>. stringLit
-          |>> (function VString value -> TableComment value | value -> TableComment(toText value |> Option.defaultValue ""))
+          keyword "COMMENT" >>. opt (sym "=") >>. tableOptionString |>> TableComment
+          attempt (keyword "DATA" >>. keyword "DIRECTORY") >>. opt (sym "=") >>. tableOptionString
+          |>> TableDataDirectory
+          attempt (keyword "INDEX" >>. keyword "DIRECTORY") >>. opt (sym "=") >>. tableOptionString
+          |>> TableIndexDirectory
           ignoredTableOption [ "ROW_FORMAT"; "CHECKSUM"; "DELAY_KEY_WRITE"; "PACK_KEYS" ]
           ignoredTableOption
               [ "KEY_BLOCK_SIZE"
@@ -2885,6 +2899,8 @@ let private createTable: Parser<Statement, unit> =
               Collation = options.Collation
               AutoIncrementSeed = options.AutoIncrementSeed
               Comment = options.Comment
+              DataDirectory = options.DataDirectory
+              IndexDirectory = options.IndexDirectory
               Partitioning = options.Partitioning
               Deprecations = List.rev options.Deprecations @ columnDeprecations }
 
