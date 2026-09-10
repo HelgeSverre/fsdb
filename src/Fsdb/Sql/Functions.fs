@@ -5484,9 +5484,8 @@ let private geometryAxisOrder (functionName: string) (referenceSystem: SpatialRe
                 )
             )
 
-let private validateGeographicCoordinates (functionName: string) (geometry: Geometry) =
-    match SpatialReferenceSystems.tryCoordinateDomainError geometry with
-    | Some(LatitudeOutOfRange latitude) ->
+let private raiseCoordinateDomainError (functionName: string) = function
+    | LatitudeOutOfRange latitude ->
         raise (
             SqlError(
                 3617,
@@ -5496,7 +5495,7 @@ let private validateGeographicCoordinates (functionName: string) (geometry: Geom
                     (functionName.ToLowerInvariant())
             )
         )
-    | Some(LongitudeOutOfRange longitude) ->
+    | LongitudeOutOfRange longitude ->
         raise (
             SqlError(
                 3616,
@@ -5506,7 +5505,13 @@ let private validateGeographicCoordinates (functionName: string) (geometry: Geom
                     (functionName.ToLowerInvariant())
             )
         )
-    | None -> geometry
+
+let private validateGeographicCoordinates functionName (geometry: Geometry) =
+    geometry
+    |> SpatialReferenceSystems.tryCoordinateDomainError
+    |> Option.iter (raiseCoordinateDomainError functionName)
+
+    geometry
 
 let private prepareConstructedGeometry (functionName: string) axisOrder (geometry: Geometry) =
     let referenceSystem = spatialReferenceSystem functionName geometry.Srid
@@ -5706,6 +5711,71 @@ let private geometryDistanceFn: Scalar =
     | [ first; second ] -> distance first second None
     | [ first; second; unit ] -> distance first second (Some unit)
     | _ -> nativeParameterCountError "st_distance"
+
+let private geometryDistanceSphereFn: Scalar =
+    let coordinates functionName (geometry: Geometry) =
+        let canonicalPoint: float * float -> float * float =
+            match geometry.Srid with
+            | 0 -> fun (longitude, latitude) -> latitude, longitude
+            | _ -> id
+
+        let points =
+            match geometry.Shape with
+            | GPoint(x, y) -> [ canonicalPoint (x, y) ]
+            | GMultiPoint points -> List.map canonicalPoint points
+            | _ ->
+                raise (
+                    SqlError(
+                        1235,
+                        sprintf "This version of MySQL doesn't yet support '%s for this geometry type'" functionName
+                    )
+                )
+
+        points
+        |> List.iter (fun point ->
+            SpatialReferenceSystems.tryPointDomainError point
+            |> Option.iter (raiseCoordinateDomainError functionName))
+
+        points
+
+    let defaultRadius functionName srid =
+        if srid = 0 then
+            6370986.0
+        else
+            let referenceSystem = spatialReferenceSystem functionName srid
+
+            match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
+            | Some semiMajorAxis, Some inverseFlattening ->
+                let semiMinorAxis = semiMajorAxis * (1.0 - 1.0 / inverseFlattening)
+                (2.0 * semiMajorAxis + semiMinorAxis) / 3.0
+            | _ -> raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s for this SRS'" functionName))
+
+    let distance firstValue secondValue radiusValue =
+        let functionName = "ST_DISTANCE_SPHERE"
+        let first = geometryArgument functionName firstValue
+        let second = geometryArgument functionName secondValue
+
+        if first.Srid <> second.Srid then
+            raise (SqlError(3033, sprintf "Binary geometry function st_distance_sphere given two geometries of different SRIDs: %d and %d, which should have been identical." first.Srid second.Srid))
+
+        let radius = radiusValue |> Option.map toDouble |> Option.defaultWith (fun () -> defaultRadius functionName first.Srid)
+
+        if radius <= 0.0 then
+            raise (SqlError(3706, "Invalid radius provided to function st_distance_sphere: Radius must be greater than zero."))
+
+        sphericalPointSetDistance radius (coordinates functionName first) (coordinates functionName second)
+        |> Option.map VDouble
+        |> Option.defaultValue VNull
+
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ]
+    | [ VNull; _; _ ]
+    | [ _; VNull; _ ]
+    | [ _; _; VNull ] -> VNull
+    | [ first; second ] -> distance first second None
+    | [ first; second; radius ] -> distance first second (Some radius)
+    | _ -> nativeParameterCountError "st_distance_sphere"
 
 let private geometryEnvelopeFn: Scalar =
     function
@@ -5929,6 +5999,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "X" (pointCoordinateFn "X" (fun x _ -> x))
     |> registerScalar "Y" (pointCoordinateFn "Y" (fun _ y -> y))
     |> registerScalar "ST_DISTANCE" geometryDistanceFn
+    |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
     |> registerScalar "ST_EQUALS" (geometryPredicateFn "ST_EQUALS" geometryEqualsPlanar)
     |> registerScalar "ST_CONTAINS" (geometryPredicateFn "ST_CONTAINS" geometryContainsPlanar)
     |> registerScalar "ST_WITHIN" (geometryPredicateFn "ST_WITHIN" (fun first second -> geometryContainsPlanar second first))

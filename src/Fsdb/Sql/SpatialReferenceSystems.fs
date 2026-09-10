@@ -139,12 +139,13 @@ let rec private coordinates = function
     | GMultiPolygon polygons -> polygons |> List.collect List.concat
     | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> coordinates geometry.Shape)
 
+let internal tryPointDomainError (latitude, longitude) =
+    if latitude < -90.0 || latitude > 90.0 then
+        Some(LatitudeOutOfRange latitude)
+    elif longitude <= -180.0 || longitude > 180.0 then
+        Some(LongitudeOutOfRange longitude)
+    else
+        None
+
 let internal tryCoordinateDomainError (geometry: Geometry) =
-    coordinates geometry.Shape
-    |> List.tryPick (fun (latitude, longitude) ->
-        if latitude < -90.0 || latitude > 90.0 then
-            Some(LatitudeOutOfRange latitude)
-        elif longitude <= -180.0 || longitude > 180.0 then
-            Some(LongitudeOutOfRange longitude)
-        else
-            None)
+    coordinates geometry.Shape |> List.tryPick tryPointDomainError

@@ -1445,6 +1445,32 @@ module ContractCatalog =
                    "SELECT ST_Distance(ST_GeomFromText('POINT(0 0)', 0), ST_GeomFromText('POINT(1 1)', 0), 'metre')"
                |> Contract.fails 3882 "SU001"
                Contract.query
+                   "spherical-distance-srid-zero"
+                   "SELECT ROUND(ST_Distance_Sphere(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 1)')), 6)"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "spherical-distance-custom-radius-prepared"
+                   "SELECT ROUND(ST_Distance_Sphere(ST_GeomFromText(?), ST_GeomFromText(?), ?), 9)"
+                   [| box "POINT(0 0)"; box "POINT(0 1)"; box 1000.0 |]
+               |> Contract.comparingValues
+               Contract.query
+                   "spherical-distance-wgs84"
+                   "SELECT ROUND(ST_Distance_Sphere(ST_GeomFromText('POINT(0 0)', 4326), ST_GeomFromText('POINT(0 1)', 4326)), 6)"
+               |> Contract.comparingValues
+               Contract.query
+                   "spherical-distance-multipoint"
+                   "SELECT ROUND(ST_Distance_Sphere(ST_GeomFromText('MULTIPOINT(0 0,10 10)'), ST_GeomFromText('POINT(1 0)')), 6)"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "spherical-distance-null"
+                   "SELECT ST_Distance_Sphere(ST_GeomFromText(?), ST_GeomFromText(?))"
+                   [| box DBNull.Value; box "POINT(0 1)" |]
+               |> Contract.comparingValues
+               Contract.query
+                   "spherical-distance-nonpositive-radius"
+                   "SELECT ST_Distance_Sphere(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 1)'), 0)"
+               |> Contract.fails 3706 "22003"
+               Contract.query
                    "geographic-srs-catalog"
                    "SELECT SRS_NAME, SRS_ID, ORGANIZATION, ORGANIZATION_COORDSYS_ID, DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID = 4326"
                |> Contract.comparingValues |]
@@ -1455,6 +1481,8 @@ module ContractCatalog =
                "function:st_geomfromtext",
                [| "parser"; "text-differential"; "prepared-protocol"; "null-semantics"; "error-contract" |]
                "function:st_geomfromwkb", [| "parser"; "text-differential"; "error-contract" |]
+               "function:st_distance_sphere",
+               [| "parser"; "text-differential"; "prepared-protocol"; "null-semantics"; "error-contract"; "result-type" |]
                "table:information_schema.st_spatial_reference_systems", [| "text-differential" |] |] }
 
     let private preparedInvalidation =

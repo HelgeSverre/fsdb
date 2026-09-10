@@ -36,6 +36,30 @@ let private encodedStrategyLength = strategyCodeLength + sizeof<double>
 
 let private radians degrees = degrees * Math.PI / 180.0
 
+let private sphericalPointDistance radius (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
+    let latitudeDelta = radians (secondLatitude - firstLatitude)
+    let longitudeDelta = radians (secondLongitude - firstLongitude)
+    let firstLatitude = radians firstLatitude
+    let secondLatitude = radians secondLatitude
+    let haversine angle = sin (angle / 2.0) ** 2.0
+
+    let centralHaversine =
+        haversine latitudeDelta
+        + cos firstLatitude * cos secondLatitude * haversine longitudeDelta
+
+    radius * 2.0 * asin (sqrt (min 1.0 centralHaversine))
+
+let internal sphericalPointSetDistance radius firstPoints secondPoints =
+    let nearer current candidate =
+        match current with
+        | None -> Some candidate
+        | Some distance -> Some(min distance candidate)
+
+    firstPoints
+    |> List.fold (fun minimum first ->
+        secondPoints
+        |> List.fold (fun minimum second -> sphericalPointDistance radius first second |> nearer minimum) minimum) None
+
 /// MySQL delegates geographic point distance to Boost.Geometry's first-order
 /// Andoyer strategy; more exact geodesic formulae produce observably different
 /// results and therefore are not interchangeable here.

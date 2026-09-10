@@ -855,6 +855,46 @@ let tests =
                         let second = call "ST_GeomFromText" [ VString "POINT(1 1)" ]
                         call "ST_Distance" [ first; second; VString "metre" ])
 
+                testCase "ST_Distance_Sphere supports point sets and radius selection"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let distance arguments =
+                        match call "ST_Distance_Sphere" arguments with
+                        | VDouble value -> value
+                        | value -> failtestf "expected a spherical distance, got %A" value
+
+                    let origin = geometry "POINT(0 0)"
+                    let north = geometry "POINT(0 1)"
+
+                    Expect.isLessThan
+                        (abs (distance [ origin; north ] - 111194.68229846345))
+                        1e-9
+                        "SRID 0 default radius"
+
+                    Expect.isLessThan
+                        (abs (distance [ origin; north; VDouble 1000.0 ] - 17.453292519943297))
+                        1e-12
+                        "custom radius"
+
+                    Expect.isLessThan
+                        (abs (distance [ geometry "MULTIPOINT(0 0,10 10)"; geometry "POINT(1 0)" ] - 111194.68229846345))
+                        1e-9
+                        "minimum multipoint distance"
+
+                    let wgsOrigin = call "ST_GeomFromText" [ VString "POINT(0 0)"; VInt 4326L ]
+                    let wgsEast = call "ST_GeomFromText" [ VString "POINT(0 1)"; VInt 4326L ]
+
+                    Expect.isLessThan
+                        (abs (distance [ wgsOrigin; wgsEast ] - 111195.07973463146))
+                        1e-9
+                        "WGS 84 mean radius"
+
+                    Expect.throwsC
+                        (fun () -> call "ST_Distance_Sphere" [ origin; north; VInt 0L ] |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(3706, _) -> ()
+                        | error -> failtestf "expected nonpositive-radius error, got %A" error)
+
                 testCase "ST_IsValid distinguishes simple planar geometry from invalid topology"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]
