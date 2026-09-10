@@ -434,8 +434,9 @@ current boundaries live in [GAPS.md](GAPS.md).
 
 - Queries: joins including `NATURAL`/`USING`, derived and lateral tables,
   `GROUP BY`/`HAVING`, window functions, `UNION [ALL]`, expression subqueries,
-  ordinary and recursive CTEs, JSON paths, `JSON_TABLE`, and planar spatial
-  predicates, overlays, and independently configurable buffer strategies.
+  ordinary and recursive CTEs, JSON paths, `JSON_TABLE`, planar spatial
+  predicates, overlays, independently configurable buffer strategies, and
+  EPSG 4326 point distance with axis-order and linear-unit handling.
 - Writes and schema: `INSERT`, `INSERT ... SELECT`, `REPLACE`, multi-table
   `UPDATE`/`DELETE`, generated columns, foreign keys, HASH partition metadata,
   atomic multi-pair and cross-database table renames, foreign-server catalog

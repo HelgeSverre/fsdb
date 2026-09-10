@@ -1293,13 +1293,25 @@ let tests =
                                [ Some "geometry_metadata_view"; Some "shape"; None; None; Some "point" ] ]) -> ()
               | other -> failtestf "expected geometry metadata rows, got %A" other
 
-              match run store "SELECT * FROM information_schema.st_spatial_reference_systems" with
+              match run store "SELECT * FROM information_schema.st_spatial_reference_systems WHERE srs_id = 0" with
               | ResultSet(
                   [ "SRS_NAME"; "SRS_ID"; "ORGANIZATION"; "ORGANIZATION_COORDSYS_ID"; "DEFINITION"; "DESCRIPTION" ],
                   [ [ Some ""; Some "0"; None; None; Some ""; None ] ]
                 ) ->
                   ()
               | other -> failtestf "expected the planar SRID metadata row, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT srs_name, srs_id, organization, organization_coordsys_id, description FROM information_schema.st_spatial_reference_systems WHERE srs_id = 4326"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "WGS 84"; Some "4326"; Some "EPSG"; Some "4326"; None ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected the WGS 84 metadata row, got %A" other
 
               match
                   run

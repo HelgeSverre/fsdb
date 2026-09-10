@@ -79,7 +79,7 @@ let geometryTypeName = function
     | MultiPolygon -> "MULTIPOLYGON"
     | GeometryCollection -> "GEOMETRYCOLLECTION"
 
-let private formatCoordinate (value: float) = value.ToString("G17", CultureInfo.InvariantCulture)
+let private formatCoordinate (value: float) = value.ToString("R", CultureInfo.InvariantCulture)
 
 let rec geometryToText (geometry: Geometry) : string =
     let pair (x, y) = formatCoordinate x + " " + formatCoordinate y

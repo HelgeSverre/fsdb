@@ -19,6 +19,7 @@ open Fsdb.Sql
 open Fsdb.Value
 open Fsdb.Temporal
 open Fsdb.GeometryOperations
+open Fsdb.SpatialReferenceSystems
 
 /// A scalar function: its already-evaluated arguments in, one `Value` out.
 type Scalar = Value list -> Value
@@ -5454,6 +5455,69 @@ let private geometrySrid functionName = function
     | VUInt srid when srid <= uint64 Int32.MaxValue -> int srid
     | _ -> geometryError functionName "the SRID must be a non-negative integer"
 
+let private spatialReferenceSystem (functionName: string) srid =
+    SpatialReferenceSystems.tryFind srid
+    |> Option.defaultWith (fun () ->
+        raise (SqlError(3548, sprintf "There's no spatial reference system with SRID %d." srid)))
+
+let private geometryAxisOrder (functionName: string) (referenceSystem: SpatialReferenceSystem) = function
+    | None -> referenceSystem.AxisOrder
+    | Some value ->
+        match (req value).Trim().ToLowerInvariant() with
+        | "axis-order=srid-defined" -> referenceSystem.AxisOrder
+        | "axis-order=lat-long" -> LatitudeLongitude
+        | "axis-order=long-lat" -> LongitudeLatitude
+        | option ->
+            let value =
+                if option.StartsWith("axis-order=", StringComparison.Ordinal) then
+                    option.Substring("axis-order=".Length)
+                else
+                    option
+
+            raise (
+                SqlError(
+                    3559,
+                    sprintf
+                        "Invalid value '%s' for option 'axis-order' in function '%s'."
+                        value
+                        (functionName.ToLowerInvariant())
+                )
+            )
+
+let private validateGeographicCoordinates (functionName: string) (geometry: Geometry) =
+    match SpatialReferenceSystems.tryCoordinateDomainError geometry with
+    | Some(LatitudeOutOfRange latitude) ->
+        raise (
+            SqlError(
+                3617,
+                sprintf
+                    "Latitude %f is out of range in function %s. It must be within [-90.000000, 90.000000]."
+                    latitude
+                    (functionName.ToLowerInvariant())
+            )
+        )
+    | Some(LongitudeOutOfRange longitude) ->
+        raise (
+            SqlError(
+                3616,
+                sprintf
+                    "Longitude %f is out of range in function %s. It must be within (-180.000000, 180.000000]."
+                    longitude
+                    (functionName.ToLowerInvariant())
+            )
+        )
+    | None -> geometry
+
+let private prepareConstructedGeometry (functionName: string) axisOrder (geometry: Geometry) =
+    let referenceSystem = spatialReferenceSystem functionName geometry.Srid
+
+    match referenceSystem.SemiMajorAxis with
+    | Some _ ->
+        geometry
+        |> SpatialReferenceSystems.withAxisOrder (geometryAxisOrder functionName referenceSystem axisOrder)
+        |> validateGeographicCoordinates functionName
+    | None -> geometry
+
 let private requirePlanar (functionName: string) (geometry: Geometry) =
     if geometry.Srid <> 0 then
         raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s with nonzero SRIDs'" functionName))
@@ -5479,45 +5543,50 @@ let private binaryGeometryFn functionName operation: Scalar =
     | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
 
 let private geometryFromTextFn requiredKind functionName: Scalar =
-    function
-    | [ VNull ]
-    | [ VNull; _ ]
-    | [ _; VNull ] -> VNull
-    | [ value ]
-    | [ value; VInt 0L ] ->
-        match tryGeometryFromText 0 (req value) with
-        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
-        | Some _ -> geometryError functionName (sprintf "%s is not a %s" (req value) (geometryTypeName requiredKind))
-        | None -> geometryError functionName (sprintf "'%s'" (req value))
-    | [ value; sridValue ] ->
+    let construct value sridValue axisOrder =
         let srid = geometrySrid functionName sridValue
 
         match tryGeometryFromText srid (req value) with
-        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
+        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind ->
+            geometry |> prepareConstructedGeometry functionName axisOrder |> VGeometry
         | Some _ -> geometryError functionName (sprintf "%s is not a %s" (req value) (geometryTypeName requiredKind))
         | None -> geometryError functionName (sprintf "'%s'" (req value))
-    | _ -> nativeParameterCountError functionName
 
-let private geometryFromWkbFn requiredKind functionName: Scalar =
     function
     | [ VNull ]
     | [ VNull; _ ]
-    | [ _; VNull ] -> VNull
-    | [ VBytes bytes ]
-    | [ VBytes bytes; VInt 0L ] ->
-        match tryGeometryFromWkb 0 bytes with
-        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
-        | Some _ -> geometryError functionName "the WKB geometry has a different type"
-        | None -> geometryError functionName "invalid WKB"
-    | [ VBytes bytes; sridValue ] ->
+    | [ _; VNull ]
+    | [ VNull; _; _ ]
+    | [ _; VNull; _ ]
+    | [ _; _; VNull ] -> VNull
+    | [ value ] -> construct value (VInt 0L) None
+    | [ value; sridValue ] -> construct value sridValue None
+    | [ value; sridValue; axisOrder ] -> construct value sridValue (Some axisOrder)
+    | _ -> nativeParameterCountError functionName
+
+let private geometryFromWkbFn requiredKind functionName: Scalar =
+    let construct bytes sridValue axisOrder =
         let srid = geometrySrid functionName sridValue
 
         match tryGeometryFromWkb srid bytes with
-        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
+        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind ->
+            geometry |> prepareConstructedGeometry functionName axisOrder |> VGeometry
         | Some _ -> geometryError functionName "the WKB geometry has a different type"
         | None -> geometryError functionName "invalid WKB"
+
+    function
+    | [ VNull ]
+    | [ VNull; _ ]
+    | [ _; VNull ]
+    | [ VNull; _; _ ]
+    | [ _; VNull; _ ]
+    | [ _; _; VNull ] -> VNull
+    | [ VBytes bytes ] -> construct bytes (VInt 0L) None
+    | [ VBytes bytes; sridValue ] -> construct bytes sridValue None
+    | [ VBytes bytes; sridValue; axisOrder ] -> construct bytes sridValue (Some axisOrder)
     | [ _ ]
-    | [ _; _ ] -> geometryError functionName "a binary WKB argument is required"
+    | [ _; _ ]
+    | [ _; _; _ ] -> geometryError functionName "a binary WKB argument is required"
     | _ -> nativeParameterCountError functionName
 
 let private geometryToTextFn functionName: Scalar =
@@ -5593,9 +5662,50 @@ let private geometrySridFn: Scalar =
     | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
     | _ -> nativeParameterCountError "st_srid"
 
-let private geometryDistanceFn =
-    binaryGeometryFn "ST_DISTANCE" (fun first second ->
-        geometryDistancePlanar first second |> Option.map VDouble |> Option.defaultValue VNull)
+let private geometryDistanceFn: Scalar =
+    let distance firstValue secondValue unit =
+        let first = geometryArgument "ST_DISTANCE" firstValue
+        let second = geometryArgument "ST_DISTANCE" secondValue
+
+        if first.Srid <> second.Srid then
+            raise (SqlError(3033, sprintf "Binary geometry function st_distance given two geometries of different SRIDs: %d and %d, which should have been identical." first.Srid second.Srid))
+
+        match first.Srid, first.Shape, second.Shape with
+        | 0, _, _ when Option.isNone unit ->
+            geometryDistancePlanar first second |> Option.map VDouble |> Option.defaultValue VNull
+        | 0, _, _ ->
+            let unitName = unit |> Option.map req |> Option.defaultValue ""
+            raise (
+                SqlError(
+                    3882,
+                    sprintf
+                        "The geometry passed to function st_distance is in SRID 0, which doesn't specify a length unit. Can't convert to '%s'."
+                        unitName
+                )
+            )
+        | srid, GPoint(firstX, firstY), GPoint(secondX, secondY) ->
+            let referenceSystem = spatialReferenceSystem "ST_DISTANCE" srid
+
+            let factor =
+                unit
+                |> Option.map (fun value ->
+                    SpatialReferenceSystems.tryLinearUnit (req value)
+                    |> Option.defaultWith (fun () ->
+                        raise (SqlError(3902, sprintf "There's no unit of measure named '%s'." (req value)))))
+                |> Option.defaultValue 1.0
+
+            geographicPointDistance referenceSystem (firstX, firstY) (secondX, secondY) / factor |> VDouble
+        | _ -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_DISTANCE for non-point geographic geometries'"))
+
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ]
+    | [ VNull; _; _ ]
+    | [ _; VNull; _ ]
+    | [ _; _; VNull ] -> VNull
+    | [ first; second ] -> distance first second None
+    | [ first; second; unit ] -> distance first second (Some unit)
+    | _ -> nativeParameterCountError "st_distance"
 
 let private geometryEnvelopeFn: Scalar =
     function

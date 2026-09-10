@@ -6,6 +6,7 @@ open NetTopologySuite.IO
 open NetTopologySuite.Operation.Buffer
 open NetTopologySuite.Operation.Overlay
 open NetTopologySuite.Operation.OverlayNG
+open Fsdb.SpatialReferenceSystems
 open Fsdb.Value
 
 [<RequireQualifiedAccess>]
@@ -32,6 +33,53 @@ type internal BufferError =
 let private defaultPointsPerCircle = 32.0
 let private strategyCodeLength = sizeof<int32>
 let private encodedStrategyLength = strategyCodeLength + sizeof<double>
+
+let private radians degrees = degrees * Math.PI / 180.0
+
+/// MySQL delegates geographic point distance to Boost.Geometry's first-order
+/// Andoyer strategy; more exact geodesic formulae produce observably different
+/// results and therefore are not interchangeable here.
+let internal geographicPointDistance referenceSystem first second =
+    match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
+    | Some semiMajorAxis, Some inverseFlattening ->
+        let flattening = 1.0 / inverseFlattening
+        let firstLatitude, firstLongitude = first
+        let secondLatitude, secondLongitude = second
+        let firstLatitude = radians firstLatitude
+        let secondLatitude = radians secondLatitude
+        let longitudeDelta = radians (secondLongitude - firstLongitude)
+        let sinFirst, cosFirst = sin firstLatitude, cos firstLatitude
+        let sinSecond, cosSecond = sin secondLatitude, cos secondLatitude
+
+        let cosineDistance =
+            sinFirst * sinSecond + cosFirst * cosSecond * cos longitudeDelta
+            |> max -1.0
+            |> min 1.0
+
+        let angularDistance = acos cosineDistance
+        let sineDistance = sin angularDistance
+        let squaredDifference = (sinFirst - sinSecond) ** 2.0
+        let squaredSum = (sinFirst + sinSecond) ** 2.0
+        let oneMinusCosine = 1.0 - cosineDistance
+        let onePlusCosine = 1.0 + cosineDistance
+
+        let firstCorrection =
+            if abs oneMinusCosine < 1e-15 then
+                0.0
+            else
+                (angularDistance + 3.0 * sineDistance) / oneMinusCosine
+
+        let secondCorrection =
+            if abs onePlusCosine < 1e-15 then
+                0.0
+            else
+                (angularDistance - 3.0 * sineDistance) / onePlusCosine
+
+        let flatteningCorrection =
+            -flattening / 4.0 * (firstCorrection * squaredDifference + secondCorrection * squaredSum)
+
+        semiMajorAxis * (angularDistance + flatteningCorrection)
+    | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
 
 let private strategyCodeAndPoints = function
     | BufferStrategy.EndRound points -> 1, points

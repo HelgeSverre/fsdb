@@ -213,8 +213,8 @@ database is removed when the lane finishes.
 The contracts cover comment and precedence boundaries, parser errors, every
 MySQL 8.4 column family over text and prepared results, prepared DML and handle
 invalidation across DDL, implicit DDL commit behavior, SQLSTATE-sensitive
-semantic errors, independent writers, and contended update/delete/insert lock
-schedules.
+semantic errors, geographic point construction and distance, independent
+writers, and contended update/delete/insert lock schedules.
 
 Function descriptors generate isolated literal and bound-parameter calls,
 NULL inputs, result-type observations, and exact wrong-arity errors. Coverage is

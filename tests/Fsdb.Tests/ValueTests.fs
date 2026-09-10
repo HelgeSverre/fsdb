@@ -778,7 +778,7 @@ let tests =
                     Expect.equal (call "MBRIntersects" [ rectangle; geometry "POINT(5 4)" ]) (VInt 0L) "disjoint bounds"
                     Expect.equal (call "MBRContains" [ rectangle; geometry "POLYGON((0 1,2 1,2 3,0 3,0 1))" ]) (VInt 1L) "area may touch a boundary"
 
-                testCase "planar geometry functions reject nonzero and mismatched SRIDs"
+                testCase "unsupported geographic operations reject nonzero and mismatched SRIDs"
                 <| fun _ ->
                     let expectError code invoke =
                         Expect.throwsC
@@ -789,11 +789,71 @@ let tests =
 
                     let planar = call "ST_GeomFromText" [ VString "POINT(0 0)" ]
                     let geographic = call "ST_GeomFromText" [ VString "POINT(0 0)"; VInt 4326L ]
+                    let geographicLine = call "ST_GeomFromText" [ VString "LINESTRING(0 0,1 1)"; VInt 4326L ]
 
                     expectError 3033 (fun () -> call "ST_Distance" [ planar; geographic ])
-                    expectError 1235 (fun () -> call "ST_Distance" [ geographic; geographic ])
+                    expectError 1235 (fun () -> call "ST_Distance" [ geographicLine; geographicLine ])
                     expectError 1235 (fun () -> call "ST_Envelope" [ geographic ])
                     expectError 1235 (fun () -> call "ST_IsValid" [ geographic ])
+
+                testCase "geographic points use WGS 84 axes, domains, and linear units"
+                <| fun _ ->
+                    let point text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+
+                    let expectError code invoke =
+                        Expect.throwsC
+                            (invoke >> ignore)
+                            (function
+                            | Fsdb.Functions.SqlError(actual, _) when actual = code -> ()
+                            | error -> failtestf "expected %d, got %A" code error)
+
+                    let oslo = point "POINT(59.9139 10.7522)"
+                    let london = point "POINT(51.5074 -0.1278)"
+
+                    match call "ST_Distance" [ oslo; london ], call "ST_Distance" [ oslo; london; VString "kilometre" ] with
+                    | VDouble metres, VDouble kilometres ->
+                        Expect.isLessThan (abs (metres - 1156066.401)) 0.001 "Andoyer distance matches MySQL"
+                        Expect.isLessThan (abs (kilometres - 1156.066401)) 0.000001 "unit conversion"
+                    | values -> failtestf "expected geographic distances, got %A" values
+
+                    let longitudeLatitude =
+                        call
+                            "ST_GeomFromText"
+                            [ VString "POINT(10.7522 59.9139)"
+                              VInt 4326L
+                              VString "axis-order=long-lat" ]
+
+                    Expect.equal (call "ST_AsText" [ longitudeLatitude ]) (VString "POINT(59.9139 10.7522)") "axis order"
+
+                    let longitudeLatitudeWkb =
+                        call
+                            "ST_GeomFromWKB"
+                            [ call "ST_AsWKB" [ call "ST_GeomFromText" [ VString "POINT(10.7522 59.9139)" ] ]
+                              VInt 4326L
+                              VString "axis-order=long-lat" ]
+
+                    Expect.equal
+                        (call "ST_AsText" [ longitudeLatitudeWkb ])
+                        (VString "POINT(59.9139 10.7522)")
+                        "WKB axis order"
+
+                    expectError 3617 (fun () -> point "POINT(91 0)")
+                    expectError 3616 (fun () -> point "POINT(0 181)")
+                    expectError 3548 (fun () -> call "ST_GeomFromText" [ VString "POINT(0 0)"; VInt 9999L ])
+
+                    expectError 3559 (fun () ->
+                        call
+                            "ST_GeomFromText"
+                            [ VString "POINT(0 0)"
+                              VInt 4326L
+                              VString "axis-order=bogus" ])
+
+                    expectError 3902 (fun () -> call "ST_Distance" [ oslo; london; VString "bogus" ])
+
+                    expectError 3882 (fun () ->
+                        let first = call "ST_GeomFromText" [ VString "POINT(0 0)" ]
+                        let second = call "ST_GeomFromText" [ VString "POINT(1 1)" ]
+                        call "ST_Distance" [ first; second; VString "metre" ])
 
                 testCase "ST_IsValid distinguishes simple planar geometry from invalid topology"
                 <| fun _ ->

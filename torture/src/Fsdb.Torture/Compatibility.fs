@@ -1384,6 +1384,79 @@ module ContractCatalog =
                 "function:" + name.ToLowerInvariant(),
                 [| "parser"; "text-differential"; "null-semantics"; "error-contract"; "prepared-protocol"; "result-type" |]) }
 
+    let private geographicSpatial =
+        let oslo = "POINT(59.9139 10.7522)"
+        let london = "POINT(51.5074 -0.1278)"
+
+        { Name = "geographic-spatial-contracts"
+          Setup = [||]
+          Steps =
+            [| Contract.query
+                   "geographic-distance-metres"
+                   (sprintf
+                       "SELECT ROUND(ST_Distance(ST_GeomFromText('%s', 4326), ST_GeomFromText('%s', 4326)), 3)"
+                       oslo
+                       london)
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "geographic-distance-unit-prepared"
+                   "SELECT ROUND(ST_Distance(ST_GeomFromText(?, 4326), ST_GeomFromText(?, 4326), ?), 6)"
+                   [| box oslo; box london; box "kilometre" |]
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-longitude-latitude-input"
+                   "SELECT ST_AsText(ST_GeomFromText('POINT(10.7522 59.9139)', 4326, 'axis-order=long-lat'))"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-wkb-longitude-latitude-input"
+                   "SELECT ST_AsText(ST_GeomFromWKB(ST_AsWKB(ST_GeomFromText('POINT(10.7522 59.9139)')), 4326, 'axis-order=long-lat'))"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "geographic-null-distance"
+                   "SELECT ST_Distance(ST_GeomFromText(?, 4326), ST_GeomFromText(?, 4326))"
+                   [| box DBNull.Value; box london |]
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-mismatched-srid"
+                   "SELECT ST_Distance(ST_GeomFromText('POINT(0 0)', 0), ST_GeomFromText('POINT(0 0)', 4326))"
+               |> Contract.fails 3033 "HY000"
+               Contract.query
+                   "geographic-latitude-domain"
+                   "SELECT ST_GeomFromText('POINT(91 0)', 4326)"
+               |> Contract.fails 3617 "22S03"
+               Contract.query
+                   "geographic-longitude-domain"
+                   "SELECT ST_GeomFromText('POINT(0 181)', 4326)"
+               |> Contract.fails 3616 "22S02"
+               Contract.query
+                   "geographic-unknown-srid"
+                   "SELECT ST_GeomFromText('POINT(0 0)', 9999)"
+               |> Contract.fails 3548 "SR001"
+               Contract.query
+                   "geographic-invalid-axis-order"
+                   "SELECT ST_GeomFromText('POINT(0 0)', 4326, 'axis-order=bogus')"
+               |> Contract.fails 3559 "22023"
+               Contract.query
+                   "geographic-unknown-unit"
+                   "SELECT ST_Distance(ST_GeomFromText('POINT(0 0)', 4326), ST_GeomFromText('POINT(1 1)', 4326), 'bogus')"
+               |> Contract.fails 3902 "SU001"
+               Contract.query
+                   "planar-distance-has-no-length-unit"
+                   "SELECT ST_Distance(ST_GeomFromText('POINT(0 0)', 0), ST_GeomFromText('POINT(1 1)', 0), 'metre')"
+               |> Contract.fails 3882 "SU001"
+               Contract.query
+                   "geographic-srs-catalog"
+                   "SELECT SRS_NAME, SRS_ID, ORGANIZATION, ORGANIZATION_COORDSYS_ID, DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID = 4326"
+               |> Contract.comparingValues |]
+          Cleanup = [||]
+          Coverage =
+            [| "function:st_distance",
+               [| "parser"; "text-differential"; "prepared-protocol"; "null-semantics"; "error-contract" |]
+               "function:st_geomfromtext",
+               [| "parser"; "text-differential"; "prepared-protocol"; "null-semantics"; "error-contract" |]
+               "function:st_geomfromwkb", [| "parser"; "text-differential"; "error-contract" |]
+               "table:information_schema.st_spatial_reference_systems", [| "text-differential" |] |] }
+
     let private preparedInvalidation =
         { Name = "prepared-ddl-invalidation"
           Setup = [| "DROP TABLE IF EXISTS contract_reprepare"; "CREATE TABLE contract_reprepare (id INT PRIMARY KEY)"; "INSERT INTO contract_reprepare VALUES (1)" |]
@@ -1544,6 +1617,7 @@ module ContractCatalog =
            generatedFunctionFamilies
            functionFamilies
            aggregateFunctions
+           geographicSpatial
            preparedInvalidation
            implicitCommit
            concurrentSessions
