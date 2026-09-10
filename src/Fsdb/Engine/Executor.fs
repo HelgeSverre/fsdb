@@ -11803,7 +11803,7 @@ and private evalAggregate
                 let ctx = ctxFor row
                 evalExpr ctx keyExpr |> Result.bind (fun k -> evalExpr ctx valueExpr |> Result.map (fun v -> k, v)))
             |> Result.map Functions.jsonObjectAggregate
-    | [ arg ] ->
+    | [ arg ] when not (directAggregateNames.Contains upper) ->
         let distinct, innerExpr = unwrapDistinct arg
         let isMin = equalsIgnoreCase name "MIN"
         let isMax = equalsIgnoreCase name "MAX"

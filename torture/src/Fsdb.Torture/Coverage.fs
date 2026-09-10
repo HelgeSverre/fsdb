@@ -249,7 +249,19 @@ module Coverage =
         let scalars = Fsdb.Functions.builtins.Scalars |> Map.keys |> Set.ofSeq
         let aggregates = Fsdb.Functions.builtins.Aggregates |> Map.keys |> Set.ofSeq
 
-        Set.union scalars aggregates
+        let contractedFunctions =
+            contractEvidence
+            |> Map.keys
+            |> Seq.choose (fun capability ->
+                let prefix = "function:"
+
+                if capability.StartsWith(prefix, StringComparison.Ordinal) then
+                    Some(capability.Substring(prefix.Length).ToUpperInvariant())
+                else
+                    None)
+            |> Set.ofSeq
+
+        Set.unionMany [ scalars; aggregates; contractedFunctions ]
         |> Set.toArray
         |> Array.map (fun name ->
             let invoked = allFunctionCalls.Contains name

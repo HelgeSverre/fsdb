@@ -1305,6 +1305,85 @@ module ContractCatalog =
                   aggregateCoverage
                   errorCoverage ] }
 
+    let private aggregateFunctions =
+        let foldFunctions =
+            [| "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "STD"; "STDDEV"; "STDDEV_POP"; "STDDEV_SAMP"; "VARIANCE"
+               "VAR_POP"; "VAR_SAMP"; "BIT_AND"; "BIT_OR"; "BIT_XOR" |]
+
+        let directFunctions = [| "GROUP_CONCAT"; "JSON_ARRAYAGG"; "JSON_OBJECTAGG" |]
+
+        let projection =
+            "COUNT(*), COUNT(n), SUM(n), AVG(n), MIN(n), MAX(n), STD(n), STDDEV(n), STDDEV_POP(n), "
+            + "STDDEV_SAMP(n), VARIANCE(n), VAR_POP(n), VAR_SAMP(n), BIT_AND(bits), BIT_OR(bits), BIT_XOR(bits)"
+
+        let errors =
+            foldFunctions
+            |> Array.map (fun name ->
+                Contract.query
+                    ("aggregate-" + name.ToLowerInvariant() + "-error")
+                    (sprintf "SELECT %s(n, n) FROM contract_aggregates" name)
+                |> Contract.fails 1064 "42000")
+
+        let directErrors =
+            [| "GROUP_CONCAT", "GROUP_CONCAT()"
+               "JSON_ARRAYAGG", "JSON_ARRAYAGG(n, n)"
+               "JSON_OBJECTAGG", "JSON_OBJECTAGG(n)" |]
+            |> Array.map (fun (name, expression) ->
+                Contract.query
+                    ("aggregate-" + name.ToLowerInvariant() + "-error")
+                    ("SELECT " + expression + " FROM contract_aggregates")
+                |> Contract.fails 1064 "42000")
+
+        { Name = "aggregate-function-contracts"
+          Setup =
+            [| "DROP TABLE IF EXISTS contract_aggregates"
+               "CREATE TABLE contract_aggregates (grp INT NOT NULL, n INT, bits INT, label VARCHAR(10))"
+               "INSERT INTO contract_aggregates VALUES (1, 1, 1, 'a'), (1, 2, 2, 'b'), (1, 3, 4, 'c'), (1, NULL, NULL, 'd'), (2, NULL, NULL, 'e')" |]
+          Steps =
+            Array.concat
+                [ [| Contract.query
+                         "aggregate-populated-text"
+                         ("SELECT " + projection + " FROM contract_aggregates WHERE grp = 1")
+                     |> Contract.comparingValues
+                     Contract.preparedQuery
+                         "aggregate-populated-prepared"
+                         ("SELECT " + projection + " FROM contract_aggregates WHERE grp = ?")
+                         [| box 1 |]
+                     |> Contract.comparingValues
+                     Contract.query
+                         "aggregate-all-null"
+                         ("SELECT " + projection + " FROM contract_aggregates WHERE grp = 2")
+                     |> Contract.comparingValues
+                     Contract.query
+                         "aggregate-empty"
+                         ("SELECT " + projection + " FROM contract_aggregates WHERE grp = 99")
+                     |> Contract.comparingValues
+                     Contract.query
+                         "direct-aggregate-populated-text"
+                         "SELECT GROUP_CONCAT(label ORDER BY label SEPARATOR ','), JSON_ARRAYAGG(n), JSON_OBJECTAGG(label, n) FROM contract_aggregates WHERE grp = 1 AND n = 2"
+                     |> Contract.comparingValues
+                     Contract.preparedQuery
+                         "direct-aggregate-populated-prepared"
+                         "SELECT GROUP_CONCAT(label ORDER BY label SEPARATOR ','), JSON_ARRAYAGG(n), JSON_OBJECTAGG(label, n) FROM contract_aggregates WHERE grp = ? AND n = 2"
+                         [| box 1 |]
+                     |> Contract.comparingValues
+                     Contract.query
+                         "direct-aggregate-all-null"
+                         "SELECT GROUP_CONCAT(n), JSON_ARRAYAGG(n), JSON_OBJECTAGG('key', n) FROM contract_aggregates WHERE grp = 2"
+                     |> Contract.comparingValues
+                     Contract.query
+                         "direct-aggregate-empty"
+                         "SELECT GROUP_CONCAT(n), JSON_ARRAYAGG(n), JSON_OBJECTAGG('key', n) FROM contract_aggregates WHERE grp = 99"
+                     |> Contract.comparingValues |]
+                  errors
+                  directErrors ]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_aggregates" |]
+          Coverage =
+            Array.append foldFunctions directFunctions
+            |> Array.map (fun name ->
+                "function:" + name.ToLowerInvariant(),
+                [| "parser"; "text-differential"; "null-semantics"; "error-contract"; "prepared-protocol"; "result-type" |]) }
+
     let private preparedInvalidation =
         { Name = "prepared-ddl-invalidation"
           Setup = [| "DROP TABLE IF EXISTS contract_reprepare"; "CREATE TABLE contract_reprepare (id INT PRIMARY KEY)"; "INSERT INTO contract_reprepare VALUES (1)" |]
@@ -1464,6 +1543,7 @@ module ContractCatalog =
            columnTypes
            generatedFunctionFamilies
            functionFamilies
+           aggregateFunctions
            preparedInvalidation
            implicitCommit
            concurrentSessions

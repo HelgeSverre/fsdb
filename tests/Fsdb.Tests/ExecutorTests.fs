@@ -11334,7 +11334,16 @@ let tests =
 
                     match runDefault store "SELECT JSON_OBJECTAGG(k, v) a FROM kv WHERE id = 99" with
                     | ResultSet(_, [ [ None ] ]) -> ()
-                    | other -> failtestf "expected NULL over an empty group, got %A" other ]
+                    | other -> failtestf "expected NULL over an empty group, got %A" other
+
+                testCase "JSON_OBJECTAGG with one argument is a syntax error"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE kv (k VARCHAR(10))" |> ignore
+
+                    match runDefault store "SELECT JSON_OBJECTAGG(k) FROM kv" with
+                    | Err(1064, _) -> ()
+                    | other -> failtestf "expected invalid JSON_OBJECTAGG arity to be a syntax error, got %A" other ]
 
           // Every expected result below was read off the MySQL 8.4.11 oracle
           // over the same [1,2,3,1,2,2] / [1,2,1,2,2] multisets.
