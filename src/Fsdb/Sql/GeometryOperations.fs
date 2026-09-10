@@ -105,6 +105,17 @@ let internal geographicPointDistance referenceSystem first second =
         semiMajorAxis * (angularDistance + flatteningCorrection)
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
 
+let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
+    let length (points: (float * float) list) =
+        points
+        |> List.pairwise
+        |> List.sumBy (fun (first, second) -> segmentDistance first second)
+
+    function
+    | GLineString points -> Some(length points)
+    | GMultiLineString lines -> Some(lines |> List.sumBy length)
+    | _ -> None
+
 let private strategyCodeAndPoints = function
     | BufferStrategy.EndRound points -> 1, points
     | BufferStrategy.EndFlat -> 2, 0.0

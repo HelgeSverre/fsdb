@@ -895,6 +895,37 @@ let tests =
                         | Fsdb.Functions.SqlError(3706, _) -> ()
                         | error -> failtestf "expected nonpositive-radius error, got %A" error)
 
+                testCase "ST_Length measures planar and WGS 84 linework"
+                <| fun _ ->
+                    let geometry arguments = call "ST_GeomFromText" arguments
+                    let length arguments = call "ST_Length" arguments
+
+                    Expect.equal
+                        (length [ geometry [ VString "LINESTRING(0 0,3 4)" ] ])
+                        (VDouble 5.0)
+                        "planar length"
+
+                    let geographic =
+                        geometry [ VString "LINESTRING(59.9139 10.7522,51.5074 -0.1278)"; VInt 4326L ]
+
+                    match length [ geographic; VString "kilometre" ] with
+                    | VDouble value -> Expect.isLessThan (abs (value - 1156.066400679251)) 1e-9 "geographic unit"
+                    | value -> failtestf "expected a geographic length, got %A" value
+
+                    Expect.equal (length [ geometry [ VString "POINT(0 0)" ] ]) VNull "non-linework is NULL"
+                    Expect.equal
+                        (length [ geometry [ VString "POINT(0 0)" ]; VString "metre" ])
+                        VNull
+                        "non-linework remains NULL with a unit"
+
+                    Expect.throwsC
+                        (fun () ->
+                            length [ geometry [ VString "LINESTRING(0 0,1 1)" ]; VString "metre" ]
+                            |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(3882, _) -> ()
+                        | error -> failtestf "expected missing-unit error, got %A" error)
+
                 testCase "ST_IsValid distinguishes simple planar geometry from invalid topology"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]

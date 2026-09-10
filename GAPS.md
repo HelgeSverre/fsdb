@@ -56,7 +56,7 @@ under `torture/findings/`.
 |---|---|---|
 | [SQL statements](#1-sql-statements-and-parser) | Application-facing DML and DDL are broad | Replication and administrative SQL |
 | [Query execution](#2-query-execution) | Common index, join, subquery, ordering, and grouping paths have dedicated plans | General cost-based planning and broader correlated forms |
-| [Built-in functions](#3-built-in-functions) | Broad scalar, aggregate, JSON, temporal, planar geometry, and geographic point-distance coverage | Non-point geographic operations and broader SRS definitions |
+| [Built-in functions](#3-built-in-functions) | Broad scalar, aggregate, JSON, temporal, planar geometry, and geographic distance/length coverage | Non-point geographic distance/topology and broader SRS definitions |
 | [Data types](#4-data-types-and-values) | Common scalar, temporal, JSON, and OGC geometry values | Binary JSON representation |
 | [Constraints and indexes](#5-constraints-and-indexes) | Constraints and common equality, range, ordering, grouping, join, and spatial probes | Arbitrary expression ordering and broader grouping paths |
 | [Charsets and collations](#6-charsets-and-collations) | ICU-backed charset and collation registry | Exact MySQL UCA weight tables |
@@ -207,7 +207,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining geographic spatial behavior | non-point distance and topology, plus reference systems beyond EPSG 4326 | low |
+| Remaining geographic spatial behavior | non-point distance and topology beyond line length, plus reference systems beyond EPSG 4326 | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets and `SYSTEM`,
 but named zones remain unavailable without MySQL's optional time-zone tables.
@@ -250,7 +250,7 @@ metadata paths. Virtual generated values are recomputed when queried.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes and geographic SRS rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays and independently configurable square/circle point, flat/round end, and miter/round join buffer strategies work; EPSG 4326 constructors honor MySQL axis options and coordinate domains, point distance uses MySQL's Andoyer strategy and linear-unit registry, and `ST_DISTANCE_SPHERE` supports point and multipoint inputs with MySQL's default, SRS-derived, or explicit radius; non-point geographic operations and other SRS definitions remain absent, and the internal augmented interval tree is not an R-tree | low | subset |
+| Spatial indexes and operations | R-tree indexes and geographic SRS rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays and independently configurable square/circle point, flat/round end, and miter/round join buffer strategies work; EPSG 4326 constructors honor MySQL axis options and coordinate domains, point distance and line length use MySQL's Andoyer strategy and linear-unit registry, and `ST_DISTANCE_SPHERE` supports point and multipoint inputs with MySQL's default, SRS-derived, or explicit radius; broader non-point geographic distance/topology and other SRS definitions remain absent, and the internal augmented interval tree is not an R-tree | low | subset |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
@@ -687,10 +687,10 @@ implementation effort:
    data-changing statements.
 
 4. Broader geographic SRS behavior. EPSG 4326 construction, axis order,
-   coordinate domains, ellipsoidal point distance, spherical point/multipoint
-   distance, and linear units are covered alongside planar spatial indexes and
-   operations; non-point geographic operations and other reference systems
-   remain absent.
+   coordinate domains, ellipsoidal point distance, line length, spherical
+   point/multipoint distance, and linear units are covered alongside planar
+   spatial indexes and operations; broader non-point geographic distance and
+   topology, plus other reference systems, remain absent.
 
 5. Extensible authentication providers. The built-in caching-SHA2, SHA-256,
    and native password exchanges are covered; external identity providers and

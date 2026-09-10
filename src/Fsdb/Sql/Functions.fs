@@ -5777,6 +5777,54 @@ let private geometryDistanceSphereFn: Scalar =
     | [ first; second; radius ] -> distance first second (Some radius)
     | _ -> nativeParameterCountError "st_distance_sphere"
 
+let private geometryLengthFn: Scalar =
+    let convertUnit unit distance =
+        unit
+        |> Option.map (fun value ->
+            SpatialReferenceSystems.tryLinearUnit (req value)
+            |> Option.map (fun factor -> distance / factor)
+            |> Option.defaultWith (fun () ->
+                raise (SqlError(3902, sprintf "There's no unit of measure named '%s'." (req value)))))
+        |> Option.defaultValue distance
+
+    let length value unit =
+        let functionName = "ST_LENGTH"
+        let geometry = geometryArgument functionName value
+
+        let measured =
+            if geometry.Srid = 0 then
+                let euclidean (firstX, firstY) (secondX, secondY) =
+                    let deltaX = secondX - firstX
+                    let deltaY = secondY - firstY
+                    sqrt (deltaX * deltaX + deltaY * deltaY)
+
+                lineworkLength euclidean geometry.Shape
+            else
+                let referenceSystem = spatialReferenceSystem functionName geometry.Srid
+                lineworkLength (geographicPointDistance referenceSystem) geometry.Shape
+
+        match measured, geometry.Srid, unit with
+        | None, _, _ -> VNull
+        | Some distance, 0, None -> VDouble distance
+        | Some _, 0, Some value ->
+            raise (
+                SqlError(
+                    3882,
+                    sprintf
+                        "The geometry passed to function st_length is in SRID 0, which doesn't specify a length unit. Can't convert to '%s'."
+                        (req value)
+                )
+            )
+        | Some distance, _, unit -> convertUnit unit distance |> VDouble
+
+    function
+    | [ VNull ]
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ value ] -> length value None
+    | [ value; unit ] -> length value (Some unit)
+    | _ -> nativeParameterCountError "st_length"
+
 let private geometryEnvelopeFn: Scalar =
     function
     | [ VNull ] -> VNull
@@ -6000,6 +6048,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "Y" (pointCoordinateFn "Y" (fun _ y -> y))
     |> registerScalar "ST_DISTANCE" geometryDistanceFn
     |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
+    |> registerScalar "ST_LENGTH" geometryLengthFn
     |> registerScalar "ST_EQUALS" (geometryPredicateFn "ST_EQUALS" geometryEqualsPlanar)
     |> registerScalar "ST_CONTAINS" (geometryPredicateFn "ST_CONTAINS" geometryContainsPlanar)
     |> registerScalar "ST_WITHIN" (geometryPredicateFn "ST_WITHIN" (fun first second -> geometryContainsPlanar second first))

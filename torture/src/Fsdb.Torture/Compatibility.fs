@@ -1471,6 +1471,35 @@ module ContractCatalog =
                    "SELECT ST_Distance_Sphere(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 1)'), 0)"
                |> Contract.fails 3706 "22003"
                Contract.query
+                   "planar-linestring-length"
+                   "SELECT ST_Length(ST_GeomFromText('LINESTRING(0 0,3 4)'))"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-linestring-length"
+                   "SELECT ROUND(ST_Length(ST_GeomFromText('LINESTRING(59.9139 10.7522,51.5074 -0.1278)', 4326)), 3)"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "geographic-multilinestring-length-unit-prepared"
+                   "SELECT ROUND(ST_Length(ST_GeomFromText(?, 4326), ?), 6)"
+                   [| box "MULTILINESTRING((0 0,0 1),(0 0,1 0))"; box "kilometre" |]
+               |> Contract.comparingValues
+               Contract.query
+                   "point-length-is-null"
+                   "SELECT ST_Length(ST_GeomFromText('POINT(0 0)'))"
+               |> Contract.comparingValues
+               Contract.query
+                   "point-length-with-unit-is-null"
+                   "SELECT ST_Length(ST_GeomFromText('POINT(0 0)'), 'metre')"
+               |> Contract.comparingValues
+               Contract.query
+                   "planar-length-has-no-unit"
+                   "SELECT ST_Length(ST_GeomFromText('LINESTRING(0 0,1 1)'), 'metre')"
+               |> Contract.fails 3882 "SU001"
+               Contract.query
+                   "spatial-length-arity"
+                   "SELECT ST_Length()"
+               |> Contract.fails 1582 "42000"
+               Contract.query
                    "geographic-srs-catalog"
                    "SELECT SRS_NAME, SRS_ID, ORGANIZATION, ORGANIZATION_COORDSYS_ID, DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID = 4326"
                |> Contract.comparingValues |]
@@ -1482,6 +1511,8 @@ module ContractCatalog =
                [| "parser"; "text-differential"; "prepared-protocol"; "null-semantics"; "error-contract" |]
                "function:st_geomfromwkb", [| "parser"; "text-differential"; "error-contract" |]
                "function:st_distance_sphere",
+               [| "parser"; "text-differential"; "prepared-protocol"; "null-semantics"; "error-contract"; "result-type" |]
+               "function:st_length",
                [| "parser"; "text-differential"; "prepared-protocol"; "null-semantics"; "error-contract"; "result-type" |]
                "table:information_schema.st_spatial_reference_systems", [| "text-differential" |] |] }
 
