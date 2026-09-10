@@ -198,10 +198,11 @@ let private whenOption
         else
             (fail message) stream
 
-/// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
-/// because the data stream arrives after the server has parsed the command.
-type LocalLoad =
-    { FileName: string
+/// A parsed LOAD DATA request, separated from `Statement` because its byte
+/// stream is acquired only after syntax and access checks succeed.
+type LoadRequest =
+    { Local: bool
+      FileName: string
       Table: string
       Replace: bool
       Ignore: bool
@@ -3312,15 +3313,15 @@ let private localLoadLines =
         | None -> "\n"
         | Some terminator -> terminator |> Option.defaultValue "\n"
 
-let private localLoadData: Parser<LocalLoad, unit> =
+let private loadData: Parser<LoadRequest, unit> =
     let field = (attempt userVariableTarget |>> LoadUserVariable) <|> (identifier |>> LoadColumn)
     let assignments = sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
 
     (keyword "LOAD"
      >>. keyword "DATA"
-     >>. keyword "LOCAL"
-     >>. keyword "INFILE"
-     >>. localLoadString
+     >>. (opt (keyword "LOCAL") |>> Option.isSome)
+     .>> keyword "INFILE"
+     .>>. localLoadString
      .>>. opt ((keyword "REPLACE" >>% true) <|> (keyword "IGNORE" >>% false))
      .>> keyword "INTO"
      .>> keyword "TABLE"
@@ -3331,10 +3332,11 @@ let private localLoadData: Parser<LocalLoad, unit> =
      .>>. opt (keyword "IGNORE" >>. intTok .>> (keyword "LINES" <|> keyword "ROWS"))
      .>>. opt (between (sym "(") (sym ")") (sepBy1 field (sym ",")))
      .>>. opt (keyword "SET" >>. assignments))
-    |>> fun ((((((((fileName, replace), table), charset), fields), lineTerminator), ignoreLines), columns), assignments) ->
+    |>> fun (((((((((local, fileName), replace), table), charset), fields), lineTerminator), ignoreLines), columns), assignments) ->
         let fieldTerminator, enclosed, escape = fields
 
-        { FileName = fileName
+        { Local = local
+          FileName = fileName
           Table = table
           Replace = replace |> Option.defaultValue false
           Ignore = replace |> Option.defaultValue false |> not
@@ -4906,10 +4908,9 @@ let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
 let private maxLoadDataMarkerLength = 1
 let private maxLoadDataTerminatorLength = 16
 
-/// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
-/// client-to-server data stream.
-let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<LocalLoad, string> =
-    let parser = ws >>. localLoadData .>> opt (sym ";") .>> eof
+/// Parses LOAD DATA syntax without reading the byte source.
+let parseLoadWithOptions (options: ParserOptions) (sql: string) : Result<LoadRequest, string> =
+    let parser = ws >>. loadData .>> opt (sym ";") .>> eof
 
     withStatementParserState options sql (runWithDepthLimit parser)
     |> Result.bind (fun load ->
@@ -4928,7 +4929,17 @@ let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<Lo
         else
             Result.Error "LOAD DATA terminators may be at most 16 characters; enclosure and escape markers at most one")
 
-let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
+let parseLoad (sql: string) : Result<LoadRequest, string> =
+    parseLoadWithOptions defaultOptions sql
+
+/// Rejects server-file requests so callers can safely initiate the LOCAL
+/// client-upload handshake.
+let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<LoadRequest, string> =
+    parseLoadWithOptions options sql
+    |> Result.bind (fun load ->
+        if load.Local then Result.Ok load else Result.Error "LOAD DATA source is not LOCAL")
+
+let parseLocalLoad (sql: string) : Result<LoadRequest, string> =
     parseLocalLoadWithOptions defaultOptions sql
 
 let private explicitTableLockMode =

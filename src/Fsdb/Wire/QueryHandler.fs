@@ -7386,7 +7386,7 @@ let executeEventBody (session: Session) (body: string) : Session * QueryResult =
 
 /// Parses and authorizes a LOCAL INFILE command before the server asks the
 /// client to send bytes. The file name is never resolved by the server.
-let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLoad option, QueryResult> =
+let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LoadRequest option, QueryResult> =
     let normalized = Parser.stripVersionComments sql |> fun value -> value.TrimStart()
 
     if not (normalized.StartsWith("LOAD DATA", StringComparison.OrdinalIgnoreCase)) then
@@ -7449,7 +7449,7 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
 
 /// Keeps the parsed field and SET mappings until the client upload has been
 /// decoded; an ordinary INSERT AST cannot represent either mapping.
-let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value list list) : Session * QueryResult =
+let executeLocalLoad (session: Session) (load: Parser.LoadRequest) (rows: Value list list) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
     let statement =
         LoadData

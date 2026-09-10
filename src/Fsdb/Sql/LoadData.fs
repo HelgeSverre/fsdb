@@ -8,7 +8,7 @@ open Fsdb.Value
 let private singleCharacter (value: string) =
     Seq.tryExactlyOne value
 
-let decode (load: Parser.LocalLoad) (bytes: byte[]) : Result<Value list list, int * string> =
+let decode (load: Parser.LoadRequest) (bytes: byte[]) : Result<Value list list, int * string> =
     try
         let charset = load.Charset |> Option.defaultValue "utf8mb4"
         let text =

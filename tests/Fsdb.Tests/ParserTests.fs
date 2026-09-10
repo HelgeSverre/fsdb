@@ -4089,6 +4089,7 @@ let tests =
                       "LOAD DATA LOCAL INFILE 'records.tsv' IGNORE INTO TABLE people FIELDS TERMINATED BY '\\t' ENCLOSED BY '\"' ESCAPED BY '\\\\' LINES TERMINATED BY '\\n' IGNORE 1 LINES (id, name)"
               with
               | Ok load ->
+                  Expect.isTrue load.Local "the client supplies LOCAL bytes"
                   Expect.equal load.FileName "records.tsv" "file name"
                   Expect.equal load.Table "people" "target table"
                   Expect.isTrue load.Ignore "LOCAL input ignores row conversion errors"
@@ -4100,6 +4101,18 @@ let tests =
                   Expect.sequenceEqual load.Fields [ LoadColumn "id"; LoadColumn "name" ] "target fields"
                   Expect.isEmpty load.Assignments "SET assignments"
               | Error error -> failtestf "unexpected parse error: %s" error
+
+          testCase "LOAD DATA INFILE keeps the server source distinct from LOCAL"
+          <| fun _ ->
+              match parseLoad "LOAD DATA INFILE '/srv/import/rows.tsv' INTO TABLE people" with
+              | Ok load ->
+                  Expect.isFalse load.Local "the server reads the file"
+                  Expect.equal load.FileName "/srv/import/rows.tsv" "server path"
+              | Error error -> failtestf "unexpected parse error: %s" error
+
+              Expect.isError
+                  (parseLocalLoad "LOAD DATA INFILE '/srv/import/rows.tsv' INTO TABLE people")
+                  "the LOCAL-only entry point cannot initiate a server read"
 
           testCase "LOAD DATA LOCAL INFILE parses user variables and SET expressions"
           <| fun _ ->
