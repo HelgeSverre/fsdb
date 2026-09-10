@@ -6,8 +6,6 @@ open System
 open Fsdb.Ast
 open Fsdb.Value
 
-let private binaryCollationId = 63us
-
 let private collationId name =
     Collation.idAndSortlen
     |> Map.tryFind name
@@ -130,7 +128,7 @@ let metadataOfColumn (column: ColumnDef) : ColumnMetadata =
             |> Option.defaultValue Collation.defaultCollation.Name
             |> collationId
         else
-            Some binaryCollationId
+            Some Collation.binaryId
 
     let flags =
         metadata.Flags

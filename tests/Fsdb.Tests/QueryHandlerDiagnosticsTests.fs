@@ -57,6 +57,27 @@ let tests =
               | ResultSet([ "Level"; "Code"; "Message" ], []) -> ()
               | other -> failtestf "expected an empty errors resultset, got %A" other
 
+          testCase "SHOW condition resultsets expose MySQL numeric wire metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SHOW WARNINGS"
+
+              Expect.equal
+                  (session.LastResultColumnMetadata |> List.map _.TypeId)
+                  [ TypeVarString; TypeLong; TypeVarString ]
+                  "the condition code is an INT"
+
+              let session, _ = handle session "SHOW COUNT(*) WARNINGS"
+
+              Expect.equal
+                  (session.LastResultColumnMetadata |> List.map _.TypeId)
+                  [ TypeLongLong ]
+                  "the condition count is a BIGINT"
+
+              Expect.isTrue
+                  (session.LastResultColumnMetadata.Head.Flags &&& UnsignedFlag <> 0us)
+                  "the condition count is unsigned"
+
           testCase "conditional schema and table DDL records MySQL notes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

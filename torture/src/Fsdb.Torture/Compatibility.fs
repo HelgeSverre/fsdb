@@ -288,11 +288,12 @@ module ContractCatalog =
                Contract.execute
                    "create-with-ignored-directories"
                    "CREATE TABLE contract_no_dir (id INT) INDEX DIRECTORY='/first' DATA DIRECTORY='/data' INDEX DIRECTORY='/index' PARTITION BY HASH(id) PARTITIONS 2"
+               Contract.query "directory-warning-contract" "SHOW WARNINGS"
                Contract.query "ignored-directory-table-exists" "SELECT COUNT(*) FROM contract_no_dir" |]
           Cleanup = [| "SET SESSION sql_mode = DEFAULT"; "DROP TABLE IF EXISTS contract_no_dir" |]
           Coverage =
             [| "statement:create_table", [| "parser"; "text-differential" |]
-               "sql-mode:no_dir_in_create", [| "execution"; "text-differential" |] |] }
+               "sql-mode:no_dir_in_create", [| "execution"; "diagnostics"; "text-differential" |] |] }
 
     let private prepared =
         { Name = "prepared-binary-protocol"

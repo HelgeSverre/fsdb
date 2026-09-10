@@ -79,18 +79,21 @@ let private tryInt64 (value: string) =
     | true, parsed -> Some parsed
     | false, _ -> None
 
+let private resultCollationId (session: Session) =
+    sessionValue session "collation_connection"
+    |> Option.bind (fun name -> Collation.idAndSortlen |> Map.tryFind (name.ToLowerInvariant()))
+    |> Option.map (fst >> uint16)
+
+let private textResultMetadata session =
+    { Value.columnMetadata TypeVarString with
+        CollationId = resultCollationId session }
+
 let private completeResultMetadata (session: Session) (result: QueryResult) (metadata: ColumnMetadata list) =
     match result with
     | ResultSet(columns, _) when metadata.Length <> columns.Length ->
-        let collationId =
-            sessionValue session "collation_connection"
-            |> Option.bind (fun name -> Collation.idAndSortlen |> Map.tryFind (name.ToLowerInvariant()))
-            |> Option.map (fst >> uint16)
-
         List.replicate
             columns.Length
-            { Value.columnMetadata TypeVarString with
-                CollationId = collationId }
+            (textResultMetadata session)
     | _ -> metadata
 
 type private TerminalResult =
@@ -2410,7 +2413,7 @@ let private runXa (parserOptions: Parser.ParserOptions) (session: Session) sql =
                     { Value.columnMetadata TypeLongLong with
                         ColumnLength = 12u
                         Flags = NotNullFlag ||| BinaryFlag ||| NumFlag
-                        CollationId = Some 63us }
+                        CollationId = Some Collation.binaryId }
 
                 let data =
                     { Value.columnMetadata TypeVarString with
@@ -3618,6 +3621,28 @@ type private Probe =
     | FlushLogs
     | LockTables
     | UnlockTables
+
+let private probeResultMetadata session probe result =
+    let text length =
+        { textResultMetadata session with
+            ColumnLength = length
+            Flags = NotNullFlag
+            Decimals = 31uy }
+
+    let unsignedInteger typeId length notNull =
+        { Value.columnMetadata typeId with
+            ColumnLength = length
+            Flags =
+                UnsignedFlag
+                ||| BinaryFlag
+                ||| NumFlag
+                ||| (if notNull then NotNullFlag else 0us)
+            CollationId = Some Collation.binaryId }
+
+    match probe with
+    | ShowConditions _ -> [ text 28u; unsignedInteger TypeLong 5u true; text 2048u ]
+    | ShowMessageCount _ -> [ unsignedInteger TypeLongLong 21u false ]
+    | _ -> completeResultMetadata session result []
 
 let private probeCausesImplicitCommit = function
     | SetPassword _
@@ -7031,10 +7056,10 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         | Some probe when probeCausesImplicitCommit probe && xaAssociation session |> Option.isSome ->
                             session, xaRmFail "ACTIVE"
                         | Some probe ->
-                            // Probe results contain rendered strings rather than
-                            // values from which descriptors can be inferred.
+                            // Text probes bypass the typed executor, so their
+                            // protocol-specific descriptors are supplied here.
                             let session, result = runProbe (beginProbeExecution session probe) sql probe
-                            { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
+                            { session with LastResultColumnMetadata = probeResultMetadata session probe result }, result
                         | None -> withStoredFunctionRegistry dispatch session (fun current -> executeStatement current sql rawSql)
 
 let private recordResult ((session, result): Session * QueryResult) : Session * QueryResult =
