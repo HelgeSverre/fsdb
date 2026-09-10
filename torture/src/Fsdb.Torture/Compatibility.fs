@@ -1364,6 +1364,11 @@ module ContractCatalog =
                    "spatial-property-family-and-index-rules"
                    "SELECT ST_IsClosed(ST_GeomFromText('POINT(1 2)')), ST_NumPoints(ST_GeomFromText('MULTILINESTRING((0 0,1 1))')), ST_NumGeometries(ST_GeomFromText('POINT(1 2)')), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(0 0,1 1,2 2)'), -1)), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(0 0,1 1,2 2)'), 1.5)), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(0 0,1 1,2 2)'), '1.9')), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(0 0,1 1,2 2)'), CAST(3.9 AS DOUBLE)))"
                |> Contract.comparingValues
+               Contract.preparedQuery
+                   "spatial-property-contextual-index-coercion"
+                   "SELECT ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(10 0,20 0,30 0)'), ?)), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(10 0,20 0,30 0)'), ?)), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(10 0,20 0,30 0)'), ?))"
+                   [| box 1.5; box 1.5M; box "1.9" |]
+               |> Contract.comparingValues
                Contract.query
                    "spatial-property-srid-retention"
                    "SELECT ST_Srid(ST_PointN(ST_GeomFromText('LINESTRING(10 20,11 21)', 4326, 'axis-order=long-lat'), 1)), ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(10 20,11 21)', 4326, 'axis-order=long-lat'), 1))"

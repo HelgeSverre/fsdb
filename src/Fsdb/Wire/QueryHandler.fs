@@ -4720,6 +4720,13 @@ let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
 let bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
     mapPlaceholders (fun i -> Lit(List.item i values)) stmt
 
+let private bindPreparedPlaceholders (session: Session) statement values =
+    let store = Session.currentStore session
+    let registry = registryFor session
+    let schema = session.Database |> Option.defaultValue defaultDatabase
+    let coerced = PreparedMetadata.coerceParameters store registry schema statement values
+    bindPlaceholders statement coerced
+
 /// Renumbers surviving `Placeholder` nodes densely in traversal (= source)
 /// order, returning the statement and the true parameter count. FParsec's
 /// `attempt` rewinds the input but not the parse-time placeholder counter,
@@ -6349,7 +6356,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 | Some ast ->
                     withStatementHints parserOptions statement.Sql (fun () ->
                         withStoredFunctionRegistry dispatch session (fun current ->
-                            executeParsed current (bindPlaceholders ast values)))
+                            executeParsed current (bindPreparedPlaceholders current ast values)))
                 | None ->
                     dispatch
                         session
@@ -7463,7 +7470,7 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
             recordDiagnostics session false (fun () ->
                 try
                     withStatementHints (parserOptionsForSession session) stmt.Sql (fun () ->
-                        let statement = bindPlaceholders ast values
+                        let statement = bindPreparedPlaceholders session ast values
                         let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
 
                         if session.PasswordExpired && not resetsPassword then

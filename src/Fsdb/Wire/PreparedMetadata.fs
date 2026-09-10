@@ -11,6 +11,14 @@ type private BoundColumn =
     { Qualifier: string
       Column: ColumnDef }
 
+type private ParameterTreatment =
+    | DescribeOnly
+    | CoerceNumeric
+
+type private ParameterAnalysis =
+    { Definitions: ColumnMetadata option list
+      Coercions: ColumnMetadata option list }
+
 let private sameName (left: string) (right: string) =
     left.Equals(right, StringComparison.OrdinalIgnoreCase)
 
@@ -38,9 +46,19 @@ let private dateTimeFunctions =
 let private geometryFunctions =
     set [ "ASTEXT"; "ASBINARY"; "DIMENSION"; "GEOMETRYTYPE"; "ISEMPTY"; "MBRCONTAINS"; "MBRINTERSECTS"; "MBRWITHIN"
           "ST_ASBINARY"; "ST_ASTEXT"; "ST_ASWKB"; "ST_ASWKT"; "ST_BUFFER"; "ST_CONTAINS"; "ST_CONVEXHULL"; "ST_DIMENSION"
-          "ST_DIFFERENCE"; "ST_DISJOINT"; "ST_DISTANCE"; "ST_ENVELOPE"; "ST_EQUALS"; "ST_GEOMETRYTYPE"; "ST_INTERSECTION"; "ST_INTERSECTS"
-          "ST_ISEMPTY"; "ST_ISVALID"; "ST_SYMDIFFERENCE"; "ST_UNION"
-          "ST_SRID"; "ST_TOUCHES"; "ST_WITHIN"; "ST_X"; "ST_Y"; "X"; "Y" ]
+          "ST_DIFFERENCE"; "ST_DISJOINT"; "ST_DISTANCE"; "ST_DISTANCE_SPHERE"; "ST_ENVELOPE"; "ST_EQUALS"; "ST_GEOMETRYTYPE"; "ST_INTERSECTION"; "ST_INTERSECTS"
+          "ST_ISEMPTY"; "ST_ISVALID"; "ST_ISCLOSED"; "ST_SYMDIFFERENCE"; "ST_UNION"
+          "ST_LENGTH"; "ST_SRID"; "ST_TOUCHES"; "ST_WITHIN"; "ST_X"; "ST_Y"; "X"; "Y"
+          "ST_NUMPOINTS"; "ST_STARTPOINT"; "ST_ENDPOINT"; "ST_POINTN"
+          "ST_NUMINTERIORRING"; "ST_NUMINTERIORRINGS"; "ST_EXTERIORRING"; "ST_INTERIORRINGN"
+          "ST_NUMGEOMETRIES"; "ST_GEOMETRYN" ]
+
+let private binaryGeometryFunctions =
+    set [ "MBRCONTAINS"; "MBRINTERSECTS"; "MBRWITHIN"; "ST_CONTAINS"; "ST_DIFFERENCE"; "ST_DISJOINT"
+          "ST_DISTANCE"; "ST_DISTANCE_SPHERE"; "ST_EQUALS"; "ST_INTERSECTION"; "ST_INTERSECTS"; "ST_SYMDIFFERENCE"; "ST_TOUCHES"
+          "ST_UNION"; "ST_WITHIN" ]
+
+let private indexedGeometryFunctions = set [ "ST_GEOMETRYN"; "ST_INTERIORRINGN"; "ST_POINTN" ]
 
 let private jsonFirstArgument =
     set [ "JSON_ARRAY_APPEND"; "JSON_ARRAY_INSERT"; "JSON_CONTAINS"; "JSON_CONTAINS_PATH"; "JSON_DEPTH"; "JSON_EXTRACT"; "JSON_INSERT"
@@ -92,12 +110,16 @@ let private functionParameterMetadata (registry: Registry) (name: string) index 
         Some json
     | None when Set.contains name geometryFunctions && index = 0 ->
         Some geometry
-    | None when Set.contains name geometryFunctions && index = 1 && name <> "ST_BUFFER" && name <> "ST_SRID" ->
+    | None when Set.contains name binaryGeometryFunctions && index = 1 ->
         Some geometry
+    | None when Set.contains name indexedGeometryFunctions && index = 1 ->
+        Some signedInteger
     | None when name = "ST_BUFFER" && index = 1 ->
         Some floatingPoint
     | None when name = "ST_BUFFER" && index > 1 ->
         Some binary
+    | None when name = "ST_DISTANCE_SPHERE" && index = 2 ->
+        Some floatingPoint
     | None when name = "ST_SRID" && index = 1 ->
         Some signedInteger
     | None when Functions.isWkbGeometryConstructor name && index = 0 ->
@@ -125,15 +147,18 @@ let private metadataOfValue =
     | VGeometry geometry -> ColumnWire.parameterMetadataOfType(TGeometry(geometryKind geometry.Shape))
     | VNull -> generic
 
-/// Infers COM_STMT_PREPARE parameter descriptors without evaluating the statement.
-let parameterDefinitions
+/// Infers each parameter's expression context without evaluating the statement.
+/// `None` distinguishes a genuinely unconstrained marker from a marker whose
+/// context is MySQL's generic string type.
+let private inferParameters
     (store: Store)
     (registry: Registry)
     (schema: string)
     (statement: Statement)
     (parameterCount: int)
-    : ColumnMetadata list =
-    let parameters = Array.create parameterCount generic
+    : ParameterAnalysis =
+    let parameters = Array.create parameterCount None
+    let coercions = Array.create parameterCount None
 
     let tryColumn scope expression =
         let matches =
@@ -165,9 +190,12 @@ let parameterDefinitions
 
         loop
 
-    let setParameter index metadata =
+    let setParameter index treatment metadata =
         if index >= 0 && index < parameters.Length then
-            parameters.[index] <- metadata
+            parameters.[index] <- Some metadata
+
+            if treatment = CoerceNumeric then
+                coercions.[index] <- Some metadata
 
     let statementOfBody =
         function
@@ -188,13 +216,14 @@ let parameterDefinitions
         | Ok(columns, _) -> columns
         | Error _ -> Executor.viewColumns store registry database table |> Option.defaultValue []
 
-    let rec inferExpression scope expected expression =
-        let inferUnknown child = inferExpression scope None child
-        let inferExpected metadata child = inferExpression scope metadata child
+    let rec inferExpression scope expected treatment expression =
+        let inferUnknown child = inferExpression scope None DescribeOnly child
+        let inferExpected metadata child = inferExpression scope metadata DescribeOnly child
+        let inferConverted metadata child = inferExpression scope metadata CoerceNumeric child
         let inferred child = metadataOfExpression scope child
 
         match expression with
-        | Placeholder index -> expected |> Option.iter (setParameter index)
+        | Placeholder index -> expected |> Option.iter (setParameter index treatment)
         | BinOp(operator, left, right) ->
             let leftMetadata = inferred left
             let rightMetadata = inferred right
@@ -221,8 +250,8 @@ let parameterDefinitions
         | Regexp(value, pattern) ->
             inferExpected (Some generic) value
             inferExpected (Some generic) pattern
-        | Cast(inner, TTime _) -> inferExpected (Some(ColumnWire.parameterMetadataOfType(TDateTime 6))) inner
-        | Cast(inner, ty) -> inferExpected (Some(ColumnWire.parameterMetadataOfType ty)) inner
+        | Cast(inner, TTime _) -> inferConverted (Some(ColumnWire.parameterMetadataOfType(TDateTime 6))) inner
+        | Cast(inner, ty) -> inferConverted (Some(ColumnWire.parameterMetadataOfType ty)) inner
         | FuncCall(name, values) when
             name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
             || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase)
@@ -242,7 +271,7 @@ let parameterDefinitions
 
             values
             |> List.iteri (fun index value ->
-                inferExpected (functionParameterMetadata registry name index) value)
+                inferConverted (functionParameterMetadata registry name index) value)
         | Case(subject, branches, fallback) ->
             subject |> Option.iter inferUnknown
 
@@ -301,7 +330,7 @@ let parameterDefinitions
                 inferBody scope body
                 describeBody body |> withQualifier alias
             | FromJsonTable(source, _, _, _) ->
-                inferExpression scope None source
+                inferExpression scope None DescribeOnly source
                 []
 
         let mutable scope = outerScope
@@ -311,21 +340,21 @@ let parameterDefinitions
 
         for join in joins do
             scope <- scope @ columnsOfItem scope join.Table
-            inferExpression scope None join.On
+            inferExpression scope None DescribeOnly join.On
 
         scope
 
     and inferSelect outerScope select =
         let scope = inferScope outerScope select.Ctes select.From select.Joins
 
-        let infer = inferExpression scope None
+        let infer = inferExpression scope None DescribeOnly
         select.Projections |> List.iter (fst >> infer)
         select.Where |> Option.iter infer
         select.GroupBy |> List.iter infer
         select.Having |> Option.iter infer
         select.OrderBy |> List.iter (fst >> infer)
-        select.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))))
-        select.Offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))))
+        select.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
+        select.Offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
 
     and inferBody scope =
         function
@@ -333,9 +362,9 @@ let parameterDefinitions
         | UnionSelect(first, rest, orderBy, limit, offset) ->
             inferSelect scope first
             rest |> List.iter (snd >> inferSelect scope)
-            orderBy |> List.iter (fst >> inferExpression scope None)
-            limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))))
-            offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))))
+            orderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
+            limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
+            offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
 
     let targetColumns (table: string) (names: string list) =
         let columns = tableColumns None table
@@ -353,7 +382,7 @@ let parameterDefinitions
         |> List.iter (fun row ->
             Seq.zip row columns
             |> Seq.iter (fun (expression, column) ->
-                inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) expression))
+                inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) DescribeOnly expression))
 
     let inferAssignments table assignments =
         let columns = tableColumns None table
@@ -365,12 +394,12 @@ let parameterDefinitions
                 |> List.tryFind (fun column -> sameName column.Name name)
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
 
-            inferExpression (withQualifier table columns) expected expression)
+            inferExpression (withQualifier table columns) expected DescribeOnly expression)
 
     match statement with
     | Select select -> inferSelect [] select
     | Union(first, rest, orderBy, limit, offset) -> inferBody [] (UnionSelect(first, rest, orderBy, limit, offset))
-    | Do expressions -> expressions |> List.iter (inferExpression [] None)
+    | Do expressions -> expressions |> List.iter (inferExpression [] None DescribeOnly)
     | Insert(table, columns, rows, onDuplicate, _) ->
         inferRows table columns rows
         inferAssignments table onDuplicate
@@ -382,7 +411,7 @@ let parameterDefinitions
 
         Seq.zip select.Projections targets
         |> Seq.iter (fun ((expression, _), column) ->
-            inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) expression)
+            inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) DescribeOnly expression)
 
         inferAssignments table onDuplicate
     | ReplaceSelect(table, columns, select) ->
@@ -391,7 +420,7 @@ let parameterDefinitions
 
         Seq.zip select.Projections targets
         |> Seq.iter (fun ((expression, _), column) ->
-            inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) expression)
+            inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) DescribeOnly expression)
     | Update update ->
         let scope = inferScope [] update.Ctes (Some(FromTable update.From)) update.Joins
 
@@ -406,16 +435,82 @@ let parameterDefinitions
                 target |> tryColumn scope
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
 
-            inferExpression scope expected assignment.Value)
+            inferExpression scope expected DescribeOnly assignment.Value)
 
-        update.Where |> Option.iter (inferExpression scope None)
-        update.OrderBy |> List.iter (fst >> inferExpression scope None)
-        update.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))))
+        update.Where |> Option.iter (inferExpression scope None DescribeOnly)
+        update.OrderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
+        update.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
     | Delete delete ->
         let scope = inferScope [] delete.Ctes (Some(FromTable delete.From)) delete.Joins
-        delete.Where |> Option.iter (inferExpression scope None)
-        delete.OrderBy |> List.iter (fst >> inferExpression scope None)
-        delete.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))))
+        delete.Where |> Option.iter (inferExpression scope None DescribeOnly)
+        delete.OrderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
+        delete.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) DescribeOnly)
     | _ -> ()
 
-    List.ofArray parameters
+    { Definitions = List.ofArray parameters
+      Coercions = List.ofArray coercions }
+
+let private parameterExpectations store registry schema statement parameterCount =
+    (inferParameters store registry schema statement parameterCount).Definitions
+
+let private parameterCoercions store registry schema statement parameterCount =
+    (inferParameters store registry schema statement parameterCount).Coercions
+
+/// Infers the parameter descriptors advertised by COM_STMT_PREPARE.
+let parameterDefinitions store registry schema statement parameterCount : ColumnMetadata list =
+    parameterExpectations store registry schema statement parameterCount
+    |> List.map (Option.defaultValue generic)
+
+let private numericParameterType (metadata: ColumnMetadata) =
+    let unsigned = metadata.Flags &&& UnsignedFlag <> 0us
+
+    match metadata.TypeId with
+    | typeId when typeId = TypeTiny -> Some(TTinyInt unsigned)
+    | typeId when typeId = TypeShort -> Some(TSmallInt unsigned)
+    | typeId when typeId = TypeLong -> Some(TInt unsigned)
+    | typeId when typeId = TypeLongLong -> Some(TBigInt unsigned)
+    | typeId when typeId = TypeFloat -> Some(TFloat unsigned)
+    | typeId when typeId = TypeDouble -> Some(TDouble unsigned)
+    | typeId when typeId = TypeNewDecimal -> Some(TDecimal(65, int metadata.Decimals, unsigned))
+    | typeId when typeId = TypeYear -> Some TYear
+    | typeId when typeId = TypeBit -> Some(TBit(int metadata.ColumnLength))
+    | _ -> None
+
+let private parameterColumn columnType : ColumnDef =
+    { Name = "parameter"
+      Type = columnType
+      NumericDisplay = None
+      Nullable = true
+      Default = None
+      AutoIncrement = false
+      PrimaryKey = false
+      Unique = false
+      OnUpdateCurrentTimestamp = false
+      Generated = None
+      Comment = ""
+      Collation = None
+      Charset = None
+      Srid = None }
+
+/// Converts bound values in typed numeric function and cast contexts.
+/// The protocol's supplied type only describes the bytes on the wire;
+/// non-numeric contexts already consume those values through their own SQL
+/// coercion rules and must retain the dynamic type of an unconstrained marker.
+let coerceParameters store registry schema statement values =
+    let mode =
+        { Storage.temporalCoercionMode store with
+            Strict = false }
+
+    let coerce expectation value =
+        match expectation |> Option.bind numericParameterType with
+        | None -> value
+        | Some columnType ->
+            match
+                Diagnostics.suppress (fun () ->
+                    Storage.coerceValueWithMode mode (parameterColumn columnType) value)
+            with
+            | Ok coerced -> coerced
+            | Error _ -> value
+
+    let expectations = parameterCoercions store registry schema statement (List.length values)
+    List.map2 coerce expectations values

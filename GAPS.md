@@ -503,11 +503,12 @@ Physical result columns report primary, unique, composite, and non-unique key
 membership consistently across queries, prepared statements, `COM_FIELD_LIST`,
 and `HANDLER`. Prepared descriptors derive schema, operator, aggregate,
 overloaded scalar, temporal, JSON, spatial, and registered-extension result
-families without evaluating the statement.
+families without evaluating the statement. Typed numeric builtin and cast
+arguments are coerced before expression evaluation for both protocol and SQL
+prepared statements.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Contextual parameter coercion | inferred parameter-marker types coerce each execution value before expression evaluation | descriptors infer and advertise expression context, but some builtin argument slots still evaluate the client's binary-protocol value type directly; fractional strings and numeric ties can therefore differ when the inferred type is integral | low | divergence |
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |

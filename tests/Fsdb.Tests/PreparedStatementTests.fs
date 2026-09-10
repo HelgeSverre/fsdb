@@ -148,6 +148,79 @@ let tests =
                   | other -> failtestf "expected the bound name back, got %A" other
               | other -> failtestf "expected a parsed statement with 2 params, got %A" other
 
+          testCase "prepared parameters are coerced to their inferred builtin argument types"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT SUBSTRING('abcdef', ?), "
+                  + "ST_AsText(ST_PointN(ST_GeomFromText('LINESTRING(10 0,20 0,30 0)'), ?)), "
+                  + "CAST(? AS SIGNED), WEEK('2024-01-01', ?), SHA2('x', ?)"
+
+              match prepareStatement sql with
+              | Result.Ok(Some ast, 5) ->
+                  let statement =
+                      { Ast = Some ast
+                        Sql = sql
+                        ParamCount = 5
+                        LastParamTypes = None }
+
+                  let parameters =
+                      [ VString "1.9"; VDouble 1.5; VDouble 1.5; VDouble 1.5; VString "255.5" ]
+
+                  match executePrepared session statement parameters |> snd with
+                  | ResultSet(_, [ [ Some "bcdef"; Some "POINT(20 0)"; Some "2"; Some "53"; Some digest ] ]) ->
+                      Expect.equal
+                          digest
+                          "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+                          "SHA2 bit length rounds in its inferred integer context"
+                  | other -> failtestf "expected integral marker coercion before builtin evaluation, got %A" other
+              | other -> failtestf "expected a parsed statement with 5 params, got %A" other
+
+          testCase "spatial prepared metadata distinguishes geometry, index, and radius parameters"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ST_PointN(?, ?), ST_Distance_Sphere(?, ?, ?), ST_Length(?, ?)"
+
+              match prepareStatement sql with
+              | Result.Ok(statement, 7) ->
+                  let parameters, _ = preparedMetadata session statement 7
+
+                  Expect.equal
+                      (parameters |> List.map _.TypeId)
+                      [ TypeGeometry; TypeLongLong; TypeGeometry; TypeGeometry; TypeDouble; TypeGeometry; TypeVarString ]
+                      "spatial parameter families"
+              | other -> failtestf "expected a parsed statement with 7 params, got %A" other
+
+          testCase "prepared comparison parameters retain their dynamic type"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE prepared_types (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO prepared_types VALUES (1), (2)"
+              let sql = "SELECT id FROM prepared_types WHERE id = ?"
+
+              match prepareStatement sql with
+              | Result.Ok(Some ast, 1) ->
+                  let statement =
+                      { Ast = Some ast
+                        Sql = sql
+                        ParamCount = 1
+                        LastParamTypes = None }
+
+                  match executePrepared session statement [ VString "1.5" ] |> snd with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected comparison coercion rather than marker pre-conversion, got %A" other
+              | other -> failtestf "expected a parsed statement with one param, got %A" other
+
+          testCase "SQL EXECUTE applies the same contextual parameter coercion"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @position = 1.5"
+              let session, _ = handle session "PREPARE pick_suffix FROM 'SELECT SUBSTRING(\"abcdef\", ?)'"
+
+              match handle session "EXECUTE pick_suffix USING @position" |> snd with
+              | ResultSet(_, [ [ Some "bcdef" ] ]) -> ()
+              | other -> failtestf "expected SQL EXECUTE to use the inferred integer context, got %A" other
+
           testCase "a prepared CTE update binds source and assignment parameters"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
