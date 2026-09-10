@@ -1987,12 +1987,13 @@ let tests =
               | Err(1649, "Unknown locale: 'xx_YY'") -> ()
               | other -> failtestf "expected 1649 for an unknown locale, got %A" other
 
-              match handle first "SELECT DATE_FORMAT('2020-01-01')" |> snd with
-              | Err(1582, "Incorrect parameter count in the call to native function 'DATE_FORMAT'") -> ()
-              | other -> failtestf "expected DATE_FORMAT to validate its arity, got %A" other
+          testCase "native functions reject invalid arity"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
 
               for sql, functionName in
-                  [ "SELECT ABS()", "ABS"
+                  [ "SELECT DATE_FORMAT('2020-01-01')", "DATE_FORMAT"
+                    "SELECT ABS()", "ABS"
                     "SELECT POW(2)", "POW"
                     "SELECT CHAR_LENGTH()", "CHAR_LENGTH"
                     "SELECT JSON_EXTRACT('{}')", "JSON_EXTRACT"
@@ -2049,7 +2050,7 @@ let tests =
                     "SELECT RAND(1, 2)", "RAND"
                     "SELECT UUID(1)", "UUID"
                     "SELECT UUID_SHORT(1)", "UUID_SHORT" ] do
-                  match handle first sql |> snd with
+                  match handle session sql |> snd with
                   | Err(1582, message) ->
                       Expect.stringContains message functionName "the error identifies the function"
                   | other -> failtestf "expected %s to validate its arity, got %A" functionName other
