@@ -2339,6 +2339,24 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             Some { result with Flags = result.Flags ||| NotNullFlag }
         | _ -> inferred
 
+    let numericUnary expression =
+        metadataOfExpr ctx expression
+        |> Option.bind (fun metadata ->
+            if
+                metadata.TypeId = TypeTiny
+                || metadata.TypeId = TypeShort
+                || metadata.TypeId = TypeLong
+                || metadata.TypeId = TypeLongLong
+                || metadata.TypeId = TypeYear
+                || metadata.TypeId = TypeFloat
+                || metadata.TypeId = TypeDouble
+                || metadata.TypeId = TypeNewDecimal
+            then
+                Some metadata
+            else
+                simple TypeDouble)
+        |> Option.orElseWith (fun () -> simple TypeDouble)
+
     let choose expressions =
         let inferred = expressions |> List.map (fun expression -> expression, metadataOfExpr ctx expression)
         let metadata = inferred |> List.choose snd
@@ -2669,9 +2687,11 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "ANY_VALUE", [ value ] -> metadataOfExpr ctx value
         | "NAME_CONST", [ _; Lit VNull ] -> simple TypeNull
         | "NAME_CONST", [ _; value ] -> metadataOfExpr ctx value
-        | "NULLIF", first :: _ -> metadataOfExpr ctx first
+        | "NULLIF", first :: fallback :: _ ->
+            metadataOfExpr ctx first |> Option.orElseWith (fun () -> metadataOfExpr ctx fallback)
         | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]
-        | ("ROUND" | "TRUNCATE" | "FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ -> metadataOfExpr ctx arg
+        | ("ROUND" | "TRUNCATE" | "FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ ->
+            numericUnary arg
         | "MOD", _ -> simple TypeLongLong
         | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
         | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))

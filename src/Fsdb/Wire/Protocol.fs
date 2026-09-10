@@ -947,7 +947,12 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
     then
         lenEncStringValue ()
     elif typeId = TypeNewDecimal then
-        VString(lenEncText ())
+        let text = lenEncText ()
+        let style = Globalization.NumberStyles.AllowLeadingSign ||| Globalization.NumberStyles.AllowDecimalPoint
+
+        match Decimal.TryParse(text, style, Globalization.CultureInfo.InvariantCulture) with
+        | true, value -> VDecimal value
+        | false, _ -> VString text
     elif typeId = TypeBlob then
         VBytes(lenEncBytes ())
     elif typeId = TypeGeometry then

@@ -11024,7 +11024,7 @@ let tests =
                 testCase "trigonometric functions use radians and MySQL's null domains"
                 <| fun _ ->
                     expectRow
-                        "SELECT ROUND(SIN(PI()/2),12), ROUND(COS(PI()),12), ROUND(TAN(0),12), ROUND(COT(PI()/4),12), ROUND(ASIN(1),12), ASIN(2), ROUND(ACOS(0),12), ACOS(2), ROUND(ATAN(1),12), ROUND(ATAN(1,1),12), ROUND(ATAN2(1,1),12), ROUND(DEGREES(PI()),12), ROUND(RADIANS(180),12)"
+                        "SELECT ROUND(SIN(PI()/2),12), ROUND(COS(PI()),12), ROUND(TAN(0),12), ROUND(COT(PI()/4),12), ROUND(ASIN(1),12), ASIN(2), ROUND(ACOS(0),12), ACOS(2), ROUND(ATAN(1),12), ROUND(ATAN(1,1),12), ROUND(ATAN2(1),12), ROUND(ATAN2(1,1),12), ROUND(DEGREES(PI()),12), ROUND(RADIANS(180),12)"
                         [ Some "1"
                           Some "-1"
                           Some "0"
@@ -11033,6 +11033,7 @@ let tests =
                           None
                           Some "1.570796326795"
                           None
+                          Some "0.785398163397"
                           Some "0.785398163397"
                           Some "0.785398163397"
                           Some "0.785398163397"

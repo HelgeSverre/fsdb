@@ -525,6 +525,25 @@ let tests =
               writer.WriteLenEncBytes bytes
               Expect.equal (readBinaryValue (Reader(writer.ToArray())) TypeBlob false) (VBytes bytes) "raw BLOB parameter"
 
+          testCase "binary protocol DECIMAL parameters retain exact numeric semantics"
+          <| fun _ ->
+              let writer = Writer()
+              writer.WriteLenEncString "1.2500"
+
+              Expect.equal
+                  (readBinaryValue (Reader(writer.ToArray())) TypeNewDecimal false)
+                  (VDecimal 1.2500M)
+                  "representable decimals stay exact"
+
+              let oversized = "99999999999999999999999999999999999999999999999999999999999999999"
+              let overflow = Writer()
+              overflow.WriteLenEncString oversized
+
+              Expect.equal
+                  (readBinaryValue (Reader(overflow.ToArray())) TypeNewDecimal false)
+                  (VString oversized)
+                  "values outside System.Decimal remain lossless text"
+
           testCase "binary protocol string parameters preserve non-UTF-8 bytes"
           <| fun _ ->
               let raw = [| 0x2fuy; 0xbbuy; 0x5fuy; 0xe2uy; 0xe2uy; 0x9auy; 0x4duy; 0x70uy; 0xaauy; 0x58uy; 0x54uy; 0xceuy; 0x7cuy; 0xe3uy; 0xe2uy; 0x0buy |]

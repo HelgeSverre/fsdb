@@ -504,6 +504,123 @@ module ContractCatalog =
                    None
                    [||] |]
 
+        let numericSpecs =
+            [| spec
+                   "numeric-unary"
+                   [| "ABS"; "CEIL"; "CEILING"; "FLOOR"; "SQRT"; "SIGN" |]
+                   "ABS(-2), CEIL(1.2), CEILING(1.2), FLOOR(1.8), SQRT(4), SIGN(-2)"
+                   "ABS(?), CEIL(?), CEILING(?), FLOOR(?), SQRT(?), SIGN(?)"
+                   [| box -2; box 1.2M; box 1.2M; box 1.8M; box 4; box -2 |]
+                   (Some(
+                       [| "ABS"; "CEIL"; "CEILING"; "FLOOR"; "SQRT"; "SIGN" |],
+                       "ABS(?), CEIL(?), CEILING(?), FLOOR(?), SQRT(?), SIGN(?)",
+                       Array.create 6 nullValue
+                   ))
+                   [| "ABS", "ABS()"
+                      "CEIL", "CEIL()"
+                      "CEILING", "CEILING()"
+                      "FLOOR", "FLOOR()"
+                      "SQRT", "SQRT()"
+                      "SIGN", "SIGN()" |]
+               spec
+                   "numeric-transcendental"
+                   [| "LOG"; "LN"; "LOG2"; "LOG10"; "EXP"; "SIN"; "COS"; "TAN"; "ASIN"; "ACOS"; "ATAN"
+                      "ATAN2"; "DEGREES"; "RADIANS" |]
+                   "LOG(1), LN(1), LOG2(8), LOG10(100), EXP(0), SIN(0), COS(0), TAN(0), ASIN(0), ACOS(1), ATAN(0), ATAN2(0, 1), DEGREES(0), RADIANS(0)"
+                   "LOG(?), LN(?), LOG2(?), LOG10(?), EXP(?), SIN(?), COS(?), TAN(?), ASIN(?), ACOS(?), ATAN(?), ATAN2(?, ?), DEGREES(?), RADIANS(?)"
+                   [| box 1
+                      box 1
+                      box 8
+                      box 100
+                      box 0
+                      box 0
+                      box 0
+                      box 0
+                      box 0
+                      box 1
+                      box 0
+                      box 0
+                      box 1
+                      box 0
+                      box 0 |]
+                   (Some(
+                       [| "LOG"; "LN"; "LOG2"; "LOG10"; "EXP"; "SIN"; "COS"; "TAN"; "ASIN"; "ACOS"; "ATAN"
+                          "ATAN2"; "DEGREES"; "RADIANS" |],
+                       "LOG(?), LN(?), LOG2(?), LOG10(?), EXP(?), SIN(?), COS(?), TAN(?), ASIN(?), ACOS(?), ATAN(?), ATAN2(?, ?), DEGREES(?), RADIANS(?)",
+                       Array.create 15 nullValue
+                   ))
+                   [| "LN", "LN()"
+                      "LOG2", "LOG2()"
+                      "LOG10", "LOG10()"
+                      "EXP", "EXP()"
+                      "SIN", "SIN()"
+                      "COS", "COS()"
+                      "TAN", "TAN()"
+                      "ASIN", "ASIN()"
+                      "ACOS", "ACOS()"
+                      "ATAN", "ATAN()"
+                      "ATAN2", "ATAN2()"
+                      "DEGREES", "DEGREES()"
+                      "RADIANS", "RADIANS()" |]
+               spec
+                   "numeric-rounding-and-power"
+                   [| "POW"; "POWER"; "ROUND"; "TRUNCATE"; "MOD" |]
+                   "POW(2, 3), POWER(2, 3), ROUND(1.25, 1), TRUNCATE(1.29, 1), MOD(7, 3)"
+                   "POW(2, ?), POWER(2, ?), ROUND(1.25, ?), TRUNCATE(1.29, ?), MOD(7, ?)"
+                   [| box 3; box 3; box 1; box 1; box 3 |]
+                   (Some(
+                       [| "POW"; "POWER"; "ROUND"; "TRUNCATE"; "MOD" |],
+                       "POW(?, ?), POWER(?, ?), ROUND(?, ?), TRUNCATE(?, ?), MOD(?, ?)",
+                       Array.create 10 nullValue
+                   ))
+                   [| "POW", "POW(2)"
+                      "POWER", "POWER(2)"
+                      "ROUND", "ROUND()" |]
+               spec
+                   "numeric-selection"
+                   [| "GREATEST"; "LEAST"; "NULLIF" |]
+                   "GREATEST(1, 3, 2), LEAST(1, 3, 2), NULLIF(1, 1)"
+                   "GREATEST(?, ?, ?), LEAST(?, ?, ?), NULLIF(?, ?)"
+                   [| box 1; box 3; box 2; box 1; box 3; box 2; box 1; box 1 |]
+                   (Some(
+                       [| "GREATEST"; "LEAST"; "NULLIF" |],
+                       "GREATEST(?, 2), LEAST(?, 2), NULLIF(?, 1)",
+                       Array.create 3 nullValue
+                   ))
+                   [| "GREATEST", "GREATEST()"; "LEAST", "LEAST()" |]
+               spec
+                   "numeric-null-predicate"
+                   [| "ISNULL" |]
+                   "ISNULL(NULL)"
+                   "ISNULL(?)"
+                   [| box 1 |]
+                   (Some([| "ISNULL" |], "ISNULL(?)", [| nullValue |]))
+                   [| "ISNULL", "ISNULL()" |]
+               spec
+                   "numeric-base-and-bits"
+                   [| "CONV"; "BIN"; "BIT_COUNT"; "OCT"; "CRC32" |]
+                   "CONV('ff', 16, 10), BIN(5), BIT_COUNT(7), OCT(8), CRC32('abc')"
+                   "CONV(?, ?, ?), BIN(?), BIT_COUNT(?), OCT(?), CRC32(?)"
+                   [| box "ff"; box 16; box 10; box 5; box 7; box 8; box "abc" |]
+                   (Some(
+                       [| "CONV"; "BIN"; "BIT_COUNT"; "OCT"; "CRC32" |],
+                       "CONV(?, 16, 10), BIN(?), BIT_COUNT(?), OCT(?), CRC32(?)",
+                       Array.create 5 nullValue
+                   ))
+                   [| "CONV", "CONV('ff', 16)"
+                      "BIN", "BIN()"
+                      "BIT_COUNT", "BIT_COUNT()"
+                      "OCT", "OCT()"
+                      "CRC32", "CRC32()" |]
+               spec
+                   "cotangent-null-result"
+                   [| "COT" |]
+                   "COT(NULL)"
+                   "COT(?)"
+                   [| nullValue |]
+                   (Some([| "COT" |], "COT(?)", [| nullValue |]))
+                   [||] |]
+
         let stringSpecs =
             [| spec
                    "string-case-and-length"
@@ -1016,6 +1133,7 @@ module ContractCatalog =
         let specs =
             Array.concat
                 [ establishedSpecs
+                  numericSpecs
                   stringSpecs
                   jsonSpecs
                   temporalSpecs
@@ -1608,14 +1726,24 @@ module CompatibilityRunner =
     let private normalizeNumericRow (row: string) =
         JsonSerializer.Deserialize<string array>(row)
         |> Array.map (fun value ->
-            if value.StartsWith("integer:", StringComparison.Ordinal) then
-                "number:" + value.Substring(8)
-            elif value.StartsWith("decimal:", StringComparison.Ordinal) then
-                "number:" + value.Substring(8)
-            elif value.StartsWith("float:", StringComparison.Ordinal) then
-                "number:" + value.Substring(6)
-            else
-                value)
+            let numericPayload =
+                if value.StartsWith("integer:", StringComparison.Ordinal) then Some(value.Substring 8)
+                elif value.StartsWith("decimal:", StringComparison.Ordinal) then Some(value.Substring 8)
+                elif value.StartsWith("float:", StringComparison.Ordinal) then Some(value.Substring 6)
+                else None
+
+            match numericPayload with
+            | Some payload ->
+                match
+                    Decimal.TryParse(
+                        payload,
+                        Globalization.NumberStyles.Float,
+                        Globalization.CultureInfo.InvariantCulture
+                    )
+                with
+                | true, number -> "number:" + number.ToString("G29", Globalization.CultureInfo.InvariantCulture)
+                | false, _ -> "number:" + payload
+            | None -> value)
 
     let private compare expectation (mysql: ContractTargetOutcome) (fsdb: ContractTargetOutcome) =
         if mysql.Status = "sent" && fsdb.Status = "sent" then

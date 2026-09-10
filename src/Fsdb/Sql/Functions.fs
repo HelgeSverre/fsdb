@@ -4847,6 +4847,7 @@ let private atanFn: Scalar =
 
 let private atan2Fn: Scalar =
     function
+    | [ value ] when not (anyNull [ value ]) -> VDouble(Math.Atan(toDouble value))
     | [ y; x ] when not (anyNull [ y; x ]) -> VDouble(Math.Atan2(toDouble y, toDouble x))
     | _ -> VNull
 
@@ -6010,47 +6011,51 @@ let private registerStringBuiltins registry =
 
 let private registerNumericBuiltins registry =
     registry
-    |> registerScalar "CEIL" ceilFn
-    |> registerScalar "CEILING" ceilFn
-    |> registerScalar "FLOOR" floorFn
+    |> registerScalar "CEIL" (exactArity "CEIL" 1 ceilFn)
+    |> registerScalar "CEILING" (exactArity "CEILING" 1 ceilFn)
+    |> registerScalar "FLOOR" (exactArity "FLOOR" 1 floorFn)
     |> registerScalar "POW" (exactArity "POW" 2 powFn)
     |> registerScalar "POWER" (exactArity "POWER" 2 powFn)
-    |> registerScalar "SQRT" sqrtFn
-    |> registerScalar "LOG" logFn
-    |> registerScalar "LN" (positiveLog "ln" Math.Log)
-    |> registerScalar "LOG2" (positiveLog "log2" Math.Log2)
-    |> registerScalar "LOG10" (positiveLog "log10" Math.Log10)
-    |> registerScalar "EXP" (unaryMath "exp" Math.Exp)
-    |> registerScalar "PI" piFn
-    |> registerScalar "SIN" (unaryMath "sin" Math.Sin)
-    |> registerScalar "COS" (unaryMath "cos" Math.Cos)
-    |> registerScalar "TAN" (unaryMath "tan" Math.Tan)
+    |> registerScalar "SQRT" (exactArity "SQRT" 1 sqrtFn)
+    |> registerScalar "LOG" (arityRange "LOG" 1 2 logFn)
+    |> registerScalar "LN" (exactArity "LN" 1 (positiveLog "ln" Math.Log))
+    |> registerScalar "LOG2" (exactArity "LOG2" 1 (positiveLog "log2" Math.Log2))
+    |> registerScalar "LOG10" (exactArity "LOG10" 1 (positiveLog "log10" Math.Log10))
+    |> registerScalar "EXP" (exactArity "EXP" 1 (unaryMath "exp" Math.Exp))
+    |> registerScalar "PI" (exactArity "PI" 0 piFn)
+    |> registerScalar "SIN" (exactArity "SIN" 1 (unaryMath "sin" Math.Sin))
+    |> registerScalar "COS" (exactArity "COS" 1 (unaryMath "cos" Math.Cos))
+    |> registerScalar "TAN" (exactArity "TAN" 1 (unaryMath "tan" Math.Tan))
     |> registerScalar "COT" (exactArity "COT" 1 cotFn)
-    |> registerScalar "ASIN" (unaryMath "asin" Math.Asin)
-    |> registerScalar "ACOS" (unaryMath "acos" Math.Acos)
-    |> registerScalar "ATAN" atanFn
-    |> registerScalar "ATAN2" atan2Fn
-    |> registerScalar "DEGREES" (unaryMath "degrees" (fun value -> value * 180.0 / Math.PI))
-    |> registerScalar "RADIANS" (unaryMath "radians" (fun value -> value * Math.PI / 180.0))
-    |> registerScalar "SIGN" signFn
-    |> registerScalar "TRUNCATE" truncateFn
+    |> registerScalar "ASIN" (exactArity "ASIN" 1 (unaryMath "asin" Math.Asin))
+    |> registerScalar "ACOS" (exactArity "ACOS" 1 (unaryMath "acos" Math.Acos))
+    |> registerScalar "ATAN" (arityRange "ATAN" 1 2 atanFn)
+    |> registerScalar "ATAN2" (arityRange "ATAN2" 1 2 atan2Fn)
+    |> registerScalar
+        "DEGREES"
+        (exactArity "DEGREES" 1 (unaryMath "degrees" (fun value -> value * 180.0 / Math.PI)))
+    |> registerScalar
+        "RADIANS"
+        (exactArity "RADIANS" 1 (unaryMath "radians" (fun value -> value * Math.PI / 180.0)))
+    |> registerScalar "SIGN" (exactArity "SIGN" 1 signFn)
+    |> registerScalar "TRUNCATE" (exactArity "TRUNCATE" 2 truncateFn)
     |> registerScalar "RAND" (arityRange "RAND" 0 1 randFn)
-    |> registerScalarResult "GREATEST" (CombineArguments everyArgument) greatestFn
-    |> registerScalarResult "LEAST" (CombineArguments everyArgument) leastFn
-    |> registerScalarResult "NULLIF" (InheritArgument 0) nullIfFn
+    |> registerScalarResult "GREATEST" (CombineArguments everyArgument) (minimumArity "GREATEST" 1 greatestFn)
+    |> registerScalarResult "LEAST" (CombineArguments everyArgument) (minimumArity "LEAST" 1 leastFn)
+    |> registerScalarResult "NULLIF" (InheritArgument 0) (exactArity "NULLIF" 2 nullIfFn)
     |> registerScalarResult "ANY_VALUE" (InheritArgument 0) anyValueFn
-    |> registerScalar "ISNULL" isNullFn
-    |> registerScalar "CONV" convFn
-    |> registerScalar "BIN" binFn
-    |> registerScalar "BIT_COUNT" bitCountFn
+    |> registerScalar "ISNULL" (exactArity "ISNULL" 1 isNullFn)
+    |> registerScalar "CONV" (exactArity "CONV" 3 convFn)
+    |> registerScalar "BIN" (exactArity "BIN" 1 binFn)
+    |> registerScalar "BIT_COUNT" (exactArity "BIT_COUNT" 1 bitCountFn)
     |> registerScalar "BITWISE_NOT" (bitwiseUnary (~~~))
     |> registerScalar "BITWISE_AND" (bitwiseBinary (&&&))
     |> registerScalar "BITWISE_OR" (bitwiseBinary (|||))
     |> registerScalar "BITWISE_XOR" (bitwiseBinary (^^^))
     |> registerScalar "BITWISE_SHIFT_LEFT" (bitwiseShift (fun value count -> value <<< count))
     |> registerScalar "BITWISE_SHIFT_RIGHT" (bitwiseShift (fun value count -> value >>> count))
-    |> registerScalar "OCT" octFn
-    |> registerByteTextScalar "CRC32" firstArgument crc32Fn
+    |> registerScalar "OCT" (exactArity "OCT" 1 octFn)
+    |> registerByteTextScalar "CRC32" firstArgument (exactArity "CRC32" 1 crc32Fn)
     |> registerScalar "UUID" (exactArity "UUID" 0 uuidFn)
     |> registerScalarResult "UUID_TO_BIN" binaryResult (arityRange "UUID_TO_BIN" 1 2 uuidToBinFn)
     |> registerScalar "BIN_TO_UUID" (arityRange "BIN_TO_UUID" 1 2 binToUuidFn)
@@ -6106,8 +6111,8 @@ let builtins: Registry =
     |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn
     |> registerScalarResult "IF" (CombineArguments (arguments (set [ 1; 2 ]))) ifFn
     |> registerFunctionalScalar AbsoluteValue
-    |> registerScalar "ROUND" roundFn
-    |> registerScalar "MOD" modFn
+    |> registerScalar "ROUND" (arityRange "ROUND" 1 2 roundFn)
+    |> registerScalar "MOD" (exactArity "MOD" 2 modFn)
     |> registerJsonBuiltins
     |> registerSpatialBuiltins
     |> registerTemporalBuiltins
