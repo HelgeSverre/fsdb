@@ -697,7 +697,132 @@ module ContractCatalog =
                    [| "JSON_SCHEMA_VALID", "JSON_SCHEMA_VALID('{}')"
                       "JSON_SCHEMA_VALIDATION_REPORT", "JSON_SCHEMA_VALIDATION_REPORT('{}')" |] |]
 
-        let specs = Array.concat [ establishedSpecs; stringSpecs; jsonSpecs ]
+        let temporalSpecs =
+            [| spec
+                   "temporal-components"
+                   [| "DATE"
+                      "TIME"
+                      "YEAR"
+                      "MONTH"
+                      "DAY"
+                      "DAYOFMONTH"
+                      "HOUR"
+                      "MINUTE"
+                      "SECOND"
+                      "MICROSECOND" |]
+                   "DATE('2024-02-29 12:34:56.123456'), TIME('2024-02-29 12:34:56.123456'), YEAR('2024-02-29'), MONTH('2024-02-29'), DAY('2024-02-29'), DAYOFMONTH('2024-02-29'), HOUR('12:34:56.123456'), MINUTE('12:34:56.123456'), SECOND('12:34:56.123456'), MICROSECOND('12:34:56.123456')"
+                   "DATE(?), TIME(?), YEAR(?), MONTH(?), DAY(?), DAYOFMONTH(?), HOUR(?), MINUTE(?), SECOND(?), MICROSECOND(?)"
+                   [| box "2024-02-29 12:34:56.123456"
+                      box "2024-02-29 12:34:56.123456"
+                      box "2024-02-29"
+                      box "2024-02-29"
+                      box "2024-02-29"
+                      box "2024-02-29"
+                      box "12:34:56.123456"
+                      box "12:34:56.123456"
+                      box "12:34:56.123456"
+                      box "12:34:56.123456" |]
+                   (Some(
+                       [| "DATE"
+                          "TIME"
+                          "YEAR"
+                          "MONTH"
+                          "DAY"
+                          "DAYOFMONTH"
+                          "HOUR"
+                          "MINUTE"
+                          "SECOND"
+                          "MICROSECOND" |],
+                       "DATE(?), TIME(?), YEAR(?), MONTH(?), DAY(?), DAYOFMONTH(?), HOUR(?), MINUTE(?), SECOND(?), MICROSECOND(?)",
+                       Array.create 10 nullValue
+                   ))
+                   [| "DAYOFMONTH", "DAYOFMONTH()" |]
+               spec
+                   "temporal-calendar"
+                   [| "DAYOFWEEK"; "DAYOFYEAR"; "WEEKDAY"; "WEEK"; "WEEKOFYEAR"; "YEARWEEK"; "QUARTER"; "LAST_DAY" |]
+                   "DAYOFWEEK('2024-02-29'), DAYOFYEAR('2024-02-29'), WEEKDAY('2024-02-29'), WEEK('2024-02-29', 3), WEEKOFYEAR('2024-02-29'), YEARWEEK('2024-02-29', 3), QUARTER('2024-02-29'), LAST_DAY('2024-02-10')"
+                   "DAYOFWEEK(?), DAYOFYEAR(?), WEEKDAY(?), WEEK(?, ?), WEEKOFYEAR(?), YEARWEEK(?, ?), QUARTER(?), LAST_DAY(?)"
+                   [| box "2024-02-29"
+                      box "2024-02-29"
+                      box "2024-02-29"
+                      box "2024-02-29"
+                      box 3
+                      box "2024-02-29"
+                      box "2024-02-29"
+                      box 3
+                      box "2024-02-29"
+                      box "2024-02-10" |]
+                   (Some(
+                       [| "DAYOFWEEK"; "DAYOFYEAR"; "WEEKDAY"; "WEEK"; "WEEKOFYEAR"; "YEARWEEK"; "QUARTER"; "LAST_DAY" |],
+                       "DAYOFWEEK(?), DAYOFYEAR(?), WEEKDAY(?), WEEK(?, 3), WEEKOFYEAR(?), YEARWEEK(?, 3), QUARTER(?), LAST_DAY(?)",
+                       Array.create 8 nullValue
+                   ))
+                   [| "DAYOFWEEK", "DAYOFWEEK()"
+                      "DAYOFYEAR", "DAYOFYEAR()"
+                      "WEEKDAY", "WEEKDAY()"
+                      "WEEKOFYEAR", "WEEKOFYEAR()"
+                      "YEARWEEK", "YEARWEEK()"
+                      "LAST_DAY", "LAST_DAY()" |]
+               spec
+                   "temporal-arithmetic"
+                   [| "DATEDIFF"; "TIMEDIFF"; "ADDTIME"; "SUBTIME"; "MAKEDATE"; "MAKETIME"; "SEC_TO_TIME" |]
+                   "DATEDIFF('2024-03-02', '2024-02-29'), TIMEDIFF('12:00:01.5', '10:00:00'), ADDTIME('10:00:00', '01:02:03'), SUBTIME('10:00:00', '01:02:03'), MAKEDATE(2024, 60), MAKETIME(12, 34, 56.5), SEC_TO_TIME(3661.5)"
+                   "DATEDIFF(?, ?), TIMEDIFF(?, ?), ADDTIME(CAST(? AS TIME(6)), ?), SUBTIME(CAST(? AS TIME(6)), ?), MAKEDATE(?, ?), MAKETIME(?, ?, ?), SEC_TO_TIME(?)"
+                   [| box "2024-03-02"
+                      box "2024-02-29"
+                      box "12:00:01.5"
+                      box "10:00:00"
+                      box (TimeSpan(10, 0, 0))
+                      box (TimeSpan(1, 2, 3))
+                      box (TimeSpan(10, 0, 0))
+                      box (TimeSpan(1, 2, 3))
+                      box 2024
+                      box 60
+                      box 12
+                      box 34
+                      box 56.5
+                      box 3661.5 |]
+                   (Some(
+                       [| "DATEDIFF"; "TIMEDIFF"; "ADDTIME"; "SUBTIME"; "MAKEDATE"; "MAKETIME"; "SEC_TO_TIME" |],
+                       "DATEDIFF(?, '2024-02-29'), TIMEDIFF(?, '10:00:00'), ADDTIME(CAST(? AS TIME), '01:02:03'), SUBTIME(CAST(? AS TIME), '01:02:03'), MAKEDATE(?, 60), MAKETIME(?, 34, 56), SEC_TO_TIME(?)",
+                       Array.create 7 nullValue
+                   ))
+                   [| "DATEDIFF", "DATEDIFF('2024-03-02')"
+                      "TIMEDIFF", "TIMEDIFF('12:00:01')"
+                      "ADDTIME", "ADDTIME('10:00:00')"
+                      "SUBTIME", "SUBTIME('10:00:00')"
+                      "MAKEDATE", "MAKEDATE(2024)"
+                      "MAKETIME", "MAKETIME(12, 34)"
+                      "SEC_TO_TIME", "SEC_TO_TIME()" |]
+               spec
+                   "temporal-conversion"
+                   [| "TO_DAYS"; "FROM_DAYS"; "UNIX_TIMESTAMP"; "FROM_UNIXTIME"; "TIME_FORMAT"; "STR_TO_DATE"; "CONVERT_TZ" |]
+                   "TO_DAYS('2024-02-29'), FROM_DAYS(739310), UNIX_TIMESTAMP('2024-02-29 12:00:00'), FROM_UNIXTIME(1709208000), TIME_FORMAT('12:34:56.123456', '%H:%i:%s.%f'), STR_TO_DATE('2024-02-29', '%Y-%m-%d'), CONVERT_TZ('2024-02-29 12:00:00', '+00:00', '+02:00')"
+                   "TO_DAYS(?), FROM_DAYS(?), UNIX_TIMESTAMP(CAST(? AS DATETIME)), FROM_UNIXTIME(?), TIME_FORMAT(?, ?), STR_TO_DATE(?, '%Y-%m-%d'), CONVERT_TZ(?, ?, ?)"
+                   [| box "2024-02-29"
+                      box 739310
+                      box "2024-02-29 12:00:00"
+                      box 1709208000
+                      box "12:34:56.123456"
+                      box "%H:%i:%s.%f"
+                      box "2024-02-29"
+                      box "2024-02-29 12:00:00"
+                      box "+00:00"
+                      box "+02:00" |]
+                   (Some(
+                       [| "TO_DAYS"; "FROM_DAYS"; "UNIX_TIMESTAMP"; "FROM_UNIXTIME"; "TIME_FORMAT"; "STR_TO_DATE"; "CONVERT_TZ" |],
+                       "TO_DAYS(?), FROM_DAYS(?), UNIX_TIMESTAMP(CAST(? AS DATETIME)), FROM_UNIXTIME(?), TIME_FORMAT(?, '%H:%i:%s'), STR_TO_DATE(?, '%Y-%m-%d'), CONVERT_TZ(?, '+00:00', '+02:00')",
+                       Array.create 7 nullValue
+                   ))
+                   [| "TO_DAYS", "TO_DAYS()"
+                      "FROM_DAYS", "FROM_DAYS()"
+                      "UNIX_TIMESTAMP", "UNIX_TIMESTAMP(1, 2)"
+                      "FROM_UNIXTIME", "FROM_UNIXTIME()"
+                      "TIME_FORMAT", "TIME_FORMAT('12:34:56')"
+                      "STR_TO_DATE", "STR_TO_DATE('2024-02-29')"
+                      "CONVERT_TZ", "CONVERT_TZ('2024-02-29', '+00:00')" |] |]
+
+        let specs = Array.concat [ establishedSpecs; stringSpecs; jsonSpecs; temporalSpecs ]
 
         let steps, coverage = generatedFunctionContracts specs
 
