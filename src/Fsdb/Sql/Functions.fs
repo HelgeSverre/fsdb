@@ -5749,32 +5749,35 @@ let private registerJsonBuiltins registry =
     registry
     |> registerScalarResult "JSON_EXTRACT" jsonResult (minimumArity "JSON_EXTRACT" 2 jsonExtractFn)
     |> registerScalarResult "JSON_VALUE" (FixedCollation("utf8mb4_0900_bin", 4)) (exactArity "JSON_VALUE" 2 jsonValueFn)
-    |> registerScalarResult "JSON_UNQUOTE" jsonTextResult jsonUnquoteFn
-    |> registerScalar "JSON_CONTAINS" jsonContainsFn
+    |> registerScalarResult "JSON_UNQUOTE" jsonTextResult (exactArity "JSON_UNQUOTE" 1 jsonUnquoteFn)
+    |> registerScalar "JSON_CONTAINS" (arityRange "JSON_CONTAINS" 2 3 jsonContainsFn)
     |> registerScalar "JSON_MEMBER_OF" jsonMemberOfFn
     |> registerScalar "JSON_CONTAINS_PATH" jsonContainsPathFn
-    |> registerScalar "JSON_OVERLAPS" jsonOverlapsFn
-    |> registerScalarResult "JSON_QUOTE" jsonTextResult jsonQuoteFn
-    |> registerScalarResult "JSON_PRETTY" jsonTextResult jsonPrettyFn
+    |> registerScalar "JSON_OVERLAPS" (exactArity "JSON_OVERLAPS" 2 jsonOverlapsFn)
+    |> registerScalarResult "JSON_QUOTE" jsonTextResult (exactArity "JSON_QUOTE" 1 jsonQuoteFn)
+    |> registerScalarResult "JSON_PRETTY" jsonTextResult (exactArity "JSON_PRETTY" 1 jsonPrettyFn)
     |> registerScalarResult "JSON_MERGE_PATCH" jsonResult (jsonMergeFn mergeJsonPatch)
     |> registerScalarResult "JSON_MERGE_PRESERVE" jsonResult (jsonMergeFn mergeJsonPreserve)
     |> registerScalarResult "JSON_ARRAY_APPEND" jsonResult jsonArrayAppendFn
     |> registerScalarResult "JSON_ARRAY_INSERT" jsonResult jsonArrayInsertFn
-    |> registerScalar "JSON_STORAGE_SIZE" jsonStorageSizeFn
-    |> registerScalar "JSON_STORAGE_FREE" jsonStorageFreeFn
+    |> registerScalar "JSON_STORAGE_SIZE" (exactArity "JSON_STORAGE_SIZE" 1 jsonStorageSizeFn)
+    |> registerScalar "JSON_STORAGE_FREE" (exactArity "JSON_STORAGE_FREE" 1 jsonStorageFreeFn)
     |> registerScalarResult "JSON_SET" jsonResult (jsonWriteFn JSet)
     |> registerScalarResult "JSON_INSERT" jsonResult (jsonWriteFn JInsert)
     |> registerScalarResult "JSON_REPLACE" jsonResult (jsonWriteFn JReplace)
     |> registerScalarResult "JSON_REMOVE" jsonResult jsonRemoveFn
     |> registerScalarResult "JSON_ARRAY" jsonResult jsonArrayFn
     |> registerScalarResult "JSON_OBJECT" jsonResult jsonObjectFn
-    |> registerScalar "JSON_LENGTH" jsonLengthFn
-    |> registerScalar "JSON_DEPTH" jsonDepthFn
-    |> registerScalar "JSON_VALID" jsonValidFn
-    |> registerScalar "JSON_SCHEMA_VALID" jsonSchemaValidFn
-    |> registerScalarResult "JSON_SCHEMA_VALIDATION_REPORT" jsonResult jsonSchemaValidationReportFn
-    |> registerScalarResult "JSON_TYPE" jsonTextResult jsonTypeFn
-    |> registerScalarResult "JSON_KEYS" jsonResult jsonKeysFn
+    |> registerScalar "JSON_LENGTH" (arityRange "JSON_LENGTH" 1 2 jsonLengthFn)
+    |> registerScalar "JSON_DEPTH" (exactArity "JSON_DEPTH" 1 jsonDepthFn)
+    |> registerScalar "JSON_VALID" (exactArity "JSON_VALID" 1 jsonValidFn)
+    |> registerScalar "JSON_SCHEMA_VALID" (exactArity "JSON_SCHEMA_VALID" 2 jsonSchemaValidFn)
+    |> registerScalarResult
+        "JSON_SCHEMA_VALIDATION_REPORT"
+        jsonResult
+        (exactArity "JSON_SCHEMA_VALIDATION_REPORT" 2 jsonSchemaValidationReportFn)
+    |> registerScalarResult "JSON_TYPE" jsonTextResult (exactArity "JSON_TYPE" 1 jsonTypeFn)
+    |> registerScalarResult "JSON_KEYS" jsonResult (arityRange "JSON_KEYS" 1 2 jsonKeysFn)
     |> registerScalarResult "JSON_SEARCH" jsonResult (minimumArity "JSON_SEARCH" 3 jsonSearchFn)
 
 let private registerSpatialBuiltins registry =
@@ -5942,39 +5945,51 @@ let private registerStringBuiltins registry =
     |> registerStringScalar "TRIM_BOTH" everyArgument (InheritArgument 1) (trimSubstring true true)
     |> registerStringScalar "TRIM_LEADING" everyArgument (InheritArgument 1) (trimSubstring true false)
     |> registerStringScalar "TRIM_TRAILING" everyArgument (InheritArgument 1) (trimSubstring false true)
-    |> registerStringScalar "LTRIM" firstArgument (InheritArgument 0) (textMap (trimRaw true false) (fun s -> s.TrimStart(' ')))
-    |> registerStringScalar "RTRIM" firstArgument (InheritArgument 0) (textMap (trimRaw false true) (fun s -> s.TrimEnd(' ')))
-    |> registerStringScalar "LPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (padFn true)
-    |> registerStringScalar "RPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (padFn false)
+    |> registerStringScalar
+        "LTRIM"
+        firstArgument
+        (InheritArgument 0)
+        (exactArity "LTRIM" 1 (textMap (trimRaw true false) (fun s -> s.TrimStart(' '))))
+    |> registerStringScalar
+        "RTRIM"
+        firstArgument
+        (InheritArgument 0)
+        (exactArity "RTRIM" 1 (textMap (trimRaw false true) (fun s -> s.TrimEnd(' '))))
+    |> registerStringScalar "LPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (exactArity "LPAD" 3 (padFn true))
+    |> registerStringScalar "RPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (exactArity "RPAD" 3 (padFn false))
     |> registerStringScalar "LEFT" firstArgument (InheritArgument 0) leftFn
     |> registerStringScalar "RIGHT" firstArgument (InheritArgument 0) rightFn
     |> registerFunctionalString Reversed
     |> registerStringScalar "REPEAT" firstArgument (InheritArgument 0) repeatFn
-    |> registerScalar "SPACE" spaceFn
+    |> registerScalar "SPACE" (exactArity "SPACE" 1 spaceFn)
     |> registerTextScalar "ASCII" firstArgument asciiFn
-    |> registerTextScalar "ORD" firstArgument ordFn
+    |> registerTextScalar "ORD" firstArgument (exactArity "ORD" 1 ordFn)
     |> registerScalarResult "CHAR" binaryResult charFn
-    |> registerByteScalar "HEX" firstArgument hexFn
-    |> registerStringScalar "UNHEX" firstArgument binaryResult unhexFn
+    |> registerByteScalar "HEX" firstArgument (exactArity "HEX" 1 hexFn)
+    |> registerStringScalar "UNHEX" firstArgument binaryResult (exactArity "UNHEX" 1 unhexFn)
     |> registerStringScalar "AES_ENCRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesEncrypt "aes-128-ecb")
     |> registerStringScalar "AES_DECRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesDecrypt "aes-128-ecb")
-    |> registerByteTextScalar "MD5" firstArgument md5Fn
-    |> registerByteTextScalar "SHA1" firstArgument sha1Fn
+    |> registerByteTextScalar "MD5" firstArgument (exactArity "MD5" 1 md5Fn)
+    |> registerByteTextScalar "SHA1" firstArgument (exactArity "SHA1" 1 sha1Fn)
     |> registerByteTextScalar "SHA" firstArgument sha1Fn
-    |> registerByteTextScalar "SHA2" firstArgument sha2Fn
+    |> registerByteTextScalar "SHA2" firstArgument (exactArity "SHA2" 2 sha2Fn)
     |> registerScalar "FORMAT" formatFn
-    |> registerStringScalar "SUBSTRING_INDEX" (arguments (set [ 0; 1 ])) (InheritArgument 0) substringIndexFn
-    |> registerStringScalar "CONCAT_WS" everyArgument (CombineArguments everyArgument) concatWsFn
+    |> registerStringScalar
+        "SUBSTRING_INDEX"
+        (arguments (set [ 0; 1 ]))
+        (InheritArgument 0)
+        (exactArity "SUBSTRING_INDEX" 3 substringIndexFn)
+    |> registerStringScalar "CONCAT_WS" everyArgument (CombineArguments everyArgument) (minimumArity "CONCAT_WS" 2 concatWsFn)
     |> registerStringScalar "ELT" (argumentsAfter 0) (CombineArguments (argumentsAfter 0)) eltFn
     |> registerStringScalar "EXPORT_SET" (arguments (set [ 1; 2; 3 ])) (CombineArguments (arguments (set [ 1; 2; 3 ]))) exportSetFn
     |> registerStringScalar "MAKE_SET" (argumentsAfter 0) (CombineArguments (argumentsAfter 0)) makeSetFn
     |> registerScalar "FIELD" fieldFn
-    |> registerTextScalar "FIND_IN_SET" everyArgument findInSetFn
+    |> registerTextScalar "FIND_IN_SET" everyArgument (exactArity "FIND_IN_SET" 2 findInSetFn)
     |> registerStringScalar "QUOTE" firstArgument (InheritArgument 0) quoteFn
     |> registerTextScalar "STRCMP" everyArgument strcmpFn
     |> registerStringScalar "SOUNDEX" firstArgument (InheritArgument 0) soundexFn
-    |> registerByteTextScalar "TO_BASE64" firstArgument toBase64Fn
-    |> registerStringScalar "FROM_BASE64" firstArgument binaryResult fromBase64Fn
+    |> registerByteTextScalar "TO_BASE64" firstArgument (exactArity "TO_BASE64" 1 toBase64Fn)
+    |> registerStringScalar "FROM_BASE64" firstArgument binaryResult (exactArity "FROM_BASE64" 1 fromBase64Fn)
     |> registerByteStringScalar "COMPRESS" firstArgument binaryResult compressFn
     |> registerStringScalar "UNCOMPRESS" firstArgument binaryResult uncompressFn
     |> registerByteTextScalar "UNCOMPRESSED_LENGTH" firstArgument uncompressedLengthFn
@@ -6074,7 +6089,7 @@ let builtins: Registry =
     empty
     |> registerScalar "NOW" nowFn
     |> registerScalar "CURRENT_TIMESTAMP" nowFn
-    |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) concatFn
+    |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) (minimumArity "CONCAT" 1 concatFn)
     |> registerFunctionalString Uppercase
     |> registerFunctionalString Lowercase
     |> registerFunctionalByteText ByteLength
