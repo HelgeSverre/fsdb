@@ -43,6 +43,7 @@ let private mkSelect
     Select
         { Projections = projections
           IntoVariables = []
+          IntoFile = None
           Distinct = false
           CalculateFoundRows = false
           StraightJoin = false
@@ -149,6 +150,7 @@ let tests =
                         (Select
                             { Projections = [ Star None, None ]
                               IntoVariables = []
+                              IntoFile = None
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
@@ -173,6 +175,7 @@ let tests =
                         (Select
                             { Projections = [ Star None, None ]
                               IntoVariables = []
+                              IntoFile = None
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
@@ -1796,6 +1799,7 @@ let tests =
                             [ "a"; "b" ],
                             { Projections = [ col "x", None; col "y", None ]
                               IntoVariables = []
+                              IntoFile = None
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
@@ -3048,6 +3052,51 @@ let tests =
                               { Name = "chosen name"; Sql = "@`chosen name`" } ]
                             "assignment targets"
                     | other -> failtestf "expected SELECT INTO targets, got %A" other
+
+                testCase "SELECT INTO accepts MySQL's preferred trailing positions"
+                <| fun _ ->
+                    for sql in
+                        [ "SELECT id FROM users INTO @chosen"
+                          "SELECT id FROM users FOR UPDATE INTO @chosen" ] do
+                        match parse sql with
+                        | Ok(Select { IntoVariables = [ target ] }) -> Expect.equal target.Name "chosen" sql
+                        | other -> failtestf "expected trailing SELECT INTO for %s, got %A" sql other
+
+                testCase "SELECT INTO OUTFILE retains export options"
+                <| fun _ ->
+                    match
+                        parse
+                            "SELECT id, name INTO OUTFILE '/srv/export/rows.csv' CHARACTER SET latin1 FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' ESCAPED BY '!' LINES STARTING BY '>' TERMINATED BY '\\r\\n' FROM users"
+                    with
+                    | Ok(Select { IntoFile = Some(Outfile(fileName, options)) }) ->
+                        Expect.equal fileName "/srv/export/rows.csv" "file name"
+                        Expect.equal options.CharacterSet (Some "latin1") "character set"
+                        Expect.equal options.FieldTerminator "," "field terminator"
+                        Expect.equal options.EnclosedBy (Some "\"") "enclosure"
+                        Expect.isTrue options.OptionallyEnclosed "string columns alone are enclosed"
+                        Expect.equal options.Escape (Some "!") "escape marker"
+                        Expect.equal options.LinePrefix ">" "line prefix"
+                        Expect.equal options.LineTerminator "\r\n" "line terminator"
+                    | other -> failtestf "expected OUTFILE options, got %A" other
+
+                testCase "SELECT INTO file destinations parse at the end and across UNION"
+                <| fun _ ->
+                    match parse "SELECT payload FROM blobs LIMIT 1 INTO DUMPFILE '/srv/export/blob.bin'" with
+                    | Ok(Select { IntoFile = Some(Dumpfile "/srv/export/blob.bin") }) -> ()
+                    | other -> failtestf "expected DUMPFILE, got %A" other
+
+                    match parse "SELECT 1 AS n UNION ALL SELECT 2 INTO OUTFILE '/srv/export/numbers.tsv'" with
+                    | Ok(Union(first, [ OpUnion true, second ], _, _, _)) ->
+                        Expect.isSome first.IntoFile "the destination belongs to the complete set result"
+                        Expect.isFalse (SelectStmt.hasDestination second) "the trailing branch remains a nested query block"
+                    | other -> failtestf "expected a UNION output destination, got %A" other
+
+                testCase "SELECT rejects multiple and non-final UNION destinations"
+                <| fun _ ->
+                    for sql in
+                        [ "SELECT 1 INTO @first INTO @second"
+                          "SELECT 1 INTO OUTFILE '/tmp/first' UNION SELECT 2" ] do
+                        Expect.isError (parse sql) sql
 
                 testCase "a bare at sign is MySQL's anonymous NULL variable reference"
                 <| fun _ ->

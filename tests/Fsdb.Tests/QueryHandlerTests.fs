@@ -2806,7 +2806,7 @@ let tests =
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE t (id INT, name VARCHAR(10))"
               let session, _ = handle session "INSERT INTO t VALUES (1, 'one')"
-              let session, result = handle session "SELECT id, name INTO @chosen_id, @chosen_name FROM t"
+              let session, result = handle session "SELECT id, name FROM t INTO @chosen_id, @chosen_name"
               Expect.equal result (Affected 0UL) "SELECT INTO has no resultset"
               Expect.equal session.UserVariables.["chosen_id"] (VInt 1L) "integer type retained"
               Expect.equal session.UserVariables.["chosen_name"] (VString "one") "string type retained"
@@ -6810,6 +6810,31 @@ let tests =
               match tryPrepareLoad loader "LOAD DATA LOCAL INFILE 'rows.tsv' INTO TABLE imports" with
               | Ok(Some load) -> Expect.isTrue load.Local "LOCAL does not inherit the server-file privilege"
               | other -> failtestf "INSERT alone should prepare LOCAL input, got %A" other
+
+          testCase "SELECT INTO OUTFILE requires the global FILE privilege"
+          <| fun _ ->
+              TestSupport.withDirectory "outfile-privilege" (fun directory ->
+                  let store = Fsdb.Storage.create ()
+                  let options = Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withSecureFileDirectory directory
+                  let root = create 1 store |> Fsdb.Session.withServerOptions options
+                  let root, _ = handle root "CREATE USER 'exporter'"
+                  let exporter =
+                      { (create 2 store |> Fsdb.Session.withServerOptions options) with
+                          User = "exporter" }
+                  let fileName = IO.Path.Combine(directory, "denied.tsv")
+                  let sql = sprintf "SELECT 1 INTO OUTFILE %s" (valueToSqlLiteral (VString fileName))
+
+                  match handle exporter sql |> snd with
+                  | Err(1227, message) -> Expect.stringContains message "FILE" "the missing privilege is named"
+                  | other -> failtestf "expected FILE privilege error 1227, got %A" other
+
+                  Expect.isFalse (IO.File.Exists fileName) "authorization happens before file creation"
+
+                  let _, _ = handle root "GRANT FILE ON *.* TO 'exporter'"
+
+                  match handle exporter sql |> snd with
+                  | Affected 1UL -> ()
+                  | other -> failtestf "expected FILE to authorize the export, got %A" other)
 
           testCase "information_schema only reveals schemas, definitions, and grants visible to the viewer"
           <| fun _ ->

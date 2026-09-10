@@ -5495,7 +5495,7 @@ and private isPlainCountStarSelect (registry: Registry) (select: SelectStmt) =
         && select.Offset.IsNone
         && select.Windows.IsEmpty
         && select.Ctes.IsEmpty
-        && select.IntoVariables.IsEmpty
+        && not (SelectStmt.hasDestination select)
         && select.Locking.IsEmpty
         && not select.Distinct
         && not select.CalculateFoundRows
@@ -8458,6 +8458,7 @@ and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join lis
     let query: SelectStmt =
         { Projections = expressions |> List.map (fun expression -> expression, None)
           IntoVariables = []
+          IntoFile = None
           Distinct = false
           CalculateFoundRows = false
           StraightJoin = false
@@ -8922,7 +8923,7 @@ and private prepareRecursiveBranch
         && select.Offset.IsNone
         && select.Windows.IsEmpty
         && select.Ctes.IsEmpty
-        && select.IntoVariables.IsEmpty
+        && not (SelectStmt.hasDestination select)
         && select.Locking.IsEmpty
         && not select.Distinct
         && not select.CalculateFoundRows
@@ -9223,7 +9224,7 @@ and private runSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
-    if not select.IntoVariables.IsEmpty then
+    if SelectStmt.hasDestination select then
         Err(1064, "SELECT INTO is only valid as a top-level statement"), [], []
     elif not select.Ctes.IsEmpty then
         let body = { select with Ctes = [] }
@@ -10118,7 +10119,7 @@ and private tryPhysicalProjectionUncached
     : PhysicalProjection option =
     let simpleSelect (select: SelectStmt) =
         select.Ctes.IsEmpty
-        && select.IntoVariables.IsEmpty
+        && not (SelectStmt.hasDestination select)
         && select.Joins.IsEmpty
         && select.GroupBy.IsEmpty
         && not select.Rollup
@@ -12592,7 +12593,7 @@ and private isIndexOwnedGroupingShape predicateCovered (select: SelectStmt) =
     && select.Offset.IsNone
     && select.Windows.IsEmpty
     && select.Ctes.IsEmpty
-    && select.IntoVariables.IsEmpty
+    && not (SelectStmt.hasDestination select)
     && select.Locking.IsEmpty
     && not select.Distinct
     && not select.CalculateFoundRows
@@ -16284,7 +16285,7 @@ let runTopLevelSelect
     (select: SelectStmt)
     : QueryResult * ColumnMetadata list * uint64 option * Value[] list =
     resetStatementMemo ()
-    let executable = { select with IntoVariables = [] }
+    let executable = SelectStmt.withoutDestination select
     Deprecation.reportQuery (Select select)
 
     if select.CalculateFoundRows then
@@ -16316,24 +16317,35 @@ let runTopLevelUnion
     (orderBy: OrderKey list)
     (limit: Expr option)
     (offset: Expr option)
-    : QueryResult * ColumnMetadata list * uint64 option =
+    : QueryResult * ColumnMetadata list * uint64 option * Value[] list =
     resetStatementMemo ()
+    let executable = SelectStmt.withoutDestination first
     Deprecation.reportQuery (Union(first, rest, orderBy, limit, offset))
 
     if first.CalculateFoundRows then
         let result, types, values =
-            runUnionStmtWithOuter store registry dbName { first with CalculateFoundRows = false } rest orderBy None None None
+            runUnionStmtWithOuter
+                store
+                registry
+                dbName
+                { executable with CalculateFoundRows = false }
+                rest
+                orderBy
+                None
+                None
+                None
 
         let limit = limit |> Option.map rowCount
         let offset = offset |> Option.map rowCount
 
         match result with
         | ResultSet(columns, rows) ->
-            ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length)
-        | error -> error, types, None
+            let limitedValues = applyLimitOffset limit offset values
+            ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length), limitedValues
+        | error -> error, types, None, []
     else
-        let result, types, _ = runUnionStmtWithOuter store registry dbName first rest orderBy limit offset None
-        result, types, None
+        let result, types, values = runUnionStmtWithOuter store registry dbName executable rest orderBy limit offset None
+        result, types, None, values
 
 /// Describes a stored view without evaluating its query or its expressions.
 let viewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
@@ -16343,9 +16355,9 @@ let viewColumns (store: Store) (registry: Registry) (schema: string) (name: stri
 /// evaluating its expressions or reading its rows.
 let statementColumns (store: Store) (registry: Registry) (schema: string) (statement: Statement) : ColumnDef list option =
     match statement with
-    | Select select when select.IntoVariables.IsEmpty ->
+    | Select select when not (SelectStmt.hasDestination select) ->
         describeQueryColumns store registry schema (QueryBody(PlainSelect select))
-    | Union(first, rest, orderBy, limit, offset) ->
+    | Union(first, rest, orderBy, limit, offset) when not (SelectStmt.hasDestination first) ->
         describeQueryColumns store registry schema (QueryBody(UnionSelect(first, rest, orderBy, limit, offset)))
     | _ -> None
 
@@ -16353,7 +16365,7 @@ let statementColumns (store: Store) (registry: Registry) (schema: string) (state
 /// without evaluating the statement to recover them.
 let statementColumnOrigins (store: Store) (schema: string) (statement: Statement) : ColumnOrigin option list option =
     match statement with
-    | Select select when select.IntoVariables.IsEmpty ->
+    | Select select when not (SelectStmt.hasDestination select) ->
         let sources =
             (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
             |> List.map (fun source ->
@@ -16510,6 +16522,12 @@ let private viewContainsSessionVariable =
     | Select select -> selectContainsSessionVariable select
     | Union(first, rest, orderBy, limit, offset) ->
         selectOrUnionContainsSessionVariable (UnionSelect(first, rest, orderBy, limit, offset))
+    | _ -> false
+
+let private viewContainsDestination =
+    function
+    | Select select -> SelectStmt.hasDestination select
+    | Union(first, _, _, _, _) -> SelectStmt.hasDestination first
     | _ -> false
 
 let private checkColumnReferences (expression: Expr) : (string option * string) list =
@@ -19432,7 +19450,9 @@ let rec executeAs
                 else
                     algorithm
 
-            if viewContainsSessionVariable view then
+            if viewContainsDestination view then
+                ids, Err(1350, "View's SELECT contains a 'INTO' clause")
+            elif viewContainsSessionVariable view then
                 ids, Err(1351, "View's SELECT contains a variable or parameter")
             elif checkOption <> "NONE" && not (supportsCheckOption definer view) then
                 ids, Err(1368, sprintf "CHECK OPTION on non-updatable view '%s.%s'" db viewName)

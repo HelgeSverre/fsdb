@@ -107,7 +107,7 @@ refuses it through the prepared-statement protocol.
 
 | Area | Remaining difference | Impact | Class |
 |---|---|---|---|
-| Server-side files | `SELECT … INTO OUTFILE/DUMPFILE` and `IMPORT TABLE` are unsupported | medium | refusal |
+| Server-side files | `IMPORT TABLE` is unsupported | low | refusal |
 | Table maintenance | `CHECKSUM TABLE` uses a stable fsdb row checksum rather than MySQL's engine-specific value; supported `FLUSH` forms operate on fsdb state rather than InnoDB internals | low | divergence |
 | ALTER execution | Accepted changes publish one immutable root; MySQL's COPY/INPLACE/INSTANT algorithms and lock durations do not exist | low | divergence |
 | Storage engines | Known engine names still use fsdb's shared InnoDB-shaped row store; physical DATA/INDEX DIRECTORY placement is rejected unless `NO_DIR_IN_CREATE` discards it | low | divergence |

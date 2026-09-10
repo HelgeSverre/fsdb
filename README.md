@@ -450,10 +450,11 @@ current boundaries live in [GAPS.md](GAPS.md).
 - Accounts: `CREATE USER`, roles, proxy grants, `GRANT`/`REVOKE`, password,
   resource, and attribute policy, plus database-, table-, and column-level
   privilege enforcement.
-- Bulk and batched work: `CLIENT_MULTI_STATEMENTS`/`CLIENT_MULTI_RESULTS` and
-  `LOAD DATA [LOCAL] INFILE`, including target columns, user variables, and
-  ordered `SET` transformations. Both byte sources are disabled or restricted
-  by default and bounded by `max_load_data_bytes`.
+- Bulk and batched work: `CLIENT_MULTI_STATEMENTS`/`CLIENT_MULTI_RESULTS`,
+  `LOAD DATA [LOCAL] INFILE`, and `SELECT … INTO OUTFILE/DUMPFILE`. Imports
+  support target columns, user variables, and ordered `SET` transformations.
+  Server-owned paths are disabled or confined by default; input sizes are
+  bounded by `max_load_data_bytes`, and exports never overwrite a file.
 
 The introspection surface used by GUI clients exposes compatible schemas and
 live data wherever fsdb owns the underlying subsystem. Its

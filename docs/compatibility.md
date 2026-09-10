@@ -219,6 +219,12 @@ directory to confine reads there; path traversal and symbolic-link escapes are
 refused. An empty option-file value deliberately allows every path visible to
 the fsdb process. Server reads share the `max_load_data_bytes` ceiling.
 
+`SELECT … INTO OUTFILE` and `SELECT … INTO DUMPFILE` use that same path policy
+and global `FILE` privilege. `OUTFILE` supports MySQL's character set, field
+terminator, enclosure, escape, line-prefix, and line-terminator options;
+`DUMPFILE` writes the unformatted bytes from at most one row. Both create a new
+server-owned file and refuse to replace one that already exists.
+
 ## Temporal values, zones, and offsets
 
 The session `time_zone` accepts MySQL's numeric offsets and `SYSTEM`. It drives

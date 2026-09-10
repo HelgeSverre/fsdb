@@ -3349,6 +3349,86 @@ let private loadData: Parser<LoadRequest, unit> =
           Fields = columns |> Option.defaultValue []
           Assignments = assignments |> Option.defaultValue [] }
 
+type private ParsedSelectDestination =
+    | ParsedVariables of UserVariableRef list
+    | ParsedFile of SelectFileDestination
+
+let private singleOutputMarker name (value: string) =
+    if value.EnumerateRunes() |> Seq.length <= 1 then
+        preturn value
+    else
+        fail (sprintf "%s must be empty or one character" name)
+
+let private outfileFields =
+    opt (
+        (keyword "FIELDS" <|> keyword "COLUMNS")
+        >>. opt (keyword "TERMINATED" >>. keyword "BY" >>. localLoadString)
+        .>>. opt (
+            opt (keyword "OPTIONALLY")
+            .>> keyword "ENCLOSED"
+            .>> keyword "BY"
+            .>>. localLoadString
+            >>= fun (optionally, marker) ->
+                singleOutputMarker "ENCLOSED BY" marker
+                |>> fun marker -> marker, optionally.IsSome
+        )
+        .>> optional (sym ",")
+        .>>. opt (
+            keyword "ESCAPED"
+            >>. keyword "BY"
+            >>. localLoadString
+            >>= singleOutputMarker "ESCAPED BY"
+        )
+    )
+    |>> function
+        | None -> "\t", None, false, Some "\\"
+        | Some((terminator, enclosure), escape) ->
+            let enclosedBy, optionally = enclosure |> Option.defaultValue ("", false)
+            let escape =
+                match escape with
+                | Some "" -> None
+                | Some marker -> Some marker
+                | None -> Some "\\"
+
+            terminator |> Option.defaultValue "\t", (if enclosedBy = "" then None else Some enclosedBy), optionally, escape
+
+let private outfileLines =
+    opt (
+        keyword "LINES"
+        >>. opt (keyword "STARTING" >>. keyword "BY" >>. localLoadString)
+        .>>. opt (keyword "TERMINATED" >>. keyword "BY" >>. localLoadString)
+    )
+    |>> function
+        | None -> "", "\n"
+        | Some(prefix, terminator) -> prefix |> Option.defaultValue "", terminator |> Option.defaultValue "\n"
+
+let private selectDestination =
+    keyword "INTO"
+    >>. choice
+        [ keyword "OUTFILE"
+          >>. localLoadString
+          .>>. opt (keyword "CHARACTER" >>. keyword "SET" >>. identifier)
+          .>>. outfileFields
+          .>>. outfileLines
+          |>> fun (((fileName, characterSet), fields), lines) ->
+              let fieldTerminator, enclosedBy, optionallyEnclosed, escape = fields
+              let linePrefix, lineTerminator = lines
+
+              ParsedFile(
+                  Outfile(
+                      fileName,
+                      { CharacterSet = characterSet
+                        FieldTerminator = fieldTerminator
+                        EnclosedBy = enclosedBy
+                        OptionallyEnclosed = optionallyEnclosed
+                        Escape = escape
+                        LinePrefix = linePrefix
+                        LineTerminator = lineTerminator }
+                  )
+              )
+          keyword "DUMPFILE" >>. localLoadString |>> (Dumpfile >> ParsedFile)
+          sepBy1 userVariableTarget (sym ",") |>> ParsedVariables ]
+
 /// A projection's alias — `AS name`, or real MySQL's implicit form with no
 /// `AS` at all (`SELECT 1 x FROM t`, `SELECT price * qty total FROM
 /// orders`): a bare word right after the expression that isn't the next
@@ -3471,6 +3551,7 @@ let private expressionSelect =
     | (UnionSelect _ as body) ->
         { Projections = [ Star None, None ]
           IntoVariables = []
+          IntoFile = None
           Distinct = false
           CalculateFoundRows = false
           StraightJoin = false
@@ -3550,8 +3631,13 @@ let private combineUnion
     let restStmts =
         rest
         |> List.mapi (fun i (op, (s, parenthesized)) ->
-            if i = rest.Length - 1 && not parenthesized then
-                op, { s with OrderBy = []; Limit = None; Offset = None }
+            if i = rest.Length - 1 then
+                let s = SelectStmt.withoutDestination s
+
+                if not parenthesized then
+                    op, { s with OrderBy = []; Limit = None; Offset = None }
+                else
+                    op, s
             else
                 op, s)
 
@@ -3566,6 +3652,11 @@ let private combineUnion
         match unionLimitOffset with
         | Some(l, o) -> l, o
         | None -> promotedLimit, promotedOffset
+
+    let first =
+        { first with
+            IntoVariables = lastStmt.IntoVariables
+            IntoFile = lastStmt.IntoFile }
 
     first, restStmts, orderBy, limit, offset
 
@@ -3632,6 +3723,7 @@ let private valuesTable: Parser<FromItem, unit> =
                 let branch (cells: Expr list) : SelectStmt =
                     { Projections = List.map2 (fun name cell -> cell, Some name) names cells
                       IntoVariables = []
+                      IntoFile = None
                       Distinct = false
                       CalculateFoundRows = false
                       StraightJoin = false
@@ -3881,9 +3973,9 @@ let private selectModifiers: Parser<bool * bool * bool, unit> =
 let private selectHead =
     selectModifiers
     .>>. sepBy1 projection (sym ",")
-    .>>. opt (keyword "INTO" >>. sepBy1 userVariableTarget (sym ","))
-    |>> fun (((distinct, calculateFoundRows, straightJoin), projections), intoVariables) ->
-        distinct, calculateFoundRows, straightJoin, projections, (intoVariables |> Option.defaultValue [])
+    .>>. opt selectDestination
+    |>> fun (((distinct, calculateFoundRows, straightJoin), projections), destination) ->
+        distinct, calculateFoundRows, straightJoin, projections, destination
 
 selectStmtRecordRef.Value <-
     (keyword "SELECT" >>. selectHead
@@ -3894,29 +3986,44 @@ selectStmtRecordRef.Value <-
      .>>. opt windowClause
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>>. opt limitClause
-     .>>. many lockClause)
-    |>> fun (((((((((distinct, calculateFoundRows, straightJoin, projs, intoVariables), fromAndJoins), where), groupBy), having), windows), orderBy), limitOffset), locking) ->
+     .>>. opt selectDestination
+     .>>. many lockClause
+     .>>. opt selectDestination)
+    >>= fun (((((((((((distinct, calculateFoundRows, straightJoin, projs, headDestination), fromAndJoins), where), groupBy), having), windows), orderBy), limitOffset), beforeLock), locking), trailing) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
         let from = fromAndJoins |> Option.map fst
         let joins = fromAndJoins |> Option.map snd |> Option.defaultValue []
+        let destinations = [ headDestination; beforeLock; trailing ] |> List.choose id
 
-        { Projections = projs
-          IntoVariables = intoVariables
-          Distinct = distinct
-          CalculateFoundRows = calculateFoundRows
-          StraightJoin = straightJoin
-          From = from
-          Joins = joins
-          Where = where
-          GroupBy = groupBy |> Option.map fst |> Option.defaultValue []
-          Rollup = groupBy |> Option.map snd |> Option.defaultValue false
-          Windows = windows |> Option.defaultValue []
-          Ctes = []
-          Having = having
-          OrderBy = orderBy |> Option.defaultValue []
-          Limit = limit
-          Offset = offset
-          Locking = locking }
+        match destinations with
+        | _ :: _ :: _ -> fail "SELECT can contain only one INTO clause"
+        | destination ->
+            let intoVariables, intoFile =
+                match destination with
+                | [ ParsedVariables variables ] -> variables, None
+                | [ ParsedFile file ] -> [], Some file
+                | [] -> [], None
+                | _ -> [], None
+
+            preturn
+                { Projections = projs
+                  IntoVariables = intoVariables
+                  IntoFile = intoFile
+                  Distinct = distinct
+                  CalculateFoundRows = calculateFoundRows
+                  StraightJoin = straightJoin
+                  From = from
+                  Joins = joins
+                  Where = where
+                  GroupBy = groupBy |> Option.map fst |> Option.defaultValue []
+                  Rollup = groupBy |> Option.map snd |> Option.defaultValue false
+                  Windows = windows |> Option.defaultValue []
+                  Ctes = []
+                  Having = having
+                  OrderBy = orderBy |> Option.defaultValue []
+                  Limit = limit
+                  Offset = offset
+                  Locking = locking }
 
 selectQueryRef.Value <-
     opt withClause .>>. selectOrUnionBranches
@@ -3928,7 +4035,13 @@ selectQueryRef.Value <-
 
         match rest with
         | [] -> preturn (PlainSelect(fst first))
-        | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect
+        | _ ->
+            let leading = fst first :: (rest |> List.take (rest.Length - 1) |> List.map (snd >> fst))
+
+            if leading |> List.exists SelectStmt.hasDestination then
+                fail "only the last query block can contain INTO"
+            else
+                unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect
 
 selectWithCtesRef.Value <-
     selectQuery |>> expressionSelect
@@ -3957,6 +4070,7 @@ let private createTableAs: Parser<Statement, unit> =
 let private querySelect projections from orderBy limit offset =
     { Projections = projections
       IntoVariables = []
+      IntoFile = None
       Distinct = false
       CalculateFoundRows = false
       StraightJoin = false

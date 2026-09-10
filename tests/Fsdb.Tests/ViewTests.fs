@@ -808,6 +808,17 @@ let tests =
                   | Err(1351, "View's SELECT contains a variable or parameter") -> ()
                   | other -> failtestf "expected view variable rejection, got %A" other)
 
+          testCase "view definitions reject SELECT INTO destinations"
+          <| fun _ ->
+              let store = setup ()
+
+              [ "CREATE VIEW assigned AS SELECT 1 INTO @value"
+                "CREATE VIEW exported AS SELECT 1 INTO OUTFILE '/tmp/view.tsv'" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1350, "View's SELECT contains a 'INTO' clause") -> ()
+                  | other -> failtestf "expected view INTO rejection, got %A" other)
+
           testCase "explicit view columns, nested views, replacement, and drop work"
           <| fun _ ->
               let store = setup ()

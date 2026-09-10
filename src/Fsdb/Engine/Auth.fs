@@ -2931,15 +2931,17 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     let referencedTables ownerDb foreignKeys =
         foreignKeys
         |> List.map (fun foreignKey -> foreignKey.RefDatabase |> Option.defaultValue ownerDb, foreignKey.RefTable)
+    let filePrivilege select = if select.IntoFile.IsSome then [ "FILE", Global ] else []
 
     match stmt with
-    | Select s -> onTables "SELECT" (selectTables defaultDb s)
+    | Select s -> onTables "SELECT" (selectTables defaultDb s) @ filePrivilege s
     | Union(first, rest, orderBy, _, _) ->
         onTables
             "SELECT"
             (selectTables defaultDb first
              @ (rest |> List.collect (snd >> selectTables defaultDb))
              @ (orderBy |> List.collect (fst >> exprReadTables defaultDb)))
+        @ filePrivilege first
     | Insert(table, _, rows, onDup, _) ->
         let readInExprs =
             (rows |> List.collect (List.collect (exprReadTables defaultDb)))

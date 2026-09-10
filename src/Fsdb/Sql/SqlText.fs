@@ -500,7 +500,36 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
         |> String.concat " "
 
     let selectPrefix = if modifiers = "" then "select " else "select " + modifiers + " "
-    let intoText = if select.IntoVariables.IsEmpty then "" else " into " + (select.IntoVariables |> List.map _.Sql |> String.concat ",")
+
+    let intoText =
+        match select.IntoFile with
+        | Some(Dumpfile fileName) -> " into dumpfile " + jsonString fileName
+        | Some(Outfile(fileName, export)) ->
+            let charset = export.CharacterSet |> Option.map (fun value -> " character set " + identifier value) |> Option.defaultValue ""
+            let enclosed =
+                export.EnclosedBy
+                |> Option.map (fun value ->
+                    " " + (if export.OptionallyEnclosed then "optionally " else "") + "enclosed by " + jsonString value)
+                |> Option.defaultValue ""
+            let escaped =
+                export.Escape
+                |> Option.map (fun value -> " escaped by " + jsonString value)
+                |> Option.defaultValue " escaped by ''"
+
+            " into outfile "
+            + jsonString fileName
+            + charset
+            + " fields terminated by "
+            + jsonString export.FieldTerminator
+            + enclosed
+            + escaped
+            + " lines starting by "
+            + jsonString export.LinePrefix
+            + " terminated by "
+            + jsonString export.LineTerminator
+        | None when not select.IntoVariables.IsEmpty ->
+            " into " + (select.IntoVariables |> List.map _.Sql |> String.concat ",")
+        | None -> ""
     let whereText = select.Where |> Option.map (renderViewExpression options context >> fun value -> " where " + value) |> Option.defaultValue ""
 
     let groupText =

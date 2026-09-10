@@ -40,6 +40,9 @@ let private samples =
        { Name = "case and aggregates"
          Sql =
            "SELECT tenant_id, COUNT(*) AS total, SUM(CASE WHEN state = 'open' THEN amount ELSE 0 END) AS open_amount FROM invoices WHERE created_at >= TIMESTAMP '2026-01-01 00:00:00' GROUP BY tenant_id HAVING COUNT(*) > 1 ORDER BY open_amount DESC" }
+       { Name = "server-side export"
+         Sql =
+           "SELECT id, label FROM export_rows ORDER BY id LIMIT 20 INTO OUTFILE '/srv/export/rows.csv' CHARACTER SET utf8mb4 FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' ESCAPED BY '!' LINES STARTING BY 'row:' TERMINATED BY '\\r\\n'" }
        { Name = "pre-commented CTE join"
          Sql =
            "WITH/* existing block */ c AS (SELECT 1 AS n UNION ALL SELECT 2) # existing line\nSELECT c.n FROM c -- join follows\nJOIN (SELECT 1 AS n) AS d ON d.n = c.n ORDER BY c.n" } |]

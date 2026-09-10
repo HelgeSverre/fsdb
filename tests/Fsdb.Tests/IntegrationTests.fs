@@ -847,6 +847,164 @@ let tests =
                   | ResultSet(_, [ [ Some "7"; Some "Embedded" ] ]) -> ()
                   | other -> failtestf "expected the embedded row, got %A" other)
 
+          testCase "SELECT INTO OUTFILE writes the complete result with MySQL delimiters"
+          <| fun _ ->
+              TestSupport.withDirectory "server-outfile" (fun directory ->
+                  let fileName = IO.Path.Combine(directory, "rows.tsv")
+                  let unionFileName = IO.Path.Combine(directory, "union.tsv")
+                  let db = Fsdb.Db.create () |> Fsdb.Db.withSecureFileDirectory directory
+                  let connection = Fsdb.Db.connect db
+                  let quoted path = valueToSqlLiteral (VString path)
+
+                  match
+                      connection.Query(
+                          sprintf "SELECT 1, 'Ada', NULL INTO OUTFILE %s" (quoted fileName)
+                      )
+                  with
+                  | Affected 1UL -> ()
+                  | other -> failtestf "expected one exported row, got %A" other
+
+                  Expect.equal (IO.File.ReadAllText fileName) "1\tAda\t\\N\n" "default OUTFILE bytes"
+
+                  match
+                      connection.Query(
+                          sprintf "SELECT 1 AS n UNION ALL SELECT 2 INTO OUTFILE %s" (quoted unionFileName)
+                      )
+                  with
+                  | Affected 2UL -> ()
+                  | other -> failtestf "expected the complete UNION to be exported, got %A" other
+
+                  Expect.equal (IO.File.ReadAllText unionFileName) "1\n2\n" "all set-operation rows are written"
+
+                  if not (OperatingSystem.IsWindows()) then
+                      let permissions = IO.File.GetUnixFileMode fileName
+
+                      Expect.equal
+                          permissions
+                          (IO.UnixFileMode.UserRead ||| IO.UnixFileMode.UserWrite ||| IO.UnixFileMode.GroupRead)
+                          "server exports are not world-readable")
+
+          testCase "SELECT INTO OUTFILE honors enclosure, escaping, and encoding options"
+          <| fun _ ->
+              TestSupport.withDirectory "server-outfile-options" (fun directory ->
+                  let fileName = IO.Path.Combine(directory, "rows.csv")
+                  let db = Fsdb.Db.create () |> Fsdb.Db.withSecureFileDirectory directory
+                  let connection = Fsdb.Db.connect db
+
+                  let sql =
+                      sprintf
+                          "SELECT 7, 'A\"B', NULL INTO OUTFILE %s CHARACTER SET latin1 FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' ESCAPED BY '!' LINES STARTING BY '>' TERMINATED BY '\\r\\n'"
+                          (valueToSqlLiteral (VString fileName))
+
+                  match connection.Query sql with
+                  | Affected 1UL -> ()
+                  | other -> failtestf "expected one custom-formatted row, got %A" other
+
+                  Expect.equal
+                      (IO.File.ReadAllBytes fileName)
+                      (Text.Encoding.Latin1.GetBytes ">7,\"A!\"B\",!N\r\n")
+                      "OUTFILE applies the configured byte format")
+
+          testCase "SELECT INTO OUTFILE escapes control and binary values byte-for-byte"
+          <| fun _ ->
+              TestSupport.withDirectory "server-outfile-escaping" (fun directory ->
+                  let fileName = IO.Path.Combine(directory, "escaped.tsv")
+                  let unicodeFileName = IO.Path.Combine(directory, "unicode.tsv")
+
+                  let destination =
+                      Outfile(
+                          fileName,
+                          { CharacterSet = None
+                            FieldTerminator = "\t"
+                            EnclosedBy = None
+                            OptionallyEnclosed = false
+                            Escape = Some "\\"
+                            LinePrefix = ""
+                            LineTerminator = "\n" }
+                      )
+
+                  let rows =
+                      [ [| VString "a\tb\nc\\d\u0000"
+                           VNull
+                           VBytes [| 0uy; byte '\t'; byte '\n'; byte '\\'; byte 'A' |] |] ]
+
+                  let policy = (Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withSecureFileDirectory directory).SecureFiles
+
+                  match Fsdb.LoadData.writeServerFile policy destination rows with
+                  | Ok 1UL -> ()
+                  | other -> failtestf "expected one escaped row, got %A" other
+
+                  Expect.equal
+                      (IO.File.ReadAllText fileName)
+                      "a\\\tb\\\nc\\\\d\\0\t\\N\t\\0\\\t\\\n\\\\A\n"
+                      "OUTFILE escapes terminators, the escape byte, NUL, and NULL"
+
+                  let unicodeDestination =
+                      Outfile(
+                          unicodeFileName,
+                          { CharacterSet = None
+                            FieldTerminator = "💥"
+                            EnclosedBy = None
+                            OptionallyEnclosed = false
+                            Escape = Some "!"
+                            LinePrefix = ""
+                            LineTerminator = "\n" }
+                      )
+
+                  let unicodeRows = [ [| VBytes(Text.Encoding.UTF8.GetBytes "A💥B") |] ]
+
+                  match Fsdb.LoadData.writeServerFile policy unicodeDestination unicodeRows with
+                  | Ok 1UL -> ()
+                  | other -> failtestf "expected one Unicode-escaped row, got %A" other
+
+                  Expect.equal
+                      (IO.File.ReadAllText unicodeFileName)
+                      "A!💥B\n"
+                      "a multibyte terminator is escaped as one character")
+
+          testCase "SELECT INTO DUMPFILE is binary, singular, and non-overwriting"
+          <| fun _ ->
+              TestSupport.withDirectory "server-dumpfile" (fun directory ->
+                  let fileName = IO.Path.Combine(directory, "one.bin")
+                  let tooManyFileName = IO.Path.Combine(directory, "many.bin")
+                  let unknownCharsetFileName = IO.Path.Combine(directory, "unknown.txt")
+                  let db = Fsdb.Db.create () |> Fsdb.Db.withSecureFileDirectory directory
+                  let connection = Fsdb.Db.connect db
+                  let quoted path = valueToSqlLiteral (VString path)
+
+                  match connection.Query(sprintf "SELECT X'00FF', 'A' INTO DUMPFILE %s" (quoted fileName)) with
+                  | Affected 1UL -> ()
+                  | other -> failtestf "expected one dumped row, got %A" other
+
+                  Expect.equal (IO.File.ReadAllBytes fileName) [| 0uy; 255uy; byte 'A' |] "DUMPFILE bytes"
+
+                  match connection.Query(sprintf "SELECT 9 INTO DUMPFILE %s" (quoted fileName)) with
+                  | Err(1086, _) -> ()
+                  | other -> failtestf "expected an existing-file error, got %A" other
+
+                  Expect.equal (IO.File.ReadAllBytes fileName) [| 0uy; 255uy; byte 'A' |] "existing data is untouched"
+
+                  connection.Query("CREATE TABLE dump_rows (n INT)") |> ignore
+                  connection.Query("INSERT INTO dump_rows VALUES (1), (2)") |> ignore
+
+                  match connection.Query(sprintf "SELECT n FROM dump_rows INTO DUMPFILE %s" (quoted tooManyFileName)) with
+                  | Err(1172, _) -> ()
+                  | other -> failtestf "expected the multi-row DUMPFILE error, got %A" other
+
+                  Expect.isFalse (IO.File.Exists tooManyFileName) "validation happens before file creation"
+
+                  match
+                      connection.Query(
+                          sprintf
+                              "SELECT 1 INTO OUTFILE %s CHARACTER SET definitely_unknown"
+                              (quoted unknownCharsetFileName)
+                      )
+                  with
+                  | Err(1115, _) -> ()
+                  | other -> failtestf "expected an unknown-character-set error, got %A" other
+
+                  Expect.isFalse (IO.File.Exists unknownCharsetFileName) "an invalid encoding creates no file")
+
           TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE receives client bytes without reading a server path"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->

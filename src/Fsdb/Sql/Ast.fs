@@ -415,6 +415,19 @@ and CheckConstraintDef =
 /// A `SELECT` projection: the expression and its optional `AS alias`.
 and Projection = Expr * string option
 
+and SelectOutfileOptions =
+    { CharacterSet: string option
+      FieldTerminator: string
+      EnclosedBy: string option
+      OptionallyEnclosed: bool
+      Escape: string option
+      LinePrefix: string
+      LineTerminator: string }
+
+and SelectFileDestination =
+    | Outfile of fileName: string * options: SelectOutfileOptions
+    | Dumpfile of fileName: string
+
 /// `FROM [db.]table [[AS] alias]`, preserving qualification and aliasing.
 and TableRef =
     { Database: string option
@@ -566,12 +579,12 @@ and LockingRead =
 
 /// A `SELECT` statement's clauses as a record rather than a positional
 /// tuple: every clause after `SELECT ... FROM` is optional and grows
-/// independently, so a record avoids a breaking
-/// edit — and an 8-argument re-spelling at every call site — each time one
-/// does.
+/// independently, so callers name the clauses they construct instead of
+/// relying on a fragile positional order.
 and SelectStmt =
     { Projections: Projection list
       IntoVariables: UserVariableRef list
+      IntoFile: SelectFileDestination option
       Distinct: bool
       CalculateFoundRows: bool
       StraightJoin: bool
@@ -608,6 +621,16 @@ and SelectStmt =
       /// Locking clauses apply to this query block only. An empty `Tables`
       /// list targets every physical source not named by another clause.
       Locking: LockingRead list }
+
+[<RequireQualifiedAccess>]
+module SelectStmt =
+    let hasDestination select =
+        not select.IntoVariables.IsEmpty || select.IntoFile.IsSome
+
+    let withoutDestination select =
+        { select with
+            IntoVariables = []
+            IntoFile = None }
 
 type ExplicitTableLockMode =
     | ReadTableLock
