@@ -173,6 +173,55 @@ let tests =
                         (VString "POINT(1.5 -2)")
                         "WKB round-trip"
 
+                testCase "geometry serializers honor geographic output axis order"
+                <| fun _ ->
+                    let geographic =
+                        call "ST_GeomFromText" [ VString "POINT(59.9139 10.7522)"; VInt 4326L ]
+
+                    Expect.equal
+                        (call "ST_AsText" [ geographic; VString "axis-order=long-lat" ])
+                        (VString "POINT(10.7522 59.9139)")
+                        "text longitude-latitude order"
+                    Expect.equal
+                        (call "ST_AsWKT" [ geographic; VString " axis-order = lat-long " ])
+                        (VString "POINT(59.9139 10.7522)")
+                        "whitespace around the option"
+                    Expect.equal
+                        (call "ST_AsText" [ geographic; VString "" ])
+                        (VString "POINT(59.9139 10.7522)")
+                        "empty options use SRS order"
+
+                    let longitudeLatitudeWkb =
+                        call "ST_AsWKB" [ geographic; VString "axis-order=long-lat" ]
+
+                    Expect.equal
+                        (call "ST_GeomFromWKB" [ longitudeLatitudeWkb ] |> fun geometry -> call "ST_AsText" [ geometry ])
+                        (VString "POINT(10.7522 59.9139)")
+                        "binary longitude-latitude order"
+                    Expect.equal
+                        (call "ST_AsText" [ call "ST_GeomFromText" [ VString "POINT(1 2)" ]; VString "axis-order=lat-long" ])
+                        (VString "POINT(1 2)")
+                        "Cartesian coordinates are unchanged"
+                    Expect.equal (call "ST_AsText" [ geographic; VNull ]) VNull "NULL options"
+
+                    Expect.throwsC
+                        (fun () -> call "ST_AsText" [ geographic; VString "axis-order=bogus" ] |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(3559, _) -> ()
+                        | error -> failtestf "expected invalid-axis-order error, got %A" error)
+
+                    Expect.throwsC
+                        (fun () ->
+                            call
+                                "ST_GeomFromText"
+                                [ VString "POINT(1 2)"
+                                  VInt 0L
+                                  VString "axis-order=bogus" ]
+                            |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(3559, _) -> ()
+                        | error -> failtestf "expected planar invalid-axis-order error, got %A" error)
+
                 testCase "geometry collections retain nested shapes and dimensions"
                 <| fun _ ->
                     let geometry = call "ST_GeomFromText" [ VString "GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))" ]

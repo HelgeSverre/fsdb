@@ -5460,29 +5460,40 @@ let private spatialReferenceSystem (functionName: string) srid =
     |> Option.defaultWith (fun () ->
         raise (SqlError(3548, sprintf "There's no spatial reference system with SRID %d." srid)))
 
+let private axisOrderOption =
+    Regex(
+        "^axis-order\\s*=\\s*(srid-defined|lat-long|long-lat)$",
+        RegexOptions.IgnoreCase ||| RegexOptions.CultureInvariant
+    )
+
 let private geometryAxisOrder (functionName: string) (referenceSystem: SpatialReferenceSystem) = function
     | None -> referenceSystem.AxisOrder
     | Some value ->
-        match (req value).Trim().ToLowerInvariant() with
-        | "axis-order=srid-defined" -> referenceSystem.AxisOrder
-        | "axis-order=lat-long" -> LatitudeLongitude
-        | "axis-order=long-lat" -> LongitudeLatitude
-        | option ->
-            let value =
-                if option.StartsWith("axis-order=", StringComparison.Ordinal) then
-                    option.Substring("axis-order=".Length)
-                else
-                    option
+        let option = (req value).Trim()
 
-            raise (
-                SqlError(
-                    3559,
-                    sprintf
-                        "Invalid value '%s' for option 'axis-order' in function '%s'."
-                        value
-                        (functionName.ToLowerInvariant())
+        if String.IsNullOrWhiteSpace option then
+            referenceSystem.AxisOrder
+        else
+            let matched = axisOrderOption.Match option
+
+            match if matched.Success then matched.Groups.[1].Value.ToLowerInvariant() else "" with
+            | "srid-defined" -> referenceSystem.AxisOrder
+            | "lat-long" -> LatitudeLongitude
+            | "long-lat" -> LongitudeLatitude
+            | _ ->
+                let invalidValue =
+                    let equals = option.IndexOf('=')
+                    if equals >= 0 then option.Substring(equals + 1).Trim() else option
+
+                raise (
+                    SqlError(
+                        3559,
+                        sprintf
+                            "Invalid value '%s' for option 'axis-order' in function '%s'."
+                            invalidValue
+                            (functionName.ToLowerInvariant())
+                    )
                 )
-            )
 
 let private raiseCoordinateDomainError (functionName: string) = function
     | LatitudeOutOfRange latitude ->
@@ -5515,12 +5526,21 @@ let private validateGeographicCoordinates functionName (geometry: Geometry) =
 
 let private prepareConstructedGeometry (functionName: string) axisOrder (geometry: Geometry) =
     let referenceSystem = spatialReferenceSystem functionName geometry.Srid
+    let suppliedOrder = geometryAxisOrder functionName referenceSystem axisOrder
 
     match referenceSystem.SemiMajorAxis with
     | Some _ ->
         geometry
-        |> SpatialReferenceSystems.withAxisOrder (geometryAxisOrder functionName referenceSystem axisOrder)
+        |> SpatialReferenceSystems.withAxisOrder suppliedOrder
         |> validateGeographicCoordinates functionName
+    | None -> geometry
+
+let private prepareSerializedGeometry (functionName: string) axisOrder (geometry: Geometry) =
+    let referenceSystem = spatialReferenceSystem functionName geometry.Srid
+    let requestedOrder = geometryAxisOrder functionName referenceSystem axisOrder
+
+    match referenceSystem.SemiMajorAxis with
+    | Some _ -> SpatialReferenceSystems.withAxisOrder requestedOrder geometry
     | None -> geometry
 
 let private requirePlanar (functionName: string) (geometry: Geometry) =
@@ -5595,15 +5615,33 @@ let private geometryFromWkbFn requiredKind functionName: Scalar =
     | _ -> nativeParameterCountError functionName
 
 let private geometryToTextFn functionName: Scalar =
+    let serialize value axisOrder =
+        geometryArgument functionName value
+        |> prepareSerializedGeometry functionName axisOrder
+        |> geometryToText
+        |> VString
+
     function
-    | [ VNull ] -> VNull
-    | [ value ] -> geometryArgument functionName value |> geometryToText |> VString
+    | [ VNull ]
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ value ] -> serialize value None
+    | [ value; axisOrder ] -> serialize value (Some axisOrder)
     | _ -> nativeParameterCountError functionName
 
 let private geometryToWkbFn functionName: Scalar =
+    let serialize value axisOrder =
+        geometryArgument functionName value
+        |> prepareSerializedGeometry functionName axisOrder
+        |> geometryToWkb
+        |> VBytes
+
     function
-    | [ VNull ] -> VNull
-    | [ value ] -> geometryArgument functionName value |> geometryToWkb |> VBytes
+    | [ VNull ]
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ value ] -> serialize value None
+    | [ value; axisOrder ] -> serialize value (Some axisOrder)
     | _ -> nativeParameterCountError functionName
 
 let private geometryTypeFn: Scalar =

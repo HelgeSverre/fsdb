@@ -1475,6 +1475,27 @@ module ContractCatalog =
                    "geographic-wkb-longitude-latitude-input"
                    "SELECT ST_AsText(ST_GeomFromWKB(ST_AsWKB(ST_GeomFromText('POINT(10.7522 59.9139)')), 4326, 'axis-order=long-lat'))"
                |> Contract.comparingValues
+               Contract.query
+                   "geographic-text-output-axis-order"
+                   "SELECT ST_AsText(ST_GeomFromText('POINT(59.9139 10.7522)', 4326), 'axis-order=long-lat'), ST_AsWKT(ST_GeomFromText('POINT(59.9139 10.7522)', 4326), ' axis-order = lat-long '), ST_AsText(ST_GeomFromText('POINT(59.9139 10.7522)', 4326), '')"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "geographic-binary-output-axis-order-prepared"
+                   "SELECT ST_AsText(ST_GeomFromWKB(ST_AsWKB(ST_GeomFromText('POINT(59.9139 10.7522)', 4326), ?))), ST_AsText(ST_GeomFromWKB(ST_AsBinary(ST_GeomFromText('POINT(59.9139 10.7522)', 4326), ?)))"
+                   [| box "axis-order=long-lat"; box "axis-order=lat-long" |]
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-output-invalid-axis-order"
+                   "SELECT ST_AsText(ST_GeomFromText('POINT(0 0)', 4326), 'axis-order=bogus')"
+               |> Contract.fails 3559 "22023"
+               Contract.query
+                   "geographic-output-axis-order-null"
+                   "SELECT ST_AsText(ST_GeomFromText('POINT(0 0)', 4326), NULL), ST_AsWKB(NULL, 'axis-order=long-lat')"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-output-axis-order-arity"
+                   "SELECT ST_AsWKB(ST_GeomFromText('POINT(0 0)', 4326), 'axis-order=long-lat', 'extra')"
+               |> Contract.fails 1582 "42000"
                Contract.preparedQuery
                    "geographic-null-distance"
                    "SELECT ST_Distance(ST_GeomFromText(?, 4326), ST_GeomFromText(?, 4326))"
@@ -1499,6 +1520,10 @@ module ContractCatalog =
                Contract.query
                    "geographic-invalid-axis-order"
                    "SELECT ST_GeomFromText('POINT(0 0)', 4326, 'axis-order=bogus')"
+               |> Contract.fails 3559 "22023"
+               Contract.query
+                   "planar-invalid-axis-order"
+                   "SELECT ST_GeomFromText('POINT(0 0)', 0, 'axis-order=bogus')"
                |> Contract.fails 3559 "22023"
                Contract.query
                    "geographic-unknown-unit"
