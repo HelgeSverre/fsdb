@@ -762,6 +762,91 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "LOAD DATA INFILE reads only from secure_file_priv"
+          <| fun _ ->
+              TestSupport.withDirectory "server-load" (fun directory ->
+                  let allowed = IO.Path.Combine(directory, "imports")
+                  IO.Directory.CreateDirectory allowed |> ignore
+                  let input = IO.Path.Combine(allowed, "rows.tsv")
+                  IO.File.WriteAllText(input, "1\tAda\n2\tGrace\n")
+                  let options = Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withSecureFileDirectory allowed
+
+                  async {
+                      let store = Fsdb.Storage.create ()
+                      use server = TestSupport.ServerFixture.startWithOptions options store Fsdb.Functions.empty
+                      let! client, stream = connectRaw server.Port
+                      use client = client
+
+                      let query (sql: string) =
+                          writePacketAsync
+                              stream
+                              { SeqId = 0uy
+                                Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      do! query "CREATE TABLE server_load (id INT PRIMARY KEY, name VARCHAR(20))" |> Async.Ignore
+                      let! created = readPacketAsync stream
+                      Expect.equal created.Value.Payload.[0] 0uy "the table is created"
+                      do! query (sprintf "LOAD DATA INFILE '%s' INTO TABLE server_load" input) |> Async.Ignore
+                      let! loaded = readPacketAsync stream
+                      Expect.equal loaded.Value.Payload.[0] 0uy "the server file is loaded"
+
+                      match Fsdb.Storage.scanList store "fsdb" "server_load" with
+                      | Ok(_, rows) ->
+                          Expect.equal
+                              (rows |> List.map (fun row -> row.[0], row.[1]))
+                              [ VInt 1L, VString "Ada"; VInt 2L, VString "Grace" ]
+                              "server-owned bytes use the ordinary LOAD DATA executor"
+                      | Error error -> failtestf "table scan failed: %A" error
+                  }
+                  |> Async.RunSynchronously)
+
+          testCase "LOAD DATA INFILE rejects disabled and out-of-directory paths"
+          <| fun _ ->
+              TestSupport.withDirectory "server-load-boundary" (fun directory ->
+                  let allowed = IO.Path.Combine(directory, "imports")
+                  IO.Directory.CreateDirectory allowed |> ignore
+                  let outside = IO.Path.Combine(directory, "outside.tsv")
+                  IO.File.WriteAllText(outside, "1\tNope\n")
+
+                  let rejectedCode options =
+                      async {
+                          use server = TestSupport.ServerFixture.startWithOptions options (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                          let! client, stream = connectRaw server.Port
+                          use client = client
+                          let sql = sprintf "LOAD DATA INFILE '%s' INTO TABLE missing" outside
+                          let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          let! rejected = readPacketAsync stream
+                          Expect.equal rejected.Value.Payload.[0] 0xffuy "the path is rejected"
+                          return Reader(rejected.Value.Payload.[1..]).ReadInt16LE()
+                      }
+
+                  let disabled = rejectedCode Fsdb.ServerOptions.defaults |> Async.RunSynchronously
+                  Expect.equal disabled 1290 "server files default to disabled"
+
+                  let restricted =
+                      rejectedCode (Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withSecureFileDirectory allowed)
+                      |> Async.RunSynchronously
+
+                  Expect.equal restricted 1290 "a sibling path cannot escape the configured directory")
+
+          testCase "embedded connections honor their server-file policy"
+          <| fun _ ->
+              TestSupport.withDirectory "embedded-server-load" (fun directory ->
+                  let input = IO.Path.Combine(directory, "rows.tsv")
+                  IO.File.WriteAllText(input, "7\tEmbedded\n")
+                  let db = Fsdb.Db.create () |> Fsdb.Db.withSecureFileDirectory directory
+                  let connection = Fsdb.Db.connect db
+                  connection.Query("CREATE TABLE embedded_load (id INT, name VARCHAR(20))") |> ignore
+
+                  match connection.Query(sprintf "LOAD DATA INFILE '%s' INTO TABLE embedded_load" input) with
+                  | Affected 1UL -> ()
+                  | other -> failtestf "expected one embedded row to load, got %A" other
+
+                  match connection.Query("SELECT id, name FROM embedded_load") with
+                  | ResultSet(_, [ [ Some "7"; Some "Embedded" ] ]) -> ()
+                  | other -> failtestf "expected the embedded row, got %A" other)
+
           TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE receives client bytes without reading a server path"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->

@@ -187,6 +187,93 @@ let tests =
               | Ok(settings, _) -> Expect.isFalse settings.RequireSecureTransport "loose- still applies a known TLS option"
               | Error message -> failtestf "a known loose TLS option remains valid: %s" message
 
+          testCase "secure_file_priv configuration is explicit and normalized"
+          <| fun _ ->
+              TestSupport.withDirectory "secure-file-options" (fun directory ->
+                  let entry value : Fsdb.OptionFile.Entry =
+                      { Name = "secure_file_priv"
+                        Value = Some value
+                        Source = "test.cnf"
+                        Line = 4 }
+
+                  match Fsdb.ServerOptions.fromEntries [ entry directory ] with
+                  | Ok(settings, remaining) ->
+                      let reported = Fsdb.ServerOptions.secureFileVariable settings.SecureFiles |> Option.get
+                      Expect.isTrue (Path.IsPathFullyQualified reported) "the reported directory is absolute"
+                      Expect.isTrue (reported.EndsWith(string Path.DirectorySeparatorChar)) "the reported directory has a trailing separator"
+                      Expect.isTrue (reported.Contains("secure-file-options")) "the configured directory is preserved"
+                      Expect.isEmpty remaining "the server option is consumed"
+                  | Error message -> failtestf "an existing absolute directory should be accepted: %s" message
+
+                  match Fsdb.ServerOptions.fromEntries [ entry "NULL" ] with
+                  | Ok(settings, _) -> Expect.equal settings.SecureFiles SecureFilePolicy.Disabled "NULL disables server files"
+                  | Error message -> failtestf "NULL should disable server files: %s" message
+
+                  match Fsdb.ServerOptions.fromEntries [ entry "" ] with
+                  | Ok(settings, _) -> Expect.equal settings.SecureFiles SecureFilePolicy.Unrestricted "an empty value is unrestricted"
+                  | Error message -> failtestf "an empty value should be accepted: %s" message)
+
+          testCase "secure_file_priv refuses missing and relative directories"
+          <| fun _ ->
+              let entry value : Fsdb.OptionFile.Entry =
+                  { Name = "secure_file_priv"
+                    Value = Some value
+                    Source = "test.cnf"
+                    Line = 7 }
+
+              for value in [ "relative/imports"; Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")) ] do
+                  match Fsdb.ServerOptions.fromEntries [ entry value ] with
+                  | Ok _ -> failtestf "invalid secure_file_priv directory was accepted: %s" value
+                  | Error message -> Expect.stringContains message "test.cnf:7" "the bad option is located"
+
+          testCase "secure_file_priv is read-only and visible in both scopes"
+          <| fun _ ->
+              TestSupport.withDirectory "secure-file-variable" (fun directory ->
+                  let options = Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withSecureFileDirectory directory
+                  let session = create 1 (Fsdb.Storage.create ()) |> Fsdb.Session.withServerOptions options
+                  let expected = Fsdb.ServerOptions.secureFileVariable options.SecureFiles |> Option.get
+
+                  match handle session "SELECT @@secure_file_priv, @@GLOBAL.secure_file_priv" |> snd with
+                  | ResultSet(_, [ [ Some sessionValue; Some globalValue ] ]) ->
+                      Expect.equal sessionValue expected "session scope"
+                      Expect.equal globalValue expected "global scope"
+                  | other -> failtestf "expected both secure_file_priv values, got %A" other
+
+                  match handle session "SET GLOBAL secure_file_priv = NULL" |> snd with
+                  | Err(1238, _) -> ()
+                  | other -> failtestf "expected read-only error 1238, got %A" other)
+
+          testCase "server file reads are bounded and cannot follow a link outside the secure directory"
+          <| fun _ ->
+              TestSupport.withDirectory "secure-file-read" (fun directory ->
+                  let allowed = Path.Combine(directory, "allowed")
+                  Directory.CreateDirectory allowed |> ignore
+                  let input = Path.Combine(allowed, "input.tsv")
+                  File.WriteAllText(input, "1\tAda\n")
+                  let policy = (Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withSecureFileDirectory allowed).SecureFiles
+
+                  match Fsdb.LoadData.readServerFile policy 1024 input with
+                  | Ok bytes -> Expect.equal (Text.Encoding.UTF8.GetString bytes) "1\tAda\n" "an in-directory file is readable"
+                  | Error error -> failtestf "expected the file to be read, got %A" error
+
+                  match Fsdb.LoadData.readServerFile policy 2 input with
+                  | Error(1153, _) -> ()
+                  | other -> failtestf "expected the byte ceiling, got %A" other
+
+                  match Fsdb.LoadData.readServerFile policy 1024 (Path.Combine(allowed, "missing.tsv")) with
+                  | Error(13, message) -> Expect.stringContains message "OS errno 2" "MySQL reports the stat failure"
+                  | other -> failtestf "expected MySQL's missing-file error, got %A" other
+
+                  if not (OperatingSystem.IsWindows()) then
+                      let outside = Path.Combine(directory, "outside.tsv")
+                      let link = Path.Combine(allowed, "linked.tsv")
+                      File.WriteAllText(outside, "2\tGrace\n")
+                      File.CreateSymbolicLink(link, outside) |> ignore
+
+                      match Fsdb.LoadData.readServerFile policy 1024 link with
+                      | Error(1290, _) -> ()
+                      | other -> failtestf "expected the escaping symlink to be refused, got %A" other)
+
           testCase "TLS configuration loads client certificate authorities"
           <| fun _ ->
               TestSupport.withDirectory "tls-options" (fun directory ->

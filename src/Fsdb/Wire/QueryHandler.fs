@@ -267,13 +267,15 @@ let private globalScopeOnlyVariables =
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
           "mandatory_roles"
-          "protocol_compression_algorithms" ]
+          "protocol_compression_algorithms"
+          "secure_file_priv" ]
 
 let private readOnlySystemVariables =
     Set.ofList
         [ "ft_query_expansion_limit"
           "innodb_ft_max_token_size"
-          "innodb_ft_min_token_size" ]
+          "innodb_ft_min_token_size"
+          "secure_file_priv" ]
 
 let private globalOnlyVariables =
     Set.union
@@ -314,7 +316,9 @@ let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name
     then
         maxPointsInGeometryOverride.Value |> Option.map string |> Some
     elif sigil = "@@" then
-        if isGlobalScope scope || globalScopeOnlyVariables.Contains name then
+        if name = "secure_file_priv" then
+            Some(ServerOptions.secureFileVariable session.SecureFiles)
+        elif isGlobalScope scope || globalScopeOnlyVariables.Contains name then
             Session.tryGlobalVariable session.Store name
         else
             lookupVar session name
@@ -782,6 +786,7 @@ let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string
     let source =
         if isGlobal then
             Session.globalVariablesSnapshot (Session.currentStore session)
+            |> Map.add "secure_file_priv" (ServerOptions.secureFileVariable session.SecureFiles)
         else
             session.Variables
 
@@ -1527,6 +1532,8 @@ let private parseSetFragment
 
                     match resolved with
                     | Error result -> Error result
+                    | Ok(value, sideEffects) when readOnlySystemVariables.Contains name ->
+                        Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
                     | Ok(_, sideEffects) when usesDefault && name = "max_sp_recursion_depth" ->
                         let depth =
                             if isGlobal then
@@ -7384,9 +7391,8 @@ let executeEventBody (session: Session) (body: string) : Session * QueryResult =
 
                 rollbackSession outcome.Session, result))
 
-/// Parses and authorizes a LOCAL INFILE command before the server asks the
-/// client to send bytes. The file name is never resolved by the server.
-let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LoadRequest option, QueryResult> =
+/// Parses and authorizes LOAD DATA before either byte source is opened.
+let tryPrepareLoad (session: Session) (sql: string) : Result<Parser.LoadRequest option, QueryResult> =
     let normalized = Parser.stripVersionComments sql |> fun value -> value.TrimStart()
 
     if not (normalized.StartsWith("LOAD DATA", StringComparison.OrdinalIgnoreCase)) then
@@ -7398,7 +7404,7 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LoadReq
         let account = accountOf session
 
         let prepared =
-            match Parser.parseLocalLoadWithOptions (parserOptionsForSession session) sql with
+            match Parser.parseLoadWithOptions (parserOptionsForSession session) sql with
             | Result.Error _ -> Result.Error(syntaxError sql)
             | Result.Ok load ->
                 match load.Charset |> Option.map _.ToLowerInvariant() with
@@ -7434,7 +7440,11 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LoadReq
 
                             let database = session.Database |> Option.defaultValue defaultDatabase
 
-                            match checkSessionAccess session store (Auth.requiredPrivilegesInStore store database statement) with
+                            let required =
+                                Auth.requiredPrivilegesInStore store database statement
+                                @ if load.Local then [] else [ "FILE", Auth.Global ]
+
+                            match checkSessionAccess session store required with
                             | Ok() -> Result.Ok(Some load)
                             | Error(code, message) -> Result.Error(Err(code, message))
 
@@ -7449,7 +7459,7 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LoadReq
 
 /// Keeps the parsed field and SET mappings until the client upload has been
 /// decoded; an ordinary INSERT AST cannot represent either mapping.
-let executeLocalLoad (session: Session) (load: Parser.LoadRequest) (rows: Value list list) : Session * QueryResult =
+let executeLoadedData (session: Session) (load: Parser.LoadRequest) (rows: Value list list) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
     let statement =
         LoadData
@@ -7467,9 +7477,14 @@ let executeLocalLoad (session: Session) (load: Parser.LoadRequest) (rows: Value 
                     withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
             with
             | :? OperationCanceledException -> reraise ()
-            | ex -> recoverExecutionError session "LOAD DATA LOCAL INFILE" ex)
+            | ex -> recoverExecutionError session "LOAD DATA" ex)
 
     syncTransactionView executed, result
+
+let executeServerLoad (session: Session) (load: Parser.LoadRequest) : Session * QueryResult =
+    match LoadData.readServerFile session.SecureFiles Limits.maxLoadDataBytes load.FileName |> Result.bind (LoadData.decode load) with
+    | Ok rows -> executeLoadedData session load rows
+    | Error(code, message) -> recordDiagnostics session false (fun () -> session, Err(code, message))
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it

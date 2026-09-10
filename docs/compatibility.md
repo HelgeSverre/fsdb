@@ -211,7 +211,13 @@ The supported load subset accepts utf8mb4, utf8mb3/utf8, latin1 (cp1252),
 and ASCII input with string field/line delimiters, optional single-character
 enclosure and escape markers, `REPLACE` or `IGNORE`, header-line skipping,
 target columns or user variables, and ordered `SET` transformations.
-Server-side `LOAD DATA INFILE` remains unsupported.
+
+Server-side `LOAD DATA INFILE` uses the same decoder and executor. It also
+requires the global `FILE` privilege and is disabled by the default
+`secure_file_priv=NULL`. Set `secure_file_priv` to an existing absolute
+directory to confine reads there; path traversal and symbolic-link escapes are
+refused. An empty option-file value deliberately allows every path visible to
+the fsdb process. Server reads share the `max_load_data_bytes` ceiling.
 
 ## Temporal values, zones, and offsets
 
@@ -478,6 +484,8 @@ validation path:
 
 - connection and protocol limits: `max_allowed_packet`, `max_connections`,
   `max_prepared_stmt_count`, `local_infile`, and `max_load_data_bytes`;
+- server files: `secure_file_priv`, an immutable startup policy also exposed
+  by `@@secure_file_priv`;
 - timeouts: `connect_timeout`, `wait_timeout`, `interactive_timeout`,
   `net_read_timeout`, `net_write_timeout`, and
   `innodb_lock_wait_timeout`;

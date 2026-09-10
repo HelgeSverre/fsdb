@@ -63,6 +63,14 @@ let withAuthenticationRsaKey plugin (privateKey: RSA) (db: Db) : Db =
     { db with
         Transport = db.Transport |> ServerOptions.withAuthenticationRsaKey plugin privateKey }
 
+/// Restricts server-side file statements to `directory`.
+let withSecureFileDirectory (directory: string) (db: Db) : Db =
+    { db with Transport = db.Transport |> ServerOptions.withSecureFileDirectory directory }
+
+/// Allows server-side file statements to use any path visible to the host process.
+let allowUnrestrictedServerFiles (db: Db) : Db =
+    { db with Transport = db.Transport |> ServerOptions.allowUnrestrictedServerFiles }
+
 /// Registers a scalar function under `name`, e.g.
 /// `db |> Db.registerScalar "slugify" (function ...)`. Free to override a
 /// built-in of the same name — `QueryHandler.registryFor` layers custom
@@ -112,11 +120,23 @@ let private connectionCounter = ref 0
 /// exactly as it would on a real connection.
 type Connection internal (db: Db) =
     let mutable session =
-        { Session.create (System.Threading.Interlocked.Decrement connectionCounter) db.Store with
+        { (Session.create (System.Threading.Interlocked.Decrement connectionCounter) db.Store
+           |> Session.withServerOptions db.Transport) with
             CustomFunctions = db.Functions }
 
     member _.Query(sql: string) : QueryHandler.QueryResult =
-        let updated, result = QueryHandler.handle session sql
+        let updated, result =
+            match QueryHandler.tryPrepareLoad session sql with
+            | Error result -> session, result
+            | Ok(Some load) when not load.Local -> QueryHandler.executeServerLoad session load
+            | Ok(Some _) ->
+                session,
+                Executor.Err(
+                    3948,
+                    "Loading local data is disabled; this must be enabled on both the client and server sides"
+                )
+            | Ok None -> QueryHandler.handle session sql
+
         session <- updated
         result
 

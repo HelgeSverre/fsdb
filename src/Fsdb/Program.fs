@@ -16,6 +16,7 @@ type Arguments =
     | Caching_Sha2_Password_Public_Key_Path of path: string
     | Sha256_Password_Private_Key_Path of path: string
     | Sha256_Password_Public_Key_Path of path: string
+    | Secure_File_Priv of path: string
     | Require_Secure_Transport
     | Version
 
@@ -33,6 +34,7 @@ type Arguments =
             | Caching_Sha2_Password_Public_Key_Path _ -> "matching PEM public key for caching SHA-2 authentication"
             | Sha256_Password_Private_Key_Path _ -> "PEM private key for SHA-256 authentication"
             | Sha256_Password_Public_Key_Path _ -> "matching PEM public key for SHA-256 authentication"
+            | Secure_File_Priv _ -> "directory allowed for server-side file statements; NULL disables them"
             | Require_Secure_Transport -> "reject plaintext MySQL sessions"
             | Version -> "print the fsdb version and exit"
 
@@ -99,6 +101,9 @@ let main argv =
                   | None -> ()
                   match results.TryGetResult Sha256_Password_Public_Key_Path with
                   | Some path -> yield commandLineEntry "sha256_password_public_key_path" (Some path)
+                  | None -> ()
+                  match results.TryGetResult Secure_File_Priv with
+                  | Some path -> yield commandLineEntry "secure_file_priv" (Some path)
                   | None -> ()
                   if results.Contains <@ Require_Secure_Transport @> then
                       yield commandLineEntry "require_secure_transport" None ]

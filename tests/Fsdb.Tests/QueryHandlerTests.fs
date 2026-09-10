@@ -6794,6 +6794,23 @@ let tests =
               | Err(1044, _) -> ()
               | other -> failtestf "expected DROP information_schema to be denied, got %A" other
 
+          testCase "server-side LOAD DATA requires FILE in addition to INSERT"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE TABLE imports (id INT)"
+              let root, _ = handle root "CREATE USER 'loader'"
+              let _, _ = handle root "GRANT INSERT ON fsdb.imports TO 'loader'"
+              let loader = { create 2 store with User = "loader" }
+
+              match tryPrepareLoad loader "LOAD DATA INFILE '/srv/imports/rows.tsv' INTO TABLE imports" with
+              | Error(Err(1227, message)) -> Expect.stringContains message "FILE" "the missing global privilege is named"
+              | other -> failtestf "expected FILE privilege error 1227, got %A" other
+
+              match tryPrepareLoad loader "LOAD DATA LOCAL INFILE 'rows.tsv' INTO TABLE imports" with
+              | Ok(Some load) -> Expect.isTrue load.Local "LOCAL does not inherit the server-file privilege"
+              | other -> failtestf "INSERT alone should prepare LOCAL input, got %A" other
+
           testCase "information_schema only reveals schemas, definitions, and grants visible to the viewer"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -1,4 +1,4 @@
-/// Transport settings shared by the command-line server and embedding API.
+/// Immutable listener settings shared by the command-line server and embedding API.
 module Fsdb.ServerOptions
 
 open System
@@ -7,19 +7,28 @@ open System.Security.Cryptography
 open System.Security.Cryptography.X509Certificates
 open Fsdb.OptionFile
 
-/// Server identity, client trust roots, and plaintext policy for a listener.
+/// Which server-owned files a listener may expose to SQL statements.
+[<RequireQualifiedAccess>]
+type SecureFilePolicy =
+    | Disabled
+    | Directory of string
+    | Unrestricted
+
+/// Transport security and server-file policy for a listener.
 type Settings =
     { Certificate: X509Certificate2 option
       ClientCertificateAuthorities: X509Certificate2 list
       AuthenticationRsaKeys: Map<Authentication.Plugin, Authentication.RsaKeyPair>
-      RequireSecureTransport: bool }
+      RequireSecureTransport: bool
+      SecureFiles: SecureFilePolicy }
 
-/// Settings for a plaintext listener.
+/// Settings for a plaintext listener with server-owned files disabled.
 let defaults =
     { Certificate = None
       ClientCertificateAuthorities = []
       AuthenticationRsaKeys = Map.empty
-      RequireSecureTransport = false }
+      RequireSecureTransport = false
+      SecureFiles = SecureFilePolicy.Disabled }
 
 /// Adds a server certificate to the transport settings.
 let withCertificate (certificate: X509Certificate2) (settings: Settings) =
@@ -40,6 +49,59 @@ let withAuthenticationRsaKey plugin (privateKey: RSA) (settings: Settings) =
         AuthenticationRsaKeys =
             settings.AuthenticationRsaKeys
             |> Map.add plugin (Authentication.rsaKeyPair privateKey) }
+
+let internal canonicalPath (path: string) =
+    let fullPath = Path.GetFullPath path
+    let root = Path.GetPathRoot fullPath
+    let relative = Path.GetRelativePath(root, fullPath)
+
+    if relative = "." then
+        root
+    else
+        relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+        |> Array.fold
+            (fun current part ->
+                let next = Path.Combine(current, part)
+
+                let entry: FileSystemInfo =
+                    if Directory.Exists next then DirectoryInfo next
+                    else FileInfo next
+
+                if entry.Exists then
+                    match entry.ResolveLinkTarget true with
+                    | null -> next
+                    | target -> target.FullName
+                else
+                    next)
+            root
+
+let internal normalizeSecureFileDirectory (path: string) =
+    if String.IsNullOrWhiteSpace path then
+        invalidArg "path" "secure_file_priv needs a directory"
+
+    let fullPath = canonicalPath path
+
+    if not (Path.IsPathFullyQualified path) then
+        invalidArg "path" "secure_file_priv needs an absolute directory"
+    elif not (Directory.Exists fullPath) then
+        invalidArg "path" "secure_file_priv directory does not exist"
+
+    fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+    + string Path.DirectorySeparatorChar
+
+/// Restricts server-side file statements to one operator-owned directory.
+let withSecureFileDirectory (path: string) (settings: Settings) =
+    { settings with SecureFiles = SecureFilePolicy.Directory(normalizeSecureFileDirectory path) }
+
+/// Allows server-side file statements to use any path visible to the process.
+let allowUnrestrictedServerFiles (settings: Settings) =
+    { settings with SecureFiles = SecureFilePolicy.Unrestricted }
+
+let secureFileVariable =
+    function
+    | SecureFilePolicy.Disabled -> None
+    | SecureFilePolicy.Directory path -> Some path
+    | SecureFilePolicy.Unrestricted -> Some ""
 
 let private boolValue (name: string) (value: string option) =
     match value |> Option.map (fun text -> text.Trim().ToLowerInvariant()) with
@@ -91,7 +153,7 @@ let private loadAuthenticationRsaKey (privatePath: string) (publicPath: string) 
     with ex ->
         Error ex.Message
 
-/// Splits TLS options from unrelated server options and validates the final TLS settings.
+/// Splits immutable listener options from process-wide runtime settings.
 let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
     let mutable certificatePath: (string * Entry) option = None
     let mutable keyPath: (string * Entry) option = None
@@ -101,6 +163,7 @@ let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
     let mutable sha256PrivateKeyPath: (string * Entry) option = None
     let mutable sha256PublicKeyPath: (string * Entry) option = None
     let mutable requireSecure = defaults.RequireSecureTransport
+    let mutable secureFiles = defaults.SecureFiles
     let remaining = ResizeArray<Entry>()
     let errors = ResizeArray<string>()
 
@@ -142,6 +205,21 @@ let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
             match boolValue "require_secure_transport" entry.Value with
             | Ok value -> requireSecure <- value
             | Error message -> errors.Add(sprintf "%s:%d: %s" entry.Source entry.Line message)
+        | "secure_file_priv" ->
+            match entry.Value with
+            | None -> errors.Add(sprintf "%s:%d: secure_file_priv needs a value" entry.Source entry.Line)
+            | Some value when value.Equals("NULL", StringComparison.OrdinalIgnoreCase) ->
+                secureFiles <- SecureFilePolicy.Disabled
+            | Some "" -> secureFiles <- SecureFilePolicy.Unrestricted
+            | Some path ->
+                try
+                    secureFiles <- SecureFilePolicy.Directory(normalizeSecureFileDirectory path)
+                with
+                | error
+                    when (error :? ArgumentException)
+                         || (error :? IOException)
+                         || (error :? UnauthorizedAccessException) ->
+                    errors.Add(sprintf "%s:%d: %s" entry.Source entry.Line error.Message)
         | _ -> remaining.Add entry
 
     let certificate =
@@ -207,7 +285,8 @@ let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
             { Certificate = certificate
               ClientCertificateAuthorities = certificateAuthorities
               AuthenticationRsaKeys = authenticationRsaKeys
-              RequireSecureTransport = requireSecure },
+              RequireSecureTransport = requireSecure
+              SecureFiles = secureFiles },
             List.ofSeq remaining
         )
     else

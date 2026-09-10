@@ -1590,7 +1590,7 @@ let private handleConnection
                     |> Map.ofList
 
                 let createSessionFor (account: Auth.Account) loginUser passwordExpired database =
-                    { Session.create connectionId store with
+                    { (Session.create connectionId store |> Session.withServerOptions options) with
                         User = account.Name
                         AccountHost = account.Host
                         ActiveRoles = Session.initialRoles store account
@@ -1936,13 +1936,21 @@ let private handleConnection
                                                 | [] -> return Some session
                                                 | statement :: remaining ->
                                                     let! dispatched =
-                                                        match QueryHandler.tryPrepareLocalLoad session statement with
+                                                        match QueryHandler.tryPrepareLoad session statement with
                                                         | Result.Error result -> async { return Some(session, result, seqId) }
                                                         | Result.Ok None ->
                                                             async {
                                                                 return
                                                                     runCancellable statement (fun () -> QueryHandler.handle session statement)
                                                                     |> Option.map (fun (nextSession, result) -> nextSession, result, seqId)
+                                                            }
+                                                        | Result.Ok(Some load) when not load.Local ->
+                                                            async {
+                                                                return
+                                                                    runCancellable statement (fun () ->
+                                                                        QueryHandler.executeServerLoad session load)
+                                                                    |> Option.map (fun (nextSession, result) ->
+                                                                        nextSession, result, seqId)
                                                             }
                                                         | Result.Ok(Some load)
                                                             when not Limits.localInfile
@@ -1971,7 +1979,7 @@ let private handleConnection
                                                                     | Result.Ok rows ->
                                                                         return
                                                                             runCancellable statement (fun () ->
-                                                                                QueryHandler.executeLocalLoad session load rows)
+                                                                                QueryHandler.executeLoadedData session load rows)
                                                                             |> Option.map (fun (nextSession, result) ->
                                                                                 nextSession, result, responseSeqId)
                                                             }

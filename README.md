@@ -99,6 +99,7 @@ fall into a few groups:
 | Storage | `--data-dir` |
 | Option files | `--defaults-file` |
 | TLS | `--ssl-cert`, `--ssl-key`, `--ssl-ca`, `--require-secure-transport` |
+| Server files | `--secure-file-priv` |
 | Caching SHA-2 RSA | `--caching-sha2-password-private-key-path`, `--caching-sha2-password-public-key-path` |
 | SHA-256 RSA | `--sha256-password-private-key-path`, `--sha256-password-public-key-path` |
 | Information | `--version`, `--help` |
@@ -132,6 +133,7 @@ default_week_format       = 0
 max_points_in_geometry   = 65536
 local_infile             = OFF
 max_load_data_bytes      = 64M
+secure_file_priv         = NULL
 wait_timeout             = 600
 connect_timeout          = 10
 net_read_timeout         = 30
@@ -449,9 +451,9 @@ current boundaries live in [GAPS.md](GAPS.md).
   resource, and attribute policy, plus database-, table-, and column-level
   privilege enforcement.
 - Bulk and batched work: `CLIENT_MULTI_STATEMENTS`/`CLIENT_MULTI_RESULTS` and
-  client-side `LOAD DATA LOCAL INFILE`, including target columns, user
-  variables, and ordered `SET` transformations. Local infile is disabled by
-  default and bounded by `max_load_data_bytes`.
+  `LOAD DATA [LOCAL] INFILE`, including target columns, user variables, and
+  ordered `SET` transformations. Both byte sources are disabled or restricted
+  by default and bounded by `max_load_data_bytes`.
 
 The introspection surface used by GUI clients exposes compatible schemas and
 live data wherever fsdb owns the underlying subsystem. Its
@@ -566,6 +568,8 @@ Configuration uses pipeline-friendly builders. Most return a new `Db` value;
 | `Db.withClientCertificateAuthority` | Trust a CA for client certificates. |
 | `Db.withAuthenticationRsaKey` | Supply a private key for one plaintext SHA-2 authentication plugin. |
 | `Db.requireSecureTransport` | Reject plaintext sessions. |
+| `Db.withSecureFileDirectory` | Restrict server-side file statements to one directory. |
+| `Db.allowUnrestrictedServerFiles` | Allow server-side file statements to access every host-visible path. |
 
 Runtime and extension APIs are similarly small:
 

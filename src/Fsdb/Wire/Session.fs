@@ -103,6 +103,7 @@ let defaultVariables: Map<string, string option> =
           "restrict_fk_on_non_standard_key", "ON"
           "sql_generate_invisible_primary_key", "OFF" ]
         |> Map.map (fun _ v -> Some v)
+        |> Map.add "secure_file_priv" None
 
 /// Recomputes defaults so configured limits and reported values cannot drift.
 let private liveDefaults () : Map<string, string option> =
@@ -366,6 +367,7 @@ type Session =
       TlsVersion: string option
       TlsCipher: string option
       AuthenticationRsaPublicKeys: Map<Authentication.Plugin, string>
+      SecureFiles: ServerOptions.SecureFilePolicy
       CloseAfterReply: bool
       TransportMetrics: TransportMetrics }
 
@@ -423,10 +425,17 @@ let create (connectionId: int) (store: Store) : Session =
       TlsVersion = None
       TlsCipher = None
       AuthenticationRsaPublicKeys = Map.empty
+      SecureFiles = ServerOptions.SecureFilePolicy.Disabled
       CloseAfterReply = false
       TransportMetrics =
         { BytesReceived = 0L
           BytesSent = 0L } }
+
+/// Applies immutable listener settings to the state visible from SQL.
+let withServerOptions (options: ServerOptions.Settings) (session: Session) =
+    { session with
+        SecureFiles = options.SecureFiles
+        Variables = session.Variables |> Map.add "secure_file_priv" (ServerOptions.secureFileVariable options.SecureFiles) }
 
 let clearSessionStateChanges (session: Session) =
     { session with SessionStateChanges = [] }
