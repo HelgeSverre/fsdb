@@ -909,6 +909,25 @@ let tests =
                       "mixed textual expressions remain non-null"
               | Error error -> failtestf "expected builtin statement to prepare, got %A" error
 
+          testCase "typed geometry constructors share prepared metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ST_MPointFromText(?, ?, ?), ST_GeomCollFromWKB(?, ?, ?)"
+
+              match prepareStatementForSession session sql with
+              | Ok(statement, parameterCount) ->
+                  let parameters, columns = preparedMetadata session statement parameterCount
+
+                  Expect.equal
+                      (parameters |> List.map _.TypeId)
+                      [ TypeVarString; TypeLongLong; TypeVarString; TypeBlob; TypeLongLong; TypeVarString ]
+                      "constructor parameter families"
+                  Expect.equal
+                      (columns |> List.map (fun column -> column.Metadata.TypeId))
+                      [ TypeGeometry; TypeGeometry ]
+                      "constructor result families"
+              | Error error -> failtestf "expected typed constructors to prepare, got %A" error
+
           testCase "JSON Schema references return MySQL's unsupported-feature error"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

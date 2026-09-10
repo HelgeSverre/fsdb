@@ -2757,9 +2757,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             simple TypeLongLong
         | "JSON_SCHEMA_VALID", _ -> simple TypeLongLong
         | "JSON_SCHEMA_VALIDATION_REPORT", _ -> json
-        | ("ST_GEOMFROMTEXT" | "ST_GEOMETRYFROMTEXT" | "GEOMFROMTEXT" | "GEOMETRYFROMTEXT" | "ST_POINTFROMTEXT"
-          | "POINTFROMTEXT" | "ST_LINESTRINGFROMTEXT" | "ST_POLYGONFROMTEXT" | "ST_GEOMFROMWKB" | "ST_GEOMETRYFROMWKB"
-          | "GEOMFROMWKB" | "ST_POINTFROMWKB"), _ ->
+        | name, _ when Functions.isGeometryConstructor name ->
             Some { Value.columnMetadata TypeGeometry with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
         | ("ST_ASTEXT" | "ST_ASWKT" | "ASTEXT" | "ST_GEOMETRYTYPE" | "GEOMETRYTYPE"), _ ->
             Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }

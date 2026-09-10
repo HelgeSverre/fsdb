@@ -71,7 +71,8 @@ row-value, subquery, and aggregate edge behavior. Spatial comparisons use
 topology rather than WKT vertex order and exercise relations, overlays, signed
 default buffers, independently configured point, join, and end strategies,
 typed line, polygon, multi-geometry, and collection property accessors, and
-geographic input/output axis-order options across text and binary forms.
+typed constructors plus geographic input/output axis-order options across text
+and binary forms.
 
 Planner regressions pair each accelerated predicate with a scan-only twin and
 check the selected access through `EXPLAIN`. Literal values and the supported

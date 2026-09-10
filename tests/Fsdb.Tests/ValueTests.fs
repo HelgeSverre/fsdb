@@ -222,6 +222,42 @@ let tests =
                         | Fsdb.Functions.SqlError(3559, _) -> ()
                         | error -> failtestf "expected planar invalid-axis-order error, got %A" error)
 
+                testCase "typed geometry constructor names share kind validation"
+                <| fun _ ->
+                    let cases =
+                        [ "ST_LineFromText", "LINESTRING(0 0,1 1)"
+                          "ST_LineStringFromText", "LINESTRING(0 0,1 1)"
+                          "ST_PolyFromText", "POLYGON((0 0,1 0,1 1,0 0))"
+                          "ST_PolygonFromText", "POLYGON((0 0,1 0,1 1,0 0))"
+                          "ST_MPointFromText", "MULTIPOINT((0 0),(1 1))"
+                          "ST_MultiPointFromText", "MULTIPOINT((0 0),(1 1))"
+                          "ST_MLineFromText", "MULTILINESTRING((0 0,1 1))"
+                          "ST_MultiLineStringFromText", "MULTILINESTRING((0 0,1 1))"
+                          "ST_MPolyFromText", "MULTIPOLYGON(((0 0,1 0,1 1,0 0)))"
+                          "ST_MultiPolygonFromText", "MULTIPOLYGON(((0 0,1 0,1 1,0 0)))"
+                          "ST_GeomCollFromText", "GEOMETRYCOLLECTION(POINT(0 0))"
+                          "ST_GeomCollFromTxt", "GEOMETRYCOLLECTION(POINT(0 0))"
+                          "ST_GeometryCollectionFromText", "GEOMETRYCOLLECTION(POINT(0 0))" ]
+
+                    for name, text in cases do
+                        let textGeometry = call name [ VString text ]
+                        Expect.equal (call "ST_AsText" [ textGeometry ]) (VString text) (name + " text")
+
+                        let wkbName =
+                            name.Replace("FromText", "FromWKB", StringComparison.OrdinalIgnoreCase)
+                                .Replace("FromTxt", "FromWKB", StringComparison.OrdinalIgnoreCase)
+
+                        let wkbGeometry = call wkbName [ call "ST_AsWKB" [ textGeometry ] ]
+                        Expect.equal (call "ST_AsText" [ wkbGeometry ]) (VString text) (wkbName + " binary")
+
+                    Expect.throwsC
+                        (fun () ->
+                            call "ST_MPointFromText" [ VString "LINESTRING(0 0,1 1)" ]
+                            |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(3037, _) -> ()
+                        | error -> failtestf "expected typed-constructor error, got %A" error)
+
                 testCase "geometry collections retain nested shapes and dimensions"
                 <| fun _ ->
                     let geometry = call "ST_GeomFromText" [ VString "GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))" ]

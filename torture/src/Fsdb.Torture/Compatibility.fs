@@ -1311,6 +1311,54 @@ module ContractCatalog =
                           MBRWithin(ST_GeomFromText('POINT(2 2)'), ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))')),
                           MBRIntersects(ST_GeomFromText('POINT(1 1)'), ST_GeomFromText('POINT(1 1)'))"""
 
+        let typedSpatialConstructorSteps, typedSpatialConstructorCoverage =
+            functionProbe
+                "typed-spatial-constructors"
+                [| "ST_LINEFROMTEXT"
+                   "ST_LINESTRINGFROMTEXT"
+                   "ST_POLYFROMTEXT"
+                   "ST_POLYGONFROMTEXT"
+                   "ST_MPOINTFROMTEXT"
+                   "ST_MULTIPOINTFROMTEXT"
+                   "ST_MLINEFROMTEXT"
+                   "ST_MULTILINESTRINGFROMTEXT"
+                   "ST_MPOLYFROMTEXT"
+                   "ST_MULTIPOLYGONFROMTEXT"
+                   "ST_GEOMCOLLFROMTEXT"
+                   "ST_GEOMCOLLFROMTXT"
+                   "ST_GEOMETRYCOLLECTIONFROMTEXT"
+                   "ST_LINEFROMWKB"
+                   "ST_LINESTRINGFROMWKB"
+                   "ST_POLYFROMWKB"
+                   "ST_POLYGONFROMWKB"
+                   "ST_MPOINTFROMWKB"
+                   "ST_MULTIPOINTFROMWKB"
+                   "ST_MLINEFROMWKB"
+                   "ST_MULTILINESTRINGFROMWKB"
+                   "ST_MPOLYFROMWKB"
+                   "ST_MULTIPOLYGONFROMWKB"
+                   "ST_GEOMCOLLFROMWKB"
+                   "ST_GEOMETRYCOLLECTIONFROMWKB" |]
+                """SELECT ST_LineFromText('LINESTRING(0 0,1 1)'), ST_LineStringFromText('LINESTRING(0 0,1 1)'),
+                          ST_PolyFromText('POLYGON((0 0,1 0,1 1,0 0))'), ST_PolygonFromText('POLYGON((0 0,1 0,1 1,0 0))'),
+                          ST_MPointFromText('MULTIPOINT((0 0),(1 1))'), ST_MultiPointFromText('MULTIPOINT((0 0),(1 1))'),
+                          ST_MLineFromText('MULTILINESTRING((0 0,1 1))'), ST_MultiLineStringFromText('MULTILINESTRING((0 0,1 1))'),
+                          ST_MPolyFromText('MULTIPOLYGON(((0 0,1 0,1 1,0 0)))'), ST_MultiPolygonFromText('MULTIPOLYGON(((0 0,1 0,1 1,0 0)))'),
+                          ST_GeomCollFromText('GEOMETRYCOLLECTION(POINT(0 0))'), ST_GeomCollFromTxt('GEOMETRYCOLLECTION(POINT(0 0))'),
+                          ST_GeometryCollectionFromText('GEOMETRYCOLLECTION(POINT(0 0))'),
+                          ST_LineFromWKB(ST_AsWKB(ST_GeomFromText('LINESTRING(0 0,1 1)'))),
+                          ST_LineStringFromWKB(ST_AsWKB(ST_GeomFromText('LINESTRING(0 0,1 1)'))),
+                          ST_PolyFromWKB(ST_AsWKB(ST_GeomFromText('POLYGON((0 0,1 0,1 1,0 0))'))),
+                          ST_PolygonFromWKB(ST_AsWKB(ST_GeomFromText('POLYGON((0 0,1 0,1 1,0 0))'))),
+                          ST_MPointFromWKB(ST_AsWKB(ST_GeomFromText('MULTIPOINT((0 0),(1 1))'))),
+                          ST_MultiPointFromWKB(ST_AsWKB(ST_GeomFromText('MULTIPOINT((0 0),(1 1))'))),
+                          ST_MLineFromWKB(ST_AsWKB(ST_GeomFromText('MULTILINESTRING((0 0,1 1))'))),
+                          ST_MultiLineStringFromWKB(ST_AsWKB(ST_GeomFromText('MULTILINESTRING((0 0,1 1))'))),
+                          ST_MPolyFromWKB(ST_AsWKB(ST_GeomFromText('MULTIPOLYGON(((0 0,1 0,1 1,0 0)))'))),
+                          ST_MultiPolygonFromWKB(ST_AsWKB(ST_GeomFromText('MULTIPOLYGON(((0 0,1 0,1 1,0 0)))'))),
+                          ST_GeomCollFromWKB(ST_AsWKB(ST_GeomFromText('GEOMETRYCOLLECTION(POINT(0 0))'))),
+                          ST_GeometryCollectionFromWKB(ST_AsWKB(ST_GeomFromText('GEOMETRYCOLLECTION(POINT(0 0))')))"""
+
         let spatialPropertyEdgeSteps =
             [| Contract.query
                    "spatial-property-family-and-index-rules"
@@ -1355,6 +1403,7 @@ module ContractCatalog =
                   temporalSteps
                   jsonSteps
                   spatialSteps
+                  typedSpatialConstructorSteps
                   spatialPropertyEdgeSteps
                   aggregateSteps
                   errorSteps ]
@@ -1366,6 +1415,7 @@ module ContractCatalog =
                   temporalCoverage
                   jsonCoverage
                   spatialCoverage
+                  typedSpatialConstructorCoverage
                   aggregateCoverage
                   errorCoverage ] }
 

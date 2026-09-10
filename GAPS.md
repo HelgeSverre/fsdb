@@ -204,8 +204,9 @@ or locking retain the general SELECT pipeline.
   hashing, and UUIDs;
 - IPv4 and IPv6 conversion and predicates;
 - NULL-selection, comparison, and session identity functions;
-- OGC geometry inspection and member access, including line endpoints and
-  indexing, polygon rings, multi-geometry members, and closure checks.
+- OGC geometry construction, serialization, inspection, and member access,
+  including typed text/binary constructors, line endpoints and indexing,
+  polygon rings, multi-geometry members, and closure checks.
 
 | Missing family | Functions | Impact |
 |---|---|---|

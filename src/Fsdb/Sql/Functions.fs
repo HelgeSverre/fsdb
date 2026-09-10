@@ -5443,6 +5443,56 @@ let private distanceFn: Scalar =
     | [ _; _; _ ] -> raise (SqlError(1210, "Incorrect arguments to DISTANCE: arguments must be vectors"))
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'distance'"))
 
+let private wktGeometryConstructors =
+    Map.ofList
+        [ "GEOMETRYFROMTEXT", Geometry
+          "GEOMFROMTEXT", Geometry
+          "POINTFROMTEXT", Point
+          "ST_GEOMETRYCOLLECTIONFROMTEXT", GeometryCollection
+          "ST_GEOMETRYFROMTEXT", Geometry
+          "ST_GEOMCOLLFROMTEXT", GeometryCollection
+          "ST_GEOMCOLLFROMTXT", GeometryCollection
+          "ST_GEOMFROMTEXT", Geometry
+          "ST_LINEFROMTEXT", LineString
+          "ST_LINESTRINGFROMTEXT", LineString
+          "ST_MLINEFROMTEXT", MultiLineString
+          "ST_MPOINTFROMTEXT", MultiPoint
+          "ST_MPOLYFROMTEXT", MultiPolygon
+          "ST_MULTILINESTRINGFROMTEXT", MultiLineString
+          "ST_MULTIPOINTFROMTEXT", MultiPoint
+          "ST_MULTIPOLYGONFROMTEXT", MultiPolygon
+          "ST_POINTFROMTEXT", Point
+          "ST_POLYFROMTEXT", Polygon
+          "ST_POLYGONFROMTEXT", Polygon ]
+
+let private wkbGeometryConstructors =
+    Map.ofList
+        [ "GEOMFROMWKB", Geometry
+          "ST_GEOMETRYCOLLECTIONFROMWKB", GeometryCollection
+          "ST_GEOMETRYFROMWKB", Geometry
+          "ST_GEOMCOLLFROMWKB", GeometryCollection
+          "ST_GEOMFROMWKB", Geometry
+          "ST_LINEFROMWKB", LineString
+          "ST_LINESTRINGFROMWKB", LineString
+          "ST_MLINEFROMWKB", MultiLineString
+          "ST_MPOINTFROMWKB", MultiPoint
+          "ST_MPOLYFROMWKB", MultiPolygon
+          "ST_MULTILINESTRINGFROMWKB", MultiLineString
+          "ST_MULTIPOINTFROMWKB", MultiPoint
+          "ST_MULTIPOLYGONFROMWKB", MultiPolygon
+          "ST_POINTFROMWKB", Point
+          "ST_POLYFROMWKB", Polygon
+          "ST_POLYGONFROMWKB", Polygon ]
+
+let internal isWktGeometryConstructor (name: string) =
+    Map.containsKey (name.ToUpperInvariant()) wktGeometryConstructors
+
+let internal isWkbGeometryConstructor (name: string) =
+    Map.containsKey (name.ToUpperInvariant()) wkbGeometryConstructors
+
+let internal isGeometryConstructor name =
+    isWktGeometryConstructor name || isWkbGeometryConstructor name
+
 let private geometryError functionName detail : 'a =
     raise (SqlError(3037, sprintf "Invalid GIS data provided to function %s: %s" functionName detail))
 
@@ -6162,20 +6212,14 @@ let private registerJsonBuiltins registry =
     |> registerScalarResult "JSON_KEYS" jsonResult (arityRange "JSON_KEYS" 1 2 jsonKeysFn)
     |> registerScalarResult "JSON_SEARCH" jsonResult (minimumArity "JSON_SEARCH" 3 jsonSearchFn)
 
+let private registerGeometryConstructors construct constructors registry =
+    constructors
+    |> Map.fold (fun current name kind -> registerScalarResult name binaryResult (construct kind name) current) registry
+
 let private registerSpatialBuiltins registry =
     registry
-    |> registerScalarResult "ST_GEOMFROMTEXT" binaryResult (geometryFromTextFn Geometry "ST_GeomFromText")
-    |> registerScalarResult "ST_GEOMETRYFROMTEXT" binaryResult (geometryFromTextFn Geometry "ST_GeometryFromText")
-    |> registerScalarResult "GEOMFROMTEXT" binaryResult (geometryFromTextFn Geometry "GeomFromText")
-    |> registerScalarResult "GEOMETRYFROMTEXT" binaryResult (geometryFromTextFn Geometry "GeometryFromText")
-    |> registerScalarResult "ST_POINTFROMTEXT" binaryResult (geometryFromTextFn Point "ST_PointFromText")
-    |> registerScalarResult "POINTFROMTEXT" binaryResult (geometryFromTextFn Point "PointFromText")
-    |> registerScalarResult "ST_LINESTRINGFROMTEXT" binaryResult (geometryFromTextFn LineString "ST_LineStringFromText")
-    |> registerScalarResult "ST_POLYGONFROMTEXT" binaryResult (geometryFromTextFn Polygon "ST_PolygonFromText")
-    |> registerScalarResult "ST_GEOMFROMWKB" binaryResult (geometryFromWkbFn Geometry "ST_GeomFromWKB")
-    |> registerScalarResult "ST_GEOMETRYFROMWKB" binaryResult (geometryFromWkbFn Geometry "ST_GeometryFromWKB")
-    |> registerScalarResult "GEOMFROMWKB" binaryResult (geometryFromWkbFn Geometry "GeomFromWKB")
-    |> registerScalarResult "ST_POINTFROMWKB" binaryResult (geometryFromWkbFn Point "ST_PointFromWKB")
+    |> registerGeometryConstructors geometryFromTextFn wktGeometryConstructors
+    |> registerGeometryConstructors geometryFromWkbFn wkbGeometryConstructors
     |> registerScalar "ST_ASTEXT" (geometryToTextFn "ST_AsText")
     |> registerScalar "ST_ASWKT" (geometryToTextFn "ST_AsWKT")
     |> registerScalar "ASTEXT" (geometryToTextFn "AsText")

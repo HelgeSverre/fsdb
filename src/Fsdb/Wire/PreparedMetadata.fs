@@ -42,13 +42,6 @@ let private geometryFunctions =
           "ST_ISEMPTY"; "ST_ISVALID"; "ST_SYMDIFFERENCE"; "ST_UNION"
           "ST_SRID"; "ST_TOUCHES"; "ST_WITHIN"; "ST_X"; "ST_Y"; "X"; "Y" ]
 
-let private wkbConstructors =
-    set [ "GEOMFROMWKB"; "ST_GEOMETRYFROMWKB"; "ST_GEOMFROMWKB"; "ST_POINTFROMWKB" ]
-
-let private wktConstructors =
-    set [ "GEOMETRYFROMTEXT"; "GEOMFROMTEXT"; "ST_GEOMETRYFROMTEXT"; "ST_GEOMFROMTEXT"; "ST_LINESTRINGFROMTEXT"
-          "ST_POINTFROMTEXT"; "ST_POLYGONFROMTEXT" ]
-
 let private jsonFirstArgument =
     set [ "JSON_ARRAY_APPEND"; "JSON_ARRAY_INSERT"; "JSON_CONTAINS"; "JSON_CONTAINS_PATH"; "JSON_DEPTH"; "JSON_EXTRACT"; "JSON_INSERT"
           "JSON_KEYS"; "JSON_LENGTH"; "JSON_PRETTY"; "JSON_REMOVE"; "JSON_REPLACE"; "JSON_SEARCH"; "JSON_SET"; "JSON_STORAGE_FREE"
@@ -107,9 +100,9 @@ let private functionParameterMetadata (registry: Registry) (name: string) index 
         Some binary
     | None when name = "ST_SRID" && index = 1 ->
         Some signedInteger
-    | None when Set.contains name wkbConstructors && index = 0 ->
+    | None when Functions.isWkbGeometryConstructor name && index = 0 ->
         Some binary
-    | None when (Set.contains name wkbConstructors || Set.contains name wktConstructors) && index = 1 ->
+    | None when Functions.isGeometryConstructor name && index = 1 ->
         Some signedInteger
     | None -> None
 
