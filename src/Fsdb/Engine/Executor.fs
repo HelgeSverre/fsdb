@@ -2667,6 +2667,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | ("COALESCE" | "IFNULL"), values -> chooseCoalescing values
         | ("GREATEST" | "LEAST"), values -> chooseExtrema values
         | "ANY_VALUE", [ value ] -> metadataOfExpr ctx value
+        | "NAME_CONST", [ _; Lit VNull ] -> simple TypeNull
         | "NAME_CONST", [ _; value ] -> metadataOfExpr ctx value
         | "NULLIF", first :: _ -> metadataOfExpr ctx first
         | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]

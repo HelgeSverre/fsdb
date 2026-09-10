@@ -320,6 +320,15 @@ let private minimumArity name minimum (invoke: Scalar) : Scalar =
         else
             nativeParameterCountError name
 
+let private arityRange name minimum maximum (invoke: Scalar) : Scalar =
+    fun arguments ->
+        let count = List.length arguments
+
+        if count >= minimum && count <= maximum then
+            invoke arguments
+        else
+            nativeParameterCountError name
+
 /// A value as the 64-bit pattern MySQL's bit-oriented functions (BIN, OCT,
 /// CONV, HEX) read it as: those treat their argument as `BIGINT UNSIGNED`,
 /// so `BIN(-1)` is 64 ones. `toDouble` can't be the route for the top half
@@ -2648,7 +2657,8 @@ let internal dayNameFn (locale: TemporalLocale.Names) : Scalar =
         tryDateTimeValue v
         |> Option.map (fun date -> VString(locale.Days.[(int date.DayOfWeek + 6) % 7]))
         |> Option.defaultValue VNull
-    | _ -> VNull
+    | [ _ ] -> VNull
+    | _ -> nativeParameterCountError "DAYNAME"
 
 let internal monthNameFn (locale: TemporalLocale.Names) : Scalar =
     function
@@ -2656,7 +2666,8 @@ let internal monthNameFn (locale: TemporalLocale.Names) : Scalar =
         tryDateTimeValue v
         |> Option.map (fun date -> VString(locale.Months.[date.Month - 1]))
         |> Option.defaultValue VNull
-    | _ -> VNull
+    | [ _ ] -> VNull
+    | _ -> nativeParameterCountError "MONTHNAME"
 
 let internal weekFn defaultMode: Scalar =
     function
@@ -5737,7 +5748,7 @@ let private mbrPredicateFn functionName predicate =
 let private registerJsonBuiltins registry =
     registry
     |> registerScalarResult "JSON_EXTRACT" jsonResult (minimumArity "JSON_EXTRACT" 2 jsonExtractFn)
-    |> registerScalarResult "JSON_VALUE" (FixedCollation("utf8mb4_0900_bin", 4)) jsonValueFn
+    |> registerScalarResult "JSON_VALUE" (FixedCollation("utf8mb4_0900_bin", 4)) (exactArity "JSON_VALUE" 2 jsonValueFn)
     |> registerScalarResult "JSON_UNQUOTE" jsonTextResult jsonUnquoteFn
     |> registerScalar "JSON_CONTAINS" jsonContainsFn
     |> registerScalar "JSON_MEMBER_OF" jsonMemberOfFn
@@ -5764,7 +5775,7 @@ let private registerJsonBuiltins registry =
     |> registerScalarResult "JSON_SCHEMA_VALIDATION_REPORT" jsonResult jsonSchemaValidationReportFn
     |> registerScalarResult "JSON_TYPE" jsonTextResult jsonTypeFn
     |> registerScalarResult "JSON_KEYS" jsonResult jsonKeysFn
-    |> registerScalarResult "JSON_SEARCH" jsonResult jsonSearchFn
+    |> registerScalarResult "JSON_SEARCH" jsonResult (minimumArity "JSON_SEARCH" 3 jsonSearchFn)
 
 let private registerSpatialBuiltins registry =
     registry
@@ -5902,9 +5913,9 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "SEC_TO_TIME" (exactArity "SEC_TO_TIME" 1 secToTimeFn)
     |> registerScalar "MAKETIME" makeTimeFn
     |> registerScalar "TIME_FORMAT" timeFormatFn
-    |> registerScalar "GET_FORMAT" getFormatFn
-    |> registerScalar "PERIOD_ADD" periodAddFn
-    |> registerScalar "PERIOD_DIFF" periodDiffFn
+    |> registerScalar "GET_FORMAT" (exactArity "GET_FORMAT" 2 getFormatFn)
+    |> registerScalar "PERIOD_ADD" (exactArity "PERIOD_ADD" 2 periodAddFn)
+    |> registerScalar "PERIOD_DIFF" (exactArity "PERIOD_DIFF" 2 periodDiffFn)
     |> registerScalar "FROM_DAYS" fromDaysFn
     |> registerScalar "TO_DAYS" toDaysFn
     |> registerScalar "UNIX_TIMESTAMP" (unixTimestampFn SystemTimeZone)
@@ -5967,9 +5978,9 @@ let private registerStringBuiltins registry =
     |> registerByteStringScalar "COMPRESS" firstArgument binaryResult compressFn
     |> registerStringScalar "UNCOMPRESS" firstArgument binaryResult uncompressFn
     |> registerByteTextScalar "UNCOMPRESSED_LENGTH" firstArgument uncompressedLengthFn
-    |> registerScalarResult "RANDOM_BYTES" binaryResult randomBytesFn
-    |> registerScalar "UUID_SHORT" uuidShortFn
-    |> registerScalarResult "NAME_CONST" (InheritArgument 1) nameConstFn
+    |> registerScalarResult "RANDOM_BYTES" binaryResult (exactArity "RANDOM_BYTES" 1 randomBytesFn)
+    |> registerScalar "UUID_SHORT" (exactArity "UUID_SHORT" 0 uuidShortFn)
+    |> registerScalarResult "NAME_CONST" (InheritArgument 1) (exactArity "NAME_CONST" 2 nameConstFn)
     |> registerScalar "REGEXP_LIKE" (requiredRegexpFunction "REGEXP_LIKE")
     |> registerScalarResult "REGEXP_REPLACE" (InheritArgument 0) (requiredRegexpFunction "REGEXP_REPLACE")
     |> registerScalarResult "REGEXP_SUBSTR" (InheritArgument 0) (requiredRegexpFunction "REGEXP_SUBSTR")
@@ -5992,7 +6003,7 @@ let private registerNumericBuiltins registry =
     |> registerScalar "SIN" (unaryMath "sin" Math.Sin)
     |> registerScalar "COS" (unaryMath "cos" Math.Cos)
     |> registerScalar "TAN" (unaryMath "tan" Math.Tan)
-    |> registerScalar "COT" cotFn
+    |> registerScalar "COT" (exactArity "COT" 1 cotFn)
     |> registerScalar "ASIN" (unaryMath "asin" Math.Asin)
     |> registerScalar "ACOS" (unaryMath "acos" Math.Acos)
     |> registerScalar "ATAN" atanFn
@@ -6001,7 +6012,7 @@ let private registerNumericBuiltins registry =
     |> registerScalar "RADIANS" (unaryMath "radians" (fun value -> value * Math.PI / 180.0))
     |> registerScalar "SIGN" signFn
     |> registerScalar "TRUNCATE" truncateFn
-    |> registerScalar "RAND" randFn
+    |> registerScalar "RAND" (arityRange "RAND" 0 1 randFn)
     |> registerScalarResult "GREATEST" (CombineArguments everyArgument) greatestFn
     |> registerScalarResult "LEAST" (CombineArguments everyArgument) leastFn
     |> registerScalarResult "NULLIF" (InheritArgument 0) nullIfFn
@@ -6018,18 +6029,18 @@ let private registerNumericBuiltins registry =
     |> registerScalar "BITWISE_SHIFT_RIGHT" (bitwiseShift (fun value count -> value >>> count))
     |> registerScalar "OCT" octFn
     |> registerByteTextScalar "CRC32" firstArgument crc32Fn
-    |> registerScalar "UUID" uuidFn
-    |> registerScalarResult "UUID_TO_BIN" binaryResult uuidToBinFn
-    |> registerScalar "BIN_TO_UUID" binToUuidFn
-    |> registerScalar "IS_UUID" isUuidFn
-    |> registerScalar "INET_ATON" inetAtonFn
-    |> registerScalar "INET_NTOA" inetNtoaFn
-    |> registerScalarResult "INET6_ATON" binaryResult inet6AtonFn
-    |> registerScalar "INET6_NTOA" inet6NtoaFn
-    |> registerScalar "IS_IPV4" isIpv4Fn
-    |> registerScalar "IS_IPV6" isIpv6Fn
-    |> registerScalar "IS_IPV4_COMPAT" isIpv4CompatFn
-    |> registerScalar "IS_IPV4_MAPPED" isIpv4MappedFn
+    |> registerScalar "UUID" (exactArity "UUID" 0 uuidFn)
+    |> registerScalarResult "UUID_TO_BIN" binaryResult (arityRange "UUID_TO_BIN" 1 2 uuidToBinFn)
+    |> registerScalar "BIN_TO_UUID" (arityRange "BIN_TO_UUID" 1 2 binToUuidFn)
+    |> registerScalar "IS_UUID" (exactArity "IS_UUID" 1 isUuidFn)
+    |> registerScalar "INET_ATON" (exactArity "INET_ATON" 1 inetAtonFn)
+    |> registerScalar "INET_NTOA" (exactArity "INET_NTOA" 1 inetNtoaFn)
+    |> registerScalarResult "INET6_ATON" binaryResult (exactArity "INET6_ATON" 1 inet6AtonFn)
+    |> registerScalar "INET6_NTOA" (exactArity "INET6_NTOA" 1 inet6NtoaFn)
+    |> registerScalar "IS_IPV4" (exactArity "IS_IPV4" 1 isIpv4Fn)
+    |> registerScalar "IS_IPV6" (exactArity "IS_IPV6" 1 isIpv6Fn)
+    |> registerScalar "IS_IPV4_COMPAT" (exactArity "IS_IPV4_COMPAT" 1 isIpv4CompatFn)
+    |> registerScalar "IS_IPV4_MAPPED" (exactArity "IS_IPV4_MAPPED" 1 isIpv4MappedFn)
 
 let private registerVectorBuiltins registry =
     registry
