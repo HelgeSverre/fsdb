@@ -4520,7 +4520,7 @@ let private acceptsExactSingleColumnProbe (store: Store) (table: Table) (literal
     |> Option.bind (fun columnIndex -> exactProbeValue store table columnIndex literal)
     |> Option.isSome
 
-type private EqualityProbeValues =
+type private IndexProbeValues =
     | StoredValues
     | ProjectedValues
 
@@ -4601,7 +4601,7 @@ let private equalityLookupRowIds
     (store: Store)
     (table: Table)
     (index: EqualityIndex)
-    (probeValues: EqualityProbeValues)
+    (probeValues: IndexProbeValues)
     (values: Value list)
     : Set<RowId> option =
     let normalize columnType transform normalizeStored value =
@@ -4955,6 +4955,7 @@ let private trySecondaryOrderSliceInTable
     (table: Table)
     (columnName: string)
     (transform: IndexTransform option)
+    (probeValues: IndexProbeValues)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     (requireBound: bool)
@@ -4964,7 +4965,9 @@ let private trySecondaryOrderSliceInTable
         |> Result.toOption
         |> Option.bind (fun index ->
             let candidates =
-                (if requireBound then rangeKeyGroups table else orderedKeyGroups table)
+                (match probeValues, requireBound with
+                 | StoredValues, true -> rangeKeyGroups table
+                 | _ -> orderedKeyGroups table)
                 |> visibleGroups
                 |> List.choose trySingleColumnKeyGroup
                 |> List.filter (fun group ->
@@ -4979,12 +4982,24 @@ let private trySecondaryOrderSliceInTable
 
     orderedIndex
     |> Option.bind (fun (index, group) ->
+        let normalizeBoundValue value =
+            match probeValues with
+            | StoredValues ->
+                exactProbeValue store table index value
+                |> Option.map (projectIndexValue group.Group.Name None table.Columns.[index] group.PrefixLength group.Transform)
+            | ProjectedValues when group.PrefixLength.IsNone ->
+                FunctionalIndex.tryNormalizeProbe
+                    table.Columns.[index].Type
+                    group.Transform
+                    (exactProbeValue store table index)
+                    value
+            | ProjectedValues -> None
+
         let normalizeBound = function
             | None -> Some None
             | Some(VNull, _) -> None
             | Some(value, inclusive) ->
-                exactProbeValue store table index value
-                |> Option.map (projectIndexValue group.Group.Name None table.Columns.[index] group.PrefixLength group.Transform)
+                normalizeBoundValue value
                 |> Option.map (fun value -> Some(value, inclusive))
 
         match normalizeBound lower, normalizeBound upper with
@@ -5058,6 +5073,27 @@ type RangeLookup =
       RangeRowIds: Lazy<Set<RowId>>
       RangeRows: Lazy<(RowId * Value[]) list> }
 
+let private rangeLookup (table: Table) (slice: SecondaryOrderSlice) =
+    match slice.ColumnIndices, slice.PrefixLengths with
+    | [ columnIndex ], [ prefixLength ] ->
+        let count = max 0 (slice.AfterLast - slice.First)
+
+        let rowIds =
+            lazy
+                (Seq.init count (fun offset -> slice.Entries.[slice.First + offset].RowId)
+                 |> Set.ofSeq)
+
+        Some
+            { RangeIndexName = slice.IndexName
+              RangeColumnIndex = columnIndex
+              RangePrefixLength = prefixLength
+              RangeColumns = table.Columns
+              RangeRowCount = count
+              TableRowCount = table.RowsArray.Count
+              RangeRowIds = rowIds
+              RangeRows = lazy (rowsForRowIds table rowIds.Value) }
+    | _ -> None
+
 let internal trySecondaryRangeLookupInTable
     (store: Store)
     (table: Table)
@@ -5065,30 +5101,19 @@ let internal trySecondaryRangeLookupInTable
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     : RangeLookup option =
-    trySecondaryOrderSliceInTable store table columnName None lower upper true
-    |> Option.bind (fun slice ->
-        match slice.ColumnIndices, slice.PrefixLengths with
-        | [ columnIndex ], [ prefixLength ] ->
-            let count = max 0 (slice.AfterLast - slice.First)
+    trySecondaryOrderSliceInTable store table columnName None StoredValues lower upper true
+    |> Option.bind (rangeLookup table)
 
-            let rowIds =
-                lazy
-                    (Seq.init count (fun offset -> slice.Entries.[slice.First + offset].RowId)
-                     |> Set.ofSeq)
-
-            let rows =
-                lazy (rowsForRowIds table rowIds.Value)
-
-            Some
-                { RangeIndexName = slice.IndexName
-                  RangeColumnIndex = columnIndex
-                  RangePrefixLength = prefixLength
-                  RangeColumns = table.Columns
-                  RangeRowCount = count
-                  TableRowCount = table.RowsArray.Count
-                  RangeRowIds = rowIds
-                  RangeRows = rows }
-        | _ -> None)
+let internal tryProjectedSecondaryRangeLookupInTable
+    (store: Store)
+    (table: Table)
+    (columnName: string)
+    (transform: IndexTransform)
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
+    : RangeLookup option =
+    trySecondaryOrderSliceInTable store table columnName (Some transform) ProjectedValues lower upper true
+    |> Option.bind (rangeLookup table)
 
 let trySecondaryRangeLookup
     (store: Store)
@@ -5180,7 +5205,7 @@ let private tryOrderedLookup
     : (string * int * ColumnDef list * int * Value[] seq) option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
-        trySecondaryOrderSliceInTable store table columnName transform lower upper false
+        trySecondaryOrderSliceInTable store table columnName transform StoredValues lower upper false
         |> Option.bind (fun slice ->
             slice.ColumnIndices
             |> List.tryExactlyOne

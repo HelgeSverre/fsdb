@@ -646,6 +646,22 @@ type ServerBenchmarks() =
         )
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member this.CorrelatedFunctionalRange() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM users candidate "
+            + "WHERE ABS(candidate.sort_key) BETWEEN u.sort_key AND u.sort_key + 2) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member this.CorrelatedFunctionalRangeScan() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM users candidate "
+            + "WHERE ABS(candidate.sort_key + 0) BETWEEN u.sort_key AND u.sort_key + 2) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedBareOuterColumn() =
         this.Query(

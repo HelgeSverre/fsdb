@@ -369,8 +369,9 @@ different access pattern:
   `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, or numeric/text/binary `ABS` parts.
   Compatible unary parts can be composed, such as `UPPER(TRIM(name))` or
   `BIT_LENGTH(REVERSE(name))`. These keys participate in equality,
-  uniqueness, ordering, grouping, mutation, recovery, and correlated equality
-  probes. Correlated probes also pass through direct derived-table and CTE
+  uniqueness, ordering, grouping, mutation, recovery, and correlated probes.
+  Numeric-result keys also serve direct and correlated comparison ranges and
+  `BETWEEN`. Correlated probes pass through direct derived-table and CTE
   projections. Function aliases share a canonical physical identity, while an
   embedding override of any function in the chain keeps execution on the
   ordinary scan path.

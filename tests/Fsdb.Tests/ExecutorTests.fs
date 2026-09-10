@@ -7118,7 +7118,7 @@ let tests =
                             (Affected 3UL)
                             "DELETE evaluates the runtime override"
 
-                testCase "correlated functional equalities probe expression indexes"
+                testCase "functional equality and numeric range probes use expression indexes"
                 <| fun _ ->
                     let mutable calls = 0
 
@@ -7233,7 +7233,7 @@ let tests =
 
                     runDefault
                         store
-                        "CREATE TABLE indexed_lengths (id INT PRIMARY KEY, name VARCHAR(60), INDEX ix_length ((CHAR_LENGTH(name))))"
+                        "CREATE TABLE indexed_lengths (id INT PRIMARY KEY, name VARCHAR(60), INDEX ix_length ((CHAR_LENGTH(name))), INDEX ix_reverse_bits ((BIT_LENGTH(REVERSE(name)))))"
                     |> ignore
 
                     runDefault store "CREATE TABLE scanned_lengths (id INT PRIMARY KEY, name VARCHAR(60))" |> ignore
@@ -7244,6 +7244,44 @@ let tests =
 
                     runDefault store ("INSERT INTO indexed_lengths VALUES " + lengths) |> ignore
                     runDefault store ("INSERT INTO scanned_lengths VALUES " + lengths) |> ignore
+
+                    let directLengthRange table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT id FROM %s WHERE TOUCH(id) = id AND CHAR_LENGTH(name) BETWEEN 8 AND 10"
+                                    table)
+
+                        result, calls
+
+                    let indexedDirectRange, indexedDirectRangeCalls = directLengthRange "indexed_lengths"
+                    let scannedDirectRange, scannedDirectRangeCalls = directLengthRange "scanned_lengths"
+                    Expect.equal indexedDirectRange scannedDirectRange "the direct functional range agrees with a scan"
+                    Expect.equal
+                        indexedDirectRange
+                        (ResultSet([ "id" ], [ [ Some "8" ]; [ Some "9" ]; [ Some "10" ] ]))
+                        "the direct functional range includes both bounds"
+                    Expect.isLessThan indexedDirectRangeCalls 5 "the direct range evaluates only its candidates"
+                    Expect.isGreaterThan scannedDirectRangeCalls 45 "the direct control exercises the scan"
+
+                    let directRangePlan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed_lengths WHERE CHAR_LENGTH(name) BETWEEN 8 AND 10"
+                        |> explainRow
+
+                    Expect.equal directRangePlan.AccessType (Some "range") "the functional range reports range access"
+                    Expect.equal directRangePlan.Key (Some "ix_length") "the functional range reports its physical key"
+
+                    match
+                        runDefault
+                            store
+                            "SELECT COUNT(*) FROM indexed_lengths AS left_names JOIN scanned_lengths AS right_names ON left_names.id = right_names.id WHERE CHAR_LENGTH(name) BETWEEN 100 AND 110"
+                    with
+                    | Err(1052, _) -> ()
+                    | other -> failtestf "expected the unqualified functional column to remain ambiguous, got %A" other
 
                     let lengthPlan =
                         runDefault store "EXPLAIN SELECT id FROM indexed_lengths WHERE CHAR_LENGTH(name) = 9"
@@ -7278,6 +7316,110 @@ let tests =
                     let nullLength, nullLengthCalls = lengthQuery 4 "indexed_lengths"
                     Expect.equal nullLength (ResultSet([ "(...)" ], [ [ Some "0" ] ])) "NULL does not equal a functional key"
                     Expect.isLessThan nullLengthCalls 5 "a NULL functional probe does not fall back to a scan"
+
+                    let lengthRangeQuery table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 1"
+                                    table)
+
+                        result, calls
+
+                    let indexedLengthRange, indexedLengthRangeCalls = lengthRangeQuery "indexed_lengths"
+                    let scannedLengthRange, scannedLengthRangeCalls = lengthRangeQuery "scanned_lengths"
+                    Expect.equal indexedLengthRange scannedLengthRange "the functional range agrees with a scan"
+                    Expect.equal indexedLengthRange (ResultSet([ "(...)" ], [ [ Some "3" ] ])) "both inclusive bounds apply"
+                    Expect.isLessThan indexedLengthRangeCalls 10 "the ordered functional key bounds residual evaluation"
+                    Expect.isGreaterThan scannedLengthRangeCalls 45 "the range control exercises the scan"
+
+                    calls <- 0
+
+                    let reversedRange =
+                        run
+                            store
+                            registry
+                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND BIT_LENGTH(REVERSE(candidate.name)) BETWEEN BIT_LENGTH(REVERSE(r.name)) - 8 AND BIT_LENGTH(REVERSE(r.name)) + 8) FROM requested_names AS r WHERE r.id = 1"
+
+                    Expect.equal reversedRange indexedLengthRange "a composed numeric functional range keeps the same bounds"
+                    Expect.isLessThan calls 10 "the composed ordered key bounds residual evaluation"
+
+                    calls <- 0
+
+                    let reversedOperands =
+                        run
+                            store
+                            registry
+                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(r.name) - 1 <= CHAR_LENGTH(candidate.name) AND CHAR_LENGTH(r.name) + 1 > CHAR_LENGTH(candidate.name)) FROM requested_names AS r WHERE r.id = 1"
+
+                    Expect.equal reversedOperands (ResultSet([ "(...)" ], [ [ Some "2" ] ])) "reversed exclusive bounds are merged"
+                    Expect.isLessThan calls 10 "comparison orientation retains the functional range"
+
+                    calls <- 0
+
+                    let projectedRange =
+                        run
+                            store
+                            registry
+                            "SELECT (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_lengths) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.label) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 1"
+
+                    Expect.equal projectedRange indexedLengthRange "a projected alias preserves the functional range"
+                    Expect.isLessThan calls 10 "the projected range reaches the physical ordered key"
+
+                    let nullLengthRange, nullLengthRangeCalls =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 4"
+
+                        result, calls
+
+                    Expect.equal nullLengthRange (ResultSet([ "(...)" ], [ [ Some "0" ] ])) "NULL bounds match no functional keys"
+                    Expect.isLessThan nullLengthRangeCalls 5 "NULL bounds do not trigger a scan"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 100 AND CHAR_LENGTH(r.name) + 100) FROM requested_names AS r WHERE r.id = 1"
+                    with
+                    | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                    | other -> failtestf "expected the broad functional range, got %A" other
+
+                    Expect.isGreaterThan calls 45 "a broad range retains the cheaper scan"
+
+                    let overriddenLength =
+                        registry
+                        |> registerScalar "CHAR_LENGTH" (fun _ -> VInt 1L)
+
+                    calls <- 0
+
+                    let overriddenLengthIndexed =
+                        run
+                            store
+                            overriddenLength
+                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 1"
+
+                    let overriddenLengthCalls = calls
+                    calls <- 0
+
+                    let overriddenLengthScanned =
+                        run
+                            store
+                            overriddenLength
+                            "SELECT (SELECT COUNT(*) FROM scanned_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 1"
+
+                    Expect.equal overriddenLengthIndexed overriddenLengthScanned "an overridden range function bypasses its stored key"
+                    Expect.isGreaterThan overriddenLengthCalls 45 "the override retains ordinary row evaluation"
 
                     let overridden =
                         registry
@@ -7315,6 +7457,30 @@ let tests =
                     | other -> failtestf "expected the explicit accent-insensitive comparison, got %A" other
 
                     Expect.isGreaterThan calls 490 "a changed comparison collation bypasses the binary expression bucket"
+
+                    let updateLengths table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "UPDATE %s SET name = CONCAT(name, 'z') WHERE TOUCH(id) = id AND CHAR_LENGTH(name) BETWEEN 8 AND 10"
+                                    table)
+
+                        result, calls
+
+                    let indexedLengthUpdate, indexedLengthUpdateCalls = updateLengths "indexed_lengths"
+                    let scannedLengthUpdate, scannedLengthUpdateCalls = updateLengths "scanned_lengths"
+                    Expect.equal indexedLengthUpdate scannedLengthUpdate "functional range candidates drive UPDATE"
+                    Expect.equal indexedLengthUpdate (Affected 3UL) "the inclusive range updates each matching row"
+                    Expect.isLessThan indexedLengthUpdateCalls 10 "UPDATE evaluates only functional-range candidates"
+                    Expect.isGreaterThan scannedLengthUpdateCalls 45 "the UPDATE control exercises the scan"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM indexed_lengths WHERE CHAR_LENGTH(name) = 11 ORDER BY id")
+                        (runDefault store "SELECT id FROM scanned_lengths WHERE CHAR_LENGTH(name) = 11 ORDER BY id")
+                        "updated functional keys remain synchronized"
 
                 testCase "UPPER expression indexes enforce uniqueness and narrow predicates"
                 <| fun _ ->
