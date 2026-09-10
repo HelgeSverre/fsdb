@@ -110,6 +110,26 @@ let isBuiltin = function
     | Expression expression -> tryPhysicalExpression expression |> Option.isSome
     | transform -> tryBuiltinName transform |> Option.isSome
 
+let rec hasTextResult = function
+    | Lowercase
+    | Uppercase
+    | Trimmed
+    | Reversed -> true
+    | Expression expression ->
+        tryPhysicalExpression expression
+        |> Option.bind (_.Calls >> List.tryLast)
+        |> Option.exists (snd >> hasTextResult)
+    | CharacterLength
+    | ByteLength
+    | BitLength
+    | AbsoluteValue -> false
+
+let tryRebaseColumn column = function
+    | Expression expression ->
+        tryPhysicalExpression expression
+        |> Option.map (fun physical -> Expression(canonicalExpression column physical.Calls))
+    | transform -> Some transform
+
 let private isTextOrBinary =
     function
     | TChar _
@@ -287,7 +307,7 @@ let private tryExactUInt64 =
 
 let rec tryNormalizeProbe columnType transform normalizeStored value =
     match transform, value with
-    | Some AbsoluteValue, VNull -> Some VNull
+    | Some _, VNull -> Some VNull
     | Some AbsoluteValue, _ when isTextOrBinary columnType ->
         match value with
         | VString text -> text |> coerceLeadingDouble |> fst |> VDouble |> Some

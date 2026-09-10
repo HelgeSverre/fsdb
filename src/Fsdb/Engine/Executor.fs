@@ -10095,6 +10095,94 @@ and private tryCorrelatedEqualityLookup
                     Storage.tryEqualityLookup store tableDb tref.Table column value
                     |> Option.orElseWith (fun () -> transientLookup tableDb column value)))))
 
+and private tryCorrelatedFunctionalEqualityLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (sourceItem: FromItem)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * Value[] list) option =
+    let qualifier = fromItemQualifier sourceItem
+
+    let sourceRef =
+        { Database = None
+          Table = qualifier
+          Alias = None
+          Partitions = [] }
+
+    let bind source context inner bound =
+        Option.map2
+            (fun (column, transform) value -> column, transform, inner, bound, value)
+            (storedIndexedColumnFor registry sourceRef inner |> Option.filter (snd >> Option.isSome))
+            (tryCorrelatedOuterValue source context bound)
+
+    let predicate source context =
+        function
+        | BinOp(Eq, left, right) ->
+            bind source context left right
+            |> Option.orElseWith (fun () -> bind source context right left)
+        | _ -> None
+
+    tryPhysicalProjection store registry dbName sourceItem
+    |> Option.filter (fun projection -> storedRowsMatchReadRows store projection.PhysicalTable.Columns)
+    |> Option.bind (fun projection ->
+        outer
+        |> Option.bind (fun context ->
+            let source = correlatedProbeSource qualifier projection.OutputColumns
+
+            whereExpr
+            |> optionalConjuncts
+            |> List.choose (predicate source context)
+            |> List.tryPick (fun (columnName, transform, inner, bound, value) ->
+                match resolveColumn projection.OutputColumns columnName with
+                | Error _ -> None
+                | Ok outputIndex ->
+                    let outputColumn = projection.OutputColumns.[outputIndex]
+
+                    let compatibleCollation =
+                        match transform with
+                        | Some transform when FunctionalIndex.hasTextResult transform ->
+                            Option.map2
+                                (fun (stored: Collation.Collation) (effective: Collation.Collation) ->
+                                    stored.Name.Equals(effective.Name, System.StringComparison.OrdinalIgnoreCase))
+                                (collationOfColumn context outputColumn)
+                                (comparisonCollation
+                                    context
+                                    "="
+                                    inner
+                                    (Some outputColumn)
+                                    bound
+                                    (tryColumnDefForExpr context bound)
+                                 |> Result.toOption)
+                            |> Option.defaultValue false
+                        | _ -> true
+
+                    if not compatibleCollation then
+                        None
+                    else
+                        tryPhysicalProjectionColumn projection columnName
+                        |> Option.bind (fun physicalColumn ->
+                            transform
+                            |> Option.bind (FunctionalIndex.tryRebaseColumn physicalColumn.Name)
+                            |> Option.bind (fun physicalTransform ->
+                                Storage.tryEqualityIndexForTransform
+                                    projection.PhysicalTable
+                                    physicalColumn.Name
+                                    (Some physicalTransform)))
+                        |> Option.bind (fun index ->
+                            Storage.tryProjectedEqualityRowIdsForIndex
+                                store
+                                projection.PhysicalTable
+                                index
+                                [ value ])
+                        |> Option.bind (fun rowIds ->
+                            Storage.rowsForRowIds projection.PhysicalTable rowIds
+                            |> List.map snd
+                            |> projectPhysicalRows store registry dbName projection
+                            |> Result.toOption
+                            |> Option.map (fun rows -> projection.OutputColumns, rows)))))
+
 and private tryPhysicalProjection
     (store: Store)
     (registry: Registry)
@@ -10231,7 +10319,7 @@ and private tryPhysicalProjectionUncached
         | _ -> None
     | _ -> None
 
-and private tryPhysicalProjectionColumn (projection: PhysicalProjection) columnName =
+and private tryPhysicalProjectionColumn (projection: PhysicalProjection) columnName : ColumnDef option =
     resolveColumn projection.OutputColumns columnName
     |> Result.toOption
     |> Option.map (fun outputIndex ->
@@ -10503,13 +10591,21 @@ and private tryCorrelatedSourceLookup
     : (ColumnDef list * Value[] list) option =
     match source with
     | FromTable table ->
-        tryCorrelatedEqualityLookup store dbName table whereExpr outer
-        |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
+        [ tryCorrelatedEqualityLookup store dbName table whereExpr outer
+          |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
+          tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+        |> List.choose id
+        |> List.sortBy (snd >> List.length)
+        |> List.tryHead
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | FromSubquery _ ->
-        tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
+        [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
+          tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+        |> List.choose id
+        |> List.sortBy (snd >> List.length)
+        |> List.tryHead
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer

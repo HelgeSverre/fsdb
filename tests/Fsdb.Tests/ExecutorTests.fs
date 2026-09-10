@@ -7118,6 +7118,204 @@ let tests =
                             (Affected 3UL)
                             "DELETE evaluates the runtime override"
 
+                testCase "correlated functional equalities probe expression indexes"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed_names (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, INDEX ix_lower ((LOWER(name))), INDEX ix_normalized ((UPPER(TRIM(name)))))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned_names (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin)"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE requested_names (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin)"
+                    |> ignore
+
+                    let values =
+                        [ for id in 1 .. 500 ->
+                              let name =
+                                  match id with
+                                  | 497 -> "e"
+                                  | 498 -> "é"
+                                  | 499 -> "Reference"
+                                  | 500 -> "REFERENCE"
+                                  | _ -> sprintf "value-%03d" id
+
+                              sprintf "(%d, '%s')" id name ]
+                        |> String.concat ", "
+
+                    runDefault store ("INSERT INTO indexed_names VALUES " + values) |> ignore
+                    runDefault store ("INSERT INTO scanned_names VALUES " + values) |> ignore
+                    runDefault
+                        store
+                        "INSERT INTO requested_names VALUES (1, 'reference'), (2, 'missing'), (3, 'e'), (4, NULL)"
+                    |> ignore
+
+                    let query table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT r.id, (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) FROM requested_names AS r ORDER BY r.id"
+                                    table)
+
+                        result, calls
+
+                    let indexed, indexedCalls = query "indexed_names"
+                    let scanned, scannedCalls = query "scanned_names"
+
+                    Expect.equal indexed scanned "the functional lookup agrees with a correlated scan"
+                    Expect.equal
+                        indexed
+                        (ResultSet(
+                            [ "id"; "(...)" ],
+                            [ [ Some "1"; Some "2" ]
+                              [ Some "2"; Some "0" ]
+                              [ Some "3"; Some "1" ]
+                              [ Some "4"; Some "0" ] ]
+                        ))
+                        "correlated counts"
+                    Expect.isLessThan indexedCalls 10 "the expression bucket bounds residual evaluation"
+                    Expect.isGreaterThan scannedCalls 900 "the unindexed control exercises the scan"
+
+                    let composedQuery table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT r.id, (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND UPPER(TRIM(candidate.name)) = UPPER(TRIM(r.name))) FROM requested_names AS r ORDER BY r.id"
+                                    table)
+
+                        result, calls
+
+                    let composedIndexed, composedIndexedCalls = composedQuery "indexed_names"
+                    let composedScanned, _ = composedQuery "scanned_names"
+                    Expect.equal composedIndexed composedScanned "the composed functional lookup agrees with a scan"
+                    Expect.isLessThan composedIndexedCalls 10 "a composed expression bucket bounds residual evaluation"
+
+                    calls <- 0
+
+                    let derived =
+                        run
+                            store
+                            registry
+                            "SELECT r.id, (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_names) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.label) = LOWER(r.name)) FROM requested_names AS r ORDER BY r.id"
+
+                    Expect.equal derived indexed "a projected alias preserves correlated functional results"
+                    Expect.isLessThan calls 10 "the projected alias reaches the physical expression bucket"
+
+                    calls <- 0
+
+                    let cte =
+                        run
+                            store
+                            registry
+                            "WITH candidates(id, label) AS (SELECT id, name FROM indexed_names) SELECT r.id, (SELECT COUNT(*) FROM candidates AS candidate WHERE TOUCH(candidate.id) = candidate.id AND UPPER(TRIM(candidate.label)) = UPPER(TRIM(r.name))) FROM requested_names AS r ORDER BY r.id"
+
+                    Expect.equal cte indexed "a pass-through CTE preserves correlated functional results"
+                    Expect.isLessThan calls 10 "the CTE reaches the composed physical expression bucket"
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed_lengths (id INT PRIMARY KEY, name VARCHAR(60), INDEX ix_length ((CHAR_LENGTH(name))))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned_lengths (id INT PRIMARY KEY, name VARCHAR(60))" |> ignore
+
+                    let lengths =
+                        [ for length in 1 .. 50 -> sprintf "(%d, '%s')" length (String.replicate length "x") ]
+                        |> String.concat ", "
+
+                    runDefault store ("INSERT INTO indexed_lengths VALUES " + lengths) |> ignore
+                    runDefault store ("INSERT INTO scanned_lengths VALUES " + lengths) |> ignore
+
+                    let lengthPlan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed_lengths WHERE CHAR_LENGTH(name) = 9"
+                        |> explainRow
+
+                    Expect.equal lengthPlan.Key (Some "ix_length") "the numeric expression index is maintained"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM indexed_lengths WHERE CHAR_LENGTH(name) = 9")
+                        (ResultSet([ "id" ], [ [ Some "9" ] ]))
+                        "the numeric expression bucket returns its row"
+
+                    let lengthQuery requestedId table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) = CHAR_LENGTH(r.name)) FROM requested_names AS r WHERE r.id = %d"
+                                    table
+                                    requestedId)
+
+                        result, calls
+
+                    let indexedLength, indexedLengthCalls = lengthQuery 1 "indexed_lengths"
+                    let scannedLength, scannedLengthCalls = lengthQuery 1 "scanned_lengths"
+                    Expect.equal indexedLength scannedLength "the numeric functional result agrees with a scan"
+                    Expect.isLessThan indexedLengthCalls 5 "the length bucket bounds residual evaluation"
+                    Expect.isGreaterThan scannedLengthCalls 45 "the length control exercises the scan"
+
+                    let nullLength, nullLengthCalls = lengthQuery 4 "indexed_lengths"
+                    Expect.equal nullLength (ResultSet([ "(...)" ], [ [ Some "0" ] ])) "NULL does not equal a functional key"
+                    Expect.isLessThan nullLengthCalls 5 "a NULL functional probe does not fall back to a scan"
+
+                    let overridden =
+                        registry
+                        |> registerScalar "LOWER" (fun _ -> VString "same")
+
+                    calls <- 0
+
+                    let overriddenIndexed =
+                        run
+                            store
+                            overridden
+                            "SELECT r.id, (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) FROM requested_names AS r ORDER BY r.id"
+
+                    let overriddenCalls = calls
+                    calls <- 0
+
+                    let overriddenScanned =
+                        run
+                            store
+                            overridden
+                            "SELECT r.id, (SELECT COUNT(*) FROM scanned_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) FROM requested_names AS r ORDER BY r.id"
+
+                    Expect.equal overriddenIndexed overriddenScanned "an override bypasses the stored transform"
+                    Expect.isGreaterThan overriddenCalls 1400 "the overridden function retains correlated row evaluation"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name) COLLATE utf8mb4_0900_ai_ci) FROM requested_names AS r WHERE r.id = 3"
+                    with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected the explicit accent-insensitive comparison, got %A" other
+
+                    Expect.isGreaterThan calls 490 "a changed comparison collation bypasses the binary expression bucket"
+
                 testCase "UPPER expression indexes enforce uniqueness and narrow predicates"
                 <| fun _ ->
                     let store = newStore ()

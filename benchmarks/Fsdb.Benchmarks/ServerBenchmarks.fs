@@ -630,6 +630,22 @@ type ServerBenchmarks() =
         this.Query "SELECT u.id, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id + 0) FROM users u WHERE u.id <= 100"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member this.CorrelatedFunctionalEquality() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM functional_users f "
+            + "WHERE UPPER(TRIM(f.name)) = UPPER(TRIM(u.name))) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member this.CorrelatedFunctionalScan() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM functional_users f "
+            + "WHERE CONCAT(UPPER(TRIM(f.name)), '') = UPPER(TRIM(u.name))) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedBareOuterColumn() =
         this.Query(
