@@ -915,7 +915,7 @@ Choose the smallest recipe that answers the question:
 just bench               # full latency suite
 just bench-features      # selected SQL-feature latency subset
 just bench-quick         # ShortRun job for fast local iteration
-just bench-durable       # fsdb WAL vs MySQL fsync/no-fsync
+just bench-durable       # tagged writes: fsdb WAL vs MySQL fsync/no-fsync
 just bench-scale         # larger seeded data set
 just bench-load          # concurrent writer throughput
 just bench-load-scale    # throughput across worker counts

@@ -277,12 +277,12 @@ bench-features:
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-features.md"
 
-# Durability-matched latency: fsdb in-memory and --data-dir (WAL) vs MySQL
-# durable and no-fsync. Reclassifies the "fsdb beats MySQL on writes" number
-# by matching what each engine actually pays for.
+# Durability-matched write latency: fsdb in-memory and --data-dir (WAL) vs
+# MySQL durable and no-fsync. Restricting this to Durability-tagged writes
+# avoids repeating read-only feature cases whose storage mode cannot differ.
 [group('bench')]
 bench-durable:
-    @just _bench-durable-run
+    @FSDB_BENCH_CATEGORIES=Durability just _bench-durable-run
     @mkdir -p benchmarks/results
     @just _bench-header "fsdb in-memory/WAL; MySQL durable/no-fsync" > "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"

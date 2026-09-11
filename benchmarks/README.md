@@ -35,7 +35,7 @@ just bench-features      # selected SQL features, results -> results/<git-sha>-f
 just bench-quick         # ShortRun validation, results -> results/<git-sha>-quick.md
 just bench-load          # 8-worker throughput, results -> results/<git-sha>-load.md
 just bench-load-scale    # throughput at 1/2/4/8/16 workers
-just bench-durable       # four-target durability-matched latency
+just bench-durable       # four-target durability-matched write latency
 just bench-scale         # scale-sensitive cases at 100k/500k rows
 just bench-comprehensive # latency, durability, data scale, and worker scale
 ```
@@ -94,7 +94,8 @@ per-operation measurements.
 ### Durability
 
 The default suite measures in-memory fsdb without a WAL or `fsync`.
-`bench-durable` adds two matched comparisons:
+`bench-durable` runs the `Durability`-tagged write bursts with two matched
+comparisons:
 
 - WAL-backed fsdb against durable MySQL;
 - in-memory fsdb against MySQL configured without commit-time `fsync`.
