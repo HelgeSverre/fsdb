@@ -585,6 +585,11 @@ The remaining campaign is planner constant factors. Indexed joins,
 equality/`IN`, and secondary ranges retain measurable fixed overhead compared
 with MySQL.
 
+Unless an artifact header says otherwise, the linked planner profiles compare
+native in-memory fsdb with native durable MySQL. They expose query-shape and
+scaling differences, not deployment-equivalent write cost. Durable write claims
+require the matched WAL/durable pair produced by `just bench-durable`.
+
 The [composite-prefix profile](benchmarks/results/582cff7-quick.md) compares a
 maintained left-prefix lookup with an expression-forced scan on the same data.
 It confirms that the bounded access path removes the scan cliff while also

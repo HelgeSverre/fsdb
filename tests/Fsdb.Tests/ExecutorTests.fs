@@ -10570,11 +10570,11 @@ let tests =
                     | Error _ -> ()
                     | Ok stmt -> failtestf "expected an alias-less JSON_TABLE to fail parsing, got %A" stmt
 
-                testCase "a correlated source built by CONCAT expands like MySQL (torture probe shape)"
+                testCase "a correlated CONCAT document expands once per left row"
                 <| fun _ ->
-                    // Mirrors the `json_table_lateral` torture probe
-                    // (Harness.fs `ScenarioProbes`), oracle-verified: CONCAT
-                    // over two INT columns forms the document per left row.
+                    // CONCAT over two INT columns forms one JSON document per
+                    // left row; lateral expansion must not reuse another row's
+                    // document.
                     let store = newStore ()
                     runDefault store "CREATE TABLE s (id INT, a INT, b INT)" |> ignore
                     runDefault store "INSERT INTO s VALUES (1, -5, 200), (2, 7, 9)" |> ignore

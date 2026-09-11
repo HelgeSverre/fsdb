@@ -906,9 +906,9 @@ type ServerBenchmarks() =
 
     // -----------------------------------------------------------------------
     // Auth / accounts / information_schema — the GUI-client and user-system
-    // surfaces. Each has a real per-statement or per-connection cost now
-    // (privilege checks read mysql.* rows, the handshake verifies
-    // credentials), so they're measured against MySQL like everything else.
+    // surfaces. Privilege checks read mysql.* rows and the handshake verifies
+    // credentials, so these cases include real per-statement or per-connection
+    // work on both engines.
     // -----------------------------------------------------------------------
 
     [<Benchmark>]

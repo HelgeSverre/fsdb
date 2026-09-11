@@ -24,9 +24,15 @@ must not be added to the root solution, root task runner, or ordinary CI until
 the harness deliberately chooses a stable subset to promote.
 
 The harness is bespoke F# for fsdb. SQL Splitter supplies deterministic MySQL
-DDL and data; it does not decide whether fsdb is correct. MySQL 8.4 is the
-semantic reference, while fsdb's parser, commit stream, and in-memory catalog
-provide subject-side evidence that an external black-box runner could not.
+DDL and data; it does not decide whether fsdb is correct. The digest-pinned
+MySQL 8.4 image is the semantic reference, while fsdb's parser, commit stream,
+and in-memory catalog provide subject-side evidence that an external black-box
+runner could not.
+
+Run intentional version matrices as separate, pinned Docker campaigns and
+record the image with their evidence. A different MySQL release may reveal a
+version boundary, but it does not silently replace the 8.4 oracle. The harness
+is for compatibility and failure classification, not performance comparison.
 
 The goal is not merely to make fsdb return an error under load. A useful run
 must answer:

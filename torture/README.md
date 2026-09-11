@@ -43,6 +43,12 @@ they are understood and minimized.
 | Durability checks | A child fsdb process is killed during commits and checkpoint rotation, then verified through WAL-tail and snapshot recovery. |
 | Evidence | Replayable artifacts stay under the ignored `artifacts/` directory. Known gaps are added only by manual review. |
 
+The checked-in runner remains locked to its pinned 8.4 oracle. Use separate,
+pinned Docker campaigns for deliberate cross-version probes, and record each
+image with its evidence rather than silently changing the baseline. These lanes
+test compatibility, not performance; use the native benchmark harness for
+timings.
+
 ## Quick start
 
 The command selects one independent lane:

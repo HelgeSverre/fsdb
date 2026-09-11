@@ -909,7 +909,15 @@ whose bytes differ but extracted identity is the same.
 
 `benchmarks/Fsdb.Benchmarks` runs fsdb head-to-head against native MySQL 8.4
 through BenchmarkDotNet. Each pair uses the same schema, seeded data, and SQL.
-Choose the smallest recipe that answers the question:
+Native, same-host processes are preferred so container networking and storage
+do not distort the comparison. If Docker is required, put both engines in
+equivalently constrained containers.
+
+Storage semantics matter for writes. The default recipes use in-memory fsdb
+against durable MySQL, which is useful for finding engine hotspots but is not a
+durability-matched comparison. Use `just bench-durable` for WAL-backed fsdb
+against durable MySQL, or for the explicitly non-durable in-memory/no-fsync
+pair. Choose the smallest recipe that answers the question:
 
 ```sh
 just bench               # full latency suite
@@ -929,7 +937,8 @@ does not use Homebrew services. Result artifacts are written under
 fsdb optimizes for readable, idiomatic F# over raw speed, so MySQL is expected
 to win many workloads. The measurements identify scaling slopes and engine
 hotspots rather than serving as a parity target. See the
-[benchmark guide](benchmarks/README.md) for isolation and interpretation rules.
+[benchmark guide](benchmarks/README.md) for durability, isolation, and
+interpretation rules.
 
 ## Development
 

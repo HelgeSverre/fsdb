@@ -26,9 +26,8 @@ let isDurableRun () =
 let tempDataDir () =
     Path.Combine(Path.GetTempPath(), "fsdb-bench-" + Guid.NewGuid().ToString("N"))
 
-/// Kills anything already bound to `port` — defensive cleanup in case a
-/// previous case's cleanup didn't run (the host was killed mid-benchmark)
-/// and an orphan fsdb still holds the port.
+/// Kills anything already bound to `port`; a benchmark host killed during a
+/// case cannot run its cleanup and may leave an orphan fsdb listener.
 let killPort (port: int) =
     use killer = Process.Start("/bin/sh", $"-c \"lsof -ti tcp:{port} | xargs -r kill -9\"")
     killer.WaitForExit(5000) |> ignore

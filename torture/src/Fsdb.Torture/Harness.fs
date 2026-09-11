@@ -985,10 +985,9 @@ module ScenarioProbes =
                "SELECT COUNT(*) AS row_count, MIN(id) AS min_id, MAX(id) AS max_id FROM scalar_matrix"
                "scalar_values",
                "SELECT id, exact_value, approximate_value, optional_text, defaulted_text FROM scalar_matrix ORDER BY id LIMIT 16"
-               // JSON_TABLE's supported subset (correlated/lateral comma-join,
-               // FOR ORDINALITY, INT-path coercion): the document is built by
-               // CONCAT per left row so the expansion is deterministic and
-               // non-empty regardless of what the json_value generator emits.
+               // The document is built by CONCAT per left row so the lateral
+               // expansion is deterministic and non-empty regardless of what
+               // the json_value generator emits.
                "json_table_lateral",
                "SELECT s.id, jt.ord, jt.n FROM scalar_matrix AS s, JSON_TABLE(CONCAT('[', s.signed_tiny, ',', s.unsigned_tiny, ']'), '$[*]' COLUMNS (ord FOR ORDINALITY, n INT PATH '$')) AS jt ORDER BY s.id, jt.ord LIMIT 16"
                // Inner-drop semantics over real generated JSON documents: a
@@ -1157,23 +1156,22 @@ module ScenarioProbes =
                "json_cross_type_ordering",
                """SELECT CAST('1' AS JSON) < CAST('"a"' AS JSON) AS int_lt_string, CAST('true' AS JSON) > CAST('1' AS JSON) AS bool_gt_int, CAST('null' AS JSON) < CAST('1' AS JSON) AS json_null_lt_int, JSON_TYPE(CAST('1' AS JSON)) AS int_type, JSON_TYPE(CAST('1.5' AS JSON)) AS decimal_type"""
 
-               // JSON_TABLE beyond the currently supported subset: typed paths,
-               // NESTED PATH, EXISTS PATH, and ON EMPTY / ON ERROR defaults.
+               // Typed paths, NESTED PATH, EXISTS PATH, and ON EMPTY / ON
+               // ERROR defaults exercise independent JSON_TABLE branches.
                "json_table_typed_path_columns",
                """SELECT jt.ord, jt.d, jt.s, jt.dt FROM JSON_TABLE(CAST('[{"d":"12.345","s":"hello","dt":"2020-03-04"},{"d":"-1.5","s":"unicode æøå","dt":"1999-12-31"}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, d DECIMAL(10,3) PATH '$.d', s VARCHAR(32) PATH '$.s', dt DATE PATH '$.dt')) AS jt ORDER BY jt.ord"""
                "json_table_path_miss_yields_null",
                """SELECT jt.ord, jt.present, jt.absent FROM JSON_TABLE(CAST('[{"a":1},{"b":2}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, present INT PATH '$.a', absent INT PATH '$.zzz')) AS jt ORDER BY jt.ord"""
-               "json_table_nested_path_unsupported",
+               "json_table_nested_path",
                """SELECT jt.a, jt.k FROM JSON_TABLE(CAST('[{"a":1,"kids":[10,11]},{"a":2,"kids":[]}]' AS JSON), '$[*]' COLUMNS (a INT PATH '$.a', NESTED PATH '$.kids[*]' COLUMNS (k INT PATH '$'))) AS jt ORDER BY jt.a, jt.k"""
-               "json_table_exists_path_unsupported",
+               "json_table_exists_path",
                """SELECT jt.ord, jt.has_a FROM JSON_TABLE(CAST('[{"a":1},{"b":2}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, has_a INT EXISTS PATH '$.a')) AS jt ORDER BY jt.ord"""
-               "json_table_default_on_empty_error_unsupported",
+               "json_table_default_on_empty_error",
                """SELECT jt.ord, jt.v FROM JSON_TABLE(CAST('[{"v":1},{"x":2},{"v":"nope"}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, v INT PATH '$.v' DEFAULT '7' ON EMPTY DEFAULT '9' ON ERROR)) AS jt ORDER BY jt.ord"""
 
-               // JSON aggregate builder fsdb has not implemented yet. (The
-               // MySQL 9 VECTOR builtins are deliberately absent: the 8.4
-               // oracle errors on them, so such a probe compares nothing.)
-               "json_arrayagg_ordered_subset_unsupported",
+               // MySQL 9 VECTOR builtins are deliberately absent because the
+               // 8.4 oracle rejects them, leaving no comparable result.
+               "json_arrayagg_ordered_subset",
                "SELECT JSON_LENGTH(JSON_ARRAYAGG(v)) AS agg_length, CAST(JSON_ARRAYAGG(v) AS CHAR) AS agg_text FROM (SELECT signed_tiny AS v FROM scalar_matrix ORDER BY id LIMIT 3) AS src"
 
                // Common table expressions, including chained and recursive forms.
@@ -1330,7 +1328,7 @@ module ScenarioProbes =
                "SELECT slug, CAST(JSON_KEYS(settings) AS CHAR) AS keys_text, settings->>'$.name' AS name_text, JSON_LENGTH(settings) AS member_count FROM tenants WHERE JSON_TYPE(settings) = 'OBJECT' ORDER BY slug LIMIT 10"
                "project_metadata_json_table_expansion",
                "SELECT p.id, jt.ord, jt.v FROM projects AS p, JSON_TABLE(p.metadata, '$[*]' COLUMNS (ord FOR ORDINALITY, v VARCHAR(255) PATH '$')) AS jt ORDER BY p.id, jt.ord LIMIT 20"
-               "tenant_settings_objectagg_unsupported",
+               "tenant_settings_objectagg",
                "SELECT CAST(JSON_OBJECTAGG(slug, JSON_TYPE(settings)) AS CHAR) AS agg_text FROM (SELECT slug, settings FROM tenants ORDER BY slug LIMIT 3) AS src"
 
                // LATERAL derived tables, WITH ROLLUP plus GROUPING(), and a CTE
@@ -1421,7 +1419,7 @@ module ScenarioProbes =
                "SELECT id, CAST(JSON_SET(attributes, '$.sku', sku, '$.price', unit_price) AS CHAR) AS enriched FROM products ORDER BY id LIMIT 8"
                "order_item_metadata_wildcard_counts",
                "SELECT COUNT(*) AS rows_with_metadata, SUM(JSON_LENGTH(JSON_EXTRACT(metadata, '$.*'))) AS object_member_count, SUM(JSON_LENGTH(JSON_EXTRACT(metadata, '$[*]'))) AS array_element_count FROM order_items WHERE metadata IS NOT NULL"
-               "customer_profile_arrayagg_unsupported",
+               "customer_profile_arrayagg",
                "SELECT CAST(JSON_ARRAYAGG(JSON_OBJECT('id', id, 'email', email)) AS CHAR) AS agg_text FROM (SELECT id, email FROM customers ORDER BY id LIMIT 3) AS src"
 
                // Recursive CTE over the payments tree, decimal running-total frames,

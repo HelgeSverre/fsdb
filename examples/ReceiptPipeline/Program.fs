@@ -130,11 +130,10 @@ let ocr (ctx: QueryContext) (args: Value list) : Value =
     | _ -> raise (SqlError(1582, "ocr expects (pdf_blob)"))
 
 // ---------------------------------------------------------------------------
-// llm_schema(alias, text, json_schema) — structured extraction, hardened the
-// way ~/code/invo does it: schema-per-call response_format, nonce-fenced
-// untrusted document text, visible truncation marker, and retry
-// classification (permanent 4xx fail now; 429/5xx/timeout back off, honoring
-// the query's cancellation token).
+// llm_schema(alias, text, json_schema) — structured extraction with a
+// schema-per-call response format, nonce-fenced untrusted document text,
+// visible truncation, and bounded retries. Permanent 4xx responses fail
+// immediately; 429, 5xx, and timeouts back off while honoring cancellation.
 // ---------------------------------------------------------------------------
 
 /// Untrusted document text goes between nonce fences the model is told to
@@ -176,8 +175,8 @@ let private postOnce (ctx: QueryContext) (m: Model) (body: JsonObject) : Result<
         else raise (SqlError(1296, sprintf "Got permanent error %d '%s' from %s" (int resp.StatusCode) text m.Endpoint))
     with
     | :? SqlError -> reraise ()
-    // A killed client must unwind now; an HttpClient timeout with the query
-    // still alive is just a transient failure.
+    // A killed client must unwind immediately; an HttpClient timeout while the
+    // query remains live is a transient failure.
     | :? OperationCanceledException when ctx.Cancellation.IsCancellationRequested -> reraise ()
     | :? OperationCanceledException -> Error(sprintf "request to %s timed out" m.Endpoint)
     | :? HttpRequestException as ex -> Error ex.Message

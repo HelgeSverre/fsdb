@@ -26,7 +26,8 @@ as a protocol quirk or MySQL behavior. At that point it documents intent.
 - External facts: MySQL protocol/semantics quirks, spec links, oracle-verified
   behaviors ("MySQL returns NULL here, not 0").
 - Consequence warnings ("reordering these writes desyncs sequence ids").
-- `ponytail:` debt markers (project convention: named ceiling + upgrade path).
+- `ponytail:` debt markers. State the current ceiling and the concrete condition
+  that should trigger removal or replacement; this is not a generic `TODO`.
 - `///` XML docs on public API — one line preferred (F# style guide).
 
 ### Delete
@@ -58,6 +59,10 @@ hedging, and "note that".
 A comment that needs three sentences usually contains one useful fact and two
 sentences of removable context.
 
+After a substantial feature or performance campaign, sweep the touched area.
+Delete resolved `ponytail:` markers, stale implementation claims, narration,
+and comments made redundant by clearer names or types.
+
 ## Markdown documents
 
 Do not use emojis, including check-mark and box symbols, as status markers.
@@ -65,3 +70,7 @@ Use words such as "Status: done" or task-list checkboxes (`[x]` and `[ ]`).
 
 The same DELETE rules apply to prose. Markdown documents do not need session
 narration or milestone names as explanations.
+
+Avoid exact counts that duplicate a visible list or generated inventory. They
+become stale without adding information. Keep exact values only when they are a
+contract, limit, reproducibility input, or measured result.

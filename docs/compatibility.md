@@ -55,6 +55,12 @@ Every divergence produces a replayable artifact. Exit code 0 means parity or
 only hand-reviewed known gaps; 2 means a new fsdb finding. Exact commands and
 artifact formats live in the [torture harness guide](../torture/README.md).
 
+The primary differential lane uses a digest-pinned MySQL 8.4 image. Docker is
+also preferred for deliberate cross-version probes: run each version as a
+separate pinned campaign and record it with the evidence. A newer or older
+server can identify a version boundary, but MySQL 8.4 remains fsdb's semantic
+baseline.
+
 The ordered DML battery covers every supported `REPLACE` source form in both
 client affected-row modes. It includes unchanged replacements, conflicts
 across unique keys, same-statement key reuse, defaults, source ordering,
@@ -103,16 +109,17 @@ the optimizer-only SELECT modifiers without changing query results.
 Private Laravel suites exercise migrations and application behavior without
 database-specific patches:
 
-| Application | Laravel major | Oracle result |
-|---|---|---|
-| App A | 11 | full parity |
-| App B | 11 | residual failures reproduce identically on real MySQL (app-side factory/collation bugs) |
-| App C | 10 | behavioral equivalence with real MySQL (identical failure set from an app-side factory bug) |
-| App D | 13 | residual failure is a sqlite-only PRAGMA introspection test that fails identically on real MySQL |
-| App E | 13 | full backend-facing suite; residual failures are app-side or real-MySQL-identical, with one documented order divergence on an unordered query |
+| Application | Oracle result |
+|---|---|
+| App A | full parity |
+| App B | residual failures reproduce identically on real MySQL (app-side factory/collation bugs) |
+| App C | behavioral equivalence with real MySQL (identical failure set from an app-side factory bug) |
+| App D | residual failure is a sqlite-only PRAGMA introspection test that fails identically on real MySQL |
+| App E | full backend-facing suite; residual failures are app-side or real-MySQL-identical, with one documented order divergence on an unordered query |
 
-The applications are private codebases, identified here only by framework
-version.
+The private codebases use stable labels here. Their framework versions and
+test inventories belong in captured campaign evidence rather than this
+maintained overview.
 
 The public [application smoke suite](../smoke/README.md) adds pinned Gitea,
 MediaWiki, Drupal, Nextcloud, Shopware, Ghost, Moodle, WordPress, Rails, and

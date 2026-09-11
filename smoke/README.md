@@ -8,6 +8,11 @@ The suite answers an application-level question: can an unchanged project
 install, migrate, and exercise its database-facing tests through the MySQL wire
 protocol? It does not replace the focused Expecto or differential suites.
 
+This is compatibility evidence, not a performance comparison. Docker provides
+an isolated, repeatable topology. Do not compare timings unless both database
+targets receive equivalent container resources, networking, and storage, and
+fsdb uses `--data-dir` when MySQL is durable.
+
 These applications add compatibility evidence that the Laravel application
 gauntlet does not provide:
 

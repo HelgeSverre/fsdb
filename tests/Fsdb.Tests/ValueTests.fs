@@ -1626,10 +1626,6 @@ let tests =
                 testCase "DIV by zero yields NULL, not an exception"
                 <| fun _ -> Expect.equal (intDiv (VInt 5L) (VInt 0L)) VNull "5 DIV 0" ]
 
-          // `Functions.fs` has no dedicated `FunctionsTests.fs` — its home
-          // in the `.fsproj`'s `<Compile>` list isn't this module's file to
-          // add (see `Fsdb.Tests.fsproj`), so the registry's builtins are
-          // exercised here instead, through `call` above.
           testList
               "Functions"
               [ testList

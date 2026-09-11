@@ -1,8 +1,14 @@
 # Benchmarks
 
-fsdb vs a native MySQL 8.4 on identical schema, seed data, and queries,
-via BenchmarkDotNet + MySqlConnector. The suite exists to find and track
-hotspots, not to chase parity — fsdb optimizes for readable F# first.
+fsdb vs MySQL 8.4 on identical schema, seed data, and queries, via
+BenchmarkDotNet and MySqlConnector. The suite exists to find and track hotspots,
+not to chase parity: fsdb optimizes for readable F# first.
+
+The supplied recipes run both engines natively on the same host. That is the
+preferred setup for performance work. If a campaign must use Docker, place both
+engines in equivalently constrained containers with comparable networking and
+storage. Comparing containerized MySQL with native fsdb, or the reverse, mixes
+engine behavior with the container boundary.
 
 ## Contents
 
@@ -56,6 +62,11 @@ Prerequisites and isolation rules:
 - Keep other heavy workloads off the machine. Two consecutive runs should
   agree on `PointSelectByPk` within roughly 20%; otherwise, discard the run.
 
+The ordinary recipes start fsdb without `--data-dir`, while MySQL retains its
+normal durability settings. That asymmetry is intentional for broad read and
+planner profiling, but its write results are not durable-performance evidence.
+Use `just bench-durable` for matched storage semantics.
+
 ### Focused runs
 
 The public recipes select broad categories. For implementation work, narrow a
@@ -93,7 +104,10 @@ per-operation measurements.
 
 ### Durability
 
-The default suite measures in-memory fsdb without a WAL or `fsync`.
+The default suite measures in-memory fsdb without a WAL or `fsync`, while its
+MySQL target remains durable. In-memory fsdb can therefore hide persistence
+cost and make write gaps appear smaller than they are in deployment.
+
 `bench-durable` runs the `Durability`-tagged write bursts with two matched
 comparisons:
 
@@ -101,9 +115,10 @@ comparisons:
 - in-memory fsdb against MySQL configured without commit-time `fsync`.
 
 WAL-backed fsdb uses a plain `fsync` per commit. `Persistence.attach` avoids
-.NET's `FileStream.Flush(true)`, which would issue macOS `F_FULLFSYNC`. A write
-result is meaningful only when both engines pay, or both skip, the same
-durability cost.
+.NET's `FileStream.Flush(true)`, which would issue macOS `F_FULLFSYNC`. Use the
+first pair for deployment-facing write claims. Use the second only to isolate
+non-durable engine work, and label it accordingly. A write result is meaningful
+only when both engines pay, or both skip, the same durability cost.
 
 ### Concurrent load
 
