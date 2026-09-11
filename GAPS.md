@@ -608,6 +608,12 @@ Direct physical sources and pass-through projections now probe the maintained
 bucket; collation-changing comparisons and embedding overrides retain ordinary
 row evaluation.
 
+The [numeric functional-range profile](benchmarks/results/04686720-quick.md)
+covers direct and correlated `ABS`/length-result bounds. The maintained ordered
+slice removes fsdb's repeated-scan cliff on that corpus. MySQL's functional-key
+spelling was slower than its forced-scan control in this short run, so the raw
+artifact is retained without treating it as a general engine ranking.
+
 The constant-expression lookup pair records the
 [scan baseline](benchmarks/results/baa1b51-quick.md) and the
 [indexed implementation](benchmarks/results/ede0c8e-quick.md). Safe numeric
