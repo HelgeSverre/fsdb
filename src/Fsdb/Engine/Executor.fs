@@ -7573,6 +7573,35 @@ and private filterSourceRows
     |> Result.mapError Err
     |> Result.map (fun filtered -> filtered :> Value[] seq)
 
+and private streamFilteredSourceRows
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (outer: EvalContext option)
+    (qualifier: string)
+    (columns: ColumnDef list)
+    (predicate: Expr)
+    (rows: Value[] seq)
+    : Value[] seq =
+    let context =
+        contextFactory
+            store
+            registry
+            dbName
+            (columnIndexOf columns)
+            (singleQualifier qualifier columns)
+            outer
+
+    let matches = prepareWhereMatches context (Some predicate)
+
+    seq {
+        for row in rows do
+            match matches row with
+            | Ok true -> yield row
+            | Ok false -> ()
+            | Error(code, message) -> raise (SqlError(code, message))
+    }
+
 and private narrowPhysicalSourceRows
     (store: Store)
     (registry: Registry)
@@ -9308,6 +9337,19 @@ and private runUnlockedSelectStmt
 
                     match basePredicate with
                     | None -> Ok(baseRows, narrowedSelect)
+                    | Some predicate when joinConsumption = MayStopEarly ->
+                        Ok(
+                            streamFilteredSourceRows
+                                store
+                                registry
+                                dbName
+                                outer
+                                baseQualifier
+                                baseColumns
+                                predicate
+                                baseRows,
+                            narrowedSelect
+                        )
                     | Some predicate ->
                         filterSourceRows store registry dbName outer baseQualifier baseColumns predicate baseRows
                         |> Result.map (fun rows -> rows, narrowedSelect)
