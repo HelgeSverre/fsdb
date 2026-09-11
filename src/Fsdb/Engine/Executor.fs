@@ -97,14 +97,8 @@ type private ViewCheckScope =
       CheckPredicate: Expr option
       VisibilityPredicate: Expr option }
 
-type private RangeLookupBounds =
-    { Column: string
-      Lower: (Value * bool) option
-      Upper: (Value * bool) option }
-
-type private FunctionalRangeLookupBounds =
-    { Column: string
-      Transform: IndexTransform
+type private RangeLookupBounds<'column> =
+    { Column: 'column
       Lower: (Value * bool) option
       Upper: (Value * bool) option }
 
@@ -9583,6 +9577,11 @@ and private storedIndexedColumnFor (registry: Registry) (tref: TableRef) express
     indexedColumnFor tref expression
     |> Option.filter (snd >> transformUsesStoredSemantics registry expression)
 
+and private storedFunctionalColumnFor registry tref expression =
+    storedIndexedColumnFor registry tref expression
+    |> Option.bind (fun (column, transform) ->
+        transform |> Option.map (fun transform -> column.ToLowerInvariant(), transform))
+
 and private inProbesWith indexedColumn valueFor (whereExpr: Expr option) : IndexInProbe list =
     let candidateTuple indexedExpressions candidate =
         match indexedExpressions, candidate with
@@ -9632,7 +9631,7 @@ and private plannerInProbes
 
     inProbesWith (storedIndexedColumnFor registry tref) plannerValue whereExpr
 
-and private tryComparisonRangePredicate columnName boundValue expression : RangeLookupBounds option =
+and private tryComparisonRangePredicate columnName boundValue expression =
     let lower name value inclusive =
         Some
             { Column = name
@@ -9667,7 +9666,7 @@ and private tryComparisonRangePredicate columnName boundValue expression : Range
             | _ -> None
     | _ -> None
 
-and private rangePredicatesFor columnName boundValue expression : RangeLookupBounds list =
+and private rangePredicatesFor columnName boundValue expression : RangeLookupBounds<_> list =
     match expression with
     | Between(indexed, lower, upper) ->
         match columnName indexed, boundValue lower, boundValue upper with
@@ -9718,8 +9717,8 @@ and private plannerRangePredicatesFor
         | [] -> rangePredicatesFor numericColumnName tryNumericConstant expression
         | predicates -> predicates
 
-and private collectClassifiedRangeBounds classify (whereExpr: Expr option) : RangeLookupBounds list =
-    let addBound (bounds: Map<string, RangeLookupBounds>) (predicate: RangeLookupBounds) =
+and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
+    let addBound bounds (predicate: RangeLookupBounds<_>) =
         let existing =
             Map.tryFind predicate.Column bounds
             |> Option.defaultValue
@@ -9751,56 +9750,11 @@ and private rangeLookupBounds
     (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
-    : RangeLookupBounds list =
+    : RangeLookupBounds<string> list =
     collectClassifiedRangeBounds (plannerRangePredicatesFor scope store registry table tref) whereExpr
 
 and private functionalRangeLookupBounds indexed boundValue (whereExpr: Expr option) =
-    let range column transform lower upper =
-        Some
-            { Column = column
-              Transform = transform
-              Lower = lower
-              Upper = upper }
-
-    let classify = function
-        | BinOp((Gt | Gte | Lt | Lte as op), left, right) ->
-            match indexed left, boundValue right with
-            | Some(column, transform), Some value ->
-                match op with
-                | Gt -> range column transform (Some(value, false)) None
-                | Gte -> range column transform (Some(value, true)) None
-                | Lt -> range column transform None (Some(value, false))
-                | Lte -> range column transform None (Some(value, true))
-                | _ -> None
-            | _ ->
-                match indexed right, boundValue left with
-                | Some(column, transform), Some value ->
-                    match op with
-                    | Lt -> range column transform (Some(value, false)) None
-                    | Lte -> range column transform (Some(value, true)) None
-                    | Gt -> range column transform None (Some(value, false))
-                    | Gte -> range column transform None (Some(value, true))
-                    | _ -> None
-                | _ -> None
-        | Between(expression, lower, upper) ->
-            match indexed expression, boundValue lower, boundValue upper with
-            | Some(column, transform), Some lower, Some upper ->
-                range column transform (Some(lower, true)) (Some(upper, true))
-            | _ -> None
-        | _ -> None
-
-    let merge (left: FunctionalRangeLookupBounds) (right: FunctionalRangeLookupBounds) =
-        { left with
-            Lower = left.Lower |> Option.orElse right.Lower
-            Upper = left.Upper |> Option.orElse right.Upper }
-
-    whereExpr
-    |> optionalConjuncts
-    |> List.choose classify
-    |> List.groupBy (fun bounds -> bounds.Column.ToLowerInvariant(), bounds.Transform)
-    |> List.choose (snd >> function
-        | first :: rest -> Some(List.fold merge first rest)
-        | [] -> None)
+    collectClassifiedRangeBounds (rangePredicatesFor indexed boundValue) whereExpr
 
 and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : SpatialLookupPredicate list =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -10037,6 +9991,12 @@ and private correlatedProbeSource qualifier (columns: ColumnDef list) =
     { Qualifier = qualifier
       ColumnNames = columns |> List.map (_.Name >> fun name -> name.ToLowerInvariant()) |> Set.ofList }
 
+and private correlatedSourceRef qualifier =
+    { Database = None
+      Table = qualifier
+      Alias = None
+      Partitions = [] }
+
 and private tryCorrelatedInnerColumn source = function
     | Col name when source.ColumnNames.Contains(name.ToLowerInvariant()) -> Some name
     | QualifiedCol(qualifier, name)
@@ -10124,8 +10084,7 @@ and private correlatedFunctionalRangeBounds
     (outer: EvalContext option)
     =
     let indexed expression =
-        storedIndexedColumnFor registry sourceRef expression
-        |> Option.bind (fun (column, transform) -> transform |> Option.map (fun transform -> column, transform))
+        storedFunctionalColumnFor registry sourceRef expression
         |> Option.filter (snd >> FunctionalIndex.hasTextResult >> not)
 
     outer
@@ -10175,17 +10134,12 @@ and private tryCorrelatedFunctionalEqualityLookup
     (outer: EvalContext option)
     : (ColumnDef list * Value[] list) option =
     let qualifier = fromItemQualifier sourceItem
-
-    let sourceRef =
-        { Database = None
-          Table = qualifier
-          Alias = None
-          Partitions = [] }
+    let sourceRef = correlatedSourceRef qualifier
 
     let bind source context inner bound =
         Option.map2
             (fun (column, transform) value -> column, transform, inner, bound, value)
-            (storedIndexedColumnFor registry sourceRef inner |> Option.filter (snd >> Option.isSome))
+            (storedFunctionalColumnFor registry sourceRef inner)
             (tryCorrelatedOuterValue source context bound)
 
     let predicate source context =
@@ -10212,8 +10166,7 @@ and private tryCorrelatedFunctionalEqualityLookup
                     let outputColumn = projection.OutputColumns.[outputIndex]
 
                     let compatibleCollation =
-                        match transform with
-                        | Some transform when FunctionalIndex.hasTextResult transform ->
+                        if FunctionalIndex.hasTextResult transform then
                             Option.map2
                                 (fun (stored: Collation.Collation) (effective: Collation.Collation) ->
                                     stored.Name.Equals(effective.Name, System.StringComparison.OrdinalIgnoreCase))
@@ -10227,20 +10180,18 @@ and private tryCorrelatedFunctionalEqualityLookup
                                     (tryColumnDefForExpr context bound)
                                  |> Result.toOption)
                             |> Option.defaultValue false
-                        | _ -> true
+                        else
+                            true
 
                     if not compatibleCollation then
                         None
                     else
-                        tryPhysicalProjectionColumn projection columnName
-                        |> Option.bind (fun physicalColumn ->
-                            transform
-                            |> Option.bind (FunctionalIndex.tryRebaseColumn physicalColumn.Name)
-                            |> Option.bind (fun physicalTransform ->
-                                Storage.tryEqualityIndexForTransform
-                                    projection.PhysicalTable
-                                    physicalColumn.Name
-                                    (Some physicalTransform)))
+                        tryPhysicalFunctionalColumn projection columnName transform
+                        |> Option.bind (fun (physicalColumn, physicalTransform) ->
+                            Storage.tryEqualityIndexForTransform
+                                projection.PhysicalTable
+                                physicalColumn.Name
+                                (Some physicalTransform))
                         |> Option.bind (fun index ->
                             Storage.tryProjectedEqualityRowIdsForIndex
                                 store
@@ -10263,12 +10214,11 @@ and private tryCorrelatedFunctionalRangeLookup
     (outer: EvalContext option)
     : (ColumnDef list * Value[] list) option =
     let qualifier = fromItemQualifier sourceItem
+    let sourceRef = correlatedSourceRef qualifier
 
-    let sourceRef =
-        { Database = None
-          Table = qualifier
-          Alias = None
-          Partitions = [] }
+    let nullBound = function
+        | Some(VNull, _) -> true
+        | _ -> false
 
     tryPhysicalProjection store registry dbName sourceItem
     |> Option.filter (fun projection -> storedRowsMatchReadRows store projection.PhysicalTable.Columns)
@@ -10280,24 +10230,20 @@ and private tryCorrelatedFunctionalRangeLookup
             whereExpr
             outer
         |> List.tryPick (fun bounds ->
-            let nullBound = function
-                | Some(VNull, _) -> true
-                | _ -> false
-
             if nullBound bounds.Lower || nullBound bounds.Upper then
                 Some(projection.OutputColumns, [])
             else
-                tryPhysicalProjectionColumn projection bounds.Column
-                |> Option.bind (fun physicalColumn ->
-                    FunctionalIndex.tryRebaseColumn physicalColumn.Name bounds.Transform
-                    |> Option.bind (fun transform ->
-                        Storage.tryProjectedSecondaryRangeLookupInTable
-                            store
-                            projection.PhysicalTable
-                            physicalColumn.Name
-                            transform
-                            bounds.Lower
-                            bounds.Upper))
+                let columnName, transform = bounds.Column
+
+                tryPhysicalFunctionalColumn projection columnName transform
+                |> Option.bind (fun (physicalColumn, physicalTransform) ->
+                    Storage.tryProjectedSecondaryRangeLookupInTable
+                        store
+                        projection.PhysicalTable
+                        physicalColumn.Name
+                        physicalTransform
+                        bounds.Lower
+                        bounds.Upper)
                 |> Option.filter (fun lookup ->
                     QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
                 |> Option.bind (fun lookup ->
@@ -10446,6 +10392,16 @@ and private tryPhysicalProjectionColumn (projection: PhysicalProjection) columnN
         let physicalIndex = projection.PhysicalColumnIndices.[outputIndex]
         projection.PhysicalTable.Columns.[physicalIndex])
 
+and private tryPhysicalFunctionalColumn
+    (projection: PhysicalProjection)
+    columnName
+    transform
+    : (ColumnDef * IndexTransform) option =
+    tryPhysicalProjectionColumn projection columnName
+    |> Option.bind (fun physicalColumn ->
+        FunctionalIndex.tryRebaseColumn physicalColumn.Name transform
+        |> Option.map (fun physicalTransform -> physicalColumn, physicalTransform))
+
 and private projectPhysicalRows
     (store: Store)
     (registry: Registry)
@@ -10574,7 +10530,7 @@ and private tryProjectedPhysicalRangeRows
     registry
     dbName
     (projection: PhysicalProjection)
-    (bounds: RangeLookupBounds)
+    (bounds: RangeLookupBounds<string>)
     =
     tryPhysicalProjectionColumn projection bounds.Column
     |> Option.bind (fun sourceColumn ->
@@ -10709,14 +10665,19 @@ and private tryCorrelatedSourceLookup
     (whereExpr: Expr option)
     (outer: EvalContext option)
     : (ColumnDef list * Value[] list) option =
+    let fewestRows candidates =
+        candidates
+        |> List.choose id
+        |> function
+            | [] -> None
+            | candidates -> Some(List.minBy (snd >> List.length) candidates)
+
     match source with
     | FromTable table ->
         [ tryCorrelatedEqualityLookup store dbName table whereExpr outer
           |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
           tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
-        |> List.choose id
-        |> List.sortBy (snd >> List.length)
-        |> List.tryHead
+        |> fewestRows
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
@@ -10724,9 +10685,7 @@ and private tryCorrelatedSourceLookup
     | FromSubquery _ ->
         [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
           tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
-        |> List.choose id
-        |> List.sortBy (snd >> List.length)
-        |> List.tryHead
+        |> fewestRows
         |> Option.orElseWith (fun () -> tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
@@ -10842,10 +10801,11 @@ and private tryRangeAccessInTableWith
                     |> Option.bind _.Qualifier
                     |> Option.exists (fun candidate -> equalsIgnoreCase candidate qualifier)
 
-            storedIndexedColumnFor registry tref expression
-            |> Option.filter (fun _ -> inScope)
-            |> Option.bind (fun (column, transform) -> transform |> Option.map (fun transform -> column, transform))
-            |> Option.filter (snd >> FunctionalIndex.hasTextResult >> not)
+            if inScope then
+                storedFunctionalColumnFor registry tref expression
+                |> Option.filter (snd >> FunctionalIndex.hasTextResult >> not)
+            else
+                None
 
         let functionalRanges =
             functionalRangeLookupBounds
@@ -10853,18 +10813,21 @@ and private tryRangeAccessInTableWith
                 (numericPlannerConstantEvaluator store registry)
                 whereExpr
             |> List.choose (fun bounds ->
+                let column, transform = bounds.Column
+
                 Storage.tryProjectedSecondaryRangeLookupInTable
                     store
                     table
-                    bounds.Column
-                    bounds.Transform
+                    column
+                    transform
                     bounds.Lower
                     bounds.Upper)
 
         storedRanges @ functionalRanges
         |> List.filter eligible
-        |> List.sortBy _.RangeRowCount
-        |> List.tryHead
+        |> function
+            | [] -> None
+            | ranges -> Some(List.minBy _.RangeRowCount ranges)
 
 and private tryRangeAccessInTable scope store registry table tref whereExpr =
     tryRangeAccessInTableWith CostedRead scope store registry table tref whereExpr
