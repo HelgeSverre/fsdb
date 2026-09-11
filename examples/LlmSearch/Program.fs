@@ -142,8 +142,7 @@ let rec llmComplete (ctx: QueryContext) (args: Value list) : Value =
             VString(shape m (fun () -> resp.["choices"].[0].["message"].["content"].GetValue<string>()))
     | _ -> raise (SqlError(1582, "llm_complete expects (alias, prompt [, json_options])"))
 
-/// Prints a result set as aligned columns; fails loudly on errors so the
-/// demo can't silently show garbage.
+/// Prints a result set as aligned columns; SQL errors stop the demo.
 let rec private printResult =
     function
     | Executor.ResultSet(cols, rows) ->
@@ -153,7 +152,7 @@ let rec private printResult =
         printfn "%s" (line cols)
         for row in cells do printfn "%s" (line row)
     | Executor.Affected n -> printfn "OK, %d rows affected" n
-    | Executor.Err(code, msg) -> failwithf "query failed (%d): %s" code msg
+    | Executor.Err(code, msg) -> raise (SqlError(code, msg))
     | Executor.MultipleResults results -> results |> List.iter (fst >> printResult)
 
 let query (conn: Db.Connection) (sql: string) =
@@ -166,13 +165,12 @@ let query (conn: Db.Connection) (sql: string) =
 /// Err here would let the demo claim work it never did.
 let exec (conn: Db.Connection) (sql: string) =
     match conn.Query sql with
-    | Executor.Err(code, msg) -> failwithf "'%s' failed (%d): %s" sql code msg
+    | Executor.Err(code, msg) -> raise (SqlError(code, msg))
     | _ -> ()
 
 let escape (s: string) = s.Replace("'", "''")
 
-[<EntryPoint>]
-let main argv =
+let private run argv =
     dryRun <- Array.contains "--dry-run" argv
 
     // pgai-vectorizer pattern: the commit hook only *queues* (it runs sync
@@ -238,3 +236,19 @@ let main argv =
 
     query conn (sprintf "SELECT llm_complete('local-chat', 'One sentence: %s') AS answer" (escape question))
     0
+
+[<EntryPoint>]
+let main argv =
+    try
+        run argv
+    with
+    | SqlError(code, message) ->
+        eprintfn "LlmSearch: error %d: %s" code message
+
+        if code = 1296 then
+            eprintfn "Check that the model service is running and the models listed above are available."
+            eprintfn "For local Ollama, install missing models with 'ollama pull <model>'."
+            eprintfn "Override settings with LLMSEARCH_ENDPOINT, LLMSEARCH_EMBED_MODEL, or LLMSEARCH_CHAT_MODEL."
+            eprintfn "To run without a model service: just example --dry-run"
+
+        1
