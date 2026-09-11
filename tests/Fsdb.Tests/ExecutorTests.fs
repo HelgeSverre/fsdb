@@ -7118,7 +7118,7 @@ let tests =
                             (Affected 3UL)
                             "DELETE evaluates the runtime override"
 
-                testCase "functional equality and numeric range probes use expression indexes"
+                testCase "functional equality and range probes use expression indexes"
                 <| fun _ ->
                     let mutable calls = 0
 
@@ -7156,6 +7156,19 @@ let tests =
 
                     runDefault store ("INSERT INTO indexed_names VALUES " + values) |> ignore
                     runDefault store ("INSERT INTO scanned_names VALUES " + values) |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed_folded_names (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_0900_ai_ci, INDEX ix_lower ((LOWER(name))))"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE scanned_folded_names (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_0900_ai_ci)"
+                    |> ignore
+
+                    runDefault store ("INSERT INTO indexed_folded_names VALUES " + values) |> ignore
+                    runDefault store ("INSERT INTO scanned_folded_names VALUES " + values) |> ignore
                     runDefault
                         store
                         "INSERT INTO requested_names VALUES (1, 'reference'), (2, 'missing'), (3, 'e'), (4, NULL)"
@@ -7230,6 +7243,142 @@ let tests =
 
                     Expect.equal cte indexed "a pass-through CTE preserves correlated functional results"
                     Expect.isLessThan calls 10 "the CTE reaches the composed physical expression bucket"
+
+                    let directTextRange table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT id FROM %s WHERE TOUCH(id) = id AND LOWER(name) >= LOWER('REFERENCE') AND LOWER(name) < LOWER('REFERENCF')"
+                                    table)
+
+                        result, calls
+
+                    let indexedTextRange, indexedTextRangeCalls = directTextRange "indexed_names"
+                    let scannedTextRange, scannedTextRangeCalls = directTextRange "scanned_names"
+                    Expect.equal indexedTextRange scannedTextRange "the direct text functional range agrees with a scan"
+                    Expect.equal indexedTextRange (ResultSet([ "id" ], [ [ Some "499" ]; [ Some "500" ] ])) "text bounds include both spellings"
+                    Expect.isLessThan indexedTextRangeCalls 10 "the ordered text key bounds residual evaluation"
+                    Expect.isGreaterThan scannedTextRangeCalls 490 "the text range control exercises the scan"
+
+                    let foldedTextRange table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT id FROM %s WHERE TOUCH(id) = id AND LOWER(name) >= 'e' AND LOWER(name) < 'f'"
+                                    table)
+
+                        result, calls
+
+                    let indexedFoldedRange, indexedFoldedRangeCalls = foldedTextRange "indexed_folded_names"
+                    let scannedFoldedRange, scannedFoldedRangeCalls = foldedTextRange "scanned_folded_names"
+                    Expect.equal indexedFoldedRange scannedFoldedRange "the folded text range agrees with a scan"
+                    Expect.equal
+                        indexedFoldedRange
+                        (ResultSet([ "id" ], [ [ Some "497" ]; [ Some "498" ] ]))
+                        "the ordered key retains accent-equivalent values"
+                    let foldedPlan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed_folded_names WHERE LOWER(name) >= 'e' AND LOWER(name) < 'f'"
+                        |> explainRow
+
+                    Expect.equal foldedPlan.AccessType (Some "range") "the folded text expression reports range access"
+                    Expect.isLessThan indexedFoldedRangeCalls 10 "the folded text key bounds residual evaluation"
+                    Expect.isGreaterThan scannedFoldedRangeCalls 490 "the folded text control exercises the scan"
+
+                    calls <- 0
+
+                    let explicitBinaryRange =
+                        run
+                            store
+                            registry
+                            "SELECT id FROM indexed_names WHERE TOUCH(id) = id AND LOWER(name) >= 'e' COLLATE utf8mb4_bin AND LOWER(name) < 'f' COLLATE utf8mb4_bin"
+
+                    Expect.equal explicitBinaryRange (ResultSet([ "id" ], [ [ Some "497" ] ])) "a matching explicit collation can use the key"
+                    Expect.isLessThan calls 10 "the matching explicit collation preserves range access"
+
+                    let directTextRangePlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM indexed_names WHERE LOWER(name) >= LOWER('REFERENCE') AND LOWER(name) < LOWER('REFERENCF')"
+                        |> explainRow
+
+                    Expect.equal directTextRangePlan.AccessType (Some "range") "the text expression range reports range access"
+                    Expect.equal directTextRangePlan.Key (Some "ix_lower") "the text expression range reports its physical key"
+
+                    let correlatedTextRange table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) FROM requested_names AS r WHERE r.id = 1"
+                                    table)
+
+                        result, calls
+
+                    let indexedTextCorrelation, indexedTextCorrelationCalls = correlatedTextRange "indexed_names"
+                    let scannedTextCorrelation, scannedTextCorrelationCalls = correlatedTextRange "scanned_names"
+                    Expect.equal indexedTextCorrelation scannedTextCorrelation "the correlated text range agrees with a scan"
+                    Expect.equal indexedTextCorrelation (ResultSet([ "(...)" ], [ [ Some "2" ] ])) "correlated text bounds"
+                    Expect.isLessThan indexedTextCorrelationCalls 10 "the correlated text key bounds residual evaluation"
+                    Expect.isGreaterThan scannedTextCorrelationCalls 490 "the correlated text control exercises the scan"
+
+                    calls <- 0
+
+                    let projectedTextRange =
+                        run
+                            store
+                            registry
+                            "SELECT (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_names) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.label) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) FROM requested_names AS r WHERE r.id = 1"
+
+                    Expect.equal projectedTextRange indexedTextCorrelation "a projected alias preserves the text functional range"
+                    Expect.isLessThan calls 10 "the projected text range reaches the physical ordered key"
+
+                    calls <- 0
+
+                    let nullTextRange =
+                        run
+                            store
+                            registry
+                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) FROM requested_names AS r WHERE r.id = 4"
+
+                    Expect.equal nullTextRange (ResultSet([ "(...)" ], [ [ Some "0" ] ])) "NULL text bounds match no functional keys"
+                    Expect.isLessThan calls 5 "NULL text bounds do not trigger a scan"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT COUNT(*) FROM indexed_names WHERE TOUCH(id) = id AND LOWER(name) >= ''"
+                    with
+                    | ResultSet(_, [ [ Some "500" ] ]) -> ()
+                    | other -> failtestf "expected the broad text functional range, got %A" other
+
+                    Expect.isGreaterThan calls 490 "a broad text range retains the cheaper scan"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) >= LOWER(r.name) COLLATE utf8mb4_0900_ai_ci AND LOWER(candidate.name) < 'f' COLLATE utf8mb4_0900_ai_ci) FROM requested_names AS r WHERE r.id = 3"
+                    with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected both accent-insensitive text-range matches, got %A" other
+
+                    Expect.isGreaterThan calls 490 "a changed range collation bypasses the binary expression key"
 
                     runDefault
                         store
@@ -7447,6 +7596,26 @@ let tests =
 
                     calls <- 0
 
+                    let overriddenRangeIndexed =
+                        run
+                            store
+                            overridden
+                            "SELECT id FROM indexed_names WHERE TOUCH(id) = id AND LOWER(name) >= 'a' AND LOWER(name) < 'z'"
+
+                    let overriddenRangeCalls = calls
+                    calls <- 0
+
+                    let overriddenRangeScanned =
+                        run
+                            store
+                            overridden
+                            "SELECT id FROM scanned_names WHERE TOUCH(id) = id AND LOWER(name) >= 'a' AND LOWER(name) < 'z'"
+
+                    Expect.equal overriddenRangeIndexed overriddenRangeScanned "an override bypasses the stored text range"
+                    Expect.isGreaterThan overriddenRangeCalls 490 "the overridden text range retains ordinary row evaluation"
+
+                    calls <- 0
+
                     match
                         run
                             store
@@ -7481,6 +7650,30 @@ let tests =
                         (runDefault store "SELECT id FROM indexed_lengths WHERE CHAR_LENGTH(name) = 11 ORDER BY id")
                         (runDefault store "SELECT id FROM scanned_lengths WHERE CHAR_LENGTH(name) = 11 ORDER BY id")
                         "updated functional keys remain synchronized"
+
+                    let updateTextRange table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "UPDATE %s SET name = CONCAT(name, 'z') WHERE TOUCH(id) = id AND LOWER(name) >= 'reference' AND LOWER(name) < 'referencf'"
+                                    table)
+
+                        result, calls
+
+                    let indexedTextUpdate, indexedTextUpdateCalls = updateTextRange "indexed_names"
+                    let scannedTextUpdate, scannedTextUpdateCalls = updateTextRange "scanned_names"
+                    Expect.equal indexedTextUpdate scannedTextUpdate "text functional-range candidates drive UPDATE"
+                    Expect.equal indexedTextUpdate (Affected 2UL) "the text range updates each matching row"
+                    Expect.isLessThan indexedTextUpdateCalls 10 "UPDATE evaluates only text functional-range candidates"
+                    Expect.isGreaterThan scannedTextUpdateCalls 490 "the text UPDATE control exercises the scan"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM indexed_names WHERE LOWER(name) >= 'referencez' AND LOWER(name) < 'referenczz'")
+                        (runDefault store "SELECT id FROM scanned_names WHERE LOWER(name) >= 'referencez' AND LOWER(name) < 'referenczz'")
+                        "updated text functional keys remain synchronized"
 
                 testCase "UPPER expression indexes enforce uniqueness and narrow predicates"
                 <| fun _ ->

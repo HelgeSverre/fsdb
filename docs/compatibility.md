@@ -89,8 +89,10 @@ and locks, plus the read-cost gate that retains a cheaper single-index plan
 when constructing an intersection would cost more than its row reduction.
 Supported unary functional-key compositions additionally run against scan
 twins across equality, ordering, grouping, mutation, correlated subqueries,
-numeric-result ranges, pass-through derived tables and CTEs, extension
-overrides, and WAL recovery.
+numeric- and compatible text-result ranges, pass-through derived tables and
+CTEs, extension overrides, and WAL recovery. Text-range controls include
+folded collations and an explicit collation mismatch that must retain the scan
+path.
 
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and

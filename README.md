@@ -370,11 +370,12 @@ different access pattern:
   Compatible unary parts can be composed, such as `UPPER(TRIM(name))` or
   `BIT_LENGTH(REVERSE(name))`. These keys participate in equality,
   uniqueness, ordering, grouping, mutation, recovery, and correlated probes.
-  Numeric-result keys also serve direct and correlated comparison ranges and
-  `BETWEEN`. Correlated probes pass through direct derived-table and CTE
-  projections. Function aliases share a canonical physical identity, while an
-  embedding override of any function in the chain keeps execution on the
-  ordinary scan path.
+  Numeric-result keys serve direct and correlated comparison ranges and
+  `BETWEEN`; text-result keys do the same when the comparison uses the key's
+  stored collation. Correlated probes pass through direct derived-table and
+  CTE projections. Function aliases share a canonical physical identity,
+  while an embedding override of any function in the chain keeps execution on
+  the ordinary scan path.
 
   Text and binary values use MySQL's leading-number conversion and
   diagnostics. Arithmetic and other general expression keys retain their DDL
