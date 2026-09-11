@@ -9385,14 +9385,15 @@ and private runUnlockedSelectStmt
 
                     let physicalAccess = choosePhysicalAccess physicalCandidates
 
-                    let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder physicalCandidates
-
                     let orderedPrefix =
                         tryEqualityPrefixOrder store registry dbName tref select equalityAccess
 
                     match orderedPrefix with
                     | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
                     | None ->
+                        let indexOrder = tryIndexOrder store registry dbName tref select
+                        let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder indexOrder physicalCandidates
+
                         match earlyPhysicalAccess |> Option.map physicalAccessRows with
                         | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                         | None ->
@@ -9403,7 +9404,7 @@ and private runUnlockedSelectStmt
                             match projectedLookup with
                             | Some(columns, rows) -> runArbitrary columns rows None select
                             | None ->
-                                match tryIndexOrder store registry dbName tref select with
+                                match indexOrder with
                                 | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
                                 | None ->
                                     let resolved =
@@ -11073,14 +11074,15 @@ and private choosePhysicalAccess candidates =
         |> List.minBy (fun candidate -> physicalAccessCandidateCount candidate, physicalAccessPreference candidate)
         |> Some
 
-and private choosePhysicalAccessBeforeIndexOrder candidates =
-    let hasPointOrSpatialAccess =
-        candidates
-        |> List.exists (function
-            | RangeAccess _ -> false
-            | _ -> true)
-
-    if hasPointOrSpatialAccess then choosePhysicalAccess candidates else None
+and private choosePhysicalAccessBeforeIndexOrder (indexOrder: IndexOrderPlan option) candidates =
+    choosePhysicalAccess candidates
+    |> Option.filter (function
+        | RangeAccess plan ->
+            indexOrder
+            |> Option.exists (fun ordered ->
+                not (equalsIgnoreCase ordered.KeyName plan.RangeIndexName)
+                && QueryPlanner.shouldSortRangeBeforeIndexOrder ordered.EstimatedRows plan.RangeRowCount)
+        | _ -> true)
 
 and private tryPhysicalAccessInTableWith policy store registry table tref whereExpr =
     physicalAccessCandidatesInTableWith policy store registry table tref whereExpr
@@ -16061,7 +16063,7 @@ let rec private explainJoinBlock
         match equality with
         | Some plan when not plan.UsesFullKey && indexOrderPlan.IsSome -> tryExplainIndexOrder ()
         | _ ->
-            match choosePhysicalAccessBeforeIndexOrder candidates, indexOrderPlan with
+            match choosePhysicalAccessBeforeIndexOrder indexOrderPlan candidates, indexOrderPlan with
             | Some access, _ -> emitAccess access
             | None, Some _ -> tryExplainIndexOrder ()
             | None, None -> candidates |> choosePhysicalAccess |> Option.map emitAccess |> Option.defaultValue false
@@ -16183,14 +16185,53 @@ and private explainSelectBlock
                 | None, _ -> None
         | _ -> None
 
+    let selectedIndexOrderPlan =
+        match select.From, joins, indexOrderPlan with
+        | _, _, Some plan when not select.GroupBy.IsEmpty -> Some plan
+        | Some(FromTable tref), [], Some plan ->
+            let candidates =
+                physicalFastPathTable store dbName tref
+                |> Option.map (fun table ->
+                    physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where)
+                |> Option.defaultValue []
+
+            let preservesEqualityPrefixOrder =
+                candidates
+                |> List.exists (function
+                    | EqualityAccess equality -> not equality.UsesFullKey
+                    | _ -> false)
+
+            if
+                not preservesEqualityPrefixOrder
+                && (choosePhysicalAccessBeforeIndexOrder (Some plan) candidates |> Option.isSome)
+            then
+                None
+            else
+                Some plan
+        | _ -> indexOrderPlan
+
     let extra =
         [ if select.Where.IsSome then "Using where"
-          if not select.OrderBy.IsEmpty && indexOrderPlan.IsNone then "Using filesort"
-          if (not select.GroupBy.IsEmpty && indexOrderPlan.IsNone) || select.Distinct then "Using temporary" ]
+          if not select.OrderBy.IsEmpty && selectedIndexOrderPlan.IsNone then "Using filesort"
+          if (not select.GroupBy.IsEmpty && selectedIndexOrderPlan.IsNone) || select.Distinct then "Using temporary" ]
 
     let consumption = joinConsumptionFor select.Limit
 
-    explainJoinBlock store registry dbName nextId acc id selectType select.From joins select.Where extra (selectSubqueryExprs select) indexOrderPlan consumption
+    explainJoinBlock
+        store
+        registry
+        dbName
+        nextId
+        acc
+        id
+        selectType
+        select.From
+        joins
+        select.Where
+        extra
+        (selectSubqueryExprs select)
+        selectedIndexOrderPlan
+        consumption
 
 /// Renders every collected `ExplainRow` into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the

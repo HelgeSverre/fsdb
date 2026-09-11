@@ -35,6 +35,7 @@ let private equalityScanFloor = 64
 let private hashJoinFloor = 64
 let private intersectionProbeFloor = 256
 let private intersectionReduction = 8L
+let private sortReduction = 8L
 
 let private choose preference estimates =
     estimates
@@ -49,6 +50,9 @@ let chooseRange tableRows candidateRows =
         RowsRead = max 0 candidateRows
         RowLookups = max 0 candidateRows } ]
     |> choose rangePreference
+
+let shouldSortRangeBeforeIndexOrder orderedRows candidateRows =
+    int64 (max 0 candidateRows) * sortReduction <= int64 (max 0 orderedRows)
 
 let chooseEquality tableRows candidateRows =
     if tableRows < equalityScanFloor then

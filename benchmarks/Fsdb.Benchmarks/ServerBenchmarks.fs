@@ -361,6 +361,18 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member this.FilterByComposedFunctionalRangeOrderById() =
+        let user = randomUserId () - 1
+        this.Query $"SELECT id FROM functional_users WHERE UPPER(TRIM(name)) >= 'USER_{user}' AND UPPER(TRIM(name)) < 'USER_{user}Z' ORDER BY id"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member this.FilterByComposedFunctionalRangeOrderByIdScan() =
+        let user = randomUserId () - 1
+        this.Query $"SELECT id FROM functional_users WHERE CONCAT(UPPER(TRIM(name)), '') >= 'USER_{user}' AND CONCAT(UPPER(TRIM(name)), '') < 'USER_{user}Z' ORDER BY id"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
     member this.OrderByComposedFunctionalIndex() =
         this.Query "SELECT id FROM functional_users ORDER BY UPPER(TRIM(name)) LIMIT 20"
 

@@ -7292,6 +7292,38 @@ let tests =
                     Expect.isLessThan indexedFoldedRangeCalls 10 "the folded text key bounds residual evaluation"
                     Expect.isGreaterThan scannedFoldedRangeCalls 490 "the folded text control exercises the scan"
 
+                    let orderedFoldedTextRange table =
+                        calls <- 0
+
+                        let result =
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "SELECT id FROM %s WHERE TOUCH(id) = id AND LOWER(name) >= 'e' AND LOWER(name) < 'f' ORDER BY id"
+                                    table)
+
+                        result, calls
+
+                    let indexedOrderedRange, indexedOrderedRangeCalls = orderedFoldedTextRange "indexed_folded_names"
+                    let scannedOrderedRange, scannedOrderedRangeCalls = orderedFoldedTextRange "scanned_folded_names"
+                    Expect.equal indexedOrderedRange scannedOrderedRange "a selective range remains eligible before an unrelated order"
+                    Expect.isLessThan indexedOrderedRangeCalls 10 "the selective range is sorted after candidate narrowing"
+                    Expect.isGreaterThan scannedOrderedRangeCalls 490 "the unrelated order control exercises the scan"
+
+                    let orderedRangePlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM indexed_folded_names WHERE LOWER(name) >= 'e' AND LOWER(name) < 'f' ORDER BY id"
+                        |> explainRow
+
+                    Expect.equal orderedRangePlan.AccessType (Some "range") "EXPLAIN reports the selective range before sorting"
+                    Expect.equal orderedRangePlan.Key (Some "ix_lower") "EXPLAIN reports the range key rather than the order key"
+                    Expect.stringContains
+                        (orderedRangePlan.Extra |> Option.defaultValue "")
+                        "Using filesort"
+                        "EXPLAIN reports the residual sort"
+
                     calls <- 0
 
                     let explicitBinaryRange =
@@ -12512,7 +12544,7 @@ let tests =
                     Expect.isLessThan calls 8 "the residual only sees spatial candidates"
 
                     match runDefault store ("EXPLAIN " + predicate "indexed" "") with
-                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "sx"; Some "sx"; Some "34"; None; Some "3"; Some "100.00"; Some "Using where" ] ]) ->
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "sx"; Some "sx"; Some "34"; None; Some "3"; Some "100.00"; Some "Using where; Using filesort" ] ]) ->
                         ()
                     | other -> failtestf "expected a spatial range plan, got %A" other
 

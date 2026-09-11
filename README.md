@@ -358,7 +358,9 @@ different access pattern:
   binary, `utf8mb4_0900_bin`, and
   `utf8mb4_0900_as_cs` prefixes support this path. Case- or accent-folded and
   PAD SPACE text prefixes retain the scan/sort path because equal values can
-  occupy separate suffix runs.
+  occupy separate suffix runs. When an unrelated predicate index produces a
+  substantially smaller candidate set, fsdb narrows those rows first and
+  sorts the remainder instead of scanning the ordering index.
 
 - **Grouping.** Compatible `GROUP BY` prefixes use the same ordered stream.
   Covered groups can derive counts and grouping-key `MIN` or `MAX` values from
