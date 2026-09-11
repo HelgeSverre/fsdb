@@ -8549,7 +8549,10 @@ let private cascadeDelete
     (address: TableAddress)
     (toDelete: Value[] list)
     : Result<Catalog * Map<TableAddress, RowRemoval list> * Map<TableAddress, RowUpdate list>, StorageError> =
-    cascadeDeleteVisited checkFks catalog Map.empty Map.empty address toDelete
+    if List.isEmpty toDelete then
+        Ok(catalog, Map.empty, Map.empty)
+    else
+        cascadeDeleteVisited checkFks catalog Map.empty Map.empty address toDelete
 
 /// `REPLACE` inserts each candidate after deleting every row that conflicts
 /// with it on a primary or unique key. A candidate can therefore affect more
