@@ -609,6 +609,23 @@ let rec private directStatementAccesses defaultDb =
     | Explain(_, statement) -> directStatementAccesses defaultDb statement
     | _ -> []
 
+let rec private directAccessesAreComplete =
+    function
+    | Select _
+    | Union _
+    | Insert _
+    | Replace _
+    | InsertSelect _
+    | ReplaceSelect _
+    | ReplaceSet _
+    | LoadData _
+    | Update _
+    | Delete _
+    | Do _
+    | ChecksumTables _ -> true
+    | Explain(_, statement) -> directAccessesAreComplete statement
+    | _ -> false
+
 let private requirementMode (privilege: string) =
     if privilege.Equals("SELECT", StringComparison.OrdinalIgnoreCase) then ReadAccess else WriteAccess
 
@@ -686,8 +703,8 @@ let private storedProgramStatements
 
 let private expandDependencies store accesses =
     let views = viewEntries store
-    let triggers = triggerEntries store
-    let routines = routineEntries store
+    let triggers = lazy (triggerEntries store)
+    let routines = lazy (routineEntries store)
 
     let rec expand visited access =
         let key = tableKey access.Database access.Table
@@ -715,7 +732,7 @@ let private expandDependencies store accesses =
                 if access.Mode = ReadAccess then
                     []
                 else
-                    triggers
+                    triggers.Value
                     |> List.filter (fun trigger -> tableKey trigger.Schema trigger.Table = key)
                     |> List.collect (fun trigger ->
                         let options = SqlMode.parserOptionsFor trigger.SqlMode
@@ -723,7 +740,7 @@ let private expandDependencies store accesses =
                         match StoredProgram.parseTrigger options trigger.Body with
                         | Error _ -> []
                         | Ok statements ->
-                            storedProgramStatements routines trigger.Schema options statements
+                            storedProgramStatements routines.Value trigger.Schema options statements
                             |> List.collect (directStatementAccesses trigger.Schema)
                             |> List.collect (fun dependency ->
                                 expand visited { dependency with ReferenceName = None }))
@@ -743,11 +760,15 @@ let private requiresOwnership temporaryCatalog access =
 
 let accessesForStatement store temporaryCatalog defaultDb statement =
     let direct = directStatementAccesses defaultDb statement
-    let represented = direct |> List.map (fun access -> tableKey access.Database access.Table) |> Set.ofList
 
     let fallback =
-        requiredAccesses store defaultDb statement
-        |> List.filter (fun access -> not (Set.contains (tableKey access.Database access.Table) represented))
+        if directAccessesAreComplete statement then
+            []
+        else
+            let represented = direct |> List.map (fun access -> tableKey access.Database access.Table) |> Set.ofList
+
+            requiredAccesses store defaultDb statement
+            |> List.filter (fun access -> not (Set.contains (tableKey access.Database access.Table) represented))
 
     direct @ fallback
     |> List.filter (requiresOwnership temporaryCatalog)
