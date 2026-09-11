@@ -2044,8 +2044,17 @@ let private syncTransactionView (session: Session) =
     match session.Tx with
     | Some transaction when transaction.Seeded ->
         let rowsModified = Storage.transactionRollbackWork transaction.Snapshot |> max 0L |> uint64
-        let catalog = transaction.Snapshot.Catalog
-        let changedDatabases, changedTables = transactionCatalogChanges transaction.BaseCatalog catalog
+        let catalog, changedDatabases, changedTables =
+            // Transactional DML records rollback work with every row event.
+            // With none, there is no dirty row state for READ UNCOMMITTED to
+            // project, so rebuilding and comparing the private catalog would
+            // only rediscover the unchanged base on every read-only statement.
+            if rowsModified = 0UL then
+                transaction.BaseCatalog, Set.empty, Set.empty
+            else
+                let catalog = transaction.Snapshot.Catalog
+                let changedDatabases, changedTables = transactionCatalogChanges transaction.BaseCatalog catalog
+                catalog, changedDatabases, changedTables
 
         match Storage.transactionId transaction.Snapshot with
         | Some transactionId ->
