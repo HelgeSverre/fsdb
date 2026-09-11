@@ -1,8 +1,9 @@
 # AGENTS.md
 
-fsdb is a MySQL-compatible database server written in idiomatic F# on .NET 10.
-The MySQL wire protocol feeds `Command`, the SQL AST, a logical plan, and a
-lazy `seq`-based executor over an in-memory or WAL-backed engine.
+fsdb stands for **F# Database** ("F Sharp Database"). It is a MySQL-compatible
+database server written in idiomatic F# on .NET 10. The MySQL wire protocol
+feeds `Command`, the SQL AST, a logical plan, and a lazy `seq`-based executor
+over an in-memory or WAL-backed engine.
 
 ## Priorities
 
