@@ -11033,9 +11033,32 @@ and private tryIndexIntersectionAccessInTableWith
     |> Option.bind (fun expression ->
         match conjuncts expression with
         | _ :: _ :: _ as conjuncts ->
+            let directCandidates =
+                lazy (directPhysicalAccessCandidatesInTableWith CandidateNarrowing store registry table tref whereExpr)
+
+            let coalesceSameKey accesses =
+                accesses
+                |> List.groupBy physicalAccessKeyNames
+                |> List.collect (fun (keyNames, sameKey) ->
+                    match sameKey with
+                    | [ _ ] -> sameKey
+                    | _ ->
+                        match directCandidates.Value |> List.filter (physicalAccessKeyNames >> (=) keyNames) with
+                        | [] -> sameKey
+                        | combined ->
+                            // A direct candidate built from the full predicate
+                            // already combines constraints on this key. Keeping
+                            // its parts would materialize supersets needlessly.
+                            combined @ sameKey
+                            |> List.minBy (fun access ->
+                                physicalAccessCandidateCount access,
+                                physicalAccessPreference access)
+                            |> List.singleton)
+
             conjuncts
             |> List.choose (fun conjunct ->
                 tryPhysicalAccessInTableWith CandidateNarrowing store registry table tref (Some conjunct))
+            |> coalesceSameKey
             |> function
                 | _ :: _ :: _ as accesses
                     when policy = CandidateNarrowing
@@ -11044,7 +11067,7 @@ and private tryIndexIntersectionAccessInTableWith
                 | _ -> None
         | _ -> None)
 
-and private physicalAccessCandidatesInTableWith
+and private directPhysicalAccessCandidatesInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
     (registry: Registry)
@@ -11059,12 +11082,16 @@ and private physicalAccessCandidatesInTableWith
       trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
       |> Option.map SpatialAccess
       tryRangeAccessInTableWith policy BareOrQualifiedColumn store registry table tref whereExpr
-      |> Option.map RangeAccess
-      tryIndexUnionAccessInTableWith policy store registry table tref whereExpr
-      |> Option.map IndexMergeAccess
-      tryIndexIntersectionAccessInTableWith policy store registry table tref whereExpr
-      |> Option.map IndexMergeAccess ]
+      |> Option.map RangeAccess ]
     |> List.choose id
+
+and private physicalAccessCandidatesInTableWith policy store registry table tref whereExpr =
+    directPhysicalAccessCandidatesInTableWith policy store registry table tref whereExpr
+    @ ([ tryIndexUnionAccessInTableWith policy store registry table tref whereExpr
+         |> Option.map IndexMergeAccess
+         tryIndexIntersectionAccessInTableWith policy store registry table tref whereExpr
+         |> Option.map IndexMergeAccess ]
+       |> List.choose id)
 
 and private choosePhysicalAccess candidates =
     match candidates with
