@@ -1,5 +1,29 @@
 module Fsdb.Collections
 
+open System.Collections.Concurrent
+
+type internal BoundedConcurrentCache<'key, 'value when 'key: equality>(capacity: int) =
+    let entries = ConcurrentDictionary<'key, 'value>()
+    let order = ConcurrentQueue<'key>()
+
+    let trim () =
+        let mutable canTrim = true
+
+        while canTrim && entries.Count > capacity do
+            match order.TryDequeue() with
+            | true, oldest -> entries.TryRemove oldest |> ignore
+            | false, _ -> canTrim <- false
+
+    member _.TryGetValue key = entries.TryGetValue key
+
+    member _.TryAdd(key, value) =
+        if entries.TryAdd(key, value) then
+            order.Enqueue key
+            trim ()
+            true
+        else
+            false
+
 let internal tryAllSome values =
     let rec collect resolved =
         function

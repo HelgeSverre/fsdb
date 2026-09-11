@@ -752,6 +752,9 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
               SecurityType = view.SecurityType
               Algorithm = view.Algorithm })
 
+let private parseStoredViewStatement definition =
+    Parser.parseViewDefinition definition |> Result.map _.Statement
+
 let private isStoredView store defaultDatabase qualifiedName =
     let database, view = splitQualified defaultDatabase qualifiedName
     tryStoredView store database view |> Option.isSome
@@ -958,7 +961,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     let underlying =
                         underlyingStored
                         |> Option.bind (fun stored ->
-                            match Parser.parse stored.Definition with
+                            match parseStoredViewStatement stored.Definition with
                             | Ok(Select definition) -> classify (Set.add key seen) stored definition
                             | _ -> None)
 
@@ -1234,7 +1237,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     match tryStoredView store database tableRef.Table with
                     | Some stored ->
-                        match Parser.parse stored.Definition with
+                        match parseStoredViewStatement stored.Definition with
                         | Ok(Select definition) ->
                             let nested =
                                 if
@@ -2917,7 +2920,7 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
                     []
                 else
                     DynamicScope.withValue viewStack (Set.add key stack) (fun () ->
-                        match Parser.parse view.Definition with
+                        match parseStoredViewStatement view.Definition with
                         | Ok(Select viewSelect) ->
                             let columns = selectProjectionColumns store view.Schema viewSelect
 
@@ -5612,7 +5615,7 @@ and private resolveTableRef
                     cteScope.Value <- Map.empty
 
                     let resolved =
-                        match Parser.parse view.Definition with
+                        match parseStoredViewStatement view.Definition with
                         | Result.Ok((Select select) as statement) ->
                             match registryForView store registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
@@ -5918,7 +5921,7 @@ and private describeQueryColumns
                     if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
                         None
                     else
-                        Parser.parse view.Definition
+                        parseStoredViewStatement view.Definition
                         |> Result.toOption
                         |> Option.bind (function
                             | Select select -> describeSelect (Set.add key seen) view.Schema Map.empty select
@@ -8544,7 +8547,7 @@ and private tryMergeDirectView
         match tryStoredView store viewDb viewRef.Table with
         | None -> Ok None
         | Some view ->
-            match Parser.parse view.Definition with
+            match parseStoredViewStatement view.Definition with
             | Ok((Select definition) as statement) ->
                 match updatableViewOfSelect store view definition with
                 | Some direct
@@ -15646,7 +15649,7 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
     match tryStoredView store dbName viewName with
     | None -> None
     | Some view ->
-        match Parser.parse view.Definition with
+        match parseStoredViewStatement view.Definition with
         | Ok(Select select) -> updatableViewOfSelect store view select
         | _ -> None
 

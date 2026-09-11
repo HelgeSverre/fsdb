@@ -13,6 +13,7 @@ open System.Collections.Generic
 open System.Globalization
 open FParsec
 open Fsdb.Ast
+open Fsdb.Collections
 open Fsdb.Sql
 open Fsdb.Value
 open Fsdb.Temporal
@@ -4980,8 +4981,11 @@ type ParsedViewDefinition =
       Sql: string
       CheckOption: string }
 
-/// Parses a stored view query and separates its trailing CHECK OPTION clause.
-let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
+let private parsedViewDefinitionCapacity = 1024
+let private cacheableViewDefinitionLength = 16384
+let private parsedViewDefinitions = BoundedConcurrentCache<string, ParsedViewDefinition>(parsedViewDefinitionCapacity)
+
+let private parseViewDefinitionUncached (sql: string) : Result<ParsedViewDefinition, string> =
     let parsed = parse sql
 
     let trailingCheckOption =
@@ -5015,9 +5019,21 @@ let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
 
     parsedDefinition
     |> Result.map (fun statement ->
-        { Statement = statement
-          Sql = definition
-          CheckOption = checkOption })
+        let definition =
+            { Statement = statement
+              Sql = definition
+              CheckOption = checkOption }
+
+        if sql.Length <= cacheableViewDefinitionLength then
+            parsedViewDefinitions.TryAdd(sql, definition) |> ignore
+
+        definition)
+
+/// Parses a stored view query and separates its trailing CHECK OPTION clause.
+let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
+    match parsedViewDefinitions.TryGetValue sql with
+    | true, definition -> Result.Ok definition
+    | false, _ -> parseViewDefinitionUncached sql
 
 let private maxLoadDataMarkerLength = 1
 let private maxLoadDataTerminatorLength = 16
