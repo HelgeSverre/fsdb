@@ -13,38 +13,38 @@ default:
 
 # === Server ===
 
-# Run the server, passing flags through (--port, --listen)
+# Run server (--port, --listen, etc.)
 [group('server')]
 run *ARGS:
     dotnet run --project src/Fsdb -- {{ ARGS }}
 
-# Open a mysql shell against a running server
+# Open mysql client shell
 [group('server')]
 client port=PORT:
     {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ port }} -uroot
 
-# Run the LlmSearch example (pass --dry-run to stub the LLM HTTP calls)
+# Run LlmSearch example
 [group('server')]
 example *ARGS:
     dotnet run --project examples/LlmSearch -- {{ ARGS }}
 
-# Run ReceiptPipeline with offline fixtures or PDF paths and endpoint settings.
+# Run ReceiptPipeline example
 [group('server')]
 receipts *ARGS:
     dotnet run --project examples/ReceiptPipeline -- {{ ARGS }}
 
-# Quick liveness probe against a running server
+# Liveness probe
 [group('server')]
 smoke port=PORT:
     {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ port }} -uroot -e 'SELECT 1; SELECT @@version;'
 
-# Run pinned external application compatibility probes in Docker.
+# Run smoke tests in Docker
 [group('qa')]
 smoke-apps *TARGETS:
     #!/usr/bin/env bash
     dotnet fsi --nologo --readline- --exec smoke/run.fsx -- "$@"
 
-# Build the external smoke images without running their database probes.
+# Build smoke images only
 [group('qa')]
 smoke-apps-build *TARGETS:
     #!/usr/bin/env bash
@@ -52,7 +52,7 @@ smoke-apps-build *TARGETS:
 
 # === QA ===
 
-# Run the Expecto test suite, passing any arguments through to Expecto
+# Run test suite
 [group('qa')]
 test *ARGS:
     #!/usr/bin/env bash
@@ -62,7 +62,7 @@ test *ARGS:
 [group('qa')]
 check: build test
 
-# Run the suite without the interactive spinner and retain per-test timings.
+# Run tests with timings
 [group('qa')]
 test-report *ARGS:
     #!/usr/bin/env bash
@@ -73,9 +73,7 @@ test-report *ARGS:
         --junit-summary test-results/fsdb.xml \
         "$@"
 
-# Large-packet and snapshot cases retain several full-size buffers, so the
-# guard stays above their expected peak while still catching unbounded growth.
-# Stress the suite with a 6 GiB memory guard.
+# Stress test (6 GiB memory limit)
 [group('qa')]
 stress minutes="1" *ARGS:
     #!/usr/bin/env bash
@@ -88,9 +86,7 @@ stress minutes="1" *ARGS:
         --no-spinner \
         "$@"
 
-# Expecto has no built-in coverage, so Coverlet instruments the Fsdb.dll loaded
-# by the test assembly and writes branch data to coverage/coverage.cobertura.xml.
-# Measure full-suite branch coverage with the repository-pinned Coverlet tool.
+# Measure branch coverage
 [group('qa')]
 coverage:
     #!/usr/bin/env bash
@@ -121,12 +117,12 @@ coverage:
 
 # === Build ===
 
-# Build the whole solution
+# Build solution
 [group('build')]
 build:
     dotnet build
 
-# Remove build artifacts
+# Clean build artifacts
 [group('build')]
 clean:
     dotnet clean -v q
@@ -134,7 +130,7 @@ clean:
 
 # === Install ===
 
-# Install fsdb globally as a single self-contained binary (no .NET needed)
+# Install standalone binary
 [group('install')]
 install dest="~/.local/bin":
     dotnet publish src/Fsdb -c Release -o src/Fsdb/bin/dist -p:PublishSingleFile=true --self-contained true -v q
@@ -142,7 +138,7 @@ install dest="~/.local/bin":
     install -m 0755 src/Fsdb/bin/dist/Fsdb {{ dest }}/fsdb
     @echo "Installed {{ dest }}/fsdb — try: fsdb --help"
 
-# Remove the globally installed fsdb
+# Uninstall binary
 [group('install')]
 uninstall dest="~/.local/bin":
     rm -f {{ dest }}/fsdb
@@ -157,7 +153,7 @@ MYSQLADMIN := "mysqladmin"
 BENCH_MYSQL_DATADIR := justfile_directory() + "/benchmarks/mysql-data"
 BENCH_MYSQL_NOFSYNC_DATADIR := justfile_directory() + "/benchmarks/mysql-data-nofsync"
 
-# Initialize (first run only) and start the throwaway benchmark MySQL server
+# Start benchmark MySQL
 [group('bench')]
 bench-mysql-start:
     #!/usr/bin/env bash
@@ -177,14 +173,12 @@ bench-mysql-start:
     echo "mysqld did not become ready, see {{ BENCH_MYSQL_DATADIR }}/mysqld.log" >&2
     exit 1
 
-# Shut down the throwaway benchmark MySQL server
+# Stop benchmark MySQL
 [group('bench')]
 bench-mysql-stop:
     {{ MYSQLADMIN }} -P"${FSDB_BENCH_MYSQL_PORT:-3316}" --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
 
-# These settings remove commit-time fsync so the target matches in-memory fsdb
-# when the campaign is explicitly measuring non-durable engine work.
-# Start a no-fsync MySQL target for matched in-memory engine comparisons.
+# Start MySQL no-fsync
 [group('bench')]
 bench-mysql-start-nofsync:
     #!/usr/bin/env bash
@@ -205,15 +199,12 @@ bench-mysql-start-nofsync:
     echo "mysqld (no-fsync) did not become ready, see {{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysqld.log" >&2
     exit 1
 
-# Shut down the no-fsync throwaway MySQL server
+# Stop MySQL no-fsync
 [group('bench')]
 bench-mysql-stop-nofsync:
     {{ MYSQLADMIN }} -P"${FSDB_BENCH_MYSQL_NOFSYNC_PORT:-3317}" --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
 
-# Each case restarts fsdb so a timed-out query cannot poison later results.
-# `dotnet exec` also avoids the hot-reload environment that makes a Release
-# binary appear as DEBUG to BenchmarkDotNet.
-# Build Release binaries and run isolated per-case fsdb benchmark processes.
+# Run isolated fsdb benchmarks
 [group('bench')]
 [private]
 _bench-run *ARGS: bench-mysql-start
@@ -230,9 +221,7 @@ _bench-run *ARGS: bench-mysql-start
     export FSDB_BENCH_BIN="$(pwd)/src/Fsdb/bin/Release/net10.0/Fsdb.dll"
     dotnet exec benchmarks/Fsdb.Benchmarks/bin/Release/net10.0/Fsdb.Benchmarks.dll {{ ARGS }}
 
-# The matrix pairs WAL-backed fsdb with durable MySQL and in-memory fsdb with
-# MySQL configured without commit-time fsync.
-# Run the four-target durability matrix.
+# Run durability matrix
 [group('bench')]
 [private]
 _bench-durable-run *ARGS: bench-mysql-start bench-mysql-start-nofsync
@@ -250,7 +239,7 @@ _bench-durable-run *ARGS: bench-mysql-start bench-mysql-start-nofsync
     export FSDB_BENCH_TARGETS=durable
     dotnet exec benchmarks/Fsdb.Benchmarks/bin/Release/net10.0/Fsdb.Benchmarks.dll {{ ARGS }}
 
-# Run the full benchmark suite (fsdb vs MySQL 8.4); results land in benchmarks/results/<git-sha>.md
+# Full benchmark suite
 [group('bench')]
 bench:
     @just _bench-run
@@ -261,7 +250,7 @@ bench:
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD).md"
 
-# Recent SQL features without rerunning the established core/auth matrix.
+# Benchmark features only
 [group('bench')]
 bench-features:
     @FSDB_BENCH_CATEGORIES=Feature just _bench-run
@@ -271,9 +260,7 @@ bench-features:
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-features.md"
 
-# Read-only cases cannot observe the storage mode, so this recipe restricts the
-# four-target matrix to writes tagged `Durability`.
-# Compare WAL/durable and in-memory/no-fsync write latency pairs.
+# Benchmark durability
 [group('bench')]
 bench-durable:
     @FSDB_BENCH_CATEGORIES=Durability just _bench-durable-run
@@ -284,9 +271,7 @@ bench-durable:
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
 
-# Larger cardinalities expose O(n) versus O(log n) slopes that the default
-# corpus can hide; per-case seeding dominates the resulting runtime.
-# Run scale-sensitive latency cases at 100k users and 500k orders.
+# Benchmark at scale
 [group('bench')]
 bench-scale:
     @FSDB_BENCH_USERS=100000 FSDB_BENCH_ORDERS=500000 FSDB_BENCH_ARTICLES=100000 FSDB_BENCH_CATEGORIES=Scale just _bench-run
@@ -316,7 +301,7 @@ _bench-header mode="in-memory fsdb; durable MySQL" users="10000" orders="50000" 
     echo "-->"
     echo
 
-# Same as `bench`, but with BenchmarkDotNet's ShortRun job for fast local iteration
+# Quick benchmark
 [group('bench')]
 bench-quick:
     @just _bench-run --quick
@@ -327,9 +312,7 @@ bench-quick:
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-quick.md"
 
-# The ordinary latency suite is single-connection and cannot expose optimistic
-# publication behavior under multiple writers.
-# Measure concurrent fsdb/MySQL throughput in operations per second.
+# Benchmark throughput
 [group('bench')]
 bench-load:
     @mkdir -p benchmarks/results
@@ -339,7 +322,7 @@ bench-load:
     @rm -f benchmarks/load-report.md
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-load.md"
 
-# Worker-scaling throughput with longer samples than the default load check.
+# Benchmark load scaling
 [group('bench')]
 bench-load-scale:
     @mkdir -p benchmarks/results
@@ -349,6 +332,6 @@ bench-load-scale:
     @rm -f benchmarks/load-report.md
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-load-scale.md"
 
-# Run latency, durability, data-size, and worker-scaling comparisons.
+# Full benchmark matrix
 [group('bench')]
 bench-comprehensive: bench bench-durable bench-scale bench-load-scale
