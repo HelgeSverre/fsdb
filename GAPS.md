@@ -614,6 +614,13 @@ slice removes fsdb's repeated-scan cliff on that corpus. MySQL's functional-key
 spelling was slower than its forced-scan control in this short run, so the raw
 artifact is retained without treating it as a general engine ranking.
 
+The [text functional-range profile](benchmarks/results/ff58fd4c-quick.md)
+covers direct and correlated composed string bounds. On the recorded corpus,
+fsdb's maintained slice is about nine times faster than its direct scan and
+about forty-four times faster than its correlated scan. MySQL strongly favors
+the direct functional key but does not profit from the correlated spelling in
+this short run.
+
 The constant-expression lookup pair records the
 [scan baseline](benchmarks/results/baa1b51-quick.md) and the
 [indexed implementation](benchmarks/results/ede0c8e-quick.md). Safe numeric
