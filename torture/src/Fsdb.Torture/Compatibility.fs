@@ -1907,6 +1907,25 @@ module ContractCatalog =
                "function:UNIX_TIMESTAMP", [| "text-differential" |]
                "function:FROM_UNIXTIME", [| "text-differential" |] |] }
 
+    let private preparedProjectionNames =
+        { Name = "prepared-projection-names"
+          Setup = [||]
+          Steps =
+            [| Contract.preparedQuery "parameter-label" "SELECT ?" [| box "value" |]
+               Contract.preparedQuery "function-label" "SELECT ABS(?)" [| box -2 |]
+               Contract.preparedQuery "arithmetic-label" "SELECT ? + 1" [| box -2 |]
+               Contract.preparedQuery "derived-label" "SELECT d.`?` FROM (SELECT ?) d" [| box "value" |]
+               Contract.preparedQuery "cte-label" "WITH c AS (SELECT ?) SELECT * FROM c" [| box "value" |]
+               Contract.preparedQuery "union-label" "SELECT ? UNION ALL SELECT ?" [| box "first"; box "second" |]
+               Contract.preparedQuery "explicit-alias" "SELECT ? AS chosen" [| box "value" |]
+               Contract.execute "sql-prepare" "PREPARE stable_labels FROM 'SELECT ?'"
+               Contract.execute "bind-first" "SET @label_value='first'"
+               Contract.query "sql-execute-first" "EXECUTE stable_labels USING @label_value"
+               Contract.execute "bind-second" "SET @label_value='second'"
+               Contract.query "sql-execute-second" "EXECUTE stable_labels USING @label_value" |]
+          Cleanup = [| "DEALLOCATE PREPARE stable_labels" |]
+          Coverage = [| "statement:select", [| "prepared-protocol"; "text-differential" |] |] }
+
     let all =
         [| comments
            exactErrors
@@ -1914,6 +1933,7 @@ module ContractCatalog =
            semanticErrors
            prepared
            preparedDml
+           preparedProjectionNames
            columnTypes
            generatedFunctionFamilies
            functionFamilies
@@ -2027,6 +2047,9 @@ module CompatibilityRunner =
 
     let private runTarget target connectionString timeoutSeconds (case: ContractCase) =
         task {
+            let builder = MySqlConnectionStringBuilder(connectionString)
+            builder.AllowUserVariables <- true
+            let connectionString = builder.ConnectionString
             let connections = Dictionary<string, MySqlConnection>(StringComparer.Ordinal)
             let pending = Dictionary<string, Task<ContractTargetOutcome>>(StringComparer.Ordinal)
             let prepared = Dictionary<string, PreparedContract>(StringComparer.Ordinal)

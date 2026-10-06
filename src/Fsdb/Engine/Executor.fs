@@ -1808,7 +1808,7 @@ let private opSymbol =
 /// and literals, a best-effort reconstruction of the source text for
 /// everything else (real MySQL echoes the original expression text, which
 /// the parser doesn't preserve).
-let rec private exprLabel (expr: Expr) : string =
+let rec internal exprLabel (expr: Expr) : string =
     match expr with
     | Lit v -> v |> toText |> Option.defaultValue "NULL"
     | MatchAgainst(cols, q, _) ->

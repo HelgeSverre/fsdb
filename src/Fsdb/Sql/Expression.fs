@@ -230,32 +230,36 @@ let rewrite (replace: Expr -> Expr option) (expression: Expr) : Expr =
 
     loop expression
 
+type private RewriteRules =
+    { Replace: Expr -> Expr option
+      ProjectionName: Expr -> string option }
+
 /// Rewrites an expression and every expression inside its subqueries.
-let rec rewriteTree (replace: Expr -> Expr option) (expression: Expr) : Expr =
+let rec private rewriteTreeWith (rules: RewriteRules) (expression: Expr) : Expr =
     rewrite
         (fun node ->
-            match replace node with
+            match rules.Replace node with
             | Some replacement -> Some replacement
             | None ->
                 match node with
-                | Exists select -> Some(Exists(rewriteSelect replace select))
-                | Subquery select -> Some(Subquery(rewriteSelect replace select))
-                | InSubquery(value, select) -> Some(InSubquery(rewriteTree replace value, rewriteSelect replace select))
+                | Exists select -> Some(Exists(rewriteSelect rules select))
+                | Subquery select -> Some(Subquery(rewriteSelect rules select))
+                | InSubquery(value, select) -> Some(InSubquery(rewriteTreeWith rules value, rewriteSelect rules select))
                 | QuantifiedComparison(value, operator, quantifier, select) ->
-                    Some(QuantifiedComparison(rewriteTree replace value, operator, quantifier, rewriteSelect replace select))
+                    Some(QuantifiedComparison(rewriteTreeWith rules value, operator, quantifier, rewriteSelect rules select))
                 | _ -> None)
         expression
 
-and private rewriteWindowSpec replace (spec: WindowSpec) =
+and private rewriteWindowSpec rules (spec: WindowSpec) =
     let rewriteBound =
         function
-        | BoundPreceding expression -> BoundPreceding(rewriteTree replace expression)
-        | BoundFollowing expression -> BoundFollowing(rewriteTree replace expression)
+        | BoundPreceding expression -> BoundPreceding(rewriteTreeWith rules expression)
+        | BoundFollowing expression -> BoundFollowing(rewriteTreeWith rules expression)
         | bound -> bound
 
     { spec with
-        PartitionBy = List.map (rewriteTree replace) spec.PartitionBy
-        OrderBy = spec.OrderBy |> List.map (fun (expression, direction) -> rewriteTree replace expression, direction)
+        PartitionBy = List.map (rewriteTreeWith rules) spec.PartitionBy
+        OrderBy = spec.OrderBy |> List.map (fun (expression, direction) -> rewriteTreeWith rules expression, direction)
         Frame =
             spec.Frame
             |> Option.map (fun frame ->
@@ -263,64 +267,68 @@ and private rewriteWindowSpec replace (spec: WindowSpec) =
                     Start = rewriteBound frame.Start
                     End = rewriteBound frame.End }) }
 
-and private rewriteFromItem replace =
+and private rewriteFromItem rules =
     function
     | FromTable _ as item -> item
-    | FromSubquery(select, alias) -> FromSubquery(rewriteSelectOrUnion replace select, alias)
+    | FromSubquery(select, alias) -> FromSubquery(rewriteSelectOrUnion rules select, alias)
     | FromJsonTable(source, path, columns, alias) ->
-        FromJsonTable(rewriteTree replace source, path, columns, alias)
-    | FromLateral(select, alias) -> FromLateral(rewriteSelectOrUnion replace select, alias)
+        FromJsonTable(rewriteTreeWith rules source, path, columns, alias)
+    | FromLateral(select, alias) -> FromLateral(rewriteSelectOrUnion rules select, alias)
 
-and private rewriteJoin replace (join: Join) =
+and private rewriteJoin rules (join: Join) =
     { join with
-        Table = rewriteFromItem replace join.Table
-        On = rewriteTree replace join.On }
+        Table = rewriteFromItem rules join.Table
+        On = rewriteTreeWith rules join.On }
 
-and private rewriteSelect replace (select: SelectStmt) =
-    let rewriteOrderKey (expression, direction) = rewriteTree replace expression, direction
+and private rewriteSelect rules (select: SelectStmt) =
+    let rewriteOrderKey (expression, direction) = rewriteTreeWith rules expression, direction
 
     { select with
-        Projections = select.Projections |> List.map (fun (expression, alias) -> rewriteTree replace expression, alias)
-        From = Option.map (rewriteFromItem replace) select.From
-        Joins = List.map (rewriteJoin replace) select.Joins
-        Where = Option.map (rewriteTree replace) select.Where
-        GroupBy = List.map (rewriteTree replace) select.GroupBy
-        Windows = select.Windows |> List.map (fun (name, spec) -> name, rewriteWindowSpec replace spec)
-        Ctes = select.Ctes |> List.map (fun cte -> { cte with Body = rewriteSelectOrUnion replace cte.Body })
-        Having = Option.map (rewriteTree replace) select.Having
+        Projections =
+            select.Projections
+            |> List.map (fun (expression, alias) ->
+                let name = alias |> Option.orElseWith (fun () -> rules.ProjectionName expression)
+                rewriteTreeWith rules expression, name)
+        From = Option.map (rewriteFromItem rules) select.From
+        Joins = List.map (rewriteJoin rules) select.Joins
+        Where = Option.map (rewriteTreeWith rules) select.Where
+        GroupBy = List.map (rewriteTreeWith rules) select.GroupBy
+        Windows = select.Windows |> List.map (fun (name, spec) -> name, rewriteWindowSpec rules spec)
+        Ctes = select.Ctes |> List.map (fun cte -> { cte with Body = rewriteSelectOrUnion rules cte.Body })
+        Having = Option.map (rewriteTreeWith rules) select.Having
         OrderBy = List.map rewriteOrderKey select.OrderBy
-        Limit = Option.map (rewriteTree replace) select.Limit
-        Offset = Option.map (rewriteTree replace) select.Offset }
+        Limit = Option.map (rewriteTreeWith rules) select.Limit
+        Offset = Option.map (rewriteTreeWith rules) select.Offset }
 
-and private rewriteSelectOrUnion replace =
+and private rewriteSelectOrUnion rules =
     function
-    | PlainSelect select -> PlainSelect(rewriteSelect replace select)
+    | PlainSelect select -> PlainSelect(rewriteSelect rules select)
     | UnionSelect(first, rest, orderBy, limit, offset) ->
-        let rewriteOrderKey (expression, direction) = rewriteTree replace expression, direction
+        let rewriteOrderKey (expression, direction) = rewriteTreeWith rules expression, direction
 
         UnionSelect(
-            rewriteSelect replace first,
-            rest |> List.map (fun (kind, select) -> kind, rewriteSelect replace select),
+            rewriteSelect rules first,
+            rest |> List.map (fun (kind, select) -> kind, rewriteSelect rules select),
             List.map rewriteOrderKey orderBy,
-            Option.map (rewriteTree replace) limit,
-            Option.map (rewriteTree replace) offset
+            Option.map (rewriteTreeWith rules) limit,
+            Option.map (rewriteTreeWith rules) offset
         )
 
 /// Rewrites every executable expression position in a statement.
-let rec rewriteStatement replace =
-    let rewriteExpression = rewriteTree replace
+let rec private rewriteStatementWith rules =
+    let rewriteExpression = rewriteTreeWith rules
     let rewriteOrderKey (expression, direction) = rewriteExpression expression, direction
     let rewriteAssignment assignment = { assignment with Value = rewriteExpression assignment.Value }
 
     function
     | CreateTableAs(name, query, ifNotExists, requestedEngine) ->
-        CreateTableAs(name, rewriteStatement replace query, ifNotExists, requestedEngine)
-    | Select select -> Select(rewriteSelect replace select)
+        CreateTableAs(name, rewriteStatementWith rules query, ifNotExists, requestedEngine)
+    | Select select -> Select(rewriteSelect rules select)
     | Do expressions -> Do(List.map rewriteExpression expressions)
     | Union(first, rest, orderBy, limit, offset) ->
         Union(
-            rewriteSelect replace first,
-            rest |> List.map (fun (kind, select) -> kind, rewriteSelect replace select),
+            rewriteSelect rules first,
+            rest |> List.map (fun (kind, select) -> kind, rewriteSelect rules select),
             List.map rewriteOrderKey orderBy,
             Option.map rewriteExpression limit,
             Option.map rewriteExpression offset
@@ -337,12 +345,12 @@ let rec rewriteStatement replace =
         InsertSelect(
             table,
             columns,
-            rewriteSelect replace select,
+            rewriteSelect rules select,
             onDuplicate |> List.map (fun (column, expression) -> column, rewriteExpression expression),
             ignore
         )
     | Replace(table, columns, rows) -> Replace(table, columns, rows |> List.map (List.map rewriteExpression))
-    | ReplaceSelect(table, columns, select) -> ReplaceSelect(table, columns, rewriteSelect replace select)
+    | ReplaceSelect(table, columns, select) -> ReplaceSelect(table, columns, rewriteSelect rules select)
     | ReplaceSet(table, assignments) ->
         ReplaceSet(table, assignments |> List.map (fun (column, expression) -> column, rewriteExpression expression))
     | LoadData load ->
@@ -353,22 +361,34 @@ let rec rewriteStatement replace =
     | Update update ->
         Update
             { update with
-                Ctes = update.Ctes |> List.map (fun cte -> { cte with Body = rewriteSelectOrUnion replace cte.Body })
+                Ctes = update.Ctes |> List.map (fun cte -> { cte with Body = rewriteSelectOrUnion rules cte.Body })
                 Assignments = List.map rewriteAssignment update.Assignments
                 Where = Option.map rewriteExpression update.Where
                 OrderBy = List.map rewriteOrderKey update.OrderBy
-                Joins = List.map (rewriteJoin replace) update.Joins
+                Joins = List.map (rewriteJoin rules) update.Joins
                 Limit = Option.map rewriteExpression update.Limit }
     | Delete delete ->
         Delete
             { delete with
-                Ctes = delete.Ctes |> List.map (fun cte -> { cte with Body = rewriteSelectOrUnion replace cte.Body })
+                Ctes = delete.Ctes |> List.map (fun cte -> { cte with Body = rewriteSelectOrUnion rules cte.Body })
                 Where = Option.map rewriteExpression delete.Where
                 OrderBy = List.map rewriteOrderKey delete.OrderBy
-                Joins = List.map (rewriteJoin replace) delete.Joins
+                Joins = List.map (rewriteJoin rules) delete.Joins
                 Limit = Option.map rewriteExpression delete.Limit }
-    | Explain(format, statement) -> Explain(format, rewriteStatement replace statement)
+    | Explain(format, statement) -> Explain(format, rewriteStatementWith rules statement)
     | statement -> statement
+
+/// Rewrites expressions without changing projection aliases.
+let rewriteTree replace expression =
+    rewriteTreeWith { Replace = replace; ProjectionName = fun _ -> None } expression
+
+/// Rewrites every executable expression position in a statement.
+let rewriteStatement replace statement =
+    rewriteStatementWith { Replace = replace; ProjectionName = fun _ -> None } statement
+
+/// Names unaliased projections from their original expressions before rewriting.
+let rewriteStatementWithProjectionNames projectionName replace statement =
+    rewriteStatementWith { Replace = replace; ProjectionName = projectionName } statement
 
 let iterStatement visit statement =
     statement

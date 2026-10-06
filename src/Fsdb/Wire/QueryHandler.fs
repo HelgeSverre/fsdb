@@ -4747,7 +4747,16 @@ let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
 /// Binds parameter `Value`s into a parsed `Statement`, replacing every
 /// `Placeholder i` with `Lit values.[i]`.
 let bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
-    mapPlaceholders (fun i -> Lit(List.item i values)) stmt
+    let parameterName expression =
+        if Expression.exists (function Placeholder _ -> true | _ -> false) expression then
+            Some(Executor.exprLabel expression)
+        else
+            None
+
+    Expression.rewriteStatementWithProjectionNames
+        parameterName
+        (function Placeholder index -> Some(Lit(List.item index values)) | _ -> None)
+        stmt
 
 let private bindPreparedPlaceholders source (session: Session) statement values =
     let store = Session.currentStore session

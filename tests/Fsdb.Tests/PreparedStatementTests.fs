@@ -121,6 +121,36 @@ let tests =
                   | other -> failtestf "expected only the bound metadata field, got %A" other
               | other -> failtestf "expected a text-probed prepared SHOW COLUMNS, got %A" other
 
+          testCase "prepared projection names survive parameter binding and repeated execution"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, names in
+                  [ "SELECT ?, ABS(?), ? + 1", [ "?"; "ABS(?)"; "? + 1" ]
+                    "SELECT d.`?` FROM (SELECT ?) d", [ "?" ]
+                    "WITH c AS (SELECT ?) SELECT * FROM c", [ "?" ]
+                    "SELECT ? UNION ALL SELECT ?", [ "?" ]
+                    "SELECT ? AS chosen", [ "chosen" ] ] do
+                  let ast, count =
+                      match prepareStatement sql with
+                      | Ok prepared -> prepared
+                      | Error error -> failtestf "prepare failed: %A" error
+                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None }
+                  for value in [ VInt -2L; VInt 7L; VNull ] do
+                      match executePrepared session statement (List.replicate count value) |> snd with
+                      | ResultSet(columns, _) -> Expect.equal columns names sql
+                      | other -> failtestf "%s returned %A" sql other
+
+          testCase "SQL EXECUTE retains projection names from PREPARE"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, prepared = handle session "PREPARE labels FROM 'SELECT ?, ABS(?)'"
+              Expect.equal prepared (Affected 0UL) "prepared"
+              for value in [ "-2"; "7"; "NULL" ] do
+                  let session, _ = handle session ("SET @label_value=" + value)
+                  match handle session "EXECUTE labels USING @label_value,@label_value" |> snd with
+                  | ResultSet(columns, _) -> Expect.equal columns [ "?"; "ABS(?)" ] "stable SQL prepared names"
+                  | other -> failtestf "EXECUTE returned %A" other
+
           testCase "a prepared INSERT/SELECT binds values into the parsed AST and executes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
