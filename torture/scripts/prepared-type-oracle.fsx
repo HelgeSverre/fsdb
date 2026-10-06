@@ -454,3 +454,83 @@ let runApproximateAggregateDescriptors () =
                     printfn "Approximate aggregate | %A | %s | increment=%d -> length=%d scale=%d" protocol expression increment length scale
 
 runApproximateAggregateDescriptors ()
+
+let runBinaryLiteralContexts () =
+    let cases =
+        [ "b'01'", "BLOB", "0x01"
+          "0b01", "BLOB", "0x01"
+          "b''", "BLOB", "0x"
+          "b'000000001'", "BLOB", "0x0001"
+          "b'01'+0", "BIGINT", "1"
+          "b'01'*2", "BIGINT", "2"
+          "-b'01'", "DOUBLE", "-1"
+          "ABS(b'01')", "DOUBLE", "1"
+          "CAST(b'01' AS UNSIGNED)", "BIGINT", "1"
+          "CAST(b'01' AS DECIMAL)", "DECIMAL", "1"
+          "HEX(b'01')", "VARCHAR", "01"
+          "CONCAT(b'01')", "BLOB", "0x01"
+          "SUM(b'01')", "DECIMAL", "1"
+          "AVG(b'01')", "DECIMAL", "1"
+          "SUM(DISTINCT b'01')", "DECIMAL", "1"
+          "BIT_COUNT(b'01')", "BIGINT", "1"
+          "b'01'=1", "BIGINT", "1"
+          "b'01'='1'", "BIGINT", "0"
+          "COALESCE(b'01',b'10')+0", "DOUBLE", "0"
+          "IFNULL(b'01',b'10')+0", "DOUBLE", "0"
+          "IF(1,b'01',b'10')+0", "DOUBLE", "1"
+          "IF(0,b'01',b'10')+0", "DOUBLE", "2"
+          "CASE WHEN 1 THEN b'01' ELSE b'10' END+0", "DOUBLE", "1"
+          "CASE WHEN 0 THEN b'01' ELSE b'10' END+0", "DOUBLE", "2"
+          "CONCAT(b'01')+0", "DOUBLE", "0"
+          "SUM(IF(1,b'01',b'10'))", "DOUBLE", "1"
+          "SUM(COALESCE(b'01',b'10'))", "DOUBLE", "0"
+          "0x01", "BLOB", "0x01"
+          "0x01+0", "BIGINT", "1"
+          "X'01'+0", "BIGINT", "1"
+          "_binary X'01'+0", "DOUBLE", "0"
+          "SUM(X'01')", "DECIMAL", "1"
+          "SUM(_binary X'01')", "DOUBLE", "0"
+          "(SELECT SUM(v) FROM (SELECT b'01' AS v) t)", "DOUBLE", "0"
+          "(SELECT v+0 FROM (SELECT b'01' AS v) t)", "DOUBLE", "0"
+          "SUM(b'1111111111111111111111111111111111111111111111111111111111111111')", "DECIMAL", "18446744073709551615"
+          "CAST(b'1111111111111111111111111111111111111111111111111111111111111111' AS UNSIGNED)", "BIGINT", "18446744073709551615"
+          "CAST(b'1111111111111111111111111111111111111111111111111111111111111111' AS SIGNED)", "BIGINT", "-1"
+          "b'1111111111111111111111111111111111111111111111111111111111111111'+0", "BIGINT", "-1"
+          "b'10000000000000000000000000000000000000000000000000000000000000000'+0", "BIGINT", "0"
+          "SUM(b'10000000000000000000000000000000000000000000000000000000000000000')", "DECIMAL", "0" ]
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        for expression, expectedType, expectedValue in cases do
+            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            if not (reader.Read()) then failwithf "%s returned no row" expression
+            let actual =
+                match reader.GetValue 0 with
+                | :? (byte[]) as bytes -> "0x" + Convert.ToHexString bytes
+                | value -> renderValue value
+            if reader.GetDataTypeName(0) <> expectedType || actual <> expectedValue then
+                failwithf "%A %s: expected %s:%s; got %s:%s"
+                    protocol expression expectedType expectedValue (reader.GetDataTypeName 0) actual
+            printfn "Binary literal | %A | %s -> %s:%s" protocol expression expectedType actual
+
+        if protocol = Sql then
+            for sql in [ "SET @literal_bytes=b'01'"; "PREPARE literal_bytes FROM 'SELECT ?+0,SUM(?)'" ] do
+                use command = new MySqlCommand(sql, connection)
+                command.ExecuteNonQuery() |> ignore
+            for sql, expected in
+                [ "SELECT @literal_bytes+0,SUM(@literal_bytes)", [ "DOUBLE:0"; "DOUBLE:0" ]
+                  "EXECUTE literal_bytes USING @literal_bytes,@literal_bytes", [ "BIGINT:0"; "DOUBLE:0" ] ] do
+                use command = new MySqlCommand(sql, connection)
+                use reader = command.ExecuteReader()
+                if not (reader.Read()) then failwithf "%s returned no row" sql
+                let actual = [ for index in 0 .. reader.FieldCount - 1 -> reader.GetDataTypeName(index) + ":" + renderValue(reader.GetValue index) ]
+                if actual <> expected then failwithf "%s: expected %A; got %A" sql expected actual
+                printfn "Binary literal binding | %s -> %A" sql actual
+            use close = new MySqlCommand("DEALLOCATE PREPARE literal_bytes", connection)
+            close.ExecuteNonQuery() |> ignore
+
+runBinaryLiteralContexts ()

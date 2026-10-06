@@ -447,3 +447,47 @@ parser represents the literal as bytes without its numeric interpretation.
 A BIT(4) column containing 1 and 2 returns DECIMAL 3 and 1.5000 in MySQL;
 column values retain their numeric representation. Numeric conversion warning
 coverage remains a separate diagnostics limitation.
+
+### Binary literal context boundaries
+
+`runBinaryLiteralContexts` in `torture/scripts/prepared-type-oracle.fsx`
+checks the following contracts on pinned MySQL 8.4.11 in text and binary
+execution. The literal's binary value and numeric interpretation are distinct:
+
+| Expression | Result family | Value |
+|---|---|---|
+| `b'01'`, `0b01` | binary BLOB | byte 01 |
+| `b'000000001'` | binary BLOB | bytes 00 01 |
+| `b'01'+0`, `b'01'*2` | BIGINT | 1, 2 |
+| `-b'01'`, `ABS(b'01')` | DOUBLE | -1, 1 |
+| `CAST(b'01' AS UNSIGNED)` | BIGINT | 1 |
+| `CAST(b'01' AS DECIMAL)` | DECIMAL | 1 |
+| `SUM(b'01')`, `AVG(b'01')` | DECIMAL | 1, 1.0000 |
+| `b'01'=1`, `b'01'='1'` | BIGINT | 1, 0 |
+| `X'01'+0`, `SUM(X'01')` | BIGINT, DECIMAL | 1, 1 |
+| `_binary X'01'+0`, `SUM(_binary X'01')` | DOUBLE | 0, 0 |
+
+IF and CASE preserve the selected literal's numeric interpretation even though
+the surrounding arithmetic advertises DOUBLE. COALESCE, IFNULL, and CONCAT
+produce ordinary binary strings: applying `+0` to their byte-01 result yields
+DOUBLE zero. SUM(IF(...)) is DOUBLE 1, whereas SUM(COALESCE(...)) is DOUBLE 0.
+A derived-column reference also loses the literal interpretation, including a
+single-row direct projection and a UNION-derived source.
+
+Assigning `b'01'` to a user variable yields an ordinary binary value.
+`@literal_bytes+0` and `SUM(@literal_bytes)` return DOUBLE zero. Binding that
+variable through SQL PREPARE to `SELECT ?+0,SUM(?)` returns BIGINT zero and
+DOUBLE zero respectively. A literal implementation must preserve these
+materialization boundaries rather than changing all binary-byte coercions.
+
+For 64 one bits, SUM and CAST AS UNSIGNED expose 18446744073709551615, while
+CAST AS SIGNED and the client-visible `literal+0` result expose -1. A 65-bit
+literal consisting of one followed by 64 zeros yields zero under both `+0`
+and SUM. The oracle checks observed values and type families in both wire
+modes; it does not assert diagnostic warnings for these boundaries.
+
+The parser currently emits `Lit(VBytes ...)` for bare bit/hex literals and
+explicit `_binary` values. This representation cannot carry their distinct
+numeric behavior. Stored BIT values already have a separate `VBit` case, but
+that case describes a column value and cannot by itself express the literal's
+binary descriptors or where its numeric interpretation is erased.
