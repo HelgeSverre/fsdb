@@ -638,6 +638,11 @@ RANGE boundary lookup and stored-function window inputs as profiling candidates.
 Smaller-size controls exceed the repeatability threshold under competing host
 load, so its raw timings do not establish a regression or speedup.
 
+The [post-compatibility comparison](benchmarks/results/10d2a1d8-windows.md)
+retains the same priorities: offset RANGE boundary scans and stored-function
+inputs. It includes a saved fsdb baseline and alternating target order, but
+large control drift still limits the results to exploratory measurements.
+
 Unless an artifact header says otherwise, the linked planner profiles compare
 native in-memory fsdb with native durable MySQL. They expose query-shape and
 scaling differences, not deployment-equivalent write cost. Durable write claims
