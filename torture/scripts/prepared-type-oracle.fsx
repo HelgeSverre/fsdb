@@ -282,3 +282,98 @@ let runDecimalExpressions () =
     execute "DEALLOCATE PREPARE decimal_probe"
 
 runDecimalExpressions ()
+
+let runDivisionIncrement () =
+    use connection = new MySqlConnection(connectionString)
+    connection.Open()
+    if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+        failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+
+    let execute sql =
+        use command = new MySqlCommand(sql, connection)
+        command.ExecuteNonQuery() |> ignore
+
+    let inspect label (command: MySqlCommand) expected =
+        use reader = command.ExecuteReader()
+        let schema = reader.GetColumnSchema()
+        if reader.FieldCount <> List.length expected || not (reader.Read()) then
+            failwithf "%s returned an unexpected result shape" label
+        expected |> List.iteri (fun index (precision, scale, value) ->
+            let actual = string (reader.GetMySqlDecimal index)
+            if reader.GetDataTypeName(index) <> "DECIMAL"
+               || schema[index].NumericPrecision <> Nullable precision
+               || schema[index].NumericScale <> Nullable scale
+               || actual <> value then
+                failwithf "%s column %d: expected DECIMAL(%d,%d) %s; got %s(%O,%O) %s"
+                    label index precision scale value (reader.GetDataTypeName index)
+                    schema[index].NumericPrecision schema[index].NumericScale actual)
+        if reader.Read() then failwithf "%s returned an unexpected second row" label
+        printfn "Division increment | %s -> %A" label expected
+
+    let query label sql expected =
+        use command = new MySqlCommand(sql, connection)
+        inspect label command expected
+
+    let sql = "SELECT 1/3 AS a,10.00/3 AS b,(1/3)*3 AS c"
+    let defaultResults = [ 5, 4, "0.3333"; 8, 6, "3.333333"; 6, 4, "1.0000" ]
+    let histories =
+        [ 0, [ 1, 0, "0"; 4, 2, "3.33"; 2, 0, "0" ], (19, 0, "1")
+          1, [ 2, 1, "0.3"; 5, 3, "3.333"; 3, 1, "1.0" ], (20, 1, "1.7")
+          4, defaultResults, (23, 4, "1.6667")
+          9, [ 10, 9, "0.333333333"; 13, 11, "3.33333333333"; 11, 9, "0.999999999" ], (28, 9, "1.666666666")
+          30, [ 31, 30, "0.333333333333333333333333333333"
+                34, 30, "3.333333333333333333333333333333"
+                32, 30, "1.000000000000000000000000000000" ], (49, 30, "1.666666666666666666666666666667") ]
+    execute "SET div_precision_increment=4"
+    execute ("PREPARE increment_probe FROM " + quote sql)
+    // A distinct text prevents connector caching from preparing the ordinary-query probe.
+    use binary = new MySqlCommand(sql + " /* retained increment */", connection)
+    binary.Prepare()
+    for increment, expected, average in histories do
+        execute (sprintf "SET div_precision_increment=%d" increment)
+        query (sprintf "ordinary at %d" increment) sql expected
+        query (sprintf "SQL prepared at 4, executed at %d" increment) "EXECUTE increment_probe" defaultResults
+        inspect (sprintf "binary prepared at 4, executed at %d" increment) binary defaultResults
+        query (sprintf "AVG at %d" increment)
+            "SELECT AVG(n) FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 2) t" [ average ]
+    execute "DEALLOCATE PREPARE increment_probe"
+
+    for assigned, retained in [ -1, 0; 31, 30 ] do
+        execute (sprintf "SET div_precision_increment=%d" assigned)
+        use warnings = new MySqlCommand("SHOW WARNINGS", connection)
+        use reader = warnings.ExecuteReader()
+        let expectedMessage = sprintf "Truncated incorrect div_precision_increment value: '%d'" assigned
+        if not (reader.Read()) || reader.GetString(0) <> "Warning"
+           || reader.GetInt32(1) <> 1292 || reader.GetString(2) <> expectedMessage then
+            failwithf "Expected warning 1292 when assigning %d" assigned
+        if reader.Read() then failwith "Unexpected additional assignment warning"
+        reader.Close()
+        use value = new MySqlCommand("SELECT @@div_precision_increment", connection)
+        if Convert.ToInt32(value.ExecuteScalar(), invariant) <> retained then
+            failwithf "Expected %d to clamp to %d" assigned retained
+        printfn "Division increment | %d clamps to %d with warning 1292" assigned retained
+
+    for assigned in [ "1.5"; "'2'"; "NULL" ] do
+        try
+            execute ("SET div_precision_increment=" + assigned)
+            failwithf "Expected assignment %s to fail" assigned
+        with :? MySqlException as error when error.Number = 1232 && error.SqlState = "42000" ->
+            printfn "Division increment | assignment %s -> 1232/42000" assigned
+
+    let database = "fsdb_division_oracle_" + Guid.NewGuid().ToString("N")
+    execute ("CREATE DATABASE " + database)
+    try
+        execute ("USE " + database)
+        execute "CREATE TABLE source(n INT)"
+        execute "INSERT INTO source VALUES (1)"
+        execute "SET div_precision_increment=4"
+        execute "PREPARE schema_increment FROM 'SELECT n/3 FROM source'"
+        execute "SET div_precision_increment=1"
+        query "before schema reprepare" "EXECUTE schema_increment" [ 14, 4, "0.3333" ]
+        execute "ALTER TABLE source ADD COLUMN extra INT"
+        query "after schema reprepare" "EXECUTE schema_increment" [ 11, 1, "0.3" ]
+        execute "DEALLOCATE PREPARE schema_increment"
+    finally
+        execute ("DROP DATABASE " + database)
+
+runDivisionIncrement ()

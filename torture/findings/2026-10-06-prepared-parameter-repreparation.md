@@ -295,3 +295,36 @@ still use System.Decimal: intermediate division is capped at scale 28 and its
 96-bit coefficient cannot retain all MySQL DECIMAL values or guard digits.
 The full oracle corpus therefore remains a specification, not a claim of
 complete fsdb decimal parity.
+
+## Division precision increment
+
+`just prepared-type-oracle` also checks `div_precision_increment` against MySQL
+8.4.11. The session setting changes both decimal division and AVG. The corpus
+checks exact text and precision/scale descriptors at increments 0, 1, 4, 9,
+and 30, including nested multiplication. For example:
+
+| Increment | `1/3` | `(1/3)*3` | AVG of integer values 1, 2, 2 |
+|---|---|---|---|
+| 0 | `0` | `0` | `1` |
+| 1 | `0.3` | `1.0` | `1.7` |
+| 4 | `0.3333` | `1.0000` | `1.6667` |
+| 9 | `0.333333333` | `0.999999999` | `1.666666666` |
+
+Both SQL PREPARE and binary preparation retain the increment from preparation.
+Changing the session value does not change the prepared descriptor or result.
+An ALTER on a referenced table forces repreparation and captures the new
+increment: preparing `n/3` at four and executing after a change to one returns
+`0.3333` before ALTER and `0.3` afterward.
+
+The valid assignment range is 0 through 30. MySQL clamps -1 and 31 to its
+endpoints and emits warning 1292. Decimal, quoted integer, and NULL assignments
+fail with 1232/42000. The oracle checks these diagnostics separately from
+query evaluation. Its ordinary and binary prepared probes use distinct SQL
+texts because MySqlConnector caches preparation by SQL text on a connection.
+
+fsdb currently fixes the increment at four and does not expose the variable.
+Closing this gap requires a captured expression setting for prepared statements,
+refresh on repreparation, shared division/AVG semantics, and assignment
+validation with clamping warnings. The scale-30 cases also exceed the current
+System.Decimal representation; exposing a setting alone would not close the
+numeric precision gap.
