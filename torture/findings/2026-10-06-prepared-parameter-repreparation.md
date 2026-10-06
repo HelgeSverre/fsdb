@@ -130,8 +130,8 @@ integer conversion after a decimal assignment.
 
 Remaining boundaries:
 
-- Decimal result-scale propagation beyond the covered ABS expression still
-  needs a broader expression-family oracle corpus.
+- Decimal result-scale propagation and division rounding remain incomplete;
+  the checked expression-family oracle below records their required behavior.
 - MySQL's direct decimal variable read after assigning 'abc' produces decimal
   wire text that MySqlConnector cannot parse; fsdb returns error 1292. This
   malformed-result edge is not included in the successful-history contract.
@@ -245,3 +245,38 @@ A separate oracle probe showed that a temporary table may shadow a permanent
 view. fsdb currently refuses the CREATE TEMPORARY TABLE with error 1050. This
 is recorded under views in GAPS.md; the dependency traversal nevertheless stops
 at a temporary-table entry rather than expanding a hidden view.
+
+## Decimal expression descriptors and values
+
+`just prepared-type-oracle` checks decimal expression metadata and exact wire
+text with `GetMySqlDecimal`, avoiding System.Decimal normalization. It covers
+an ordinary query and a retained prepared handle after decimal, integer, NULL,
+and a different-scale decimal assignment.
+
+With @v initially 1.25, direct reads advertise precision 65 and scale 30 while
+returning `1.25`. Arithmetic, ABS, unary negation, and COALESCE also advertise
+scale 30, but pad their results to that scale. CASE returns the selected value's
+current scale instead. ROUND and TRUNCATE with a requested scale of 2 advertise
+scale 2 and report precisions 38 and 37 respectively. Addition and subtraction
+report precision 66 in the connector's result metadata; this is result metadata,
+not a permitted DECIMAL column declaration.
+
+The differences are not purely presentational. For the retained decimal @v
+holding 1.25, MySQL returns:
+
+```text
+@v + 1 = 2.250000000000000000000000000000
+@v / 3 = 0.416666666000000000000000000000
+```
+
+fsdb at `4f45e955` returns `2.25` and `0.416667`. Padding fsdb's quotient would
+preserve the wrong value. `Value.div` currently chooses scale from the stored
+System.Decimal plus four and rounds there, independently of expression metadata.
+`Executor.outputColumnFormats` has a special scale rule for ABS of a retained
+decimal variable; other expressions need shared declared-scale rules, with
+separate value-preserving behavior for direct reads and CASE.
+
+The corpus retains the division-by-three case alongside terminating division,
+so a display-only fix cannot satisfy it. Arithmetic precision and rounding remain
+open; these oracle assertions record the required behavior rather than claiming
+fsdb parity.

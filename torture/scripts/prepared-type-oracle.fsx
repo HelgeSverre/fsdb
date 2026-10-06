@@ -189,3 +189,96 @@ runSetHistory "SET SESSION sql_select_limit=@v, @x=@v"
       ["BIGINT:0"; "BIGINT:0"]
       ["BIGINT:NULL"; "BIGINT:0"]
       ["BIGINT:3"; "BIGINT:3"] ]
+
+type DecimalColumn =
+    { Name: string
+      Expression: string
+      Precision: int
+      Scale: int }
+
+let decimalColumn name expression precision scale =
+    { Name = name; Expression = expression; Precision = precision; Scale = scale }
+
+let decimalColumns =
+    [ decimalColumn "direct" "@v" 65 30
+      decimalColumn "addition" "@v+1" 66 30
+      decimalColumn "subtraction" "@v-1" 66 30
+      decimalColumn "multiplication" "@v*2" 65 30
+      decimalColumn "division" "@v/2" 65 30
+      decimalColumn "thirds" "@v/3" 65 30
+      decimalColumn "modulo" "@v%1" 65 30
+      decimalColumn "absolute_value" "ABS(@v)" 65 30
+      decimalColumn "negative_value" "-@v" 65 30
+      decimalColumn "rounded" "ROUND(@v,2)" 38 2
+      decimalColumn "truncated" "TRUNCATE(@v,2)" 37 2
+      decimalColumn "coalesced" "COALESCE(@v,0)" 65 30
+      decimalColumn "conditional" "CASE WHEN 1 THEN @v ELSE 0 END" 65 30 ]
+
+let fixedDecimal scale (value: decimal) = value.ToString("F" + string scale, invariant)
+let decimal30 = fixedDecimal 30
+
+let decimalHistories =
+    [ "1.25",
+      [ "1.25"; decimal30 2.25M; decimal30 0.25M; decimal30 2.5M
+        decimal30 0.625M; decimal30 0.416666666M; decimal30 0.25M
+        decimal30 1.25M; decimal30 -1.25M; "1.25"; "1.25"
+        decimal30 1.25M; "1.25" ]
+      "2",
+      [ "2"; decimal30 3M; decimal30 1M; decimal30 4M
+        decimal30 1M; decimal30 0.666666666M; decimal30 0M
+        decimal30 2M; decimal30 -2M; "2.00"; "2.00"; decimal30 2M; "2" ]
+      "NULL",
+      [ "NULL"; "NULL"; "NULL"; "NULL"; "NULL"; "NULL"; "NULL"
+        "NULL"; "NULL"; "NULL"; "NULL"; decimal30 0M; "NULL" ]
+      "1.2345",
+      [ "1.2345"; decimal30 2.2345M; decimal30 0.2345M; decimal30 2.469M
+        decimal30 0.61725M; decimal30 0.4115M; decimal30 0.2345M
+        decimal30 1.2345M; decimal30 -1.2345M; "1.23"; "1.23"
+        decimal30 1.2345M; "1.2345" ] ]
+
+let runDecimalExpressions () =
+    use connection = new MySqlConnection(connectionString)
+    connection.Open()
+    if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+        failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+
+    let execute sql =
+        use command = new MySqlCommand(sql, connection)
+        command.ExecuteNonQuery() |> ignore
+
+    let inspect label sql expected =
+        use command = new MySqlCommand(sql, connection)
+        use reader = command.ExecuteReader()
+        let schema = reader.GetColumnSchema()
+        if reader.FieldCount <> decimalColumns.Length || not (reader.Read()) then
+            failwithf "%s returned an unexpected decimal result shape" label
+        List.zip decimalColumns expected
+        |> List.iteri (fun index (column, expectedValue) ->
+            // System.Decimal normalization would hide scale and precision differences.
+            let actual = if reader.IsDBNull index then "NULL" else string (reader.GetMySqlDecimal index)
+            let metadata = schema[index]
+            if reader.GetDataTypeName(index) <> "DECIMAL"
+               || metadata.NumericScale <> Nullable column.Scale
+               || metadata.NumericPrecision <> Nullable column.Precision
+               || actual <> expectedValue then
+                failwithf "%s %s: expected DECIMAL(%d,%d) %s; got %s(%O,%O) %s"
+                    label column.Name column.Precision column.Scale expectedValue
+                    (reader.GetDataTypeName index) metadata.NumericPrecision metadata.NumericScale actual
+            printfn "Decimal | %s | %s | DECIMAL(%d,%d) -> %s"
+                label column.Name column.Precision column.Scale actual)
+        if reader.Read() then failwithf "%s returned an unexpected second row" label
+
+    let sql =
+        decimalColumns
+        |> List.map (fun column -> column.Expression + " AS " + column.Name)
+        |> String.concat ", "
+        |> (+) "SELECT "
+    execute "SET @v=1.25"
+    inspect "ordinary" sql (decimalHistories |> List.head |> snd)
+    execute ("PREPARE decimal_probe FROM " + quote sql)
+    for value, expected in decimalHistories do
+        execute ("SET @v=" + value)
+        inspect ("prepared after " + value) "EXECUTE decimal_probe" expected
+    execute "DEALLOCATE PREPARE decimal_probe"
+
+runDecimalExpressions ()
