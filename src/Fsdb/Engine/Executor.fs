@@ -1702,6 +1702,34 @@ let private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr list 
         expr
     |> List.rev
 
+type private NumericAggregateKind = CountValues | SumValues | AverageValues
+
+type private NumericAggregateAccumulator(kind: NumericAggregateKind, divisionPrecision: int) =
+    let mutable count = 0L
+    let mutable exactTotal = 0M
+    let mutable total: Value option = None
+
+    member _.Add(value) =
+        if value <> VNull then
+            count <- count + 1L
+            if kind <> CountValues then
+                match total, value with
+                | None, VInt integer -> exactTotal <- exactTotal + decimal integer
+                | None, VUInt unsigned -> exactTotal <- exactTotal + decimal unsigned
+                | None, VDecimal number -> exactTotal <- exactTotal + number
+                | None, value when count = 1L -> total <- Some value
+                | None, value -> total <- Some(Value.add (VDecimal exactTotal) value)
+                | Some current, value -> total <- Some(Value.add current value)
+
+    member _.Value =
+        match kind with
+        | CountValues -> VInt count
+        | _ when count = 0L -> VNull
+        | SumValues -> total |> Option.defaultValue (VDecimal exactTotal)
+        | AverageValues ->
+            let sum = total |> Option.defaultValue (VDecimal exactTotal)
+            Value.divWithIntermediatePrecision divisionPrecision sum (VInt count)
+
 type private WindowRow = int * (Value list * (Value * Collation.Collation option) list * Value[])
 
 /// Every call to the named function inside `expr` — one walker, since the
@@ -12588,23 +12616,10 @@ and private evalAggregate
         when (upper = "COUNT" || upper = "SUM" || upper = "AVG")
              && (match innerExpr with Distinct _ -> false | _ -> true)
              && Functions.isUnmodifiedBuiltinAggregate name registry ->
-        let mutable count = 0L
-        let mutable exactTotal = 0M
-        let mutable total: Value option = None
+        let kind = if upper = "COUNT" then CountValues elif upper = "SUM" then SumValues else AverageValues
+        let accumulator = NumericAggregateAccumulator(kind, divisionPrecisionIncrement ())
         let mutable failure: EvalError option = None
         let mutable processed = 0
-
-        let add value =
-            count <- count + 1L
-
-            if upper <> "COUNT" then
-                match total, value with
-                | None, VInt integer -> exactTotal <- exactTotal + decimal integer
-                | None, VUInt unsigned -> exactTotal <- exactTotal + decimal unsigned
-                | None, VDecimal number -> exactTotal <- exactTotal + number
-                | None, value when count = 1L -> total <- Some value
-                | None, value -> total <- Some(Value.add (VDecimal exactTotal) value)
-                | Some current, value -> total <- Some(Value.add current value)
 
         for row in rows do
             if failure.IsNone then
@@ -12616,17 +12631,11 @@ and private evalAggregate
                 | Error error -> failure <- Some error
                 | Ok VNull -> ()
                 | Ok value ->
-                    add (if upper = "COUNT" then value else enumNumericOperand ctx innerExpr value |> Functions.numericAggregateValue)
+                    accumulator.Add(if upper = "COUNT" then value else enumNumericOperand ctx innerExpr value |> Functions.numericAggregateValue)
 
         match failure with
         | Some error -> Error error
-        | None when upper = "COUNT" -> Ok(VInt count)
-        | None when count = 0L -> Ok VNull
-        | None when upper = "SUM" -> Ok(total |> Option.defaultValue (VDecimal exactTotal))
-        | None ->
-            total
-            |> Option.defaultValue (VDecimal exactTotal)
-            |> fun sum -> Ok(Value.divWithIntermediatePrecision (divisionPrecisionIncrement ()) sum (VInt count))
+        | None -> Ok accumulator.Value
     | arg :: rest when isGroupConcat ->
         // `GROUP_CONCAT` folds entirely here rather than through
         // `registry.Aggregates` — see `isAggregateCall`'s doc. `rest` holds
