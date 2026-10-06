@@ -2458,643 +2458,6 @@ let private combinedDecimalShape left right =
     { Precision = max (left.Precision - left.Scale) (right.Precision - right.Scale) + scale
       Scale = scale }
 
-let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
-    let simple typeId =
-        let columnLength =
-            if typeId = TypeTiny then 4u
-            elif typeId = TypeShort then 6u
-            elif typeId = TypeLong then 11u
-            elif typeId = TypeLongLong then 20u
-            elif typeId = TypeFloat then 12u
-            elif typeId = TypeDouble then 22u
-            elif typeId = TypeNewDecimal then 67u
-            elif typeId = TypeDate then 10u
-            elif typeId = TypeDateTime then 19u
-            elif typeId = TypeTime then 10u
-            elif typeId = TypeYear then 4u
-            else 0u
-
-        Some
-            { Value.columnMetadata typeId with
-                ColumnLength = columnLength
-                Decimals = if typeId = TypeDouble || typeId = TypeFloat then 31uy else 0uy }
-    let typeIdOf expression = metadataOfExpr ctx expression |> Option.map _.TypeId
-    let numericMetadata expression =
-        let rec literalBytes = function
-            | Lit(VBinaryLiteral bytes) -> Some bytes
-            | Distinct inner -> literalBytes inner
-            | Subquery select -> tryReducedScalarProjection ctx.Registry select |> Option.bind literalBytes
-            | _ -> None
-        match literalBytes expression with
-        | Some bytes ->
-            let precision = max 1 (int (System.Math.Ceiling(float (min 8 bytes.Length) * 8.0 * System.Math.Log10 2.0)))
-            Some { Value.columnMetadata TypeLongLong with ColumnLength = uint32 precision; Flags = UnsignedFlag ||| NotNullFlag }
-        | None -> metadataOfExpr ctx expression
-
-    let numeric combineShapes left right =
-        let isInteger typeId =
-            typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
-
-        let leftMetadata = numericMetadata left
-        let rightMetadata = numericMetadata right
-
-        let inferred =
-            match leftMetadata, rightMetadata with
-            | Some leftType, _ when leftType.TypeId = TypeDouble || leftType.TypeId = TypeFloat -> simple TypeDouble
-            | _, Some rightType when rightType.TypeId = TypeDouble || rightType.TypeId = TypeFloat -> simple TypeDouble
-            | Some leftType, _ when leftType.TypeId = TypeString || leftType.TypeId = TypeVarString || leftType.TypeId = TypeBlob -> simple TypeDouble
-            | _, Some rightType when rightType.TypeId = TypeString || rightType.TypeId = TypeVarString || rightType.TypeId = TypeBlob -> simple TypeDouble
-            | Some leftType, _ when leftType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
-            | _, Some rightType when rightType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
-            | Some leftType, Some rightType when isInteger leftType.TypeId && isInteger rightType.TypeId -> simple TypeLongLong
-            | Some leftType, None when isInteger leftType.TypeId -> simple TypeDouble
-            | None, Some rightType when isInteger rightType.TypeId -> simple TypeDouble
-            | _ -> None
-
-        let inferred =
-            inferred
-            |> Option.map (fun metadata ->
-                if metadata.TypeId = TypeNewDecimal then
-                    let shape = combineShapes (decimalShape left leftMetadata) (decimalShape right rightMetadata)
-                    withDecimalShape shape metadata
-                else metadata)
-
-        match inferred, leftMetadata, rightMetadata with
-        | Some result, Some leftType, Some rightType
-            when hasMetadataFlag NotNullFlag leftType && hasMetadataFlag NotNullFlag rightType ->
-            Some { result with Flags = result.Flags ||| NotNullFlag }
-        | _ -> inferred
-
-    let numericUnary expression =
-        metadataOfExpr ctx expression
-        |> Option.bind (fun metadata ->
-            if
-                metadata.TypeId = TypeTiny
-                || metadata.TypeId = TypeShort
-                || metadata.TypeId = TypeLong
-                || metadata.TypeId = TypeLongLong
-                || metadata.TypeId = TypeYear
-                || metadata.TypeId = TypeFloat
-                || metadata.TypeId = TypeDouble
-                || metadata.TypeId = TypeNewDecimal
-            then
-                Some metadata
-            else
-                simple TypeDouble)
-        |> Option.orElseWith (fun () -> simple TypeDouble)
-
-    let choose expressions =
-        let inferred = expressions |> List.map (fun expression -> expression, metadataOfExpr ctx expression)
-        let metadata = inferred |> List.choose snd
-        let notNull =
-            sameLength metadata expressions
-            && (metadata |> List.forall (hasMetadataFlag NotNullFlag))
-
-        let isText item =
-            item.TypeId = TypeString || item.TypeId = TypeVarString || item.TypeId = TypeBlob
-
-        let isInteger item =
-            item.TypeId = TypeTiny
-            || item.TypeId = TypeShort
-            || item.TypeId = TypeLong
-            || item.TypeId = TypeLongLong
-            || item.TypeId = TypeYear
-
-        let withNullability item =
-            { item with
-                Flags =
-                    if notNull then
-                        item.Flags ||| NotNullFlag
-                    else
-                        item.Flags &&& ~~~NotNullFlag }
-
-        let onlyUntypedNulls =
-            inferred
-            |> List.forall (function
-                | _, Some _ -> true
-                | Lit VNull, None -> true
-                | _ -> false)
-
-        let textMetadata = metadata |> List.filter isText
-
-        match metadata with
-        | [ item ] when onlyUntypedNulls -> item |> withNullability |> Some
-        | _ when not textMetadata.IsEmpty ->
-            textMetadata
-            |> List.maxBy _.ColumnLength
-            |> fun item ->
-                if textMetadata |> List.exists (fun candidate -> candidate.TypeId = TypeBlob) then
-                    { item with TypeId = TypeBlob; Flags = item.Flags ||| BlobFlag ||| BinaryFlag }
-                else
-                    { item with TypeId = TypeVarString; Flags = item.Flags &&& ~~~BlobFlag }
-            |> withNullability
-            |> Some
-        | _ when metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) ->
-            simple TypeDouble |> Option.map withNullability
-        | _ when metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal) ->
-            let shape =
-                inferred
-                |> List.map (fun (expression, metadata) -> decimalShape expression metadata)
-                |> List.reduce combinedDecimalShape
-            let shape = { shape with Precision = min 65 shape.Precision }
-            simple TypeNewDecimal |> Option.map (withDecimalShape shape >> withNullability)
-        | _ when not metadata.IsEmpty && metadata |> List.forall isInteger ->
-            let isUnsigned = metadata |> List.forall (hasMetadataFlag UnsignedFlag)
-
-            simple TypeLongLong
-            |> Option.map (fun item ->
-                { item with
-                    ColumnLength = metadata |> List.map _.ColumnLength |> List.max
-                    Flags =
-                        if isUnsigned then
-                            item.Flags ||| UnsignedFlag
-                        else
-                            item.Flags &&& ~~~UnsignedFlag })
-            |> Option.map withNullability
-        | _ -> List.tryHead metadata |> Option.map withNullability
-
-    let chooseCoalescing expressions =
-        let notNull =
-            expressions
-            |> List.choose (metadataOfExpr ctx)
-            |> List.exists (hasMetadataFlag NotNullFlag)
-
-        choose expressions
-        |> Option.map (fun result ->
-            { result with
-                Flags =
-                    if notNull then
-                        result.Flags ||| NotNullFlag
-                    else
-                        result.Flags &&& ~~~NotNullFlag })
-
-    let chooseExtrema expressions =
-        match choose expressions with
-        | Some metadata when metadata.TypeId = TypeString || metadata.TypeId = TypeVarString ->
-            expressions
-            |> List.choose (metadataOfExpr ctx)
-            |> List.filter (fun item -> item.TypeId = TypeString || item.TypeId = TypeVarString)
-            |> List.fold (fun length item -> max length item.ColumnLength) 4u
-            |> fun length -> Some { metadata with ColumnLength = length }
-        | metadata -> metadata
-
-    let text length =
-        Some
-            { ColumnWire.metadataOfType(TVarchar length) with
-                Decimals = 31uy }
-
-    let binary length =
-        Some
-            { ColumnWire.metadataOfType(TVarBinary length) with
-                Decimals = 31uy }
-
-    let json = Some(ColumnWire.metadataOfType TJson)
-    let geometry = Some(ColumnWire.metadataOfType(TGeometry Geometry))
-
-    let datetime expression =
-        Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expression |> Option.defaultValue 0)))
-
-    let datetimeWithFsp fsp = Some(ColumnWire.metadataOfType(TDateTime fsp))
-
-    let datetimeOf expressions =
-        expressions
-        |> List.choose (fspOfExpr ctx)
-        |> List.fold max 0
-        |> fun fsp -> Some(ColumnWire.metadataOfType(TDateTime fsp))
-
-    let dateArithmetic expression first interval =
-        let timeUnit =
-            match interval with
-            | NamedFunction "INTERVAL" [ _; Lit(VString unit) ] ->
-                not (dateOnlyIntervalUnits.Contains(unit.ToUpperInvariant()))
-            | _ -> true
-
-        match metadataOfExpr ctx first with
-        | Some metadata when metadata.TypeId = TypeDate && not timeUnit -> Some(ColumnWire.metadataOfType TDate)
-        | Some metadata when metadata.TypeId = TypeTime ->
-            Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expression |> Option.defaultValue 0)))
-        | Some metadata when metadata.TypeId = TypeDate || metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp ->
-            datetimeOf [ first ]
-        | _ -> text 16383
-
-    let strToDate format =
-        let containsAny (tokens: string list) (value: string) = tokens |> List.exists value.Contains
-
-        match format with
-        | Lit(VString value) ->
-            let hasDate = containsAny strToDateDateTokens value
-            let hasTime = containsAny strToDateTimeTokens value
-            let fsp = if value.Contains("%f", System.StringComparison.Ordinal) then 6 else 0
-
-            match hasDate, hasTime with
-            | true, true -> datetimeWithFsp fsp
-            | true, false -> Some(ColumnWire.metadataOfType TDate)
-            | false, true -> Some(ColumnWire.metadataOfType(TTime fsp))
-            | false, false -> text 16383
-        | _ -> datetime expr
-
-    let rec characterBound expression =
-        match expression with
-        | Collate(value, _) -> characterBound value
-        | Lit(VString text) -> text.EnumerateRunes() |> Seq.length
-        | Lit(VBinaryLiteral bytes)
-        | Lit(VBytes bytes) -> bytes.Length
-        | Lit(VBit(width, _)) -> (width + 7) / 8
-        | Col _
-        | QualifiedCol _ ->
-            tryColumnDefForExpr ctx expression
-            |> Option.bind (fun column ->
-                match column.Type with
-                | TChar length
-                | TVarchar length -> Some length
-                | _ -> None)
-            |> Option.defaultValue 1
-        | _ -> 1
-
-    let weightStringMetadata (source: Expr) (charLength: int option) =
-        match charLength with
-        | Some length when
-            match source with
-            | Cast(_, TBinary _) -> true
-            | _ -> false
-            ->
-            Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 (max 8 length); Flags = BinaryFlag }
-        | _ ->
-            let charset = sourceCharset ctx source
-            let bytesPerCharacter = if charset.StartsWith("utf8", System.StringComparison.Ordinal) then 4 else 1
-            let isBinaryCollation =
-                match source with
-                | Collate(_, name) -> name.EndsWith("_bin", System.StringComparison.Ordinal)
-                | _ ->
-                    tryColumnDefForExpr ctx source
-                    |> Option.exists (fun column ->
-                        column.Charset = Some "binary"
-                        || (column.Collation |> Option.exists (fun name -> name.EndsWith("_bin", System.StringComparison.Ordinal))))
-            let multiplier = if isBinaryCollation || not (charset.StartsWith("utf8", System.StringComparison.Ordinal)) then 1 else 16
-            let sourceLength = int64 (characterBound source) * int64 bytesPerCharacter * int64 multiplier
-            let charLength = charLength |> Option.map (fun length -> int64 length * int64 multiplier) |> Option.defaultValue 0L
-            let length = max sourceLength charLength |> max 8L |> min (int64 System.UInt32.MaxValue)
-            Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 length; Flags = BinaryFlag }
-
-    let (|RegisteredScalarResult|_|) name =
-        match Functions.lookup name ctx.Registry with
-        | Some _ -> Functions.lookupScalarMetadata name ctx.Registry
-        | None when name.Contains('.', System.StringComparison.Ordinal) -> None
-        | None -> Functions.lookupScalarMetadata (ctx.DbName + "." + name) ctx.Registry
-
-    match expr with
-    | Lit VNull -> None
-    | Lit(VInt value) ->
-        let typeId =
-            if value >= int64 System.SByte.MinValue && value <= int64 System.SByte.MaxValue then TypeTiny
-            elif value >= int64 System.Int16.MinValue && value <= int64 System.Int16.MaxValue then TypeShort
-            elif value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue then TypeLong
-            else TypeLongLong
-
-        simple typeId |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
-    | Lit(VUInt _) -> Some { Value.columnMetadata TypeLongLong with Flags = UnsignedFlag ||| NotNullFlag }
-    | Lit(VBit(width, _)) ->
-        Some { Value.columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag ||| NotNullFlag }
-    | Lit(VDouble _) -> simple TypeDouble |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | Lit(VDecimal value) ->
-        simple TypeNewDecimal
-        |> Option.map (fun metadata ->
-            withDecimalShape (decimalShape expr None) { metadata with Flags = NotNullFlag })
-    | Lit(VString text) ->
-        Some
-            { Value.columnMetadata TypeVarString with
-                ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text)
-                Flags = NotNullFlag
-                CollationId = metadataCollationId ctx.Store.ExecutionSettings.ConnectionCollation.Name }
-    | Lit(VBinaryLiteral bytes)
-    | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
-    | Lit(VDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | Lit(VDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | Lit(VTimestamp _) -> simple TypeTimestamp |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | Lit(VTime _) -> Some { ColumnWire.metadataOfType(TTime 0) with Flags = BinaryFlag ||| NotNullFlag }
-    | Lit(VZeroDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | Lit(VZeroDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | Lit(VJson _) -> Some { ColumnWire.metadataOfType TJson with Flags = BinaryFlag ||| NotNullFlag }
-    | UserVariable variable when variable.Sql = "@" -> simple TypeVarString
-    | UserVariable variable ->
-        variable.PreparedType
-        |> Option.map PreparedVariables.metadata
-        |> Option.orElseWith (fun () ->
-            currentVariableContext ()
-            |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
-            |> Option.bind (fun value ->
-                match value with
-                | VDecimal _ -> Some(PreparedVariables.metadata UserVariableType.Decimal)
-                | _ -> metadataOfExpr ctx (Lit value))
-            |> Option.orElse (simple TypeVarString))
-    | SystemVariable(scope, variable) ->
-        currentVariableContext ()
-        |> Option.bind (fun bindings ->
-            bindings.ReadSystemVariable (scope |> Option.defaultValue "") variable
-            |> Result.toOption
-            |> Option.flatten)
-        |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
-        |> Option.orElse (simple TypeVarString)
-    | AssignUserVariable(_, value) -> metadataOfExpr ctx value
-    | Lit(VGeometry _) ->
-        Some { Value.columnMetadata TypeGeometry with
-                   ColumnLength = 4294967295u
-                   Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
-    | Col _
-    | QualifiedCol _ -> tryColumnDefForExpr ctx expr |> Option.map ColumnWire.metadataOfColumn
-    | Row _ -> None
-    | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
-    | Not _
-    | IsNull _
-    | IsNotNull _
-    | IsTrue _
-    | IsFalse _
-    | Like _
-    | Regexp _
-    | In _
-    | InSubquery _
-    | QuantifiedComparison _
-    | Between _
-    | Exists _ -> simple TypeLongLong
-    | RuntimeExpression operand -> metadataOfExpr ctx operand
-    | Neg(Lit(VBinaryLiteral _)) -> simple TypeDouble
-    | Neg operand ->
-        let source = metadataOfExpr ctx operand
-        numeric (fun _ right -> right) (Lit(VInt 0L)) operand
-        |> Option.map (fun metadata ->
-            if metadata.TypeId <> TypeLongLong then metadata
-            else
-                let promoted =
-                    tryClosedNumericValue ctx.Registry operand
-                    |> Option.map Value.negateConstant
-                    |> Option.exists (function VDecimal _ -> true | _ -> false)
-                let length =
-                    source |> Option.map (fun item -> item.ColumnLength + (if hasMetadataFlag UnsignedFlag item then 1u else 0u))
-                    |> Option.defaultValue metadata.ColumnLength
-                { metadata with
-                    TypeId = if promoted then TypeNewDecimal else TypeLongLong
-                    ColumnLength = length })
-    | BinOp((Add | Sub | SignedSub), left, right) ->
-        numeric (fun left right ->
-            let shape = combinedDecimalShape left right
-            { shape with Precision = shape.Precision + 1 }) left right
-    | BinOp(Mul, left, right) ->
-        numeric (fun left right ->
-            { Precision = min 65 (left.Precision + right.Precision)
-              Scale = min 30 (left.Scale + right.Scale) }) left right
-    | BinOp(Div, left, right) ->
-        match typeIdOf left, typeIdOf right with
-        | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
-        | _, Some rightType when rightType = TypeDouble || rightType = TypeFloat -> simple TypeDouble
-        | Some _, _
-        | _, Some _ ->
-            let dividend = decimalShape left (metadataOfExpr ctx left)
-            let divisor = decimalShape right (metadataOfExpr ctx right)
-            let increment = divisionPrecisionIncrement ()
-            let shape =
-                { Precision = min 65 (dividend.Precision + divisor.Scale + increment)
-                  Scale = min 30 (dividend.Scale + increment) }
-            simple TypeNewDecimal |> Option.map (withDecimalShape shape)
-        | _ -> None
-    | BinOp(IntDiv, _, _) -> simple TypeLongLong
-    | Cast(value, ty) ->
-        let metadata = ColumnWire.metadataOfType ty
-        let metadata = match ty with TBigInt _ -> { metadata with ColumnLength = 21u } | _ -> metadata
-
-        metadataOfExpr ctx value
-        |> Option.filter (hasMetadataFlag NotNullFlag)
-        |> Option.map (fun _ -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
-        |> Option.orElse (Some metadata)
-    | Collate(inner, collation) ->
-        metadataOfExpr ctx inner
-        |> Option.map (fun metadata ->
-            { metadata with
-                CollationId = metadataCollationId collation })
-    | Distinct inner
-    | OrderBy(inner, _) -> metadataOfExpr ctx inner
-    | NamedFunction "DEFAULT" [ argument ] ->
-        metadataOfExpr ctx argument
-    | NamedFunction "COERCIBILITY" [ _ ] ->
-        simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | NamedFunction "COLLATION" [ _ ]
-    | NamedFunction "CHARSET" [ _ ] ->
-        Some { Value.columnMetadata TypeVarString with ColumnLength = 64u; Flags = NotNullFlag }
-    | NamedFunction "SLEEP" [ _ ] ->
-        simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | NamedFunction "BENCHMARK" [ _; _ ] ->
-        simple TypeLongLong
-    | NamedFunction "WEIGHT_STRING" [ Cast(source, TBinary length) ] ->
-        weightStringMetadata (Cast(source, TBinary length)) (Some length)
-    | NamedFunction "WEIGHT_STRING" [ Cast(source, TChar length) ] ->
-        weightStringMetadata source (Some length)
-    | NamedFunction "WEIGHT_STRING" [ source ] ->
-        weightStringMetadata source None
-    | FuncCall(RegisteredScalarResult metadata, _) -> Some metadata
-    | FuncCall(name, args) ->
-        match name.ToUpperInvariant(), args with
-        | "COUNT", _ -> simple TypeLongLong
-        | ("SUM" | "AVG"), [ arg ] ->
-            let isAverage = equalsIgnoreCase name "AVG"
-            let approximate length scale =
-                simple TypeDouble
-                |> Option.map (fun metadata -> { metadata with ColumnLength = length; Decimals = scale })
-            match numericMetadata arg with
-            | metadata when metadata |> Option.forall (fun item -> item.TypeId = TypeNull) ->
-                let scale = if isAverage then divisionPrecisionIncrement () else 0
-                approximate (uint32 (17 + scale)) (byte scale)
-            | Some metadata when
-                metadata.TypeId = TypeDouble
-                || metadata.TypeId = TypeFloat
-                || metadata.TypeId = TypeString
-                || metadata.TypeId = TypeVarString
-                || metadata.TypeId = TypeBlob
-                || hasMetadataFlag (EnumFlag ||| SetFlag) metadata
-                ->
-                approximate 23u 31uy
-            | metadata ->
-                let argument = decimalShape arg metadata
-                let increment = if isAverage then divisionPrecisionIncrement () else 22
-                let shape =
-                    { Precision = min 65 (argument.Precision + increment)
-                      Scale = if isAverage then min 30 (argument.Scale + increment) else argument.Scale }
-                simple TypeNewDecimal |> Option.map (withDecimalShape shape)
-        | ("STD" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"), _ -> simple TypeDouble
-        | "GROUP_CONCAT", _ -> Some(ColumnWire.metadataOfType TText)
-        | ("JSON_ARRAYAGG" | "JSON_OBJECTAGG"), _ -> json
-        | "GROUPING", _ -> simple TypeLongLong
-        | ("MIN" | "MAX"), [ arg ] ->
-            metadataOfExpr ctx arg
-            |> Option.map (fun metadata ->
-                if hasMetadataFlag (EnumFlag ||| SetFlag) metadata then
-                    { metadata with Flags = metadata.Flags &&& ~~~(EnumFlag ||| SetFlag) }
-                else
-                    metadata)
-        | ("COALESCE" | "IFNULL"), values -> chooseCoalescing values
-        | ("GREATEST" | "LEAST"), values -> chooseExtrema values
-        | "ANY_VALUE", [ value ] -> metadataOfExpr ctx value
-        | "NAME_CONST", [ _; Lit VNull ] -> simple TypeNull
-        | "NAME_CONST", [ _; value ] -> metadataOfExpr ctx value
-        | "NULLIF", first :: fallback :: _ ->
-            metadataOfExpr ctx first |> Option.orElseWith (fun () -> metadataOfExpr ctx fallback)
-        | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]
-        | ("ROUND" | "TRUNCATE"), arg :: precision ->
-            numericUnary arg
-            |> Option.map (fun metadata ->
-                if metadata.TypeId <> TypeNewDecimal then metadata
-                else
-                    let scale =
-                        match precision with
-                        | [] -> 0
-                        | [ Lit(VInt digits) ] -> int (max 0L (min (int64 metadata.Decimals) digits))
-                        | _ -> int metadata.Decimals
-                    let argument = decimalShape arg (Some metadata)
-                    let carry = if equalsIgnoreCase name "ROUND" && scale < argument.Scale then 1 else 0
-                    let shape = { Precision = min 65 (argument.Precision - argument.Scale + scale + carry); Scale = scale }
-                    withDecimalShape shape metadata)
-        | ("FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ ->
-            numericUnary arg
-        | "MOD", [ left; right ] ->
-            numeric (fun left right ->
-                { Precision = max left.Precision right.Precision
-                  Scale = max left.Scale right.Scale }) left right
-        | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
-        | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
-        | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
-        | "TIMESTAMP", arguments -> datetimeOf arguments
-        | ("DATE_ADD" | "DATE_SUB"), first :: interval :: _ ->
-            dateArithmetic expr first interval
-        | ("ADDDATE" | "SUBDATE"), first :: interval :: _ ->
-            let interval =
-                match interval with
-                | FuncCall(name, _) when name.Equals("INTERVAL", System.StringComparison.OrdinalIgnoreCase) -> interval
-                | value -> FuncCall("INTERVAL", [ value; Lit(VString "DAY") ])
-
-            dateArithmetic expr first interval
-        | "TIMESTAMPADD", [ unit; amount; value ] ->
-            dateArithmetic expr value (FuncCall("INTERVAL", [ amount; unit ]))
-        | ("NOW" | "CURRENT_TIMESTAMP" | "LOCALTIME" | "LOCALTIMESTAMP" | "SYSDATE"), _ ->
-            Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
-        | "UTC_TIMESTAMP", _ -> Some(ColumnWire.metadataOfType(TDateTime 0))
-        | "UTC_DATE", _ -> Some(ColumnWire.metadataOfType TDate)
-        | ("UTC_TIME" | "CURRENT_TIME" | "CURTIME"), _ -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
-        | ("ADDTIME" | "SUBTIME"), first :: second :: _ ->
-            let fsp = [ first; second ] |> List.choose (fspOfExpr ctx) |> List.fold max 0
-
-            match metadataOfExpr ctx first with
-            | Some metadata when metadata.TypeId = TypeTime -> Some(ColumnWire.metadataOfType(TTime fsp))
-            | Some metadata when metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp -> Some(ColumnWire.metadataOfType(TDateTime fsp))
-            | metadata -> metadata
-        | "TIMEDIFF", [ _; _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
-        | "SEC_TO_TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
-        | "MAKETIME", [ _; _; _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
-        | "TIME_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 1024u }
-        | "GET_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 64u }
-        | ("PERIOD_ADD" | "PERIOD_DIFF" | "TO_DAYS" | "DATEDIFF" | "TIMESTAMPDIFF" | "EXTRACT"), _ -> simple TypeLongLong
-        | "FROM_DAYS", _ -> Some(ColumnWire.metadataOfType TDate)
-        | ("CURDATE" | "CURRENT_DATE" | "LAST_DAY" | "MAKEDATE"), _ -> Some(ColumnWire.metadataOfType TDate)
-        | "UNIX_TIMESTAMP", [] -> simple TypeLongLong
-        | "UNIX_TIMESTAMP", [ argument ] ->
-            match fspOfExpr ctx argument |> Option.defaultValue 0 with
-            | 0 -> simple TypeLongLong
-            | fsp -> Some(ColumnWire.metadataOfType(TDecimal(20 + fsp, fsp, false)))
-        | "FROM_UNIXTIME", [ argument ] -> Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx argument |> Option.defaultValue 0)))
-        | "FROM_UNIXTIME", _ -> text 16383
-        | "CONVERT_TZ", [ argument; _; _ ] -> Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx argument |> Option.defaultValue 0)))
-        | "STR_TO_DATE", [ _; format ] -> strToDate format
-        | ("DATE_FORMAT" | "DAYNAME" | "MONTHNAME"), _ -> text 64
-        | ("MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "QUARTER" | "WEEK" | "WEEKDAY"
-          | "MICROSECOND" | "WEEKOFYEAR" | "YEARWEEK" | "JSON_LENGTH" | "JSON_DEPTH" | "JSON_VALID" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LENGTH"
-          | "OCTET_LENGTH" | "BIT_LENGTH" | "BIT_COUNT" | "ASCII" | "ORD" | "LOCATE" | "INSTR" | "POSITION" | "FIELD" | "FIND_IN_SET"
-          | "STRCMP" | "REGEXP_LIKE" | "REGEXP_INSTR" | "SIGN" | "ISNULL" | "CRC32" | "IS_UUID" | "INET_ATON" | "VECTOR_DIM" | "IS_IPV4"
-          | "IS_IPV6" | "IS_IPV4_COMPAT" | "IS_IPV4_MAPPED" | "JSON_MEMBER_OF" | "JSON_CONTAINS_PATH" | "JSON_OVERLAPS" | "JSON_STORAGE_SIZE"
-          | "JSON_STORAGE_FREE"), _ ->
-            simple TypeLongLong
-        | "JSON_CONTAINS", _ -> simple TypeLongLong
-        | ("JSON_EXTRACT" | "JSON_MERGE_PATCH" | "JSON_MERGE_PRESERVE" | "JSON_ARRAY_APPEND" | "JSON_ARRAY_INSERT" | "JSON_SET" | "JSON_INSERT"
-          | "JSON_REPLACE" | "JSON_REMOVE" | "JSON_ARRAY" | "JSON_OBJECT" | "JSON_KEYS" | "JSON_SEARCH"), _ ->
-            json
-        | "JSON_VALUE", _ -> text 16383
-        | ("JSON_UNQUOTE" | "JSON_TYPE"), _ -> text 16383
-        | ("DATABASE" | "SCHEMA" | "VERSION" | "CURRENT_USER" | "CURRENT_ROLE" | "USER" | "SESSION_USER"), _ -> text 16383
-        | ("LAST_INSERT_ID" | "ROW_COUNT" | "FOUND_ROWS" | "CONNECTION_ID" | "GET_LOCK" | "RELEASE_LOCK" | "IS_FREE_LOCK" | "IS_USED_LOCK"
-          | "RELEASE_ALL_LOCKS"), _ ->
-            simple TypeLongLong
-        | "JSON_SCHEMA_VALID", _ -> simple TypeLongLong
-        | "JSON_SCHEMA_VALIDATION_REPORT", _ -> json
-        | name, _ when Functions.isGeometryConstructor name ->
-            Some { Value.columnMetadata TypeGeometry with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
-        | ("ST_ASTEXT" | "ST_ASWKT" | "ASTEXT" | "ST_GEOMETRYTYPE" | "GEOMETRYTYPE"), _ ->
-            Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
-        | ("ST_ASWKB" | "ST_ASBINARY" | "ASBINARY"), _ ->
-            Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
-        | "ST_BUFFER_STRATEGY", _ ->
-            Some
-                { Value.columnMetadata TypeVarString with
-                    ColumnLength = 16u
-                    Decimals = 31uy
-                    Flags = BinaryFlag }
-        | ("ST_ENVELOPE" | "ST_CONVEXHULL" | "ST_BUFFER" | "ST_INTERSECTION" | "ST_UNION" | "ST_DIFFERENCE" | "ST_SYMDIFFERENCE"
-          | "ST_STARTPOINT" | "ST_ENDPOINT" | "ST_POINTN" | "ST_EXTERIORRING" | "ST_INTERIORRINGN" | "ST_GEOMETRYN"), _ ->
-            geometry
-        | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY" | "ST_ISVALID" | "ST_ISCLOSED" | "ST_NUMPOINTS"
-          | "ST_NUMINTERIORRING" | "ST_NUMINTERIORRINGS" | "ST_NUMGEOMETRIES"), _ ->
-            simple TypeLongLong
-        | ("ST_CONTAINS" | "ST_WITHIN" | "ST_INTERSECTS" | "ST_DISJOINT" | "ST_TOUCHES" | "ST_EQUALS" | "MBRCONTAINS" | "MBRWITHIN"
-          | "MBRINTERSECTS"), _ -> simple TypeLongLong
-        | ("ST_X" | "ST_Y" | "X" | "Y" | "ST_DISTANCE" | "ST_DISTANCE_SPHERE" | "ST_LENGTH"), _ -> simple TypeDouble
-        | ("JSON_QUOTE" | "JSON_PRETTY"), _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
-        | ("AES_ENCRYPT" | "AES_DECRYPT" | "COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
-            Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
-        | ("CHAR" | "UNHEX" | "FROM_BASE64" | "UUID_TO_BIN" | "STRING_TO_VECTOR" | "TO_VECTOR"), _ -> binary 16383
-        | "CONCAT", arguments when
-            arguments |> List.choose (metadataOfExpr ctx)
-            |> List.exists (fun metadata ->
-                hasMetadataFlag BinaryFlag metadata
-                && (metadata.TypeId = TypeBlob || metadata.TypeId = TypeString || metadata.TypeId = TypeVarString)) ->
-            let length =
-                arguments |> List.choose (metadataOfExpr ctx)
-                |> List.sumBy (fun metadata -> uint64 metadata.ColumnLength)
-                |> min (uint64 System.UInt32.MaxValue)
-                |> uint32
-            Some { Value.columnMetadata TypeBlob with ColumnLength = length; Flags = BlobFlag ||| BinaryFlag; Decimals = 31uy }
-        | ("CONCAT" | "CONCAT_WS" | "UPPER" | "UCASE" | "LOWER" | "LCASE" | "SUBSTRING" | "SUBSTR" | "MID" | "REPLACE" | "INSERT" | "TRIM"
-          | "TRIM_BOTH" | "TRIM_LEADING" | "TRIM_TRAILING" | "LTRIM" | "RTRIM" | "LPAD" | "RPAD" | "LEFT" | "RIGHT" | "REVERSE" | "REPEAT"
-          | "SPACE" | "HEX" | "MD5" | "SHA" | "SHA1" | "SHA2" | "FORMAT" | "SUBSTRING_INDEX" | "ELT" | "EXPORT_SET" | "MAKE_SET" | "QUOTE"
-          | "SOUNDEX" | "TO_BASE64" | "REGEXP_REPLACE" | "REGEXP_SUBSTR" | "CONV" | "BIN" | "OCT" | "UUID" | "BIN_TO_UUID" | "INET_NTOA"
-          | "VECTOR_TO_STRING" | "FROM_VECTOR"), _ ->
-            text 16383
-        | ("UNCOMPRESSED_LENGTH" | "UUID_SHORT"), _ ->
-            Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
-        | ("BIT_AND" | "BIT_OR" | "BIT_XOR" | "BITWISE_NOT" | "BITWISE_AND" | "BITWISE_OR" | "BITWISE_XOR" | "BITWISE_SHIFT_LEFT"
-          | "BITWISE_SHIFT_RIGHT"), _ ->
-            Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
-        | "INET6_ATON", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 16u; Flags = BinaryFlag; Decimals = 31uy }
-        | "INET6_NTOA", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 156u; Decimals = 31uy }
-        | ("SQRT" | "LOG" | "LN" | "LOG2" | "LOG10" | "EXP" | "POWER" | "POW" | "PI" | "SIN" | "COS" | "TAN" | "COT" | "ASIN" | "ACOS"
-          | "ATAN" | "ATAN2" | "DEGREES" | "RADIANS" | "RAND" | "DISTANCE" | "VECTOR_DISTANCE"), _ ->
-            simple TypeDouble
-        | _ -> None
-    | MatchAgainst _ -> simple TypeDouble
-    | WindowOver(fn, _) ->
-        match fn with
-        | WinRowNumber
-        | WinRank _
-        | WinNTile _ -> simple TypeLongLong
-        | WinPercentRank
-        | WinCumeDist -> simple TypeDouble
-        | WinLagLead(_, arg, _, _)
-        | WinFirstValue arg
-        | WinLastValue arg
-        | WinNthValue(arg, _) -> metadataOfExpr ctx arg
-        | WinAggregate(name, args) -> metadataOfExpr ctx (FuncCall(name, args))
-    | Case(_, whens, elseBranch) ->
-        (whens |> List.map snd) @ [ elseBranch |> Option.defaultValue (Lit VNull) ] |> choose
-    | Subquery select ->
-        tryReducedScalarProjection ctx.Registry select
-        |> Option.bind (metadataOfExpr ctx)
-    | Placeholder _
-    | Star _ -> None
-
 let rec private columnsForQualifier (ctx: EvalContext) (qualifier: string) : ColumnDef list =
     match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
     | Some(columns, _) -> columns
@@ -3115,39 +2478,6 @@ let private displayColumnForExpr ctx =
     | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
         tryColumnDefForExpr ctx argument
     | expression -> tryColumnDefForExpr ctx expression
-
-let private outputFormatOfExpr ctx expr =
-    let decimalScale =
-        match expr with
-        | Neg _
-        | BinOp((Add | Sub | SignedSub | Mul | Div), _, _)
-        | NamedFunction "MOD" _
-        | NamedFunction "ABS" _
-        | NamedFunction "ROUND" _
-        | NamedFunction "TRUNCATE" _
-        | NamedFunction "COALESCE" _
-        | NamedFunction "AVG" _
-        | NamedFunction "IFNULL" _ ->
-            metadataOfExpr ctx expr
-            |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
-            |> Option.map (fun metadata -> int metadata.Decimals)
-        | _ -> None
-    { Fsp = fspOfExpr ctx expr
-      DecimalScale = decimalScale
-      Column = displayColumnForExpr ctx expr }
-
-let private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : OutputColumnFormat list =
-    projections
-    |> List.collect (fun proj ->
-        match proj with
-        | Star None, _ -> columns |> List.map outputFormatOfColumn
-        | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map outputFormatOfColumn
-        | expr, _ -> [ outputFormatOfExpr ctx expr ])
-
-/// The declared fsp list must mirror projection expansion because `VDateTime`
-/// alone does not retain its declared display precision.
-let private outputColumnFsps ctx columns projections =
-    outputColumnFormats ctx columns projections |> List.map _.Fsp
 
 let private qualifierRangesOf (sources: (string * ColumnDef list) list) =
     sources
@@ -3397,79 +2727,6 @@ let rec private outputColumnOrigins
 
     select.Projections |> List.collect (fst >> originsForExpression)
 
-/// Static result metadata for each projection, used ahead of the
-/// value-derived fallback whenever the expression determines its own type.
-///
-/// The data-driven read can only see what a `Value` is, not what it was
-/// declared as, so it reports every integer as `LONGLONG` and every string as
-/// `VAR_STRING`. MySQL reports the declared type, and clients act on the
-/// difference: an `ENUM` renders as `ENUM` only when the column definition
-/// carries `ENUM_FLAG`, and `TINYINT(1)` is a `bool` to a client rather than a
-/// number. Where a projection resolves back to a real base-table column, that
-/// declared type wins.
-///
-/// `None` keeps the value-derived metadata for expressions whose result
-/// family is not statically known. The projection expansion mirrors
-/// `outputColumnFsps` so the lists remain column-aligned.
-let private outputColumnWireOverridesFor
-    (rollup: bool)
-    (ctx: EvalContext)
-    (columns: ColumnDef list)
-    (select: SelectStmt)
-    : ColumnMetadata option list =
-    let projections = select.Projections
-
-    let overrideOf (c: ColumnDef) =
-        match c.Type with
-        // WITH ROLLUP materializes each grouped column into a *nullable*
-        // temporary to hold the super-aggregate row's NULL, and an enum's
-        // value set doesn't survive that — MySQL reports the column as plain
-        // VARCHAR there, so claiming ENUM would claim more than the server
-        // delivers. Widths and BOOLEAN survive the temporary.
-        | TEnum _ when rollup -> Some { ColumnWire.metadataOfColumn c with TypeId = TypeVarString; Flags = 0us }
-        | _ -> ColumnWire.resultMetadataOf c
-
-    let overrides =
-        projections
-        |> List.collect (fun proj ->
-            match proj with
-            | Star None, _ -> columns |> List.map overrideOf
-            | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map overrideOf
-            | expr, _ ->
-                [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
-                  | Some ty -> Some ty
-                  | None -> metadataOfExpr ctx expr ])
-
-    let origins = outputColumnOrigins ctx.Store ctx.DbName ctx.Qualifiers select
-
-    if sameLength origins overrides then
-        List.map2
-            (fun origin metadata ->
-                metadata
-                |> Option.map (fun value ->
-                    let value =
-                        origin
-                        |> Option.bind (fun (source: ColumnOrigin) ->
-                            Storage.tableSnapshot ctx.Store source.Schema source.OriginalTable
-                            |> Result.toOption
-                            |> Option.map (fun table -> ColumnWire.withIndexFlags table.Indexes source.OriginalName value))
-                        |> Option.defaultValue value
-
-                    { value with
-                        Origin = origin }))
-            origins
-            overrides
-    else
-        overrides
-
-/// Applies `outputColumnWireOverrides` on top of a data-driven wire-type list,
-/// keeping the data-driven type wherever there's no override. Falls back
-/// wholesale on a length mismatch (both lists come from the same projection
-/// expansion, so they shouldn't disagree) rather than throwing from `map2`.
-/// The non-grouped wrapper keeps its callers independent of rollup handling.
-let private outputColumnWireOverrides ctx columns select =
-    outputColumnWireOverridesFor false ctx columns select
-
 let private applyWireOverrides (overrides: ColumnMetadata option list) (types: ColumnMetadata list) : ColumnMetadata list =
     if sameLength overrides types then
         List.map2 (fun ov ty -> defaultArg ov ty) overrides types
@@ -3532,18 +2789,6 @@ let private renderOutputCols (formats: OutputColumnFormat list) (outputCols: (st
         List.map2 (fun format (_, value) -> renderOutputValue format value) formats outputCols
     else
         outputCols |> List.map (snd >> Value.toText)
-
-let private displayValueForText (ctx: EvalContext) expression value =
-    match displayColumnForExpr ctx expression with
-    | Some column when column.NumericDisplay |> Option.exists _.ZeroFill ->
-        renderOutputValue (outputFormatOfColumn column) value
-        |> Option.map VString
-        |> Option.defaultValue VNull
-    | _ ->
-        let format = outputFormatOfExpr ctx expression
-        if format.DecimalScale.IsSome then
-            renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
-        else value
 
 let private collationOfColumn (ctx: EvalContext) (column: ColumnDef) : Collation.Collation option =
     match column.Type with
@@ -4854,20 +4099,6 @@ let private evalLogicalOr left evaluateRight =
             evaluateRight ()
             |> Result.map (fun right -> if truthy right = Some true then VInt 1L else VNull))
 
-let private prepareScalarArguments ctx name expressions values =
-    List.zip expressions values
-    |> List.mapi (fun index (expression, value) ->
-        let value =
-            if Functions.isTextArgument name index ctx.Registry then
-                displayValueForText ctx expression value
-            else
-                value
-
-        match value with
-        | VString text when Functions.isByteArgument name index ctx.Registry ->
-            VBytes(Charset.encode (sourceCharset ctx expression) text)
-        | _ -> value)
-
 let private substringSearchHaystack (name: string) (arguments: Expr list) =
     match name.ToUpperInvariant(), arguments with
     | ("LOCATE" | "POSITION"), _ :: haystack :: _ -> Some haystack
@@ -5655,6 +4886,775 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 else
                     Ok value
             | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
+
+and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
+    let simple typeId =
+        let columnLength =
+            if typeId = TypeTiny then 4u
+            elif typeId = TypeShort then 6u
+            elif typeId = TypeLong then 11u
+            elif typeId = TypeLongLong then 20u
+            elif typeId = TypeFloat then 12u
+            elif typeId = TypeDouble then 22u
+            elif typeId = TypeNewDecimal then 67u
+            elif typeId = TypeDate then 10u
+            elif typeId = TypeDateTime then 19u
+            elif typeId = TypeTime then 10u
+            elif typeId = TypeYear then 4u
+            else 0u
+
+        Some
+            { Value.columnMetadata typeId with
+                ColumnLength = columnLength
+                Decimals = if typeId = TypeDouble || typeId = TypeFloat then 31uy else 0uy }
+    let typeIdOf expression = metadataOfExpr ctx expression |> Option.map _.TypeId
+    let numericMetadata expression =
+        let rec literalBytes = function
+            | Lit(VBinaryLiteral bytes) -> Some bytes
+            | Distinct inner -> literalBytes inner
+            | Subquery select -> tryReducedScalarProjection ctx.Registry select |> Option.bind literalBytes
+            | _ -> None
+        match literalBytes expression with
+        | Some bytes ->
+            let precision = max 1 (int (System.Math.Ceiling(float (min 8 bytes.Length) * 8.0 * System.Math.Log10 2.0)))
+            Some { Value.columnMetadata TypeLongLong with ColumnLength = uint32 precision; Flags = UnsignedFlag ||| NotNullFlag }
+        | None -> metadataOfExpr ctx expression
+
+    let numeric combineShapes left right =
+        let isInteger typeId =
+            typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
+
+        let leftMetadata = numericMetadata left
+        let rightMetadata = numericMetadata right
+
+        let inferred =
+            match leftMetadata, rightMetadata with
+            | Some leftType, _ when leftType.TypeId = TypeDouble || leftType.TypeId = TypeFloat -> simple TypeDouble
+            | _, Some rightType when rightType.TypeId = TypeDouble || rightType.TypeId = TypeFloat -> simple TypeDouble
+            | Some leftType, _ when leftType.TypeId = TypeString || leftType.TypeId = TypeVarString || leftType.TypeId = TypeBlob -> simple TypeDouble
+            | _, Some rightType when rightType.TypeId = TypeString || rightType.TypeId = TypeVarString || rightType.TypeId = TypeBlob -> simple TypeDouble
+            | Some leftType, _ when leftType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
+            | _, Some rightType when rightType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
+            | Some leftType, Some rightType when isInteger leftType.TypeId && isInteger rightType.TypeId -> simple TypeLongLong
+            | Some leftType, None when isInteger leftType.TypeId -> simple TypeDouble
+            | None, Some rightType when isInteger rightType.TypeId -> simple TypeDouble
+            | _ -> None
+
+        let inferred =
+            inferred
+            |> Option.map (fun metadata ->
+                if metadata.TypeId = TypeNewDecimal then
+                    let shape = combineShapes (decimalShape left leftMetadata) (decimalShape right rightMetadata)
+                    withDecimalShape shape metadata
+                else metadata)
+
+        match inferred, leftMetadata, rightMetadata with
+        | Some result, Some leftType, Some rightType
+            when hasMetadataFlag NotNullFlag leftType && hasMetadataFlag NotNullFlag rightType ->
+            Some { result with Flags = result.Flags ||| NotNullFlag }
+        | _ -> inferred
+
+    let numericUnary expression =
+        metadataOfExpr ctx expression
+        |> Option.bind (fun metadata ->
+            if
+                metadata.TypeId = TypeTiny
+                || metadata.TypeId = TypeShort
+                || metadata.TypeId = TypeLong
+                || metadata.TypeId = TypeLongLong
+                || metadata.TypeId = TypeYear
+                || metadata.TypeId = TypeFloat
+                || metadata.TypeId = TypeDouble
+                || metadata.TypeId = TypeNewDecimal
+            then
+                Some metadata
+            else
+                simple TypeDouble)
+        |> Option.orElseWith (fun () -> simple TypeDouble)
+
+    let choose expressions =
+        let inferred = expressions |> List.map (fun expression -> expression, metadataOfExpr ctx expression)
+        let metadata = inferred |> List.choose snd
+        let notNull =
+            sameLength metadata expressions
+            && (metadata |> List.forall (hasMetadataFlag NotNullFlag))
+
+        let isText item =
+            item.TypeId = TypeString || item.TypeId = TypeVarString || item.TypeId = TypeBlob
+
+        let isInteger item =
+            item.TypeId = TypeTiny
+            || item.TypeId = TypeShort
+            || item.TypeId = TypeLong
+            || item.TypeId = TypeLongLong
+            || item.TypeId = TypeYear
+
+        let withNullability item =
+            { item with
+                Flags =
+                    if notNull then
+                        item.Flags ||| NotNullFlag
+                    else
+                        item.Flags &&& ~~~NotNullFlag }
+
+        let onlyUntypedNulls =
+            inferred
+            |> List.forall (function
+                | _, Some _ -> true
+                | Lit VNull, None -> true
+                | _ -> false)
+
+        let textMetadata = metadata |> List.filter isText
+
+        match metadata with
+        | [ item ] when onlyUntypedNulls -> item |> withNullability |> Some
+        | _ when not textMetadata.IsEmpty ->
+            textMetadata
+            |> List.maxBy _.ColumnLength
+            |> fun item ->
+                if textMetadata |> List.exists (fun candidate -> candidate.TypeId = TypeBlob) then
+                    { item with TypeId = TypeBlob; Flags = item.Flags ||| BlobFlag ||| BinaryFlag }
+                else
+                    { item with TypeId = TypeVarString; Flags = item.Flags &&& ~~~BlobFlag }
+            |> withNullability
+            |> Some
+        | _ when metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) ->
+            simple TypeDouble |> Option.map withNullability
+        | _ when metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal) ->
+            let shape =
+                inferred
+                |> List.map (fun (expression, metadata) -> decimalShape expression metadata)
+                |> List.reduce combinedDecimalShape
+            let shape = { shape with Precision = min 65 shape.Precision }
+            simple TypeNewDecimal |> Option.map (withDecimalShape shape >> withNullability)
+        | _ when not metadata.IsEmpty && metadata |> List.forall isInteger ->
+            let isUnsigned = metadata |> List.forall (hasMetadataFlag UnsignedFlag)
+
+            simple TypeLongLong
+            |> Option.map (fun item ->
+                { item with
+                    ColumnLength = metadata |> List.map _.ColumnLength |> List.max
+                    Flags =
+                        if isUnsigned then
+                            item.Flags ||| UnsignedFlag
+                        else
+                            item.Flags &&& ~~~UnsignedFlag })
+            |> Option.map withNullability
+        | _ -> List.tryHead metadata |> Option.map withNullability
+
+    let chooseCoalescing expressions =
+        let notNull =
+            expressions
+            |> List.choose (metadataOfExpr ctx)
+            |> List.exists (hasMetadataFlag NotNullFlag)
+
+        choose expressions
+        |> Option.map (fun result ->
+            { result with
+                Flags =
+                    if notNull then
+                        result.Flags ||| NotNullFlag
+                    else
+                        result.Flags &&& ~~~NotNullFlag })
+
+    let chooseExtrema expressions =
+        match choose expressions with
+        | Some metadata when metadata.TypeId = TypeString || metadata.TypeId = TypeVarString ->
+            expressions
+            |> List.choose (metadataOfExpr ctx)
+            |> List.filter (fun item -> item.TypeId = TypeString || item.TypeId = TypeVarString)
+            |> List.fold (fun length item -> max length item.ColumnLength) 4u
+            |> fun length -> Some { metadata with ColumnLength = length }
+        | metadata -> metadata
+
+    let text length =
+        Some
+            { ColumnWire.metadataOfType(TVarchar length) with
+                Decimals = 31uy }
+
+    let binary length =
+        Some
+            { ColumnWire.metadataOfType(TVarBinary length) with
+                Decimals = 31uy }
+
+    let json = Some(ColumnWire.metadataOfType TJson)
+    let geometry = Some(ColumnWire.metadataOfType(TGeometry Geometry))
+
+    let datetime expression =
+        Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expression |> Option.defaultValue 0)))
+
+    let datetimeWithFsp fsp = Some(ColumnWire.metadataOfType(TDateTime fsp))
+
+    let datetimeOf expressions =
+        expressions
+        |> List.choose (fspOfExpr ctx)
+        |> List.fold max 0
+        |> fun fsp -> Some(ColumnWire.metadataOfType(TDateTime fsp))
+
+    let dateArithmetic expression first interval =
+        let timeUnit =
+            match interval with
+            | NamedFunction "INTERVAL" [ _; Lit(VString unit) ] ->
+                not (dateOnlyIntervalUnits.Contains(unit.ToUpperInvariant()))
+            | _ -> true
+
+        match metadataOfExpr ctx first with
+        | Some metadata when metadata.TypeId = TypeDate && not timeUnit -> Some(ColumnWire.metadataOfType TDate)
+        | Some metadata when metadata.TypeId = TypeTime ->
+            Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expression |> Option.defaultValue 0)))
+        | Some metadata when metadata.TypeId = TypeDate || metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp ->
+            datetimeOf [ first ]
+        | _ -> text 16383
+
+    let strToDate format =
+        let containsAny (tokens: string list) (value: string) = tokens |> List.exists value.Contains
+
+        match format with
+        | Lit(VString value) ->
+            let hasDate = containsAny strToDateDateTokens value
+            let hasTime = containsAny strToDateTimeTokens value
+            let fsp = if value.Contains("%f", System.StringComparison.Ordinal) then 6 else 0
+
+            match hasDate, hasTime with
+            | true, true -> datetimeWithFsp fsp
+            | true, false -> Some(ColumnWire.metadataOfType TDate)
+            | false, true -> Some(ColumnWire.metadataOfType(TTime fsp))
+            | false, false -> text 16383
+        | _ -> datetime expr
+
+    let rec characterBound expression =
+        match expression with
+        | Collate(value, _) -> characterBound value
+        | Lit(VString text) -> text.EnumerateRunes() |> Seq.length
+        | Lit(VBinaryLiteral bytes)
+        | Lit(VBytes bytes) -> bytes.Length
+        | Lit(VBit(width, _)) -> (width + 7) / 8
+        | Col _
+        | QualifiedCol _ ->
+            tryColumnDefForExpr ctx expression
+            |> Option.bind (fun column ->
+                match column.Type with
+                | TChar length
+                | TVarchar length -> Some length
+                | _ -> None)
+            |> Option.defaultValue 1
+        | _ -> 1
+
+    let weightStringMetadata (source: Expr) (charLength: int option) =
+        match charLength with
+        | Some length when
+            match source with
+            | Cast(_, TBinary _) -> true
+            | _ -> false
+            ->
+            Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 (max 8 length); Flags = BinaryFlag }
+        | _ ->
+            let charset = sourceCharset ctx source
+            let bytesPerCharacter = if charset.StartsWith("utf8", System.StringComparison.Ordinal) then 4 else 1
+            let isBinaryCollation =
+                match source with
+                | Collate(_, name) -> name.EndsWith("_bin", System.StringComparison.Ordinal)
+                | _ ->
+                    tryColumnDefForExpr ctx source
+                    |> Option.exists (fun column ->
+                        column.Charset = Some "binary"
+                        || (column.Collation |> Option.exists (fun name -> name.EndsWith("_bin", System.StringComparison.Ordinal))))
+            let multiplier = if isBinaryCollation || not (charset.StartsWith("utf8", System.StringComparison.Ordinal)) then 1 else 16
+            let sourceLength = int64 (characterBound source) * int64 bytesPerCharacter * int64 multiplier
+            let charLength = charLength |> Option.map (fun length -> int64 length * int64 multiplier) |> Option.defaultValue 0L
+            let length = max sourceLength charLength |> max 8L |> min (int64 System.UInt32.MaxValue)
+            Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 length; Flags = BinaryFlag }
+
+    let (|RegisteredScalarResult|_|) name =
+        match Functions.lookup name ctx.Registry with
+        | Some _ -> Functions.lookupScalarMetadata name ctx.Registry
+        | None when name.Contains('.', System.StringComparison.Ordinal) -> None
+        | None -> Functions.lookupScalarMetadata (ctx.DbName + "." + name) ctx.Registry
+
+    match expr with
+    | Lit VNull -> None
+    | Lit(VInt value) ->
+        let typeId =
+            if value >= int64 System.SByte.MinValue && value <= int64 System.SByte.MaxValue then TypeTiny
+            elif value >= int64 System.Int16.MinValue && value <= int64 System.Int16.MaxValue then TypeShort
+            elif value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue then TypeLong
+            else TypeLongLong
+
+        simple typeId |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
+    | Lit(VUInt _) -> Some { Value.columnMetadata TypeLongLong with Flags = UnsignedFlag ||| NotNullFlag }
+    | Lit(VBit(width, _)) ->
+        Some { Value.columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag ||| NotNullFlag }
+    | Lit(VDouble _) -> simple TypeDouble |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VDecimal value) ->
+        simple TypeNewDecimal
+        |> Option.map (fun metadata ->
+            withDecimalShape (decimalShape expr None) { metadata with Flags = NotNullFlag })
+    | Lit(VString text) ->
+        Some
+            { Value.columnMetadata TypeVarString with
+                ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text)
+                Flags = NotNullFlag
+                CollationId = metadataCollationId ctx.Store.ExecutionSettings.ConnectionCollation.Name }
+    | Lit(VBinaryLiteral bytes)
+    | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
+    | Lit(VDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VTimestamp _) -> simple TypeTimestamp |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VTime _) -> Some { ColumnWire.metadataOfType(TTime 0) with Flags = BinaryFlag ||| NotNullFlag }
+    | Lit(VZeroDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VZeroDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VJson _) -> Some { ColumnWire.metadataOfType TJson with Flags = BinaryFlag ||| NotNullFlag }
+    | UserVariable variable when variable.Sql = "@" -> simple TypeVarString
+    | UserVariable variable ->
+        variable.PreparedType
+        |> Option.map PreparedVariables.metadata
+        |> Option.orElseWith (fun () ->
+            currentVariableContext ()
+            |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
+            |> Option.bind (fun value ->
+                match value with
+                | VDecimal _ -> Some(PreparedVariables.metadata UserVariableType.Decimal)
+                | _ -> metadataOfExpr ctx (Lit value))
+            |> Option.orElse (simple TypeVarString))
+    | SystemVariable(scope, variable) ->
+        currentVariableContext ()
+        |> Option.bind (fun bindings ->
+            bindings.ReadSystemVariable (scope |> Option.defaultValue "") variable
+            |> Result.toOption
+            |> Option.flatten)
+        |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
+        |> Option.orElse (simple TypeVarString)
+    | AssignUserVariable(_, value) -> metadataOfExpr ctx value
+    | Lit(VGeometry _) ->
+        Some { Value.columnMetadata TypeGeometry with
+                   ColumnLength = 4294967295u
+                   Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
+    | Col _
+    | QualifiedCol _ -> tryColumnDefForExpr ctx expr |> Option.map ColumnWire.metadataOfColumn
+    | Row _ -> None
+    | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
+    | Not _
+    | IsNull _
+    | IsNotNull _
+    | IsTrue _
+    | IsFalse _
+    | Like _
+    | Regexp _
+    | In _
+    | InSubquery _
+    | QuantifiedComparison _
+    | Between _
+    | Exists _ -> simple TypeLongLong
+    | RuntimeExpression operand -> metadataOfExpr ctx operand
+    | Neg(Lit(VBinaryLiteral _)) -> simple TypeDouble
+    | Neg operand ->
+        let source = metadataOfExpr ctx operand
+        numeric (fun _ right -> right) (Lit(VInt 0L)) operand
+        |> Option.map (fun metadata ->
+            if metadata.TypeId <> TypeLongLong then metadata
+            else
+                let promoted =
+                    tryClosedNumericValue ctx.Registry operand
+                    |> Option.map Value.negateConstant
+                    |> Option.exists (function VDecimal _ -> true | _ -> false)
+                let length =
+                    source |> Option.map (fun item -> item.ColumnLength + (if hasMetadataFlag UnsignedFlag item then 1u else 0u))
+                    |> Option.defaultValue metadata.ColumnLength
+                { metadata with
+                    TypeId = if promoted then TypeNewDecimal else TypeLongLong
+                    ColumnLength = length })
+    | BinOp((Add | Sub | SignedSub), left, right) ->
+        numeric (fun left right ->
+            let shape = combinedDecimalShape left right
+            { shape with Precision = shape.Precision + 1 }) left right
+    | BinOp(Mul, left, right) ->
+        numeric (fun left right ->
+            { Precision = min 65 (left.Precision + right.Precision)
+              Scale = min 30 (left.Scale + right.Scale) }) left right
+    | BinOp(Div, left, right) ->
+        match typeIdOf left, typeIdOf right with
+        | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
+        | _, Some rightType when rightType = TypeDouble || rightType = TypeFloat -> simple TypeDouble
+        | Some _, _
+        | _, Some _ ->
+            let dividend = decimalShape left (metadataOfExpr ctx left)
+            let divisor = decimalShape right (metadataOfExpr ctx right)
+            let increment = divisionPrecisionIncrement ()
+            let shape =
+                { Precision = min 65 (dividend.Precision + divisor.Scale + increment)
+                  Scale = min 30 (dividend.Scale + increment) }
+            simple TypeNewDecimal |> Option.map (withDecimalShape shape)
+        | _ -> None
+    | BinOp(IntDiv, _, _) -> simple TypeLongLong
+    | Cast(value, ty) ->
+        let metadata = ColumnWire.metadataOfType ty
+        let metadata = match ty with TBigInt _ -> { metadata with ColumnLength = 21u } | _ -> metadata
+
+        metadataOfExpr ctx value
+        |> Option.filter (hasMetadataFlag NotNullFlag)
+        |> Option.map (fun _ -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
+        |> Option.orElse (Some metadata)
+    | Collate(inner, collation) ->
+        metadataOfExpr ctx inner
+        |> Option.map (fun metadata ->
+            { metadata with
+                CollationId = metadataCollationId collation })
+    | Distinct inner
+    | OrderBy(inner, _) -> metadataOfExpr ctx inner
+    | NamedFunction "DEFAULT" [ argument ] ->
+        metadataOfExpr ctx argument
+    | NamedFunction "COERCIBILITY" [ _ ] ->
+        simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | NamedFunction "COLLATION" [ _ ]
+    | NamedFunction "CHARSET" [ _ ] ->
+        Some { Value.columnMetadata TypeVarString with ColumnLength = 64u; Flags = NotNullFlag }
+    | NamedFunction "SLEEP" [ _ ] ->
+        simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | NamedFunction "BENCHMARK" [ _; _ ] ->
+        simple TypeLongLong
+    | NamedFunction "WEIGHT_STRING" [ Cast(source, TBinary length) ] ->
+        weightStringMetadata (Cast(source, TBinary length)) (Some length)
+    | NamedFunction "WEIGHT_STRING" [ Cast(source, TChar length) ] ->
+        weightStringMetadata source (Some length)
+    | NamedFunction "WEIGHT_STRING" [ source ] ->
+        weightStringMetadata source None
+    | FuncCall(RegisteredScalarResult metadata, _) -> Some metadata
+    | FuncCall(name, args) ->
+        match name.ToUpperInvariant(), args with
+        | "COUNT", _ -> simple TypeLongLong
+        | ("SUM" | "AVG"), [ arg ] ->
+            let isAverage = equalsIgnoreCase name "AVG"
+            let approximate length scale =
+                simple TypeDouble
+                |> Option.map (fun metadata -> { metadata with ColumnLength = length; Decimals = scale })
+            match numericMetadata arg with
+            | metadata when metadata |> Option.forall (fun item -> item.TypeId = TypeNull) ->
+                let scale = if isAverage then divisionPrecisionIncrement () else 0
+                approximate (uint32 (17 + scale)) (byte scale)
+            | Some metadata when
+                metadata.TypeId = TypeDouble
+                || metadata.TypeId = TypeFloat
+                || metadata.TypeId = TypeString
+                || metadata.TypeId = TypeVarString
+                || metadata.TypeId = TypeBlob
+                || hasMetadataFlag (EnumFlag ||| SetFlag) metadata
+                ->
+                approximate 23u 31uy
+            | metadata ->
+                let argument = decimalShape arg metadata
+                let increment = if isAverage then divisionPrecisionIncrement () else 22
+                let shape =
+                    { Precision = min 65 (argument.Precision + increment)
+                      Scale = if isAverage then min 30 (argument.Scale + increment) else argument.Scale }
+                simple TypeNewDecimal |> Option.map (withDecimalShape shape)
+        | ("STD" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"), _ -> simple TypeDouble
+        | "GROUP_CONCAT", _ -> Some(ColumnWire.metadataOfType TText)
+        | ("JSON_ARRAYAGG" | "JSON_OBJECTAGG"), _ -> json
+        | "GROUPING", _ -> simple TypeLongLong
+        | ("MIN" | "MAX"), [ arg ] ->
+            metadataOfExpr ctx arg
+            |> Option.map (fun metadata ->
+                if hasMetadataFlag (EnumFlag ||| SetFlag) metadata then
+                    { metadata with Flags = metadata.Flags &&& ~~~(EnumFlag ||| SetFlag) }
+                else
+                    metadata)
+        | ("COALESCE" | "IFNULL"), values -> chooseCoalescing values
+        | ("GREATEST" | "LEAST"), values -> chooseExtrema values
+        | "ANY_VALUE", [ value ] -> metadataOfExpr ctx value
+        | "NAME_CONST", [ _; Lit VNull ] -> simple TypeNull
+        | "NAME_CONST", [ _; value ] -> metadataOfExpr ctx value
+        | "NULLIF", first :: fallback :: _ ->
+            metadataOfExpr ctx first |> Option.orElseWith (fun () -> metadataOfExpr ctx fallback)
+        | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]
+        | ("ROUND" | "TRUNCATE"), arg :: precision ->
+            numericUnary arg
+            |> Option.map (fun metadata ->
+                if metadata.TypeId <> TypeNewDecimal then metadata
+                else
+                    let scale =
+                        match precision with
+                        | [] -> 0
+                        | [ Lit(VInt digits) ] -> int (max 0L (min (int64 metadata.Decimals) digits))
+                        | _ -> int metadata.Decimals
+                    let argument = decimalShape arg (Some metadata)
+                    let carry = if equalsIgnoreCase name "ROUND" && scale < argument.Scale then 1 else 0
+                    let shape = { Precision = min 65 (argument.Precision - argument.Scale + scale + carry); Scale = scale }
+                    withDecimalShape shape metadata)
+        | ("FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ ->
+            numericUnary arg
+        | "MOD", [ left; right ] ->
+            numeric (fun left right ->
+                { Precision = max left.Precision right.Precision
+                  Scale = max left.Scale right.Scale }) left right
+        | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
+        | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
+        | "TIMESTAMP", arguments -> datetimeOf arguments
+        | ("DATE_ADD" | "DATE_SUB"), first :: interval :: _ ->
+            dateArithmetic expr first interval
+        | ("ADDDATE" | "SUBDATE"), first :: interval :: _ ->
+            let interval =
+                match interval with
+                | FuncCall(name, _) when name.Equals("INTERVAL", System.StringComparison.OrdinalIgnoreCase) -> interval
+                | value -> FuncCall("INTERVAL", [ value; Lit(VString "DAY") ])
+
+            dateArithmetic expr first interval
+        | "TIMESTAMPADD", [ unit; amount; value ] ->
+            dateArithmetic expr value (FuncCall("INTERVAL", [ amount; unit ]))
+        | ("NOW" | "CURRENT_TIMESTAMP" | "LOCALTIME" | "LOCALTIMESTAMP" | "SYSDATE"), _ ->
+            Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | "UTC_TIMESTAMP", _ -> Some(ColumnWire.metadataOfType(TDateTime 0))
+        | "UTC_DATE", _ -> Some(ColumnWire.metadataOfType TDate)
+        | ("UTC_TIME" | "CURRENT_TIME" | "CURTIME"), _ -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | ("ADDTIME" | "SUBTIME"), first :: second :: _ ->
+            let fsp = [ first; second ] |> List.choose (fspOfExpr ctx) |> List.fold max 0
+
+            match metadataOfExpr ctx first with
+            | Some metadata when metadata.TypeId = TypeTime -> Some(ColumnWire.metadataOfType(TTime fsp))
+            | Some metadata when metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp -> Some(ColumnWire.metadataOfType(TDateTime fsp))
+            | metadata -> metadata
+        | "TIMEDIFF", [ _; _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | "SEC_TO_TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | "MAKETIME", [ _; _; _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | "TIME_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 1024u }
+        | "GET_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 64u }
+        | ("PERIOD_ADD" | "PERIOD_DIFF" | "TO_DAYS" | "DATEDIFF" | "TIMESTAMPDIFF" | "EXTRACT"), _ -> simple TypeLongLong
+        | "FROM_DAYS", _ -> Some(ColumnWire.metadataOfType TDate)
+        | ("CURDATE" | "CURRENT_DATE" | "LAST_DAY" | "MAKEDATE"), _ -> Some(ColumnWire.metadataOfType TDate)
+        | "UNIX_TIMESTAMP", [] -> simple TypeLongLong
+        | "UNIX_TIMESTAMP", [ argument ] ->
+            match fspOfExpr ctx argument |> Option.defaultValue 0 with
+            | 0 -> simple TypeLongLong
+            | fsp -> Some(ColumnWire.metadataOfType(TDecimal(20 + fsp, fsp, false)))
+        | "FROM_UNIXTIME", [ argument ] -> Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx argument |> Option.defaultValue 0)))
+        | "FROM_UNIXTIME", _ -> text 16383
+        | "CONVERT_TZ", [ argument; _; _ ] -> Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx argument |> Option.defaultValue 0)))
+        | "STR_TO_DATE", [ _; format ] -> strToDate format
+        | ("DATE_FORMAT" | "DAYNAME" | "MONTHNAME"), _ -> text 64
+        | ("MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "QUARTER" | "WEEK" | "WEEKDAY"
+          | "MICROSECOND" | "WEEKOFYEAR" | "YEARWEEK" | "JSON_LENGTH" | "JSON_DEPTH" | "JSON_VALID" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LENGTH"
+          | "OCTET_LENGTH" | "BIT_LENGTH" | "BIT_COUNT" | "ASCII" | "ORD" | "LOCATE" | "INSTR" | "POSITION" | "FIELD" | "FIND_IN_SET"
+          | "STRCMP" | "REGEXP_LIKE" | "REGEXP_INSTR" | "SIGN" | "ISNULL" | "CRC32" | "IS_UUID" | "INET_ATON" | "VECTOR_DIM" | "IS_IPV4"
+          | "IS_IPV6" | "IS_IPV4_COMPAT" | "IS_IPV4_MAPPED" | "JSON_MEMBER_OF" | "JSON_CONTAINS_PATH" | "JSON_OVERLAPS" | "JSON_STORAGE_SIZE"
+          | "JSON_STORAGE_FREE"), _ ->
+            simple TypeLongLong
+        | "JSON_CONTAINS", _ -> simple TypeLongLong
+        | ("JSON_EXTRACT" | "JSON_MERGE_PATCH" | "JSON_MERGE_PRESERVE" | "JSON_ARRAY_APPEND" | "JSON_ARRAY_INSERT" | "JSON_SET" | "JSON_INSERT"
+          | "JSON_REPLACE" | "JSON_REMOVE" | "JSON_ARRAY" | "JSON_OBJECT" | "JSON_KEYS" | "JSON_SEARCH"), _ ->
+            json
+        | "JSON_VALUE", _ -> text 16383
+        | ("JSON_UNQUOTE" | "JSON_TYPE"), _ -> text 16383
+        | ("DATABASE" | "SCHEMA" | "VERSION" | "CURRENT_USER" | "CURRENT_ROLE" | "USER" | "SESSION_USER"), _ -> text 16383
+        | ("LAST_INSERT_ID" | "ROW_COUNT" | "FOUND_ROWS" | "CONNECTION_ID" | "GET_LOCK" | "RELEASE_LOCK" | "IS_FREE_LOCK" | "IS_USED_LOCK"
+          | "RELEASE_ALL_LOCKS"), _ ->
+            simple TypeLongLong
+        | "JSON_SCHEMA_VALID", _ -> simple TypeLongLong
+        | "JSON_SCHEMA_VALIDATION_REPORT", _ -> json
+        | name, _ when Functions.isGeometryConstructor name ->
+            Some { Value.columnMetadata TypeGeometry with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        | ("ST_ASTEXT" | "ST_ASWKT" | "ASTEXT" | "ST_GEOMETRYTYPE" | "GEOMETRYTYPE"), _ ->
+            Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
+        | ("ST_ASWKB" | "ST_ASBINARY" | "ASBINARY"), _ ->
+            Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        | "ST_BUFFER_STRATEGY", _ ->
+            Some
+                { Value.columnMetadata TypeVarString with
+                    ColumnLength = 16u
+                    Decimals = 31uy
+                    Flags = BinaryFlag }
+        | ("ST_ENVELOPE" | "ST_CONVEXHULL" | "ST_BUFFER" | "ST_INTERSECTION" | "ST_UNION" | "ST_DIFFERENCE" | "ST_SYMDIFFERENCE"
+          | "ST_STARTPOINT" | "ST_ENDPOINT" | "ST_POINTN" | "ST_EXTERIORRING" | "ST_INTERIORRINGN" | "ST_GEOMETRYN"), _ ->
+            geometry
+        | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY" | "ST_ISVALID" | "ST_ISCLOSED" | "ST_NUMPOINTS"
+          | "ST_NUMINTERIORRING" | "ST_NUMINTERIORRINGS" | "ST_NUMGEOMETRIES"), _ ->
+            simple TypeLongLong
+        | ("ST_CONTAINS" | "ST_WITHIN" | "ST_INTERSECTS" | "ST_DISJOINT" | "ST_TOUCHES" | "ST_EQUALS" | "MBRCONTAINS" | "MBRWITHIN"
+          | "MBRINTERSECTS"), _ -> simple TypeLongLong
+        | ("ST_X" | "ST_Y" | "X" | "Y" | "ST_DISTANCE" | "ST_DISTANCE_SPHERE" | "ST_LENGTH"), _ -> simple TypeDouble
+        | ("JSON_QUOTE" | "JSON_PRETTY"), _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
+        | ("AES_ENCRYPT" | "AES_DECRYPT" | "COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
+            Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        | ("CHAR" | "UNHEX" | "FROM_BASE64" | "UUID_TO_BIN" | "STRING_TO_VECTOR" | "TO_VECTOR"), _ -> binary 16383
+        | "CONCAT", arguments when
+            arguments |> List.choose (metadataOfExpr ctx)
+            |> List.exists (fun metadata ->
+                hasMetadataFlag BinaryFlag metadata
+                && (metadata.TypeId = TypeBlob || metadata.TypeId = TypeString || metadata.TypeId = TypeVarString)) ->
+            let length =
+                arguments |> List.choose (metadataOfExpr ctx)
+                |> List.sumBy (fun metadata -> uint64 metadata.ColumnLength)
+                |> min (uint64 System.UInt32.MaxValue)
+                |> uint32
+            Some { Value.columnMetadata TypeBlob with ColumnLength = length; Flags = BlobFlag ||| BinaryFlag; Decimals = 31uy }
+        | ("CONCAT" | "CONCAT_WS" | "UPPER" | "UCASE" | "LOWER" | "LCASE" | "SUBSTRING" | "SUBSTR" | "MID" | "REPLACE" | "INSERT" | "TRIM"
+          | "TRIM_BOTH" | "TRIM_LEADING" | "TRIM_TRAILING" | "LTRIM" | "RTRIM" | "LPAD" | "RPAD" | "LEFT" | "RIGHT" | "REVERSE" | "REPEAT"
+          | "SPACE" | "HEX" | "MD5" | "SHA" | "SHA1" | "SHA2" | "FORMAT" | "SUBSTRING_INDEX" | "ELT" | "EXPORT_SET" | "MAKE_SET" | "QUOTE"
+          | "SOUNDEX" | "TO_BASE64" | "REGEXP_REPLACE" | "REGEXP_SUBSTR" | "CONV" | "BIN" | "OCT" | "UUID" | "BIN_TO_UUID" | "INET_NTOA"
+          | "VECTOR_TO_STRING" | "FROM_VECTOR"), _ ->
+            text 16383
+        | ("UNCOMPRESSED_LENGTH" | "UUID_SHORT"), _ ->
+            Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
+        | ("BIT_AND" | "BIT_OR" | "BIT_XOR" | "BITWISE_NOT" | "BITWISE_AND" | "BITWISE_OR" | "BITWISE_XOR" | "BITWISE_SHIFT_LEFT"
+          | "BITWISE_SHIFT_RIGHT"), _ ->
+            Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
+        | "INET6_ATON", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 16u; Flags = BinaryFlag; Decimals = 31uy }
+        | "INET6_NTOA", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 156u; Decimals = 31uy }
+        | ("SQRT" | "LOG" | "LN" | "LOG2" | "LOG10" | "EXP" | "POWER" | "POW" | "PI" | "SIN" | "COS" | "TAN" | "COT" | "ASIN" | "ACOS"
+          | "ATAN" | "ATAN2" | "DEGREES" | "RADIANS" | "RAND" | "DISTANCE" | "VECTOR_DISTANCE"), _ ->
+            simple TypeDouble
+        | _ -> None
+    | MatchAgainst _ -> simple TypeDouble
+    | WindowOver(fn, _) ->
+        match fn with
+        | WinRowNumber
+        | WinRank _
+        | WinNTile _ -> simple TypeLongLong
+        | WinPercentRank
+        | WinCumeDist -> simple TypeDouble
+        | WinLagLead(_, arg, _, _)
+        | WinFirstValue arg
+        | WinLastValue arg
+        | WinNthValue(arg, _) -> metadataOfExpr ctx arg
+        | WinAggregate(name, args) -> metadataOfExpr ctx (FuncCall(name, args))
+    | Case(_, whens, elseBranch) ->
+        (whens |> List.map snd) @ [ elseBranch |> Option.defaultValue (Lit VNull) ] |> choose
+    | Subquery select ->
+        tryReducedScalarProjection ctx.Registry select
+        |> Option.bind (metadataOfExpr ctx)
+    | Placeholder _
+    | Star _ -> None
+
+and private outputFormatOfExpr ctx expr =
+    let decimalScale =
+        match expr with
+        | Neg _
+        | BinOp((Add | Sub | SignedSub | Mul | Div), _, _)
+        | NamedFunction "MOD" _
+        | NamedFunction "ABS" _
+        | NamedFunction "ROUND" _
+        | NamedFunction "TRUNCATE" _
+        | NamedFunction "COALESCE" _
+        | NamedFunction "AVG" _
+        | NamedFunction "IFNULL" _ ->
+            metadataOfExpr ctx expr
+            |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
+            |> Option.map (fun metadata -> int metadata.Decimals)
+        | _ -> None
+    { Fsp = fspOfExpr ctx expr
+      DecimalScale = decimalScale
+      Column = displayColumnForExpr ctx expr }
+
+and private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : OutputColumnFormat list =
+    projections
+    |> List.collect (fun proj ->
+        match proj with
+        | Star None, _ -> columns |> List.map outputFormatOfColumn
+        | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map outputFormatOfColumn
+        | expr, _ -> [ outputFormatOfExpr ctx expr ])
+
+/// The declared fsp list must mirror projection expansion because `VDateTime`
+/// alone does not retain its declared display precision.
+and private outputColumnFsps ctx columns projections =
+    outputColumnFormats ctx columns projections |> List.map _.Fsp
+
+/// Static result metadata for each projection, used ahead of the
+/// value-derived fallback whenever the expression determines its own type.
+///
+/// The data-driven read can only see what a `Value` is, not what it was
+/// declared as, so it reports every integer as `LONGLONG` and every string as
+/// `VAR_STRING`. MySQL reports the declared type, and clients act on the
+/// difference: an `ENUM` renders as `ENUM` only when the column definition
+/// carries `ENUM_FLAG`, and `TINYINT(1)` is a `bool` to a client rather than a
+/// number. Where a projection resolves back to a real base-table column, that
+/// declared type wins.
+///
+/// `None` keeps the value-derived metadata for expressions whose result
+/// family is not statically known. The projection expansion mirrors
+/// `outputColumnFsps` so the lists remain column-aligned.
+and private outputColumnWireOverridesFor
+    (rollup: bool)
+    (ctx: EvalContext)
+    (columns: ColumnDef list)
+    (select: SelectStmt)
+    : ColumnMetadata option list =
+    let projections = select.Projections
+
+    let overrideOf (c: ColumnDef) =
+        match c.Type with
+        // WITH ROLLUP materializes each grouped column into a *nullable*
+        // temporary to hold the super-aggregate row's NULL, and an enum's
+        // value set doesn't survive that — MySQL reports the column as plain
+        // VARCHAR there, so claiming ENUM would claim more than the server
+        // delivers. Widths and BOOLEAN survive the temporary.
+        | TEnum _ when rollup -> Some { ColumnWire.metadataOfColumn c with TypeId = TypeVarString; Flags = 0us }
+        | _ -> ColumnWire.resultMetadataOf c
+
+    let overrides =
+        projections
+        |> List.collect (fun proj ->
+            match proj with
+            | Star None, _ -> columns |> List.map overrideOf
+            | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map overrideOf
+            | expr, _ ->
+                [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
+                  | Some ty -> Some ty
+                  | None -> metadataOfExpr ctx expr ])
+
+    let origins = outputColumnOrigins ctx.Store ctx.DbName ctx.Qualifiers select
+
+    if sameLength origins overrides then
+        List.map2
+            (fun origin metadata ->
+                metadata
+                |> Option.map (fun value ->
+                    let value =
+                        origin
+                        |> Option.bind (fun (source: ColumnOrigin) ->
+                            Storage.tableSnapshot ctx.Store source.Schema source.OriginalTable
+                            |> Result.toOption
+                            |> Option.map (fun table -> ColumnWire.withIndexFlags table.Indexes source.OriginalName value))
+                        |> Option.defaultValue value
+
+                    { value with
+                        Origin = origin }))
+            origins
+            overrides
+    else
+        overrides
+
+/// Applies `outputColumnWireOverrides` on top of a data-driven wire-type list,
+/// keeping the data-driven type wherever there's no override. Falls back
+/// wholesale on a length mismatch (both lists come from the same projection
+/// expansion, so they shouldn't disagree) rather than throwing from `map2`.
+/// The non-grouped wrapper keeps its callers independent of rollup handling.
+and private outputColumnWireOverrides ctx columns select =
+    outputColumnWireOverridesFor false ctx columns select
+
+and private displayValueForText (ctx: EvalContext) expression value =
+    match displayColumnForExpr ctx expression with
+    | Some column when column.NumericDisplay |> Option.exists _.ZeroFill ->
+        renderOutputValue (outputFormatOfColumn column) value
+        |> Option.map VString
+        |> Option.defaultValue VNull
+    | _ ->
+        let format = outputFormatOfExpr ctx expression
+        if format.DecimalScale.IsSome then
+            renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
+        else value
+
+and private prepareScalarArguments ctx name expressions values =
+    List.zip expressions values
+    |> List.mapi (fun index (expression, value) ->
+        let value =
+            if Functions.isTextArgument name index ctx.Registry then
+                displayValueForText ctx expression value
+            else
+                value
+
+        match value with
+        | VString text when Functions.isByteArgument name index ctx.Registry ->
+            VBytes(Charset.encode (sourceCharset ctx expression) text)
+        | _ -> value)
 
 and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, EvalError> =
     match expr with
