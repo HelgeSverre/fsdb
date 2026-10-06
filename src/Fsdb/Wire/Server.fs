@@ -2181,11 +2181,7 @@ let private handleConnection
                                     let stmtId = session.NextStmtId
                                     let parameterMetadata, resultColumns = QueryHandler.preparedMetadata session ast paramCount
 
-                                    let stmt: PreparedStmt =
-                                        { Ast = ast
-                                          Sql = sql
-                                          ParamCount = paramCount
-                                          LastParamTypes = None }
+                                    let stmt = QueryHandler.createPreparedStatement session sql ast paramCount
 
                                     let session =
                                         { session with
@@ -2345,7 +2341,7 @@ let private handleConnection
                                             { session with Statements = Map.add stmtId { stmt with LastParamTypes = Some types } session.Statements }
                                             |> discardLongData stmtId
 
-                                        match runCancellable stmt.Sql (fun () -> QueryHandler.executePrepared session stmt values) with
+                                        match runCancellable stmt.Sql (fun () -> QueryHandler.executePreparedHandle session stmtId values) with
                                         | None -> ()
                                         | Some(session, result) ->
                                             match cursor, result with

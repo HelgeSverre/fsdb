@@ -192,13 +192,13 @@ let globalVariablesSnapshot (store: Store) : Map<string, string option> =
     globalVariablesOf store
     |> Seq.fold (fun m (kv: System.Collections.Generic.KeyValuePair<string, string option>) -> Map.add kv.Key kv.Value m) (liveDefaults ())
 
-/// A connection-local prepared statement. Text-probed commands have no AST;
-/// parameter types persist because later EXECUTEs may omit them.
+/// A connection-local prepared statement with independent SQL-derived and wire-decoding types.
 type PreparedStmt =
     { Ast: Statement option
       Sql: string
       ParamCount: int
-      LastParamTypes: (byte * bool) list option }
+      LastParamTypes: (byte * bool) list option
+      ParameterTypes: Fsdb.PreparedMetadata.ParameterTypes option }
 
 /// A materialized read-only result retained between COM_STMT_FETCH calls.
 type PreparedCursor =

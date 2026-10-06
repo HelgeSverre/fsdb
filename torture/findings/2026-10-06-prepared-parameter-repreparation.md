@@ -1,6 +1,6 @@
 # Prepared parameter type repreparation
 
-Status: open
+Status: explicit-marker histories resolved; direct user-variable typing open
 
 Oracle: MySQL 8.4.11, using the digest pinned in `torture/compose.yaml`.
 The `prepared-projection-names` probe in
@@ -12,8 +12,9 @@ Int32 values of -2:
 SELECT ?, ABS(?), ? + 1
 ```
 
-MySQL returns three BIGINT columns with values -2, 2, and -1. fsdb returns
-BIGINT, DOUBLE, and BIGINT; its middle value is a floating-point 2.
+The original comparison returns three BIGINT columns from MySQL with values
+-2, 2, and -1. fsdb returned BIGINT, DOUBLE, and BIGINT; its middle value was a
+floating-point 2.
 The independent statement `SELECT ABS(?)` returns DOUBLE on both engines.
 The bare projection parameter changes MySQL's type-repreparation decision for
 the entire statement, including the argument to ABS.
@@ -24,14 +25,18 @@ repreparation. Supplied NULL and string values have separate rules, as do casts,
 numeric families, and temporal families. Subsequent executions also depend on
 the statement's retained types.
 
-`PreparedMetadata.bindParameters` currently infers conversion rules afresh from
-the original AST for each execution. A complete fix needs a statement-local
-derived-type lifecycle shared by binary and SQL prepared execution. Changing
-ABS alone to always retain numeric inputs would break the standalone case.
+`PreparedMetadata.bindParameters` retains SQL-derived types on each binary or
+SQL prepared handle, separately from the binary protocol's remembered wire
+types. It converts supplied strings before checking compatibility and rederives
+the whole statement when required. NULL metadata, decimal scale, inherited cast
+types, LIMIT validation, column-assignment diagnostics, and numeric/temporal
+widening have dedicated regressions. Declared metadata wrappers are confined to
+projections so bound predicates retain literal index probes.
 
-The stable-name regressions cover parameter labels independently of this type
-difference. The mixed statement remains covered for its names in
-`PreparedStatementTests`, but its type mismatch is unresolved.
+The `prepared-parameter-type-history` compatibility case compares repeated
+binary-handle and SQL EXECUTE histories, including a failed execution followed
+by typed NULLs. `PreparedStatementTests` also checks independent handles and
+registered signatures overriding polymorphic builtins.
 
 ## Repeated-execution oracle
 
@@ -86,8 +91,31 @@ marker stays BIGINT. The source-level behavior is in
 and [`Prepared_statement::check_parameter_types`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_prepare.cc).
 The manual's string exception alone is insufficient to implement these cases.
 
-The fix therefore needs retained types owned by each prepared handle,
-conversion before compatibility checking, whole-statement rederivation when
-required, and typed NULL result metadata. Binary wire type reuse is separate
-from this state. SQL and binary execution must share the same lifecycle without
-sharing state between distinct handles.
+## Direct user-variable references
+
+This remaining case has no explicit parameter marker:
+
+```sql
+SET @v=-2;
+PREPARE p FROM 'SELECT @v, ABS(@v)';
+EXECUTE p;
+SET @v=1.25;
+EXECUTE p;
+SET @v=1.5e0;
+EXECUTE p;
+SET @v='hello';
+EXECUTE p;
+SET @v=NULL;
+EXECUTE p;
+```
+
+MySQL 8.4.11 returns BIGINT/BIGINT throughout, with rows (-2, 2), (1, 1),
+(1, 1), (0, 0), and (NULL, NULL). fsdb follows each current variable value:
+TINYINT/TINYINT, DECIMAL/DECIMAL, DOUBLE/DOUBLE, VARCHAR/DOUBLE, and
+VARCHAR/DOUBLE. The decimal and double rows retain 1.25 and 1.5, respectively;
+the string row retains 'hello' in its first column.
+
+Direct variable references require a separate prepare-time variable-type
+snapshot and conversion policy. They must remain distinguishable from the
+explicit markers in `EXECUTE ... USING`, whose value changes follow the
+repreparation rules above.

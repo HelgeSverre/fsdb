@@ -61,10 +61,10 @@
     <Compile Include="Wire/Compression.fs" />
     <Compile Include="Wire/Packet.fs" />
     <Compile Include="Wire/Protocol.fs" />
+    <Compile Include="Wire/PreparedMetadata.fs" />
     <Compile Include="Wire/Session.fs" />
     <Compile Include="Wire/CatalogOverlay.fs" />
     <Compile Include="Wire/TableHandler.fs" />
-    <Compile Include="Wire/PreparedMetadata.fs" />
     <Compile Include="Wire/QueryHandler.fs" />
     <Compile Include="Engine/EventScheduler.fs" />
     <Compile Include="Wire/Server.fs" />

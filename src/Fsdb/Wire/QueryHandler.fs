@@ -4744,9 +4744,7 @@ let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
         | _ -> None)
         statement
 
-/// Binds parameter `Value`s into a parsed `Statement`, replacing every
-/// `Placeholder i` with `Lit values.[i]`.
-let bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
+let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Statement =
     let parameterName expression =
         if Expression.exists (function Placeholder _ -> true | _ -> false) expression then
             Some(Executor.exprLabel expression)
@@ -4755,16 +4753,24 @@ let bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
 
     Expression.rewriteStatementWithProjectionNames
         parameterName
-        (function Placeholder index -> Some(Lit(List.item index values)) | _ -> None)
+        (function Placeholder index -> Some(List.item index values) | _ -> None)
         stmt
 
-let private bindPreparedPlaceholders source (session: Session) statement values =
-    let store = Session.currentStore session
-    let registry = registryFor session
-    let schema = session.Database |> Option.defaultValue defaultDatabase
+/// Binds literal values while preserving the original projection names.
+let bindPlaceholders statement values =
+    bindParameterExpressions statement (List.map Lit values)
 
-    PreparedMetadata.bindParameters source store registry schema statement values
-    |> Result.map (bindPlaceholders statement)
+let private bindPreparedPlaceholders source (session: Session) (prepared: PreparedStmt) statement (values: Value list) =
+    if values.Length <> prepared.ParamCount then
+        Error(1210, "Incorrect arguments to EXECUTE")
+    else
+        let store = Session.currentStore session
+        let registry = registryFor session
+        let schema = session.Database |> Option.defaultValue defaultDatabase
+
+        PreparedMetadata.bindParameters source store registry schema statement prepared.ParameterTypes values
+        |> Result.map (fun (types, expressions) ->
+            { prepared with ParameterTypes = Some types }, bindParameterExpressions statement expressions)
 
 /// Renumbers surviving `Placeholder` nodes densely in traversal (= source)
 /// order, returning the statement and the true parameter count. FParsec's
@@ -4824,6 +4830,22 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
 
 let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
     prepareStatementWithOptions (parserOptionsForSession session) sql
+
+let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
+    let types =
+        ast |> Option.map (fun statement ->
+            PreparedMetadata.initialTypes
+                (Session.currentStore session)
+                (registryFor session)
+                (session.Database |> Option.defaultValue defaultDatabase)
+                statement
+                count)
+
+    { Ast = ast
+      Sql = sql
+      ParamCount = count
+      LastParamTypes = None
+      ParameterTypes = types }
 
 let preparedMetadata
     (session: Session)
@@ -6362,11 +6384,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 match prepareStatementForSession session sql with
                 | Error(code, message) -> session, Err(code, message)
                 | Ok(ast, count) when session.TextStatements.Count + session.Statements.Count < Limits.maxPreparedStmtCount ->
-                    let statement =
-                        { Ast = ast
-                          Sql = sql
-                          ParamCount = count
-                          LastParamTypes = None }
+                    let statement = createPreparedStatement session sql ast count
 
                     { session with TextStatements = Map.add name statement session.TextStatements }, Affected 0UL
                 | Ok _ ->
@@ -6395,8 +6413,10 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 | Some ast ->
                     withStatementHints parserOptions statement.Sql (fun () ->
                         withStoredFunctionRegistry dispatch session (fun current ->
-                            match bindPreparedPlaceholders PreparedMetadata.UserVariables current ast values with
-                            | Ok bound -> executeParsed current bound
+                            match bindPreparedPlaceholders PreparedMetadata.UserVariables current statement ast values with
+                            | Ok(updated, bound) ->
+                                let current = { current with TextStatements = Map.add name updated current.TextStatements }
+                                executeParsed current bound
                             | Error(code, message) -> current, Err(code, message)))
                 | None ->
                     dispatch
@@ -7497,7 +7517,7 @@ let executeServerLoad (session: Session) (load: Parser.LoadRequest) : Session * 
 /// directly (no re-parse, no SQL escaping); the text-probed forms
 /// (SET/SHOW/transaction control, which have no AST) still substitute into
 /// `Sql` and go through the ordinary text path.
-let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list) : Session * QueryResult =
+let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (values: Value list) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
 
     // The AST path calls `executeParsed` directly, which — unlike `handle` —
@@ -7519,9 +7539,10 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
             recordDiagnostics session false (fun () ->
                 try
                     withStatementHints (parserOptionsForSession session) stmt.Sql (fun () ->
-                        match bindPreparedPlaceholders PreparedMetadata.ProtocolValues session ast values with
+                        match bindPreparedPlaceholders PreparedMetadata.ProtocolValues session stmt ast values with
                         | Error(code, message) -> session, Err(code, message)
-                        | Ok statement ->
+                        | Ok(updated, statement) ->
+                            let session = save updated session
                             let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
 
                             if session.PasswordExpired && not resetsPassword then
@@ -7559,3 +7580,16 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
                 | ex -> recoverExecutionError session "prepared statement" ex)
 
         syncTransactionView executed, result
+
+/// Executes an unregistered prepared statement once.
+let executePrepared session statement values =
+    executePreparedWith (fun _ session -> session) session statement values
+
+/// Executes a binary prepared handle and retains its derived parameter types.
+let executePreparedHandle (session: Session) statementId values =
+    match Map.tryFind statementId session.Statements with
+    | None -> session, Err(1243, "Unknown prepared statement handler given to EXECUTE")
+    | Some statement ->
+        executePreparedWith
+            (fun updated session -> { session with Statements = Map.add statementId updated session.Statements })
+            session statement values

@@ -1901,7 +1901,8 @@ let tests =
                   { Ast = None
                     Sql = "SET @escaped = ?"
                     ParamCount = 1
-                    LastParamTypes = None }
+                    LastParamTypes = None
+                    ParameterTypes = None }
 
               let literalSession, result = executePrepared literalSession textStatement [ VString "O'Brien\\" ]
               Expect.equal result (Affected 0UL) "text-prepared substitution should use mode-aware quoting"
@@ -2395,7 +2396,8 @@ let tests =
                       { Ast = Some ast
                         Sql = "INSERT INTO explicit_offsets (id, stamp, plain) VALUES (5, ?, ?)"
                         ParamCount = 2
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   let session, result =
                       executePrepared
@@ -4517,7 +4519,8 @@ let tests =
                       { Ast = Some ast
                         Sql = "SELECT doubled(?)"
                         ParamCount = 1
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   match executePrepared session statement [ VInt 7L ] with
                   | preparedSession, ResultSet(_, [ [ Some "14" ] ]) ->

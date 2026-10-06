@@ -2712,7 +2712,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]
         | ("ROUND" | "TRUNCATE" | "FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ ->
             numericUnary arg
-        | "MOD", _ -> simple TypeLongLong
+        | "MOD", [ left; right ] -> numeric left right
         | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
         | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)

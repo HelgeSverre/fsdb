@@ -595,7 +595,8 @@ let tests =
                       { Ast = Some ast
                         Sql = "INSERT INTO t VALUES (?)"
                         ParamCount = 1
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   let session, result = executePrepared session prepared [ VString "abc" ]
                   Expect.equal result (Affected 1UL) "prepared insert succeeds"
@@ -651,7 +652,8 @@ let tests =
                       { Ast = Some ast
                         Sql = "INSERT INTO t VALUES (?)"
                         ParamCount = 1
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   let session, result = executePrepared session prepared [ VDecimal 67.891M ]
                   Expect.equal result (Affected 1UL) "prepared rounded value inserts"

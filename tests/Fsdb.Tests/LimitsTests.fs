@@ -927,7 +927,8 @@ let tests =
                           { Ast = Some ast
                             Sql = preparedSql
                             ParamCount = 0
-                            LastParamTypes = None }
+                            LastParamTypes = None
+                            ParameterTypes = None }
 
                       match executePrepared session prepared [] |> snd with
                       | Err(3134, _) -> ()

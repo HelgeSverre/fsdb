@@ -1,6 +1,7 @@
 module Fsdb.PreparedMetadata
 
 open System
+open System.Globalization
 open Fsdb.Ast
 open Fsdb.Engine
 open Fsdb.Functions
@@ -14,11 +15,21 @@ type private BoundColumn =
 type private ParameterTreatment =
     | DescribeOnly
     | CoerceNumeric
+    | InheritType
     | ValidateUnsignedInteger
+    | AssignToColumn
 
 type private ParameterBinding =
     | CoerceNumericAs of ColumnMetadata
+    | InheritedType of ColumnMetadata
     | UnsignedIntegerOnly
+    | ColumnAssignment
+
+/// SQL-derived types retained by one prepared statement, independently of wire encodings.
+type ParameterTypes =
+    private
+        { Context: ColumnMetadata list
+          Derived: ColumnMetadata list }
 
 type internal BindingSource =
     | ProtocolValues
@@ -26,7 +37,8 @@ type internal BindingSource =
 
 type private ParameterAnalysis =
     { Definitions: ColumnMetadata option list
-      Bindings: ParameterBinding option list }
+      Bindings: ParameterBinding option list
+      ProjectedParameters: Set<int> }
 
 let private sameName (left: string) (right: string) =
     left.Equals(right, StringComparison.OrdinalIgnoreCase)
@@ -87,7 +99,7 @@ let private functionParameterMetadata (registry: Registry) (name: string) index 
         Some floatingPoint
     | None when name = "ROUND" || name = "TRUNCATE" ->
         Some(if index = 0 then decimalNumber else signedInteger)
-    | None when name = "MOD" || name = "BIT_COUNT" || Set.contains name integerFunctions ->
+    | None when name = "BIT_COUNT" || Set.contains name integerFunctions ->
         Some signedInteger
     | None when Set.contains name dateFunctions ->
         Some date
@@ -168,6 +180,7 @@ let private inferParameters
     : ParameterAnalysis =
     let parameters = Array.create parameterCount None
     let bindings = Array.create parameterCount None
+    let mutable projectedParameters = Set.empty
 
     let tryColumn scope expression =
         let matches =
@@ -207,7 +220,9 @@ let private inferParameters
                 match treatment with
                 | DescribeOnly -> bindings.[index]
                 | CoerceNumeric -> Some(CoerceNumericAs metadata)
+                | InheritType -> Some(InheritedType metadata)
                 | ValidateUnsignedInteger -> Some UnsignedIntegerOnly
+                | AssignToColumn -> Some ColumnAssignment
 
     let statementOfBody =
         function
@@ -262,11 +277,14 @@ let private inferParameters
         | Regexp(value, pattern) ->
             inferExpected (Some generic) value
             inferExpected (Some generic) pattern
-        | Cast(inner, TTime _) -> inferConverted (Some(ColumnWire.parameterMetadataOfType(TDateTime 6))) inner
-        | Cast(inner, ty) -> inferConverted (Some(ColumnWire.parameterMetadataOfType ty)) inner
+        | Cast(inner, TTime _) -> inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TDateTime 6))) InheritType inner
+        | Cast(inner, ty) -> inferExpression scope (Some(ColumnWire.parameterMetadataOfType ty)) InheritType inner
         | FuncCall(name, values) when
-            name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase)
+            (name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
+             || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase)
+             || name.Equals("GREATEST", StringComparison.OrdinalIgnoreCase)
+             || name.Equals("LEAST", StringComparison.OrdinalIgnoreCase))
+            && Functions.isUnmodifiedBuiltinScalar name registry
             ->
             let output = values |> List.tryPick inferred |> Option.orElse expected |> Option.orElse (Some generic)
             values |> List.iter (inferExpected output)
@@ -278,6 +296,11 @@ let private inferParameters
         | FuncCall(name, [ first; second ]) when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
             inferExpected (inferred second |> Option.orElse expected |> Option.orElse (Some generic)) first
             inferExpected (inferred first |> Option.orElse expected |> Option.orElse (Some generic)) second
+        | FuncCall(name, [ left; right ]) when
+            name.Equals("MOD", StringComparison.OrdinalIgnoreCase)
+            && Functions.isUnmodifiedBuiltinScalar name registry ->
+            inferExpected (inferred right |> Option.orElse (Some floatingPoint)) left
+            inferExpected (inferred left |> Option.orElse (Some floatingPoint)) right
         | FuncCall(name, values) ->
             let name = name.ToUpperInvariant()
 
@@ -360,7 +383,17 @@ let private inferParameters
         let scope = inferScope outerScope select.Ctes select.From select.Joins
 
         let infer = inferExpression scope None DescribeOnly
-        select.Projections |> List.iter (fst >> infer)
+        select.Projections
+        |> List.iter (fun (expression, _) ->
+            projectedParameters <-
+                Fsdb.Sql.Expression.fold
+                    (fun parameters expression ->
+                        match expression with
+                        | Placeholder index -> Fsdb.Sql.Expression.Descend(Set.add index parameters)
+                        | _ -> Fsdb.Sql.Expression.Descend parameters)
+                    projectedParameters
+                    expression
+            infer expression)
         select.Where |> Option.iter infer
         select.GroupBy |> List.iter infer
         select.Having |> Option.iter infer
@@ -394,7 +427,7 @@ let private inferParameters
         |> List.iter (fun row ->
             Seq.zip row columns
             |> Seq.iter (fun (expression, column) ->
-                inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) DescribeOnly expression))
+                inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) AssignToColumn expression))
 
     let inferAssignments table assignments =
         let columns = tableColumns None table
@@ -406,7 +439,7 @@ let private inferParameters
                 |> List.tryFind (fun column -> sameName column.Name name)
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
 
-            inferExpression (withQualifier table columns) expected DescribeOnly expression)
+            inferExpression (withQualifier table columns) expected AssignToColumn expression)
 
     match statement with
     | Select select -> inferSelect [] select
@@ -423,7 +456,7 @@ let private inferParameters
 
         Seq.zip select.Projections targets
         |> Seq.iter (fun ((expression, _), column) ->
-            inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) DescribeOnly expression)
+            inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) AssignToColumn expression)
 
         inferAssignments table onDuplicate
     | ReplaceSelect(table, columns, select) ->
@@ -432,7 +465,7 @@ let private inferParameters
 
         Seq.zip select.Projections targets
         |> Seq.iter (fun ((expression, _), column) ->
-            inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) DescribeOnly expression)
+            inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) AssignToColumn expression)
     | Update update ->
         let scope = inferScope [] update.Ctes (Some(FromTable update.From)) update.Joins
 
@@ -447,7 +480,7 @@ let private inferParameters
                 target |> tryColumn scope
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
 
-            inferExpression scope expected DescribeOnly assignment.Value)
+            inferExpression scope expected AssignToColumn assignment.Value)
 
         update.Where |> Option.iter (inferExpression scope None DescribeOnly)
         update.OrderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
@@ -460,18 +493,20 @@ let private inferParameters
     | _ -> ()
 
     { Definitions = List.ofArray parameters
-      Bindings = List.ofArray bindings }
+      Bindings = List.ofArray bindings
+      ProjectedParameters = projectedParameters }
 
 let private parameterExpectations store registry schema statement parameterCount =
     (inferParameters store registry schema statement parameterCount).Definitions
-
-let private parameterBindings store registry schema statement parameterCount =
-    (inferParameters store registry schema statement parameterCount).Bindings
 
 /// Infers the parameter descriptors advertised by COM_STMT_PREPARE.
 let parameterDefinitions store registry schema statement parameterCount : ColumnMetadata list =
     parameterExpectations store registry schema statement parameterCount
     |> List.map (Option.defaultValue generic)
+
+let initialTypes store registry schema statement parameterCount =
+    let types = parameterDefinitions store registry schema statement parameterCount
+    { Context = types; Derived = types }
 
 let private numericParameterType (metadata: ColumnMetadata) =
     let unsigned = metadata.Flags &&& UnsignedFlag <> 0us
@@ -504,45 +539,195 @@ let private parameterColumn columnType : ColumnDef =
       Charset = None
       Srid = None }
 
-/// Applies the binding rules that are stricter than ordinary expression
-/// coercion. Typed numeric function and cast arguments convert before
-/// evaluation. LIMIT/OFFSET reject floating and decimal values; protocol
-/// strings retain MySQL's numeric-string conversion, while SQL user-variable
-/// strings are refused. Other contexts retain the client's dynamic type.
-let internal bindParameters source store registry schema statement values =
-    let mode =
-        { Storage.temporalCoercionMode store with
-            Strict = false }
+type private ParameterFamily =
+    | Integral of unsigned: bool
+    | ExactNumeric
+    | ApproximateNumeric
+    | CalendarDate
+    | ClockTime
+    | CalendarTime
+    | Other
 
-    let bind binding value =
+let private family (metadata: ColumnMetadata) =
+    match numericParameterType metadata with
+    | Some(TDouble _ | TFloat _) -> ApproximateNumeric
+    | Some(TDecimal _) -> ExactNumeric
+    | Some _ -> Integral(metadata.Flags &&& UnsignedFlag <> 0us)
+    | None when metadata.TypeId = TypeDate -> CalendarDate
+    | None when metadata.TypeId = TypeTime -> ClockTime
+    | None when metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp -> CalendarTime
+    | None -> Other
+
+let private inherited = function
+    | Some(InheritedType _ | UnsignedIntegerOnly) -> true
+    | _ -> false
+
+let private accepts (expected: ColumnMetadata) value =
+    match value with
+    | VNull | VString _ | VBytes _ -> true
+    | _ ->
+        match family expected, family (metadataOfValue value) with
+        | Integral expectedSign, Integral actualSign -> expectedSign = actualSign || expected.TypeId = TypeYear
+        | ExactNumeric, (Integral _ | ExactNumeric)
+        | ApproximateNumeric, (Integral _ | ExactNumeric | ApproximateNumeric)
+        | (CalendarDate | ClockTime | CalendarTime), (Integral _ | ExactNumeric | ApproximateNumeric)
+        | CalendarDate, CalendarDate
+        | ClockTime, (ClockTime | CalendarTime)
+        | CalendarTime, (CalendarDate | ClockTime | CalendarTime)
+        | Other, Other -> true
+        | _ -> false
+
+let private convertedNumericString expected (text: string) =
+    let integer =
+        match family expected with
+        | Integral false ->
+            match Int64.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, value when value >= 0L -> Some(VInt value)
+            | _ -> None
+        | Integral true ->
+            match UInt64.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, value -> Some(VUInt value)
+            | _ -> None
+        | _ -> None
+
+    let exact () =
+        match family expected with
+        | Integral _ | ExactNumeric ->
+            match Decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, value -> Some(VDecimal value)
+            | _ -> None
+        | _ -> None
+
+    let approximate () =
+        match Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, value when Double.IsFinite value -> Some(VDouble value)
+        | _ -> None
+
+    integer |> Option.orElseWith exact |> Option.orElseWith approximate
+
+let private parameterType metadata =
+    numericParameterType metadata
+    |> Option.defaultWith (fun () ->
+        match family metadata with
+        | CalendarDate -> TDate
+        | ClockTime -> TTime 6
+        | CalendarTime -> TDateTime 6
+        | _ when metadata.TypeId = TypeGeometry -> TGeometry Geometry
+        | _ when metadata.TypeId = TypeJson -> TJson
+        | _ when metadata.TypeId = TypeBlob -> TLongBlob
+        | _ -> TVarchar 16383)
+
+/// Converts supplied values before deciding whether the entire statement must be reprepared.
+let internal bindParameters source store registry schema statement retained (values: Value list) =
+    let analysis = inferParameters store registry schema statement values.Length
+    let original = analysis.Definitions |> List.map (Option.defaultValue generic)
+    let retained = retained |> Option.defaultValue { Context = original; Derived = original }
+    let expected = retained.Derived
+    let mode = { Storage.temporalCoercionMode store with Strict = false }
+
+    let coerce columnType value =
+        Diagnostics.suppress (fun () -> Storage.coerceValueWithMode mode (parameterColumn columnType) value)
+        |> Result.defaultValue value
+
+    let convert expected value =
+        match family expected, value with
+        | (Integral _ | ExactNumeric | ApproximateNumeric), VString text ->
+            convertedNumericString expected text |> Option.defaultValue value
+        | (CalendarDate | ClockTime | CalendarTime), (VString _ | VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
+            let strict = { mode with Strict = true }
+            let value =
+                match family expected, value with
+                | (CalendarDate | CalendarTime), (VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
+                    Functions.tryDateTimeValue value
+                    |> Option.map (fun dateTime ->
+                        if dateTime.TimeOfDay = TimeSpan.Zero then VDate(DateOnly.FromDateTime dateTime)
+                        else VDateTime dateTime)
+                    |> Option.defaultValue value
+                | _ -> value
+            let target =
+                match value with
+                | VDate _ -> TDate
+                | VDateTime _ -> TDateTime 6
+                | VString text when Fsdb.Temporal.tryParseDateTimeComponents text |> Option.isSome -> TDateTime 6
+                | VString text when Fsdb.Temporal.tryParseDateComponents text |> Option.isSome -> TDate
+                | _ -> parameterType expected
+            Diagnostics.suppress (fun () -> Storage.coerceValueWithMode strict (parameterColumn target) value)
+            |> Result.defaultValue value
+        | _ -> value
+
+    let actual =
+        List.zip3 analysis.Bindings expected values
+        |> List.map (fun (binding, expected, value) ->
+            match binding with
+            | Some UnsignedIntegerOnly -> value
+            | _ -> convert expected value)
+    let reprepare =
+        retained.Context <> original
+        || (List.zip3 analysis.Bindings expected actual
+            |> List.exists (fun (binding, expected, value) -> not (inherited binding) && not (accepts expected value)))
+
+    let types =
+        if reprepare then
+            List.zip3 analysis.Bindings original actual
+            |> List.map (fun (binding, original, value) ->
+                if inherited binding || value = VNull then original else metadataOfValue value)
+        else
+            expected
+
+    let bind binding definition expected value =
         match binding with
-        | None -> Ok value
+        | Some ColumnAssignment -> Ok value
         | Some UnsignedIntegerOnly ->
             match value with
             | VInt number when number >= 0L -> Ok value
             | VInt _ -> Error(1690, "signed integer value is out of range in 'EXECUTE'")
-            | VUInt _ -> Ok value
-            | VNull -> Ok value
+            | VUInt _ | VNull -> Ok value
             | VString _ when source = ProtocolValues -> Ok value
             | _ -> Error(1210, "Incorrect arguments to EXECUTE")
-        | Some(CoerceNumericAs expectation) ->
-            match numericParameterType expectation with
+        | _ ->
+            let derivedCoercion =
+                match family expected with
+                | CalendarDate | ClockTime | CalendarTime -> Some(parameterType expected)
+                | _ -> numericParameterType expected
+
+            let coercion =
+                match binding with
+                | Some(InheritedType metadata) -> numericParameterType metadata
+                | Some(CoerceNumericAs metadata) ->
+                    match family metadata with
+                    | Integral _ -> numericParameterType metadata
+                    | _ -> derivedCoercion
+                | _ -> derivedCoercion
+
+            match coercion with
             | None -> Ok value
             | Some columnType ->
-                match
-                    Diagnostics.suppress (fun () ->
-                        Storage.coerceValueWithMode mode (parameterColumn columnType) value)
-                with
-                | Ok coerced -> Ok coerced
-                | Error _ -> Ok value
+                let value =
+                    match family (ColumnWire.parameterMetadataOfType columnType), value with
+                    | Integral _, VDouble number -> VDouble(Math.Round(number, MidpointRounding.ToEven))
+                    | _ -> value
+                let coerced = coerce columnType value
+                // A bare marker returns its supplied decimal scale; arithmetic uses the derived scale.
+                match definition, family expected, value, coerced with
+                | None, ExactNumeric, VDecimal _, _ -> Ok value
+                | None, ExactNumeric, _, VDecimal number ->
+                    Ok(VDecimal(Decimal.Parse(number.ToString("G29", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)))
+                | _ -> Ok coerced
 
-    let rec bindAll bindings values bound =
-        match bindings, values with
-        | [], [] -> Ok(List.rev bound)
-        | binding :: remainingBindings, value :: remainingValues ->
-            bind binding value
-            |> Result.bind (fun value -> bindAll remainingBindings remainingValues (value :: bound))
+    let rec bindAll parameterIndex bindings definitions types values bound =
+        match bindings, definitions, types, values with
+        | [], [], [], [] -> Ok(List.rev bound)
+        | binding :: bindings, definition :: definitions, expected :: types, value :: values ->
+            bind binding definition expected value
+            |> Result.bind (fun value ->
+                let expression =
+                    match binding, value, family expected with
+                    | Some(UnsignedIntegerOnly | ColumnAssignment), _, _ -> Lit value
+                    | _, VNull, _ | _, _, Integral _ when Set.contains parameterIndex analysis.ProjectedParameters ->
+                        Cast(Lit value, parameterType expected)
+                    | _ -> Lit value
+                bindAll (parameterIndex + 1) bindings definitions types values (expression :: bound))
         | _ -> Error(1210, "Incorrect arguments to EXECUTE")
 
-    let bindings = parameterBindings store registry schema statement (List.length values)
-    bindAll bindings values []
+    bindAll 0 analysis.Bindings analysis.Definitions types actual []
+    |> Result.map (fun expressions -> { Context = original; Derived = types }, expressions)

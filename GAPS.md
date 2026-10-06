@@ -507,11 +507,16 @@ families without evaluating the statement. Typed numeric builtin and cast
 arguments are coerced before expression evaluation for both protocol and SQL
 prepared statements. `LIMIT` and `OFFSET` retain MySQL's distinct binary-
 protocol and SQL user-variable validation rules.
+Each prepared handle retains its derived parameter types independently of the
+binary protocol's cached encodings. Incompatible supplied types rederive the
+whole statement, while compatible executions retain their numeric and temporal
+families. NULL projections retain declared metadata; a reprepare restores a
+NULL marker's original expression context.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
-| Parameter type repreparation | changes between derived and supplied parameter types can reprepare the whole statement | parameter coercion is inferred independently on each execution; a bare marker can trigger MySQL to change another marker's numeric result type, while fsdb retains its original coercion ([reproducer](torture/findings/2026-10-06-prepared-parameter-repreparation.md)) | medium | divergence |
+| Prepared user-variable typing | user variables referenced directly in prepared SQL retain their prepare-time type | `SELECT @v` inside a prepared statement follows the variable's current value type; explicit `?` markers, including SQL `EXECUTE ... USING`, retain handle-local types and support statement-wide rederivation ([evidence](torture/findings/2026-10-06-prepared-parameter-repreparation.md#direct-user-variable-references)) | medium | divergence |
 | Unaliased expression labels | source-shaped expression labels | reconstructed labels can omit string quotes or normalize spacing and casing; prepared projections retain their original labels through parameter binding, and explicit aliases are preserved | low | divergence |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |

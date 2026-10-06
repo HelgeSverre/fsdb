@@ -114,7 +114,8 @@ let tests =
                       { Ast = None
                         Sql = sql
                         ParamCount = 1
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   match executePrepared session statement [ VString "name" ] |> snd with
                   | ResultSet(_, [ [ Some "name"; Some "varchar(255)"; Some "NO"; Some ""; None; Some "" ] ]) -> ()
@@ -134,7 +135,7 @@ let tests =
                       match prepareStatement sql with
                       | Ok prepared -> prepared
                       | Error error -> failtestf "prepare failed: %A" error
-                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None }
+                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None }
                   for value in [ VInt -2L; VInt 7L; VNull ] do
                       match executePrepared session statement (List.replicate count value) |> snd with
                       | ResultSet(columns, _) -> Expect.equal columns names sql
@@ -151,6 +152,153 @@ let tests =
                   | ResultSet(columns, _) -> Expect.equal columns [ "?"; "ABS(?)" ] "stable SQL prepared names"
                   | other -> failtestf "EXECUTE returned %A" other
 
+          testCase "SQL prepared parameter types retain widening across executions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "PREPARE typed FROM 'SELECT ?, ABS(?), ? + 1'"
+              let steps =
+                  [ "-2", TypeLongLong, [ Some "-2"; Some "2"; Some "-1" ]
+                    "'-3'", TypeNewDecimal, [ Some "-3"; Some "3"; Some "-2" ]
+                    "NULL", TypeNewDecimal, [ None; None; None ]
+                    "1.25", TypeNewDecimal, [ Some "1.25"; Some "1.25"; Some "2.25" ]
+                    "-4", TypeNewDecimal, [ Some "-4"; Some "4"; Some "-3" ]
+                    "1.5e0", TypeDouble, [ Some "1.5"; Some "1.5"; Some "2.5" ]
+                    "'oops'", TypeDouble, [ Some "0"; Some "0"; Some "1" ]
+                    "-5", TypeDouble, [ Some "-5"; Some "5"; Some "-4" ] ]
+
+              (session, steps)
+              ||> List.fold (fun session (value, expectedType, expectedRow) ->
+                  let session, _ = handle session ("SET @v=" + value)
+                  let session, result = handle session "EXECUTE typed USING @v,@v,@v"
+                  match result with
+                  | ResultSet(_, [ row ]) ->
+                      let numbers = List.map (Option.map (fun (value: string) -> Decimal.Parse(value, Globalization.CultureInfo.InvariantCulture)))
+                      Expect.equal (numbers row) (numbers expectedRow) value
+                  | other -> failtestf "execution returned %A" other
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      (List.replicate 3 expectedType)
+                      ("retained types for " + value)
+                  session)
+              |> ignore
+
+          testCase "statement-wide repreparation rederives NULL markers from their context"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "PREPARE typed FROM 'SELECT ?, ABS(?)'"
+              let steps =
+                  [ "-2", "-2", [ TypeLongLong; TypeLongLong ]
+                    "NULL", "1.25", [ TypeVarString; TypeNewDecimal ]
+                    "-4", "-4", [ TypeLongLong; TypeLongLong ] ]
+              (session, steps)
+              ||> List.fold (fun session (first, second, expected) ->
+                  let session, _ = handle session ("SET @a=" + first + ",@b=" + second)
+                  let session, result = handle session "EXECUTE typed USING @a,@b"
+                  match result with
+                  | ResultSet(_, [ _ ]) -> ()
+                  | other -> failtestf "execution returned %A" other
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) expected "rederived types"
+                  session)
+              |> ignore
+
+          testCase "binary prepared handles retain independent parameter types"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ?, ABS(?)"
+              let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+              let statement = createPreparedStatement session sql ast count
+              let session = { session with Statements = Map.ofList [ 1, statement; 2, statement ] }
+              let execute session id value expected =
+                  let session, result = executePreparedHandle session id [ value; value ]
+                  match result with
+                  | ResultSet(_, [ _ ]) -> ()
+                  | other -> failtestf "execution returned %A" other
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ expected; expected ]
+                      "handle-local types"
+                  session
+              let session = execute session 1 (VInt -2L) TypeLongLong
+              let session = execute session 2 (VDouble 1.5) TypeDouble
+              let session = execute session 1 (VString "-3") TypeNewDecimal
+              let session = execute session 2 (VInt -4L) TypeDouble
+              let session = execute session 1 VNull TypeNewDecimal
+              execute session 2 VNull TypeDouble |> ignore
+
+          testCase "numeric prepared expressions use rederived families and integer argument rounding"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, parameters, types, expected in
+                  [ "SELECT MOD(?, ?)", [ VDecimal 5.5M; VDecimal 2M ], [ TypeDouble ], [ "1.5" ]
+                    "SELECT ?, MOD(?, ?)", [ VInt 1L; VDecimal 5.5M; VDecimal 2M ],
+                        [ TypeLongLong; TypeNewDecimal ], [ "1"; "1.5" ]
+                    "SELECT ?, CAST(? AS SIGNED), SUBSTRING('abcdef', ?)", [ VInt -2L; VDouble 2.5; VDouble 2.5 ],
+                        [ TypeLongLong; TypeLongLong; TypeVarString ], [ "-2"; "2"; "bcdef" ] ] do
+                  let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+                  let statement = createPreparedStatement session sql ast count
+                  let session, result = executePrepared session statement parameters
+                  match result with
+                  | ResultSet(_, [ row ]) ->
+                      let normalize (value: string) =
+                          match Decimal.TryParse(value, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+                          | true, number -> number.ToString("G29", Globalization.CultureInfo.InvariantCulture)
+                          | _ -> value
+                      Expect.equal (row |> List.map (Option.map normalize)) (expected |> List.map Some) sql
+                  | other -> failtestf "%s returned %A" sql other
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) types sql
+
+          testCase "binary prepared temporal parameters retain DATETIME after widening from DATE"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let ast, count = prepareStatement "SELECT ?" |> function Ok value -> value | Error error -> failtestf "%A" error
+              let statement = createPreparedStatement session "SELECT ?" ast count
+              let session = { session with Statements = Map.ofList [ 1, statement ] }
+              let steps =
+                  [ VDate(DateOnly(2024, 1, 2)), TypeDate, Some "2024-01-02"
+                    VDateTime(DateTime(2024, 1, 3, 12, 30, 0)), TypeDateTime, Some "2024-01-03 12:30:00"
+                    VDate(DateOnly(2024, 1, 4)), TypeDateTime, Some "2024-01-04 00:00:00"
+                    VInt 20240105L, TypeDateTime, Some "2024-01-05 00:00:00"
+                    VNull, TypeDateTime, None ]
+              (session, steps)
+              ||> List.fold (fun session (value, expectedType, expectedValue) ->
+                  let session, result = executePreparedHandle session 1 [ value ]
+                  Expect.equal result (ResultSet([ "?" ], [ [ expectedValue ] ])) "temporal value"
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ expectedType ] "retained temporal type"
+                  session)
+              |> ignore
+
+          testCase "prepared parameter inference honors signatures that override polymorphic builtins"
+          <| fun _ ->
+              for name in [ "MOD"; "GREATEST"; "LEAST" ] do
+                  let extension =
+                      Fsdb.Functions.ScalarFunction.create name (fun _ _ -> VNull)
+                      |> Fsdb.Functions.ScalarFunction.withSignature [ TJson; TJson ] TJson
+                  let session =
+                      { create 1 (Fsdb.Storage.create ()) with
+                          CustomFunctions = Fsdb.Functions.empty |> Fsdb.Functions.registerExtension extension }
+                  let sql = "SELECT " + name + "(?, ?)"
+                  let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+                  let parameters, _ = preparedMetadata session ast count
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeJson; TypeJson ] name
+
+          testCase "prepared parameter types survive an execution error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ?, ABS(?)"
+              let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+              let statement = createPreparedStatement session sql ast count
+              let session = { session with Statements = Map.ofList [ 1, statement ] }
+              let session, result = executePreparedHandle session 1 [ VInt Int64.MinValue; VInt Int64.MinValue ]
+              match result with
+              | Err(1690, _) -> ()
+              | other -> failtestf "expected signed overflow, got %A" other
+              let session, result = executePreparedHandle session 1 [ VNull; VNull ]
+              Expect.equal result (ResultSet([ "?"; "ABS(?)" ], [ [ None; None ] ])) "NULL execution after error"
+              Expect.equal
+                  (session.LastResultColumnMetadata |> List.map _.TypeId)
+                  [ TypeLongLong; TypeLongLong ]
+                  "derived types survive the failed execution"
+
           testCase "a prepared INSERT/SELECT binds values into the parsed AST and executes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -162,7 +310,8 @@ let tests =
                       { Ast = Some ast
                         Sql = "INSERT INTO ps_t (id, name) VALUES (?, ?)"
                         ParamCount = 2
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   // The name carries a quote and a backslash — bound as a
                   // `Value` into the AST, never re-spliced SQL text, so there
@@ -192,7 +341,8 @@ let tests =
                       { Ast = Some ast
                         Sql = sql
                         ParamCount = 5
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   let parameters =
                       [ VString "1.9"; VDouble 1.5; VDouble 1.5; VDouble 1.5; VString "255.5" ]
@@ -234,7 +384,8 @@ let tests =
                       { Ast = Some ast
                         Sql = sql
                         ParamCount = 1
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   match executePrepared session statement [ VString "1.5" ] |> snd with
                   | ResultSet(_, []) -> ()
@@ -265,7 +416,8 @@ let tests =
                           { Ast = Some ast
                             Sql = sql
                             ParamCount = 1
-                            LastParamTypes = None }
+                            LastParamTypes = None
+                            ParameterTypes = None }
                           [ value ]
                       |> snd
                   | other -> failtestf "expected one LIMIT parameter in %s, got %A" sql other
@@ -336,7 +488,8 @@ let tests =
                       { Ast = Some ast
                         Sql = sql
                         ParamCount = 2
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   let session, result = executePrepared session statement [ VInt 2L; VInt 99L ]
                   Expect.equal result (Affected 1UL) "the selected row updates"
@@ -358,7 +511,8 @@ let tests =
                       { Ast = Some ast
                         Sql = sql
                         ParamCount = 2
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   match executePrepared session statement [ VInt 3L; VInt 4L ] |> snd with
                   | ResultSet(_, [ [ Some "1" ] ]) -> ()
@@ -394,7 +548,8 @@ let tests =
                       { Ast = Some ast
                         Sql = "SELECT RANDOM_BYTES(?)"
                         ParamCount = 1
-                        LastParamTypes = None }
+                        LastParamTypes = None
+                        ParameterTypes = None }
 
                   let session, result = executePrepared session statement [ VInt 0L ]
 

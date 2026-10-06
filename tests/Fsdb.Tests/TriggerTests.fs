@@ -125,7 +125,8 @@ let tests =
                           { Ast = Some ast
                             Sql = "INSERT INTO procedure_source VALUES (?, ?)"
                             ParamCount = 2
-                            LastParamTypes = None }
+                            LastParamTypes = None
+                            ParameterTypes = None }
 
                       let prepared, result = executePrepared executed statement [ VInt 2L; VInt 11L ]
                       expectOk result "prepared trigger procedure call"

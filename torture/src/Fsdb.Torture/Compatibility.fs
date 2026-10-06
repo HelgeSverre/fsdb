@@ -26,7 +26,7 @@ type ContractAction =
     | Send of pending: string * operation: ContractOperation * protocol: ContractProtocol * sql: string * parameters: obj array
     | Reap of pending: string
     | PrepareHandle of handle: string * operation: ContractOperation * sql: string * parameters: obj array
-    | InvokeHandle of handle: string
+    | InvokeHandle of handle: string * parameters: obj array option
     | CloseHandle of handle: string
     | AwaitPending of pending: string
 
@@ -158,8 +158,11 @@ module Contract =
     let invoke name handle expectation : ContractStep =
         { Name = name
           Connection = "main"
-          Action = InvokeHandle handle
+          Action = InvokeHandle(handle, None)
           Expectation = expectation }
+
+    let invokeWith name handle parameters : ContractStep =
+        { invoke name handle OracleSuccess with Action = InvokeHandle(handle, Some parameters) }
 
     let close name handle : ContractStep =
         { Name = name
@@ -1926,6 +1929,50 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE stable_labels" |]
           Coverage = [| "statement:select", [| "prepared-protocol"; "text-differential" |] |] }
 
+    let private preparedTypeHistory =
+        let sql = "SELECT ?, ABS(?), ? + 1"
+        let values =
+            [| "integer", "-2", box -2L
+               "negative-string", "'-3'", box "-3"
+               "null", "NULL", box DBNull.Value
+               "decimal", "1.25", box 1.25M
+               "integer-after-decimal", "-4", box -4L
+               "double", "1.5e0", box 1.5
+               "invalid-string", "'oops'", box "oops"
+               "integer-after-double", "-5", box -5L |]
+        { Name = "prepared-parameter-type-history"
+          Setup = [||]
+          Steps =
+            [| Contract.prepare "binary-prepare" "typed" Query sql [| box -2L; box -2L; box -2L |]
+               for name, _, value in values do
+                   Contract.invokeWith ("binary-" + name) "typed" (Array.replicate 3 value)
+               Contract.close "binary-close" "typed"
+               Contract.prepare "temporal-prepare" "temporal" Query "SELECT ?" [| box (DateOnly(2024, 1, 2)) |]
+               Contract.invoke "temporal-date" "temporal" OracleSuccess
+               Contract.invokeWith "temporal-datetime" "temporal" [| box (DateTime(2024, 1, 3, 12, 30, 0)) |]
+               Contract.invokeWith "temporal-date-after-datetime" "temporal" [| box (DateOnly(2024, 1, 4)) |]
+               Contract.invokeWith "temporal-numeric-date" "temporal" [| box 20240105L |]
+               Contract.invokeWith "temporal-null" "temporal" [| box DBNull.Value |]
+               Contract.close "temporal-close" "temporal"
+               Contract.prepare "error-prepare" "error-types" Query "SELECT ?, ABS(?)"
+                   [| box Int64.MinValue; box Int64.MinValue |]
+               Contract.invoke "error-overflow" "error-types" (OracleError(1690, "22003"))
+               Contract.invokeWith "error-retained-types" "error-types" [| box DBNull.Value; box DBNull.Value |]
+               Contract.close "error-close" "error-types"
+               Contract.execute "sql-prepare" ("PREPARE typed_history FROM '" + sql + "'")
+               for name, literal, _ in values do
+                   Contract.execute ("set-" + name) ("SET @typed_value=" + literal)
+                   Contract.query ("sql-" + name) "EXECUTE typed_history USING @typed_value,@typed_value,@typed_value"
+               Contract.execute "null-prepare" "PREPARE null_history FROM 'SELECT ?, ABS(?)'"
+               Contract.execute "null-initial-values" "SET @typed_a=-2,@typed_b=-2"
+               Contract.query "null-initial-execute" "EXECUTE null_history USING @typed_a,@typed_b"
+               Contract.execute "null-reprepare-values" "SET @typed_a=NULL,@typed_b=1.25"
+               Contract.query "null-reprepare-execute" "EXECUTE null_history USING @typed_a,@typed_b"
+               Contract.execute "null-reset-values" "SET @typed_a=-4,@typed_b=-4"
+               Contract.query "null-reset-execute" "EXECUTE null_history USING @typed_a,@typed_b" |]
+          Cleanup = [| "DEALLOCATE PREPARE typed_history"; "DEALLOCATE PREPARE null_history" |]
+          Coverage = [| "statement:select", [| "prepared-protocol"; "text-differential" |] |] }
+
     let all =
         [| comments
            exactErrors
@@ -1934,6 +1981,7 @@ module ContractCatalog =
            prepared
            preparedDml
            preparedProjectionNames
+           preparedTypeHistory
            columnTypes
            generatedFunctionFamilies
            functionFamilies
@@ -2124,9 +2172,13 @@ module CompatibilityRunner =
                             stopwatch.Stop()
                             command.Dispose()
                             outcomes.Add { empty target "driver_error" with Message = error.ToString(); ElapsedMs = stopwatch.ElapsedMilliseconds }
-                    | InvokeHandle name ->
+                    | InvokeHandle(name, parameters) ->
                         match prepared.TryGetValue name with
                         | true, handle ->
+                            parameters |> Option.iter (fun values ->
+                                if values.Length <> handle.Command.Parameters.Count then
+                                    invalidArg (nameof parameters) "prepared parameter count differs"
+                                values |> Array.iteri (fun index value -> handle.Command.Parameters[index].Value <- value))
                             match handle.Operation with
                             | Execute ->
                                 let! outcome = Database.executeCommand target timeoutSeconds handle.Command
