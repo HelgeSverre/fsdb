@@ -5228,6 +5228,12 @@ let internal numericAggregateValue = function
     | VBinaryLiteral bytes -> VUInt(Value.binaryLiteralNumber bytes)
     | VBit(_, value) -> VUInt value
     | (VNull | VInt _ | VUInt _ | VDecimal _ | VDouble _) as value -> value
+    | (VString _ | VBytes _) as value ->
+        let text = toText value |> Option.defaultValue ""
+        let number, truncated = Value.coerceLeadingDouble text
+        if truncated then
+            Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
+        VDouble number
     | value -> VDouble(toDouble value)
 
 /// MySQL promotes SUM over exact integer inputs to DECIMAL rather than

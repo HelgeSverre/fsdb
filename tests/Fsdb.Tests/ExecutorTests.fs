@@ -3795,6 +3795,20 @@ let tests =
                         | ResultSet(_, [ row ]) -> Expect.equal row (List.map Some expected) sql
                         | other -> failtestf "unexpected aggregate result: %A" other
 
+                testCase "prefix windows preserve evaluation of unclassified custom scalars"
+                <| fun _ ->
+                    let store = newStore ()
+                    let mutable next = 0L
+                    let registry =
+                        builtins
+                        |> registerScalar "NEXT_INPUT" (fun _ ->
+                            next <- next + 1L
+                            VInt next)
+                    runDefault store "CREATE TABLE prefix_inputs(id INT)" |> ignore
+                    runDefault store "INSERT INTO prefix_inputs VALUES(1),(2),(3)" |> ignore
+                    let result = run store registry "SELECT SUM(NEXT_INPUT()) OVER(ORDER BY id) AS s FROM prefix_inputs ORDER BY id"
+                    Expect.equal result (ResultSet([ "s" ], [ [ Some "1" ]; [ Some "5" ]; [ Some "15" ] ])) "custom inputs retain per-frame evaluation"
+
                 testCase "empty bit aggregates return their MySQL identities"
                 <| fun _ ->
                     let store = newStore ()

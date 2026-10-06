@@ -28,6 +28,35 @@ let tests =
                   Expect.equal rows [ [ Some "1" ] ] "row value"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "numeric aggregate warnings follow conversion and window boundaries"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE aggregate_warnings(id INT PRIMARY KEY,v VARCHAR(30))"
+              let session, _ = handle session "INSERT INTO aggregate_warnings VALUES(1,'12x'),(2,'12x'),(3,'bad'),(4,''),(5,'  '),(6,NULL),(7,' 2 ')"
+              let malformed = [ "12x"; "12x"; "bad" ]
+              for expression, expected, warnings in
+                  [ "SUM(v)", [ Some "26" ], malformed
+                    "AVG(v)", [ Some "4.333333333333333" ], malformed
+                    "SUM(DISTINCT v)", [ Some "14" ], []
+                    "AVG(DISTINCT v)", [ Some "4.666666666666667" ], []
+                    "COUNT(v)", [ Some "6" ], []
+                    "SUM(v) OVER(ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW)",
+                        [ Some "12"; Some "12"; Some "0"; Some "0"; Some "0"; None; Some "2" ], malformed
+                    "SUM(v) OVER(ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+                        [ Some "12"; Some "24"; Some "24"; Some "24"; Some "24"; Some "24"; Some "26" ], malformed
+                    "SUM(v) OVER()", List.replicate 7 (Some "26"), malformed
+                    "SUM(v) OVER(PARTITION BY MOD(id,2) ORDER BY id)",
+                        [ Some "12"; Some "12"; Some "12"; Some "12"; Some "12"; Some "12"; Some "14" ], malformed
+                    "SUM(v) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+                        [ Some "12"; Some "24"; Some "12"; Some "0"; Some "0"; Some "0"; Some "2" ],
+                        [ "12x"; "12x"; "12x"; "12x"; "bad"; "bad" ] ] do
+                  let order = if expression.Contains("OVER") then " ORDER BY id" else ""
+                  let current, result = handle session ("SELECT " + expression + " AS value FROM aggregate_warnings" + order)
+                  Expect.equal result (ResultSet([ "value" ], expected |> List.map List.singleton)) expression
+                  let _, actualWarnings = handle current "SHOW WARNINGS"
+                  let expectedWarnings = warnings |> List.map (fun text -> [ Some "Warning"; Some "1292"; Some("Truncated incorrect DOUBLE value: '" + text + "'") ])
+                  Expect.equal actualWarnings (ResultSet([ "Level"; "Code"; "Message" ], expectedWarnings)) (expression + " warnings")
+
           testCase "block_encryption_mode selects AES mode per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

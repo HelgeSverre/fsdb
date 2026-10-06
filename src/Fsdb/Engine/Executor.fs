@@ -12752,7 +12752,9 @@ and private evalAggregate
                 |> Result.map (fun v ->
                     let numericValue = if foldsNumerically then enumNumericOperand ctx innerExpr v else v
                     if isNumericBuiltin then
-                        let value = Functions.numericAggregateValue numericValue
+                        // MySQL's DISTINCT accumulator suppresses conversion diagnostics.
+                        let convert () = Functions.numericAggregateValue numericValue
+                        let value = if distinct then Diagnostics.suppress convert else convert ()
                         value, value
                     else
                         numericValue, collationKeyOf ctx innerExpr v))
@@ -14383,17 +14385,23 @@ and private runWindowedSelect
                         Some(int requested)
                     | _ -> None
 
-                let partitions =
-                    if denseCumeDist.IsSome || streamedRowNumberLimit.IsSome then
-                        []
-                    else
-                        grouped |> Seq.map sortGroup |> List.ofSeq
-
                 let partitionOrderKey (_, (key, _, _)) =
                     List.map2 (fun value collation -> value, Some collation) key partitionCollations
 
                 let partitionGroupKey group =
                     group |> Seq.head |> partitionOrderKey
+
+                let partitions =
+                    if denseCumeDist.IsSome || streamedRowNumberLimit.IsSome then
+                        []
+                    else
+                        // Partition key order is observable in expression diagnostics.
+                        let directions = List.replicate partitionBy.Length Asc
+                        grouped
+                        |> Seq.sortWith (fun left right ->
+                            compareByOrderKeys directions (partitionGroupKey left) (partitionGroupKey right))
+                        |> Seq.map sortGroup
+                        |> List.ofSeq
 
                 let rememberRowNumberOrder () =
                     match windowAlias with
@@ -14668,6 +14676,33 @@ and private runWindowedSelect
                 let aggregateOver (name: string) (args: Expr list) group pos =
                     frameRows group pos |> Result.bind (fun rows -> evalAggregate registry ctxFor rows name args)
 
+                let prefixAggregate kind expression =
+                    partitions
+                    |> traverse (fun group ->
+                        let accumulator = NumericAggregateAccumulator(kind, divisionPrecisionIncrement ())
+                        let mutable consumed = 0
+                        let mutable failure = None
+                        group
+                        |> Array.mapi (fun pos (originalIndex, _) ->
+                            frameRange group pos
+                            |> Result.bind (fun (_, hi) ->
+                                while consumed <= hi && failure.IsNone do
+                                    Limits.checkQueryCancellation consumed
+                                    let ctx = ctxFor (rowAt group consumed)
+                                    match evalExpr ctx expression with
+                                    | Error error -> failure <- Some error
+                                    | Ok value ->
+                                        enumNumericOperand ctx expression value
+                                        |> Functions.numericAggregateValue
+                                        |> accumulator.Add
+                                    consumed <- consumed + 1
+                                match failure with
+                                | Some error -> Error error
+                                | None -> Ok(originalIndex, accumulator.Value)))
+                        |> Array.toList
+                        |> traverse id)
+                    |> Result.map (List.collect id >> Array.ofList)
+
                 match fn with
                 | WinRowNumber ->
                     match streamedRowNumberLimit with
@@ -14805,7 +14840,33 @@ and private runWindowedSelect
                     elif args |> List.exists (function Distinct _ -> true | _ -> false) then
                         Error(1235, "This version of MySQL doesn't yet support '<window function>(DISTINCT ..)'")
                     else
-                        let values = perRow (aggregateOver name args)
+                        let scope =
+                            { Columns = columns |> List.map (_.Name >> _.ToLowerInvariant()) |> Set.ofList
+                              Qualifiers = qualifiers |> Map.keys |> Seq.map _.ToLowerInvariant() |> Set.ofSeq }
+                        let canReuseInput expression =
+                            let unclassifiedFunction =
+                                expression
+                                |> Expression.exists (function
+                                    | FuncCall(name, _) when not (Functions.isUnmodifiedBuiltinScalar name registry) ->
+                                        registry.Extensions
+                                        |> Map.tryFind (name.ToUpperInvariant())
+                                        |> Option.forall (fun extension -> not extension.Deterministic)
+                                    | _ -> false)
+                            not unclassifiedFunction && isStatementStableExpr store registry dbName scope expression
+                        let growingFrame =
+                            frame.Start = UnboundedPreceding
+                            && (frame.Unit = FrameRows || frame.End = CurrentRow || frame.End = UnboundedFollowing)
+                        let values =
+                            match args with
+                            | [ expression ]
+                                when growingFrame
+                                     && (equalsIgnoreCase name "SUM" || equalsIgnoreCase name "AVG")
+                                     && Functions.isUnmodifiedBuiltinAggregate name registry
+                                     && canReuseInput expression ->
+                                // Growing frames consume each input once, including its diagnostics.
+                                let kind = if equalsIgnoreCase name "SUM" then SumValues else AverageValues
+                                prefixAggregate kind expression
+                            | _ -> perRow (aggregateOver name args)
                         if equalsIgnoreCase name "AVG" && Functions.isUnmodifiedBuiltinAggregate name registry then
                             // MySQL materializes window averages at their declared scale before outer arithmetic.
                             let scale =

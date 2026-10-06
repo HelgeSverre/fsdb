@@ -2622,15 +2622,41 @@ module ContractCatalog =
 
     let private numericAggregateConversion =
         { Name = "numeric-aggregate-conversion"
-          Setup = [||]
+          Setup =
+            [| "CREATE TABLE aggregate_warning_input(id INT PRIMARY KEY,v VARCHAR(30))"
+               "INSERT INTO aggregate_warning_input VALUES(1,'12x'),(2,'12x'),(3,'bad'),(4,''),(5,'  '),(6,NULL),(7,' 2 ')" |]
           Steps =
             [| for name, sql in
                    [ "single", "SELECT SUM('001.25') AS s,AVG('001.25') AS a,SUM('foo') AS invalid_sum,SUM('12abc') AS prefix_sum"
+                     "binary", "SELECT SUM(_binary '12x') AS s,AVG(_binary 'bad') AS a"
+                     "overflow", "SELECT SUM('1e999') AS s,AVG('1e-999') AS a"
                      "distinct", "SELECT SUM(DISTINCT v) AS s,AVG(DISTINCT v) AS a,COUNT(DISTINCT v) AS c FROM (SELECT '1' AS v UNION ALL SELECT '01' UNION ALL SELECT '2') t"
                      "window", "SELECT SUM(v) OVER () AS s,AVG(v) OVER () AS a FROM (SELECT '001.25' AS v) t" ] do
                    Contract.query (name + "-text") sql
-                   Contract.preparedQuery (name + "-binary") sql [||] |]
-          Cleanup = [||]
+                   Contract.query (name + "-text-warnings") "SHOW WARNINGS"
+                   Contract.preparedQuery (name + "-binary") sql [||]
+                   Contract.query (name + "-binary-warnings") "SHOW WARNINGS"
+               for index, expression in
+                   [ "SUM(v)"; "AVG(v)"; "SUM(DISTINCT v)"; "AVG(DISTINCT v)"; "COUNT(v)"
+                     "SUM(v) OVER(ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW)"
+                     "SUM(v) OVER(ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+                     "AVG(v) OVER(ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+                     "SUM(v) OVER()"
+                     "SUM(v) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "AVG(v) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "SUM(v) OVER(ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING)"
+                     "SUM(v) OVER(ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)"
+                     "SUM(v) OVER(ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING)"
+                     "SUM(v) OVER(PARTITION BY MOD(id,2) ORDER BY id)"
+                     "SUM(v) OVER(ORDER BY FLOOR(id/3))" ] |> List.indexed do
+                   let name = sprintf "warnings-%d" index
+                   let order = if expression.Contains("OVER") then " ORDER BY id" else ""
+                   let sql = "SELECT " + expression + " AS value FROM aggregate_warning_input" + order
+                   Contract.query (name + "-text") sql
+                   Contract.query (name + "-text-warnings") "SHOW WARNINGS"
+                   Contract.preparedQuery (name + "-binary") sql [||]
+                   Contract.query (name + "-binary-warnings") "SHOW WARNINGS" |]
+          Cleanup = [| "DROP TABLE IF EXISTS aggregate_warning_input" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
     let private approximateAggregateDescriptors =

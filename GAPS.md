@@ -218,8 +218,12 @@ and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 MySQL's UCA weight-table bytes.
 SUM and AVG convert text before accumulation, including single-row windows;
 their DISTINCT forms compare converted numbers while COUNT retains text
-collation equality. Numeric-prefix conversion warnings remain part of the
-broader diagnostics gap.
+collation equality. Text and binary-string conversions emit numeric-prefix
+warnings; DISTINCT suppresses those conversion warnings. Growing ROWS frames
+and default RANGE prefixes consume stable SUM/AVG inputs once per partition;
+bounded sliding frames retain repeated conversion warnings. Offset RANGE frames
+and volatile window arguments still use per-frame evaluation, so their warning
+multiplicity remains part of the diagnostics gap.
 
 MySQL Enterprise Encryption is not a Community Server compatibility gap. Its
 asymmetric key-management functions belong to the separately installed
@@ -549,7 +553,7 @@ NULL marker's original expression context.
 | Unaliased expression labels | source-shaped expression labels | reconstructed labels can omit string quotes or normalize spacing and casing; prepared projections retain their original labels through parameter binding, and explicit aliases are preserved | low | divergence |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
-| Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index conversion conditions, conditional DDL, ignored physical-directory options, unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |
+| Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index and numeric-aggregate conversion conditions, conditional DDL, ignored physical-directory options, unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |
 | System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset, `SYSTEM`, and catalog-backed named time-zone variables are live; most others are inert or absent, `div_precision_increment` controls division and AVG and is retained by prepared statements ([oracle](torture/findings/2026-10-06-prepared-parameter-repreparation.md#division-precision-increment)), and `system_time_zone` retains its static bootstrap label | medium | divergence |
 
 ## 13. Authentication and privileges
