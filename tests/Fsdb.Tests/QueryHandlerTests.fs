@@ -1122,7 +1122,7 @@ let tests =
               | session, ResultSet(_, [ _ ]) ->
                   Expect.equal
                       (session.LastResultColumnMetadata |> List.map _.TypeId)
-                      [ TypeTiny; TypeShort; TypeLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeNewDecimal; TypeString ]
+                      [ TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeNewDecimal; TypeString ]
                       "literal, arithmetic, predicate, division, and cast types"
 
                   let charMetadata = List.last session.LastResultColumnMetadata

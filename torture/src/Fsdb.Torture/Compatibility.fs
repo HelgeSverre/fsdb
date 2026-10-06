@@ -2187,6 +2187,82 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private integerExpressionDescriptors =
+        { Name = "integer-expression-descriptors"
+          Setup = [| "CREATE TABLE integer_expressions(n INT,u BIGINT UNSIGNED)"
+                     "INSERT INTO integer_expressions VALUES(12,34),(-12,56),(NULL,NULL)" |]
+          Steps =
+            [| for index, expression in
+                   [ "1"
+                     "-1"
+                     "127"
+                     "128"
+                     "9223372036854775807"
+                     "18446744073709551615"
+                     "1+1"
+                     "12+34"
+                     "1-1"
+                     "1*1"
+                     "12*34"
+                     "CAST(1 AS SIGNED)"
+                     "CAST(1 AS UNSIGNED)"
+                     "CAST(18446744073709551615 AS UNSIGNED)"
+                     "-CAST(18446744073709551615 AS UNSIGNED)"
+                     "CAST(1 AS UNSIGNED)/2"
+                     "CAST(1 AS UNSIGNED)/CAST(2 AS UNSIGNED)"
+                     "COALESCE(CAST(18446744073709551615 AS UNSIGNED),0)"
+                     "1 DIV 2"
+                     "ROUND(1,0)"
+                     "TRUNCATE(1,0)"
+                     "CAST(NULL AS UNSIGNED)"
+                     "CAST('123' AS SIGNED)"
+                     "b'01'+1"
+                     "1+b'01'"
+                     "b'01'-1"
+                     "b'01'*2"
+                     "CAST(1 AS UNSIGNED)+2"
+                     "CAST(3 AS UNSIGNED)-2"
+                     "-(b'01'+1)"
+                     "-(1+1)"
+                     "MOD(b'01',2)"
+                     "MOD(2,b'01')"
+                     "123 DIV 2"
+                     "1.25 DIV 0.1"
+                     "'12' DIV 2"
+                     "12 DIV '2'"
+                     "b'01' DIV 2"
+                     "2 DIV b'01'"
+                     "NULL DIV 2"
+                     "1 DIV NULL"
+                     "CAST(1 AS UNSIGNED) DIV 2"
+                     "1 DIV 2e0"
+                     "9223372036854775807+0"
+                     "MOD(CAST(1 AS UNSIGNED),2)"
+                     "MOD(2,CAST(1 AS UNSIGNED))"
+                     "b'01'/b'01'"
+                     "b'01'/CAST(2 AS UNSIGNED)"
+                     "1=1"
+                     "1<2"
+                     "NOT 0"
+                     "1 IS NULL"
+                     "EXISTS(SELECT 1)"
+                     "-(1=1)"
+                     "-(NOT 0)"
+                     "(1=1)+1" ] |> List.indexed do
+                   let sql = "SELECT " + expression + " AS value"
+                   Contract.query (sprintf "literal-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "literal-%d-binary" index) sql [||]
+               Contract.execute "integer-variable" "SET @value=7"
+               Contract.query "integer-variable-descriptors" "SELECT @value AS a,@value+1 AS b,-@value AS c,@value DIV 2 AS d"
+               let sql = "SELECT n+1 AS a,n-1 AS b,n*2 AS c,n DIV 2 AS d,MOD(n,2) AS e,u+1 AS f,u*2 AS g,-u AS h,u DIV 2 AS i,MOD(u,2) AS j,COALESCE(u+1,0) AS k FROM integer_expressions ORDER BY n"
+               Contract.query "columns-text" sql
+               Contract.preparedQuery "columns-binary" sql [||]
+               Contract.execute "signed-subtraction-mode" "SET sql_mode='NO_UNSIGNED_SUBTRACTION'"
+               Contract.query "signed-subtraction-text" "SELECT CAST(1 AS UNSIGNED)-2 AS value"
+               Contract.preparedQuery "signed-subtraction-binary" "SELECT CAST(1 AS UNSIGNED)-2 AS value" [||] |]
+          Cleanup = [| "DROP TABLE IF EXISTS integer_expressions"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private divisionOperandDescriptors =
         { Name = "division-operand-descriptors"
           Setup = [| "SET sql_mode=''"
@@ -2591,6 +2667,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            temporalNumericConversion
+           integerExpressionDescriptors
            divisionOperandDescriptors
            temporalArithmeticDescriptors
            calendarCasts

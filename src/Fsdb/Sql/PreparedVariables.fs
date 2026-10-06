@@ -17,8 +17,8 @@ let private typeOf = function
     | _ -> UserVariableType.Text
 
 let metadata = function
-    | UserVariableType.SignedInteger -> ColumnWire.metadataOfType(TBigInt false)
-    | UserVariableType.UnsignedInteger -> ColumnWire.metadataOfType(TBigInt true)
+    | UserVariableType.SignedInteger -> { ColumnWire.metadataOfType(TBigInt false) with ColumnLength = 21u }
+    | UserVariableType.UnsignedInteger -> { ColumnWire.metadataOfType(TBigInt true) with ColumnLength = 21u }
     | UserVariableType.Decimal -> ColumnWire.metadataOfType(TDecimal(65, 30, false))
     | UserVariableType.Double -> ColumnWire.metadataOfType(TDouble false)
     | UserVariableType.Text -> ColumnWire.metadataOfType(TVarchar 16383)

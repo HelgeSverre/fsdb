@@ -883,6 +883,92 @@ let tests =
               Expect.equal constants (ResultSet([ "unsigned_value"; "signed_value" ], [ [ Some "-18446744073709551615"; Some "9223372036854775808" ] ])) "constants promote to decimal"
               Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal; TypeNewDecimal ] "promoted constants advertise decimal"
 
+          testCase "integer literal and arithmetic descriptors retain operand precision"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, expected, family, width, scale in
+                  [ "1", Some "1", TypeLongLong, 2u, 0uy
+                    "-1", Some "-1", TypeLongLong, 2u, 0uy
+                    "127", Some "127", TypeLongLong, 4u, 0uy
+                    "128", Some "128", TypeLongLong, 4u, 0uy
+                    "9223372036854775807", Some "9223372036854775807", TypeLongLong, 20u, 0uy
+                    "18446744073709551615", Some "18446744073709551615", TypeLongLong, 20u, 0uy
+                    "1+1", Some "2", TypeLongLong, 3u, 0uy
+                    "12+34", Some "46", TypeLongLong, 4u, 0uy
+                    "1-1", Some "0", TypeLongLong, 3u, 0uy
+                    "1*1", Some "1", TypeLongLong, 3u, 0uy
+                    "12*34", Some "408", TypeLongLong, 5u, 0uy
+                    "CAST(1 AS SIGNED)", Some "1", TypeLongLong, 21u, 0uy
+                    "CAST(1 AS UNSIGNED)", Some "1", TypeLongLong, 21u, 0uy
+                    "CAST(18446744073709551615 AS UNSIGNED)", Some "18446744073709551615", TypeLongLong, 21u, 0uy
+                    "-CAST(18446744073709551615 AS UNSIGNED)", Some "-18446744073709551615", TypeNewDecimal, 22u, 0uy
+                    "CAST(1 AS UNSIGNED)/2", Some "0.5000", TypeNewDecimal, 27u, 4uy
+                    "CAST(1 AS UNSIGNED)/CAST(2 AS UNSIGNED)", Some "0.5000", TypeNewDecimal, 26u, 4uy
+                    "COALESCE(CAST(18446744073709551615 AS UNSIGNED),0)", Some "18446744073709551615", TypeNewDecimal, 22u, 0uy
+                    "1 DIV 2", Some "0", TypeLongLong, 2u, 0uy
+                    "ROUND(1,0)", Some "1", TypeLongLong, 21u, 0uy
+                    "TRUNCATE(1,0)", Some "1", TypeLongLong, 21u, 0uy
+                    "CAST(NULL AS UNSIGNED)", None, TypeLongLong, 21u, 0uy
+                    "CAST('123' AS SIGNED)", Some "123", TypeLongLong, 21u, 0uy
+                    "b'01'/b'01'", Some "1.0000", TypeNewDecimal, 9u, 4uy
+                    "b'01'/CAST(2 AS UNSIGNED)", Some "0.5000", TypeNewDecimal, 9u, 4uy ] do
+                  let sql = "SELECT " + expression + " AS value"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) expression
+                  Expect.equal (current.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength, item.Decimals))
+                      [ family, width, scale ] (expression + " descriptor")
+
+                  let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.ColumnLength, column.Metadata.Decimals))
+                      [ family, width, scale ] (expression + " prepared descriptor")
+
+          testCase "integer operator precision is independent of operand unsignedness"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @value=7"
+              for expression, expected, width, unsigned in
+                  [ "b'01'+1", Some "2", 5u, false
+                    "1+b'01'", Some "2", 5u, false
+                    "b'01'-1", Some "0", 5u, false
+                    "b'01'*2", Some "2", 5u, false
+                    "CAST(1 AS UNSIGNED)+2", Some "3", 22u, true
+                    "CAST(3 AS UNSIGNED)-2", Some "1", 22u, true
+                    "-(b'01'+1)", Some "-2", 5u, false
+                    "-(1+1)", Some "-2", 3u, false
+                    "MOD(b'01',2)", Some "1", 4u, false
+                    "MOD(2,b'01')", Some "0", 4u, false
+                    "123 DIV 2", Some "61", 4u, false
+                    "1.25 DIV 0.1", Some "12", 3u, false
+                    "'12' DIV 2", Some "6", 3u, false
+                    "12 DIV '2'", Some "6", 4u, false
+                    "b'01' DIV 2", Some "0", 4u, false
+                    "2 DIV b'01'", Some "2", 2u, false
+                    "NULL DIV 2", None, 1u, false
+                    "1 DIV NULL", None, 2u, false
+                    "CAST(1 AS UNSIGNED) DIV 2", Some "0", 21u, true
+                    "1 DIV 2e0", Some "0", 22u, false
+                    "9223372036854775807+0", Some "9223372036854775807", 21u, false
+                    "MOD(CAST(1 AS UNSIGNED),2)", Some "1", 22u, true
+                    "MOD(2,CAST(1 AS UNSIGNED))", Some "0", 22u, false
+                    "1=1", Some "1", 1u, false
+                    "1<2", Some "1", 1u, false
+                    "NOT 0", Some "1", 1u, false
+                    "1 IS NULL", Some "0", 1u, false
+                    "EXISTS(SELECT 1)", Some "1", 1u, false
+                    "-(1=1)", Some "-1", 2u, false
+                    "-(NOT 0)", Some "-1", 2u, false
+                    "(1=1)+1", Some "2", 3u, false
+                    "@value", Some "7", 21u, false
+                    "@value+1", Some "8", 22u, false
+                    "-@value", Some "-7", 21u, false
+                    "@value DIV 2", Some "3", 21u, false ] do
+                  let current, result = handle session ("SELECT " + expression + " AS value")
+                  Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) expression
+                  let metadata = current.LastResultColumnMetadata.Head
+                  Expect.equal (metadata.TypeId, metadata.ColumnLength, metadata.Decimals, hasMetadataFlag UnsignedFlag metadata)
+                      (TypeLongLong, width, 0uy, unsigned) (expression + " descriptor")
+
           testCase "closed conditional and numeric functions support negation promotion"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

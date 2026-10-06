@@ -4985,7 +4985,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         match literalBytes expression with
         | Some bytes ->
             let precision = max 1 (int (System.Math.Ceiling(float (min 8 bytes.Length) * 8.0 * System.Math.Log10 2.0)))
-            Some { Value.columnMetadata TypeLongLong with ColumnLength = uint32 precision; Flags = UnsignedFlag ||| NotNullFlag }
+            Some { Value.columnMetadata TypeLongLong with ColumnLength = uint32 (precision + 1); Flags = NotNullFlag }
         | None -> metadataOfExpr ctx expression
 
     let isTemporalMetadata (metadata: ColumnMetadata) =
@@ -5035,7 +5035,11 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                     Flags = metadata.Flags &&& NotNullFlag })
         else None
 
-    let numeric combineShapes left right =
+    let signedNumericResult _ _ _ = false
+    let arithmeticUnsignedResult typeId left right =
+        if typeId = TypeLongLong then left || right else left && right
+
+    let numeric unsignedResult combineShapes left right =
         let isInteger typeId =
             typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
 
@@ -5058,10 +5062,12 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         let inferred =
             inferred
             |> Option.map (fun metadata ->
-                let temporalInteger =
-                    metadata.TypeId = TypeLongLong
-                    && (Option.exists isTemporalMetadata leftMetadata || Option.exists isTemporalMetadata rightMetadata)
-                if metadata.TypeId = TypeNewDecimal || temporalInteger then
+                if metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeLongLong then
+                    let unsigned =
+                        unsignedResult metadata.TypeId
+                            (Option.exists (hasMetadataFlag UnsignedFlag) leftMetadata)
+                            (Option.exists (hasMetadataFlag UnsignedFlag) rightMetadata)
+                    let metadata = { metadata with Flags = if unsigned then UnsignedFlag else 0us }
                     let shape = combineShapes (decimalShape left leftMetadata) (decimalShape right rightMetadata)
                     withDecimalShape shape metadata
                 else metadata)
@@ -5294,14 +5300,10 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
 
     match expr with
     | Lit VNull -> None
-    | Lit(VInt value) ->
-        let typeId =
-            if value >= int64 System.SByte.MinValue && value <= int64 System.SByte.MaxValue then TypeTiny
-            elif value >= int64 System.Int16.MinValue && value <= int64 System.Int16.MaxValue then TypeShort
-            elif value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue then TypeLong
-            else TypeLongLong
-
-        simple typeId |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
+    | Lit(VInt _) ->
+        simple TypeLongLong
+        |> Option.map (fun metadata ->
+            withDecimalShape (decimalShape expr None) { metadata with Flags = NotNullFlag })
     | Lit(VUInt value) ->
         Some { Value.columnMetadata TypeLongLong with
                    ColumnLength = uint32 (value.ToString(System.Globalization.CultureInfo.InvariantCulture).Length)
@@ -5337,6 +5339,8 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
             |> Option.bind (fun value ->
                 match value with
+                | VInt _ -> Some(PreparedVariables.metadata UserVariableType.SignedInteger)
+                | VUInt _ -> Some(PreparedVariables.metadata UserVariableType.UnsignedInteger)
                 | VDecimal _ -> Some(PreparedVariables.metadata UserVariableType.Decimal)
                 | _ -> metadataOfExpr ctx (Lit value))
             |> Option.orElse (simple TypeVarString))
@@ -5368,7 +5372,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     | InSubquery _
     | QuantifiedComparison _
     | Between _
-    | Exists _ -> simple TypeLongLong
+    | Exists _ -> simple TypeLongLong |> Option.map (fun metadata -> { metadata with ColumnLength = 1u })
     | RuntimeExpression operand -> metadataOfExpr ctx operand
     | Neg(Lit(VBinaryLiteral _)) -> simple TypeDouble
     | Neg operand ->
@@ -5376,7 +5380,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         match source |> Option.bind temporalUnaryMetadata with
         | Some metadata -> Some metadata
         | None ->
-            numeric (fun _ right -> right) (Lit(VInt 0L)) operand
+            numeric signedNumericResult (fun _ right -> right) (Lit(VInt 0L)) operand
             |> Option.map (fun metadata ->
                 if metadata.TypeId <> TypeLongLong then metadata
                 else
@@ -5389,13 +5393,16 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                         |> Option.defaultValue metadata.ColumnLength
                     { metadata with
                         TypeId = if promoted then TypeNewDecimal else TypeLongLong
-                        ColumnLength = length })
-    | BinOp((Add | Sub | SignedSub), left, right) ->
-        numeric (fun left right ->
+                        ColumnLength = max 2u length })
+    | BinOp((Add | Sub | SignedSub as operator), left, right) ->
+        numeric arithmeticUnsignedResult (fun left right ->
             let shape = combinedDecimalShape left right
             { shape with Precision = shape.Precision + 1 }) left right
+        |> Option.map (fun metadata ->
+            if operator = SignedSub then { metadata with Flags = metadata.Flags &&& ~~~UnsignedFlag }
+            else metadata)
     | BinOp(Mul, left, right) ->
-        numeric (fun left right ->
+        numeric arithmeticUnsignedResult (fun left right ->
             { Precision = min 65 (left.Precision + right.Precision)
               Scale = min 30 (left.Scale + right.Scale) }) left right
     | BinOp(Div, left, right) ->
@@ -5432,7 +5439,32 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                     let original = leftDisplay |> Option.map (fun item -> int64 item.ColumnLength - int64 item.Decimals) |> Option.defaultValue 0L
                     uint32 (min (17L + int64 scale) (max 0L original + int64 scale))
             simple TypeDouble |> Option.map (fun metadata -> { metadata with ColumnLength = width; Decimals = byte scale })
-    | BinOp(IntDiv, _, _) -> simple TypeLongLong
+    | BinOp(IntDiv, left, right) ->
+        let operandShape expression =
+            let metadata = numericMetadata expression |> Option.orElseWith (fun () -> divisionOperandMetadata expression)
+            let shape = decimalShape expression metadata
+            let precision =
+                match expression, metadata with
+                | Lit(VString _), _ -> characterBound expression
+                | _, Some item when item.TypeId = TypeString || item.TypeId = TypeVarString ->
+                    match tryColumnDefForExpr ctx expression with
+                    | Some { Type = TChar length | TVarchar length } -> length
+                    | _ -> int (min 65u item.ColumnLength)
+                | _, Some item when item.TypeId = TypeDouble || item.TypeId = TypeFloat
+                                    || item.TypeId = TypeBlob || item.TypeId = TypeJson -> int (min 65u item.ColumnLength)
+                | _ -> shape.Precision
+            let scale = divisionOperandMetadata expression |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
+            metadata, precision, scale
+        let leftMetadata, precision, leftScale = operandShape left
+        let rightMetadata, rightPrecision, rightScale = operandShape right
+        let leftScale = if leftScale = 31 then 0 else leftScale
+        let rightScale = if rightScale = 31 then rightPrecision else rightScale
+        let unsigned =
+            Option.exists (hasMetadataFlag UnsignedFlag) leftMetadata
+            || Option.exists (hasMetadataFlag UnsignedFlag) rightMetadata
+        let shape = { Precision = min 21 (max 0 (precision - leftScale + rightScale)); Scale = 0 }
+        simple TypeLongLong
+        |> Option.map (fun metadata -> withDecimalShape shape { metadata with Flags = if unsigned then UnsignedFlag else 0us })
     | Cast(value, ty) ->
         let metadata = ColumnWire.metadataOfType ty
         let metadata = match ty with TBigInt _ -> { metadata with ColumnLength = 21u } | _ -> metadata
@@ -5537,9 +5569,13 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         | ("FLOOR" | "CEILING" | "CEIL"), arg :: _ ->
             numericUnary arg
         | "MOD", [ left; right ] ->
-            numeric (fun left right ->
+            numeric signedNumericResult (fun left right ->
                 { Precision = max left.Precision right.Precision
                   Scale = max left.Scale right.Scale }) left right
+            |> Option.map (fun metadata ->
+                // MySQL determines MOD's width before inheriting the dividend's sign.
+                let unsigned = numericMetadata left |> Option.exists (hasMetadataFlag UnsignedFlag)
+                { metadata with Flags = if unsigned then UnsignedFlag else 0us })
         | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
         | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
@@ -17230,7 +17266,8 @@ let statementNumericMetadata store registry schema statement =
             let columns = sources |> List.collect snd
             let context = contextFactory store registry schema (columnIndexOf columns) (qualifierRanges sources) None (probeRow columns)
             outputColumnWireOverrides context columns select
-            |> List.map (Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble))
+            |> List.map (Option.filter (fun metadata ->
+                metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeLongLong))
             |> Some
     | _ -> None
 

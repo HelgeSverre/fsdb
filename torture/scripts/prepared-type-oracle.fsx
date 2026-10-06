@@ -940,3 +940,99 @@ let runConstantNegationDescriptors () =
             printfn "Constant negation | %A | -%s -> DECIMAL width=%d value=%s" protocol operand width expected
 
 runConstantNegationDescriptors ()
+
+let runIntegerExpressionDescriptors () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        for expression, family, width, scale, expected, unsigned in
+            [ "1", "BIGINT", 2, 0, "1", false
+              "-1", "BIGINT", 2, 0, "-1", false
+              "127", "BIGINT", 4, 0, "127", false
+              "128", "BIGINT", 4, 0, "128", false
+              "9223372036854775807", "BIGINT", 20, 0, "9223372036854775807", false
+              "18446744073709551615", "BIGINT", 20, 0, "18446744073709551615", true
+              "1+1", "BIGINT", 3, 0, "2", false
+              "12+34", "BIGINT", 4, 0, "46", false
+              "1-1", "BIGINT", 3, 0, "0", false
+              "1*1", "BIGINT", 3, 0, "1", false
+              "12*34", "BIGINT", 5, 0, "408", false
+              "CAST(1 AS SIGNED)", "BIGINT", 21, 0, "1", false
+              "CAST(1 AS UNSIGNED)", "BIGINT", 21, 0, "1", true
+              "CAST(18446744073709551615 AS UNSIGNED)", "BIGINT", 21, 0, "18446744073709551615", true
+              "-CAST(18446744073709551615 AS UNSIGNED)", "DECIMAL", 22, 0, "-18446744073709551615", false
+              "CAST(1 AS UNSIGNED)/2", "DECIMAL", 27, 4, "0.5", false
+              "CAST(1 AS UNSIGNED)/CAST(2 AS UNSIGNED)", "DECIMAL", 26, 4, "0.5", true
+              "COALESCE(CAST(18446744073709551615 AS UNSIGNED),0)", "DECIMAL", 22, 0, "18446744073709551615", false
+              "1 DIV 2", "BIGINT", 2, 0, "0", false
+              "ROUND(1,0)", "BIGINT", 21, 0, "1", false
+              "TRUNCATE(1,0)", "BIGINT", 21, 0, "1", false
+              "CAST(NULL AS UNSIGNED)", "BIGINT", 21, 0, "NULL", true
+              "CAST('123' AS SIGNED)", "BIGINT", 21, 0, "123", false
+              "b'01'+1", "BIGINT", 5, 0, "2", false
+              "1+b'01'", "BIGINT", 5, 0, "2", false
+              "b'01'-1", "BIGINT", 5, 0, "0", false
+              "b'01'*2", "BIGINT", 5, 0, "2", false
+              "CAST(1 AS UNSIGNED)+2", "BIGINT", 22, 0, "3", true
+              "CAST(3 AS UNSIGNED)-2", "BIGINT", 22, 0, "1", true
+              "-(b'01'+1)", "BIGINT", 5, 0, "-2", false
+              "-(1+1)", "BIGINT", 3, 0, "-2", false
+              "MOD(b'01',2)", "BIGINT", 4, 0, "1", false
+              "MOD(2,b'01')", "BIGINT", 4, 0, "0", false
+              "123 DIV 2", "BIGINT", 4, 0, "61", false
+              "1.25 DIV 0.1", "BIGINT", 3, 0, "12", false
+              "'12' DIV 2", "BIGINT", 3, 0, "6", false
+              "12 DIV '2'", "BIGINT", 4, 0, "6", false
+              "b'01' DIV 2", "BIGINT", 4, 0, "0", false
+              "2 DIV b'01'", "BIGINT", 2, 0, "2", false
+              "NULL DIV 2", "BIGINT", 1, 0, "NULL", false
+              "1 DIV NULL", "BIGINT", 2, 0, "NULL", false
+              "CAST(1 AS UNSIGNED) DIV 2", "BIGINT", 21, 0, "0", true
+              "1 DIV 2e0", "BIGINT", 22, 0, "0", false
+              "9223372036854775807+0", "BIGINT", 21, 0, "9223372036854775807", false
+              "MOD(CAST(1 AS UNSIGNED),2)", "BIGINT", 22, 0, "1", true
+              "MOD(2,CAST(1 AS UNSIGNED))", "BIGINT", 22, 0, "0", false
+              "b'01'/b'01'", "DECIMAL", 9, 4, "1", false
+              "b'01'/CAST(2 AS UNSIGNED)", "DECIMAL", 9, 4, "0.5", false
+              "1=1", "BIGINT", 1, 0, "1", false
+              "1<2", "BIGINT", 1, 0, "1", false
+              "NOT 0", "BIGINT", 1, 0, "1", false
+              "1 IS NULL", "BIGINT", 1, 0, "0", false
+              "EXISTS(SELECT 1)", "BIGINT", 1, 0, "1", false
+              "-(1=1)", "BIGINT", 2, 0, "-1", false
+              "-(NOT 0)", "BIGINT", 2, 0, "-1", false
+              "(1=1)+1", "BIGINT", 3, 0, "2", false ] do
+            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
+               || reader.GetDataTypeName(0) <> family
+               || metadata.ColumnSize <> Nullable width || metadata.NumericScale <> Nullable scale
+               || (family = "BIGINT" && (reader.GetFieldType(0) = typeof<uint64>) <> unsigned) then
+                failwithf "%A %s: expected %s width=%d scale=%d unsigned=%b value=%s; got %s width=%O scale=%O CLR=%s"
+                    protocol expression family width scale unsigned expected (reader.GetDataTypeName 0)
+                    metadata.ColumnSize metadata.NumericScale (reader.GetFieldType(0).Name)
+            printfn "Integer descriptor | %A | %s -> %s width=%d scale=%d unsigned=%b" protocol expression family width scale unsigned
+
+        if protocol = Sql then
+            for assignment, unsigned, negativeWidth in [ "7", false, 21; "CAST(7 AS UNSIGNED)", true, 22 ] do
+                use setup = new MySqlCommand("SET @value=" + assignment, connection)
+                setup.ExecuteNonQuery() |> ignore
+                for expression, width, expected, resultUnsigned in
+                    [ "@value", 21, "7", unsigned
+                      "@value+1", 22, "8", unsigned
+                      "-@value", negativeWidth, "-7", false
+                      "@value DIV 2", 21, "3", unsigned ] do
+                    use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+                    use reader = command.ExecuteReader()
+                    let metadata = reader.GetColumnSchema()[0]
+                    if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
+                       || reader.GetDataTypeName(0) <> "BIGINT" || metadata.ColumnSize <> Nullable width
+                       || (reader.GetFieldType(0) = typeof<uint64>) <> resultUnsigned then
+                        failwithf "%s assigned %s: expected BIGINT width=%d unsigned=%b" expression assignment width resultUnsigned
+                    printfn "Integer variable | %s | %s -> width=%d unsigned=%b" assignment expression width resultUnsigned
+
+runIntegerExpressionDescriptors ()

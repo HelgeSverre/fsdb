@@ -217,7 +217,7 @@ let tests =
 
               match handle session "SELECT @value LIMIT 0" with
               | resultSession, ResultSet([ "@value" ], []) ->
-                  Expect.equal (resultSession.LastResultColumnMetadata |> List.map _.TypeId) [ TypeTiny ] "metadata follows the assigned value without rows"
+                  Expect.equal (resultSession.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength)) [ TypeLongLong, 21u ] "integer variables retain their declared width without rows"
               | _, other -> failtestf "expected an empty typed resultset, got %A" other
 
           testCase "SET evaluates a user-variable arithmetic expression"

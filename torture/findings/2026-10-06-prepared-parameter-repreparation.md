@@ -823,3 +823,49 @@ The native MySQL 8.4.11 contract manifest is
 `artifacts/runs/20261006T191407359-66965/contracts/manifest.json`.
 The native oracle was used because the OrbStack API did not answer its health
 probe. The disposable server was stopped and its data directory removed.
+
+### Integer expression descriptors
+
+MySQL 8.4.11 reports integer literals as BIGINT regardless of the smallest
+storage type that could hold them. Display widths follow expression precision:
+
+| Expression | Family | Width | Unsigned |
+| --- | --- | --- | --- |
+| `1` | BIGINT | 2 | no |
+| `1+1` | BIGINT | 3 | no |
+| `12*34` | BIGINT | 5 | no |
+| `1=1` | BIGINT | 1 | no |
+| `-(1=1)` | BIGINT | 2 | no |
+| `b'01'+1` | BIGINT | 5 | no |
+| `CAST(1 AS UNSIGNED)+2` | BIGINT | 22 | yes |
+| `MOD(CAST(1 AS UNSIGNED),2)` | BIGINT | 22 | yes |
+| `1 DIV 2e0` | BIGINT | 22 | no |
+| `b'01'/b'01'` | DECIMAL | 9 | no |
+
+CAST to SIGNED or UNSIGNED reserves width 21, even for a one-digit value.
+Stored-column widths and literal widths therefore cannot substitute for CAST
+widths. Integer user variables likewise reserve width 21; their arithmetic
+precision does not shrink to the current value.
+
+Bare binary literals contribute numeric precision from byte capacity but retain
+a signed numeric descriptor. Integer arithmetic inherits unsignedness from
+either operand; exact decimal arithmetic requires both operands to be unsigned.
+MOD determines its width before inheriting the dividend's unsigned flag.
+`NO_UNSIGNED_SUBTRACTION` clears the result flag after width inference.
+
+DIV derives precision from the dividend's whole digits and divisor's scale,
+capped at 21. Unspecified scale is zero for the dividend and the operand's
+precision for the divisor. Boolean negation reserves a sign even though the
+predicate itself has width 1.
+
+The maintained oracle checks text and binary descriptors, values, and integer
+signedness. Expecto also checks PREPARE descriptors, which retain integer
+expression metadata independently of generic column definitions. The differential
+contract covers literals, stored columns, user variables, and unsigned subtraction.
+
+The native MySQL 8.4.11 contract manifest is
+`artifacts/runs/20261006T193956330-70045/contracts/manifest.json`.
+The root gate passes with `DOTNET_PROCESSOR_COUNT=4`; a scheduler timing test
+that exceeded its five-second admission window with two workers also passes
+in isolation with four. Native MySQL supplied the oracle while OrbStack's API
+was unresponsive, and the disposable server and data directory were cleaned up.
