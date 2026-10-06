@@ -924,13 +924,45 @@ Expecto checks text output and both execution and PREPARE descriptors. The
 `approximate-expression-descriptors` contract also covers text conversion and
 user variables.
 
-Scientific-notation literal widths remain incomplete: MySQL retains the original
-lexical width (`1e0` has width 3), while the current literal AST retains only the
-double value. Broader scalar/function descriptor families remain outside this
-matrix; these results do not establish complete numeric descriptor parity.
+Scientific-notation literal widths are covered below. Broader scalar/function
+descriptor families remain outside these matrices; these results do not
+establish complete numeric descriptor parity.
 
 Validation: `DOTNET_PROCESSOR_COUNT=4 just check` passes all 2,824 tests.
 The maintained native MySQL 8.4.11 oracle passes. The compatibility contract
 run passes 3,299 steps across 37 cases with no differences; its manifest is
 `artifacts/runs/20261006T202152662-79151/contracts/manifest.json`.
 The disposable native oracle server and data directory are cleaned up.
+
+
+## Scientific literal descriptors
+
+Native MySQL 8.4.11 preserves scientific literal spelling for names and DOUBLE
+widths: `1e0` has width 3, `1E+00` width 5, `0001e000` width 8, and `.1e1`
+width 4. Their scale is 31. Parentheses and unary plus preserve this width;
+unary minus, arithmetic, ABS, and COALESCE use the normal expression width 23.
+Scalar projections, derived columns, views, and CREATE TABLE AS SELECT preserve
+the literal width. Assigning the value to a user variable erases that spelling.
+
+The AST retains the spelling alongside the double value. Shared literal-value
+matching keeps index probes, predicate preparation, grouping, and other value
+consumers independent of presentation. SQL rendering, WAL, and snapshot recovery
+retain the spelling; an explicitly declared DOUBLE column keeps its own width.
+
+DOUBLE's numeric character capacity for DIV is 22 regardless of display width,
+following MySQL's [`Item::max_char_length`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item.h).
+For a DOUBLE(10,2) column `d=1.25`, `d DIV 1` has width 21, `d DIV 0.1`
+width 22, and `2 DIV d` width 4. FLOAT retains its own operand width.
+The maintained oracle and scientific-literal contract cover both protocols,
+literal names, projection boundaries, parameter inference, and numeric values.
+
+Validation: the final native MySQL 8.4.11 oracle passes, and contracts pass
+3,353 steps across 38 cases with no differences (manifest
+`artifacts/runs/20261006T204951041-88299/contracts/manifest.json`).
+The final `DOTNET_PROCESSOR_COUNT=4 just check` builds without warnings and
+passes 2,827 of 2,828 tests. Its only failure is the existing lookup timing
+ratio test (3.26 versus the 2.5 ceiling); that test passes when run alone with
+`just test --filter-test-case 'point SELECT by PRIMARY KEY latency'`.
+An earlier full gate passed before the additional optimizer regressions.
+The final functional tests include spelling, persistence, prepared descriptors,
+and indexed DOUBLE lookup coverage. No timing threshold was changed.

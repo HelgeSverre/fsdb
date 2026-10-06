@@ -128,6 +128,8 @@ module UserVariableRef =
 // rides along in the same `and` chain since `SelectStmt` needs them.
 type Expr =
     | Lit of Value
+    /// Scientific notation retains its spelling for projection names and wire width.
+    | ApproximateLiteral of value: float * spelling: string
     // A `?` parameter placeholder in a prepared statement, numbered by its
     // position in the SQL text. Bound to a `Lit` by `QueryHandler.bindPlaceholders`
     // before execution — the executor never sees one.
@@ -1116,3 +1118,9 @@ and DeleteStmt =
       Where: Expr option
       OrderBy: OrderKey list
       Limit: Expr option }
+
+/// Literal values are independent of the spelling retained for result metadata.
+let (|LiteralValue|_|) = function
+    | Lit value -> Some value
+    | ApproximateLiteral(value, _) -> Some(VDouble value)
+    | _ -> None

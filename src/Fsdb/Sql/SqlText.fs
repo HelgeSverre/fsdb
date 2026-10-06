@@ -139,6 +139,7 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
     let render = renderViewExpression options context
 
     match expr with
+    | ApproximateLiteral(_, spelling) -> spelling
     | Lit value -> literal value
     | Placeholder _ -> "?"
     | UserVariable variable -> variable.Sql

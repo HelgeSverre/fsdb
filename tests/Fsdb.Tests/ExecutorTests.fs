@@ -1162,6 +1162,16 @@ let tests =
                         ()
                     | other -> failtestf "expected a const plan row, got %A" other
 
+                testCase "scientific literals retain indexed DOUBLE lookups"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE scientific_keys (id DOUBLE PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO scientific_keys VALUES (1), (2)" |> ignore
+                    for literal in [ "1e0"; "1E+00"; ".1e1" ] do
+                        match runDefault store ("EXPLAIN SELECT * FROM scientific_keys WHERE id = " + literal) with
+                        | ResultSet(_, [ [ _; _; _; _; Some "const"; Some "PRIMARY"; Some "PRIMARY"; _; _; Some "1"; _; _ ] ]) -> ()
+                        | other -> failtestf "expected a unique-key lookup for %s, got %A" literal other
+
                 testCase "EXPLAIN const also fires on an alias-qualified equality (WHERE u.id = 1)"
                 <| fun _ ->
                     let store = newStore ()

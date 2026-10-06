@@ -71,6 +71,7 @@ let children =
         @ (branches |> List.collect (fun (condition, result) -> [ condition; result ]))
         @ Option.toList fallback
     | Lit _
+    | ApproximateLiteral _
     | Placeholder _
     | UserVariable _
     | SystemVariable _

@@ -677,6 +677,7 @@ let private qualifiedTableName: Parser<string, unit> =
 
 let private numberFormat =
     NumberLiteralOptions.AllowFraction
+    ||| NumberLiteralOptions.AllowFractionWOIntegerPart
     ||| NumberLiteralOptions.AllowExponent
     ||| NumberLiteralOptions.AllowHexadecimal
 
@@ -689,35 +690,43 @@ let private numberFormat =
 /// Hexadecimal literals retain their binary bytes and numeric origin.
 /// `AllowHexadecimal` keeps `0x41` together rather than parsing `0` followed
 /// by the bare identifier `x41`.
-let private numberLit: Parser<Value, unit> =
-    (numberLiteral numberFormat "number" .>> ws)
-    |>> fun nl ->
-        if nl.IsHexadecimal then
-            let digits = nl.String.Substring(2)
-            let digits = if digits.Length % 2 = 1 then "0" + digits else digits
+let private numericLiteralValue (nl: NumberLiteral) =
+    if nl.IsHexadecimal then
+        let digits = nl.String.Substring(2)
+        let digits = if digits.Length % 2 = 1 then "0" + digits else digits
 
-            Array.init (digits.Length / 2) (fun i -> Convert.ToByte(digits.Substring(i * 2, 2), 16))
-            |> VBinaryLiteral
-        elif nl.IsInteger then
-            match Int64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
-            | true, i -> VInt i
-            // MySQL types an integer literal past BIGINT's signed range but
-            // inside its unsigned one as BIGINT UNSIGNED, exactly:
-            // `SELECT 18446744073709551615` echoes all twenty digits back
-            // rather than the nearest double.
+        Array.init (digits.Length / 2) (fun i -> Convert.ToByte(digits.Substring(i * 2, 2), 16))
+        |> VBinaryLiteral
+    elif nl.IsInteger then
+        match Int64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+        | true, i -> VInt i
+        // MySQL types an integer literal past BIGINT's signed range but
+        // inside its unsigned one as BIGINT UNSIGNED, exactly:
+        // `SELECT 18446744073709551615` echoes all twenty digits back
+        // rather than the nearest double.
+        | false, _ ->
+            match UInt64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, u -> VUInt u
             | false, _ ->
-                match UInt64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
-                | true, u -> VUInt u
-                | false, _ ->
-                    match Decimal.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
-                    | true, d -> VDecimal d
-                    | false, _ -> VDouble(float nl.String)
-        elif nl.HasExponent then
-            VDouble(float nl.String)
-        else
-            match Decimal.TryParse(nl.String, NumberStyles.Float, CultureInfo.InvariantCulture) with
-            | true, d -> VDecimal d
-            | false, _ -> VDouble(float nl.String)
+                match Decimal.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+                | true, d -> VDecimal d
+                | false, _ -> VDouble(float nl.String)
+    elif nl.HasExponent then
+        VDouble(float nl.String)
+    else
+        match Decimal.TryParse(nl.String, NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, d -> VDecimal d
+        | false, _ -> VDouble(float nl.String)
+
+let private numericLiteral = numberLiteral numberFormat "number" .>> ws
+let private numberLit: Parser<Value, unit> = numericLiteral |>> numericLiteralValue
+
+let private numberExpr: Parser<Expr, unit> =
+    numericLiteral
+    |>> fun literal ->
+        match numericLiteralValue literal with
+        | VDouble value when literal.HasExponent -> ApproximateLiteral(value, literal.String)
+        | value -> Lit value
 
 /// One character of a `quote`-delimited string literal, as a (possibly
 /// two-character) string rather than one `char`: a doubled quote (`''` or
@@ -1973,7 +1982,7 @@ let private matchAgainstAtom: Parser<Expr, unit> =
     // `expr` would swallow the `IN NATURAL LANGUAGE MODE` modifier as an
     // `IN (...)` comparison.
     let againstArg =
-        choice [ stringLit |>> Lit; numberLit |>> Lit; placeholderAtom; identifier |>> Col ]
+        choice [ stringLit |>> Lit; numberExpr; placeholderAtom; identifier |>> Col ]
 
     (keyword "MATCH" >>. sym "(" >>. sepBy1 matchColumn (sym ",") .>> sym ")"
      .>> keyword "AGAINST"
@@ -2001,7 +2010,7 @@ let private atom: Parser<Expr, unit> =
           groupConcatAtom
           introducedBinaryLit |>> Lit
           bitBytesLit |>> Lit
-          numberLit |>> Lit
+          numberExpr
           hexBytesLit |>> Lit
           nationalStringLit |>> Lit
           introducedStringLit
@@ -2133,6 +2142,7 @@ let private negateExpr (e: Expr) : Expr =
     | _ -> Neg e
 
 opp.AddOperator(PrefixOperator("-", ws, 7, true, negateExpr))
+opp.AddOperator(PrefixOperator("+", ws, 7, true, id))
 opp.AddOperator(PrefixOperator("~", ws, 7, true, (fun value -> FuncCall("BITWISE_NOT", [ value ]))))
 opp.AddOperator(PrefixOperator("NOT", highNotBoundary, 7, true, Not))
 opp.AddOperator(
@@ -3228,10 +3238,10 @@ let private insertValue: Parser<Expr, unit> =
     // minus uses, so both paths share one negation semantics.
     choice
         [ attempt (keyword "DEFAULT" .>> cellEnd >>% FuncCall("DEFAULT", []))
-          literal numberLit
+          attempt (numberExpr .>> cellEnd)
           literal (keyword "NULL" >>% VNull)
           literal stringLit
-          attempt (pchar '-' >>. ws >>. numberLit .>> cellEnd |>> (Lit >> negateExpr))
+          attempt (pchar '-' >>. ws >>. numberExpr .>> cellEnd |>> negateExpr)
           expr ]
 
 let private insertStmt: Parser<Statement, unit> =

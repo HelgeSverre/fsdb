@@ -373,6 +373,10 @@ let private decodeDirection (r: #IReader) : Direction =
 let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     match expr with
     | Lit v -> w.WriteByte 0x01uy; encodeValue w v
+    | ApproximateLiteral(value, spelling) ->
+        w.WriteByte 0x19uy
+        w.WriteDoubleLE value
+        writeStr w spelling
     | RuntimeExpression _
     | Placeholder _ -> failwith "Persistence: a prepared-statement placeholder can't reach the WAL/snapshot"
     | UserVariable _
@@ -460,6 +464,7 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
 
     match r.ReadByte() with
     | 0x01uy -> Lit(decodeValue r)
+    | 0x19uy -> ApproximateLiteral(BitConverter.Int64BitsToDouble(r.ReadInt64LE()), readStr r)
     | 0x02uy -> Col(readStr r)
     | 0x03uy -> QualifiedCol(readStr r, readStr r)
     | 0x17uy -> Row(exprList ())

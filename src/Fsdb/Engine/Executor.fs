@@ -484,7 +484,7 @@ let private tryLiteralValues expressions =
     let rec collect values =
         function
         | [] -> Some(List.rev values)
-        | Lit value :: rest -> collect (value :: values) rest
+        | LiteralValue value :: rest -> collect (value :: values) rest
         | _ -> None
 
     collect [] expressions
@@ -1735,6 +1735,11 @@ let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : C
       OnUpdateCurrentTimestamp = false
       Srid = None }
 
+let private approximateLiteralColumn name (spelling: string) =
+    { syntheticColumn name (TDouble false) false with
+        NumericDisplay = Some { Width = Some spelling.Length; Decimals = None; ZeroFill = false }
+        Default = Some(DConst(VInt 0L)) }
+
 /// Every `MATCH ... AGAINST` node in an expression tree — the fulltext
 /// pre-pass (`runFullTextSelect`) computes one owning-table score column per
 /// distinct node, exactly like `collectWindowFuncs` feeds
@@ -1834,6 +1839,7 @@ let private opSymbol =
 /// the parser doesn't preserve).
 let rec internal exprLabel (expr: Expr) : string =
     match expr with
+    | ApproximateLiteral(_, spelling) -> spelling
     | Lit v -> v |> toText |> Option.defaultValue "NULL"
     | MatchAgainst(cols, q, _) ->
         let columnLabel (column: MatchColumn) =
@@ -2290,8 +2296,9 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
     | Cast(source, TChar _)
     | Cast(source, TVarchar _) -> fspOfExpr ctx source
     | Cast(_, ty) -> fspOfType ty
+    | ApproximateLiteral _
     | Lit(VDouble _) -> Some 6
-    | Lit value -> fspOfValue value
+    | LiteralValue value -> fspOfValue value
     | NamedFunction "MAX" [ arg ]
     | NamedFunction "MIN" [ arg ] -> fspOfExpr ctx arg
     | NamedFunction "TIME" [ arg ]
@@ -2307,12 +2314,12 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
     | NamedFunction "CURRENT_TIME" args
     | NamedFunction "UTC_TIME" args ->
         match args with
-        | [ Lit value ] -> Some(Value.toDouble value |> int |> max 0 |> min 6)
+        | [ LiteralValue value ] -> Some(Value.toDouble value |> int |> max 0 |> min 6)
         | _ -> Some 0
     | NamedFunction "NOW" args
     | NamedFunction "CURRENT_TIMESTAMP" args ->
         match args with
-        | [ Lit v ] -> Some(Value.toDouble v |> int |> max 0 |> min 6)
+        | [ LiteralValue v ] -> Some(Value.toDouble v |> int |> max 0 |> min 6)
         | _ -> Some 0
     | _ -> tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type)
 
@@ -2569,6 +2576,7 @@ and private selectProjectionColumns (store: Store) (dbName: string) (select: Sel
 
     let rec projectionColumns =
         function
+        | ApproximateLiteral(_, spelling) -> [ Some(approximateLiteralColumn spelling spelling) ]
         | Star None -> sources |> List.collect snd
         | Star(Some qualifier) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> List.collect snd
         | Col name -> [ columnFor name sources ]
@@ -2907,7 +2915,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | Lit VNull -> named "binary" 6
     | Lit(VString _) -> Ok(connection 4)
     | Lit(VJson _) -> named "utf8mb4_bin" 4
-    | Lit _ -> named "binary" 5
+    | Lit _ | ApproximateLiteral _ -> named "binary" 5
     | Cast(_, (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _)) -> Ok(connection 2)
     | Cast(_, TJson) -> named "utf8mb4_bin" 2
     | Cast(_, (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob | TBit _)) -> named "binary" 2
@@ -3100,7 +3108,7 @@ let private combineConjuncts =
 let private canPushIntoSource (qualifier: string) =
     let rec eligible =
         function
-        | Lit _ -> true
+        | Lit _ | ApproximateLiteral _ -> true
         | QualifiedCol(source, _) -> source.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
         | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
             eligible left && eligible right
@@ -3970,7 +3978,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
     let every expressions = expressions |> List.forall (isStatementStableExpr store registry dbName scope)
 
     match expression with
-    | Lit _
+    | Lit _ | ApproximateLiteral _
     | Star None -> true
     | Star(Some qualifier) -> scope.Qualifiers.Contains(qualifier.ToLowerInvariant())
     | Col name -> scope.Columns.Contains(name.ToLowerInvariant())
@@ -4137,6 +4145,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         || (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
         || (Temporal.hasZeroMonthOrDay date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
+    | ApproximateLiteral(value, _) -> Ok(VDouble value)
     | Lit v -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
     // MATCH reaches scalar evaluation only when its statement shape has no
@@ -4902,7 +4911,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 and private isLiteralConstantExpression registry expression =
     let closed = isLiteralConstantExpression registry
     match expression with
-    | Lit _ -> true
+    | Lit _ | ApproximateLiteral _ -> true
     | Neg _ | Not _ | IsNull _ | IsNotNull _ | IsTrue _ | IsFalse _
     | BinOp _ | Cast _ | Collate _ | Like _ | Between _ | In _ | Case _ ->
         Expression.children expression |> List.forall closed
@@ -5326,6 +5335,9 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                    Flags = UnsignedFlag ||| NotNullFlag }
     | Lit(VBit(width, _)) ->
         Some { Value.columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag ||| NotNullFlag }
+    | ApproximateLiteral(_, spelling) ->
+        simple TypeDouble
+        |> Option.map (fun metadata -> { metadata with ColumnLength = uint32 spelling.Length; Flags = NotNullFlag })
     | Lit(VDouble _) -> simple TypeDouble |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VDecimal value) ->
         simple TypeNewDecimal
@@ -5470,8 +5482,10 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                     match tryColumnDefForExpr ctx expression with
                     | Some { Type = TChar length | TVarchar length } -> length
                     | _ -> int (min 65u item.ColumnLength)
-                | _, Some item when item.TypeId = TypeDouble || item.TypeId = TypeFloat
-                                    || item.TypeId = TypeBlob || item.TypeId = TypeJson -> int (min 65u item.ColumnLength)
+                // DOUBLE's numeric character capacity is independent of display width.
+                | _, Some item when item.TypeId = TypeDouble -> 22
+                | _, Some item when item.TypeId = TypeFloat || item.TypeId = TypeBlob || item.TypeId = TypeJson ->
+                    int (min 65u item.ColumnLength)
                 | _ -> shape.Precision
             let scale = display |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
             metadata, precision, scale
@@ -5738,6 +5752,13 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     | Subquery select ->
         tryReducedScalarProjection ctx select
         |> Option.bind (metadataOfExpr ctx)
+        |> Option.orElseWith (fun () ->
+            selectProjectionColumns ctx.Store ctx.DbName select
+            |> List.tryHead
+            |> Option.flatten
+            |> Option.map ColumnWire.metadataOfColumn
+            |> Option.filter (fun metadata -> metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat)
+            |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags &&& ~~~NotNullFlag }))
     | Placeholder _
     | Star _ -> None
 
@@ -6561,6 +6582,8 @@ and private describeQueryColumns
                             |> Option.map (fun (precision, scale) ->
                                 computedColumn name (TDecimal(precision, scale, false)) false (Some(decimalDefault scale)) None
                                 |> fun column -> describeLiteral column (VDecimal value))
+                        | ApproximateLiteral(_, spelling) ->
+                            approximateLiteralColumn name spelling |> describeColumn |> Some
                         | Lit(VDouble _) -> Some(computedColumn name (TDouble false) false (Some(DConst(VInt 0L))) None |> describeColumn)
                         | Lit(VString text) ->
                             Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci") |> describeColumn)
@@ -7222,7 +7245,7 @@ and private prepareWhereMatches
 
     let directComparison op columnExpression literalExpression columnOnLeft =
         match tryDirectColumnForExpr context columnExpression, literalExpression with
-        | Some(index, column), Lit _ ->
+        | Some(index, column), LiteralValue _ ->
             match evalExpr context literalExpression with
             | Error error -> Some(fun _ -> Error error)
             | Ok literal ->
@@ -7245,9 +7268,9 @@ and private prepareWhereMatches
             let evaluateLeft = prepare left
             let evaluateRight = prepare right
             fun row -> evalLogicalOr (evaluateLeft row) (fun () -> evaluateRight row)
-        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), column, (Lit _ as literal)) ->
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), column, (LiteralValue _ as literal)) ->
             directComparison op column literal true |> Option.defaultWith (fun () -> evaluate expression)
-        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (Lit _ as literal), column) ->
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (LiteralValue _ as literal), column) ->
             directComparison op column literal false |> Option.defaultWith (fun () -> evaluate expression)
         | _ -> evaluate expression
 
@@ -8317,7 +8340,7 @@ and private applyResolvedJoin
 
             let rec safeLeftFilter =
                 function
-                | Lit _ -> true
+                | Lit _ | ApproximateLiteral _ -> true
                 | QualifiedCol(qualifier, column) ->
                     leftQualifiers |> Set.contains (qualifier.ToLowerInvariant())
                     && (resolveQualified qualifier column
@@ -8357,8 +8380,8 @@ and private applyResolvedJoin
 
             let isConstantTrue =
                 function
-                | Lit value -> truthy value = Some true
-                | BinOp(Eq, Lit left, Lit right) -> Value.equals left right = Some true
+                | LiteralValue value -> truthy value = Some true
+                | BinOp(Eq, LiteralValue left, LiteralValue right) -> Value.equals left right = Some true
                 | _ -> false
 
             match preservedRightProbe, indexedJoinProbe with
@@ -9003,7 +9026,7 @@ and private tryMergeDirectView
     let rec mergeablePredicate =
         function
         | Col _
-        | Lit _ -> true
+        | Lit _ | ApproximateLiteral _ -> true
         | BinOp(_, left, right)
         | Like(left, right, _, _)
         | Regexp(left, right) -> mergeablePredicate left && mergeablePredicate right
@@ -9987,8 +10010,8 @@ and private literalPointLookupEqualities (registry: Registry) (tref: TableRef) (
     | Some whereExpr ->
         conjuncts whereExpr
         |> List.choose (function
-            | BinOp(Eq, indexed, Lit value)
-            | BinOp(Eq, Lit value, indexed) ->
+            | BinOp(Eq, indexed, LiteralValue value)
+            | BinOp(Eq, LiteralValue value, indexed) ->
                 storedIndexedColumnFor registry tref indexed
                 |> Option.map (fun (column, transform) ->
                     { Column = column
@@ -10020,7 +10043,7 @@ and private isNumericIndexValue = function
 
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let rec isSafe = function
-        | Lit _ -> true
+        | Lit _ | ApproximateLiteral _ -> true
         | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafe left && isSafe right
         | Collate(expression, _) -> isSafe expression
         | FuncCall(name, arguments)
@@ -10057,7 +10080,7 @@ and private pointLookupEqualities
 
     let tryNonLiteralConstant expression =
         match expression with
-        | Lit _ -> None
+        | Lit _ | ApproximateLiteral _ -> None
         | _ -> tryNumericConstant expression
 
     let tryNumericColumn expression =
@@ -10147,7 +10170,7 @@ and private inProbesWith indexedColumn valueFor (whereExpr: Expr option) : Index
 
 and private literalInProbesWith indexedColumn =
     let literalValue _ = function
-        | Lit value -> Some value
+        | LiteralValue value -> Some value
         | _ -> None
 
     inProbesWith indexedColumn literalValue
@@ -10162,7 +10185,7 @@ and private plannerInProbes
     let tryNumericConstant = numericPlannerConstantEvaluator store registry
 
     let plannerValue column = function
-        | Lit value -> Some value
+        | LiteralValue value -> Some value
         | expression when isDirectNumericIndexColumn table column -> tryNumericConstant expression
         | _ -> None
 
@@ -10230,7 +10253,7 @@ and private literalRangePredicatesFor (scope: ColumnReferenceScope) (tref: Table
     let columnName = rangeColumnNameFor scope tref
 
     let literalValue = function
-        | Lit value -> Some value
+        | LiteralValue value -> Some value
         | _ -> None
 
     rangePredicatesFor columnName literalValue
@@ -10641,7 +10664,7 @@ and private tryCorrelatedEqualityPredicate source context =
 
 and private tryLiteralEqualityPredicate source =
     let literalValue = function
-        | Lit value -> Some value
+        | LiteralValue value -> Some value
         | _ -> None
 
     tryEqualityPredicate (tryCorrelatedInnerColumn source) literalValue
@@ -11165,7 +11188,7 @@ and private tryProjectedPhysicalLiteralLookup
     (whereExpr: Expr option)
     : (ColumnDef list * Value[] list) option =
     let literalValue = function
-        | Lit value -> Some value
+        | LiteralValue value -> Some value
         | _ -> None
 
     tryPhysicalProjection store registry dbName source
@@ -11281,7 +11304,7 @@ and private tryCorrelatedCountEqualityPredicate source context =
         tryCorrelatedOuterValue source context expression
         |> Option.orElseWith (fun () ->
             match expression with
-            | Lit value -> Some value
+            | LiteralValue value -> Some value
             | _ -> None)
 
     let bind inner bound =
@@ -11867,7 +11890,7 @@ and private rowCount =
     function
     | Lit(VInt count) -> int (min (int64 System.Int32.MaxValue) (max 0L count))
     | Lit(VUInt count) -> int (min (uint64 System.Int32.MaxValue) count)
-    | Lit value -> int (min (float System.Int32.MaxValue) (max 0.0 (Value.toDouble value)))
+    | LiteralValue value -> int (min (float System.Int32.MaxValue) (max 0.0 (Value.toDouble value)))
     | Col name ->
         match tryRoutineVariable name with
         | Some variable -> rowCount (Lit variable.Value)
@@ -12793,7 +12816,7 @@ and private rewriteAggregates
             whens
             |> traverse (fun (c, r) -> sub c |> Result.bind (fun c' -> sub r |> Result.map (fun r' -> c', r')))
             |> Result.bind (fun whens' -> subOpt elseBranch |> Result.map (fun else' -> Case(subject', whens', else'))))
-    | Lit _
+    | Lit _ | ApproximateLiteral _
     | Col _
     | QualifiedCol _
     | Star _
@@ -12870,7 +12893,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
             whens
             |> traverse (fun (c, r) -> sub c |> Result.bind (fun c' -> sub r |> Result.map (fun r' -> c', r')))
             |> Result.bind (fun whens' -> subOpt elseBranch |> Result.map (fun else' -> Case(subject', whens', else'))))
-    | Lit _
+    | Lit _ | ApproximateLiteral _
     | QualifiedCol _
     | Star _
     | WindowOver _
@@ -13479,7 +13502,7 @@ and private tryIndexedGroupProjection
         match groupValue argument, argument with
         | Some(GroupValue index), _ -> Some(GroupNonNullCardinality index)
         | _, Lit VNull -> Some(GroupConstant(VInt 0L))
-        | _, Lit _ -> Some GroupCardinality
+        | _, LiteralValue _ -> Some GroupCardinality
         | _ ->
             tryDirectColumnForExpr context argument
             |> Option.filter (snd >> _.Nullable >> not)
@@ -14867,7 +14890,7 @@ and private fullTextScoresForTable
 
     let scoreNode node =
         match node with
-        | MatchAgainst(columns, Lit queryValue, mode) ->
+        | MatchAgainst(columns, LiteralValue queryValue, mode) ->
             let columns = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList
 
             match indexColumns |> List.tryFind (snd >> (=) columns), Value.toText queryValue with
@@ -21851,7 +21874,7 @@ let transactionWriteTargets
     let literalInsertTargets tableName columns rows =
         rows
         |> traverse (traverse (function
-            | Lit value -> Ok(Some value)
+            | LiteralValue value -> Ok(Some value)
             | FuncCall(name, []) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) -> Ok None
             | _ -> Error()))
         |> Result.toOption
@@ -21866,7 +21889,7 @@ let transactionWriteTargets
         assignments
         |> traverse (fun (column, expression) ->
             match expression with
-            | Lit value -> Ok(column, Some value)
+            | LiteralValue value -> Ok(column, Some value)
             | _ -> Error())
         |> Result.toOption
         |> Option.bind (fun values ->

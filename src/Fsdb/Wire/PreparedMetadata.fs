@@ -206,7 +206,7 @@ let private inferParameters
         let rec loop =
             function
             | Placeholder _ -> None
-            | Lit value -> Some(metadataOfValue value)
+            | LiteralValue value -> Some(metadataOfValue value)
             | UserVariable variable -> variable.PreparedType |> Option.map PreparedVariables.metadata
             | (Col _ | QualifiedCol _) as expression ->
                 tryColumn scope expression

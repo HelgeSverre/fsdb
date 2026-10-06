@@ -883,6 +883,47 @@ let tests =
               Expect.equal constants (ResultSet([ "unsigned_value"; "signed_value" ], [ [ Some "-18446744073709551615"; Some "9223372036854775808" ] ])) "constants promote to decimal"
               Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal; TypeNewDecimal ] "promoted constants advertise decimal"
 
+          testCase "scientific literals retain spelling widths across projection boundaries"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE scientific_source(n INT,f FLOAT,d DOUBLE(10,2))"
+              let session, _ = handle session "INSERT INTO scientific_source VALUES(1,1.25,1.25)"
+              for expression, expected, family, width, scale in
+                  [ "1e0", "1", TypeDouble, 3u, 31uy
+                    "1E+00", "1", TypeDouble, 5u, 31uy
+                    "0001e000", "1", TypeDouble, 8u, 31uy
+                    "1.00e0", "1", TypeDouble, 6u, 31uy
+                    ".1e1", "1", TypeDouble, 4u, 31uy
+                    "1.e0", "1", TypeDouble, 4u, 31uy
+                    "+1e0", "1", TypeDouble, 3u, 31uy
+                    "-1e0", "-1", TypeDouble, 23u, 31uy
+                    "-(-1e0)", "1", TypeDouble, 23u, 31uy
+                    "(1e0)", "1", TypeDouble, 3u, 31uy
+                    "(SELECT 1e0)", "1", TypeDouble, 3u, 31uy
+                    "(SELECT 1e0 FROM scientific_source LIMIT 1)", "1", TypeDouble, 3u, 31uy
+                    "(SELECT x FROM (SELECT 1e0 AS x)t)", "1", TypeDouble, 3u, 31uy
+                    "1 DIV 2e0", "0", TypeLongLong, 22u, 0uy
+                    "2e0 DIV 1", "2", TypeLongLong, 22u, 0uy
+                    "(SELECT 2e0 FROM scientific_source LIMIT 1) DIV 1", "2", TypeLongLong, 22u, 0uy
+                    "(SELECT f FROM scientific_source) DIV 1", "1", TypeLongLong, 13u, 0uy
+                    "(SELECT d FROM scientific_source) DIV 1", "1", TypeLongLong, 21u, 0uy
+                    "(SELECT d FROM scientific_source) DIV 0.1", "12", TypeLongLong, 22u, 0uy
+                    "2 DIV (SELECT d FROM scientific_source)", "1", TypeLongLong, 4u, 0uy
+                    "1e0/2", "0.5", TypeDouble, 23u, 31uy
+                    "ABS(1e0)", "1", TypeDouble, 23u, 31uy
+                    "COALESCE(1e0,NULL)", "1", TypeDouble, 23u, 31uy
+                    "1e0+0", "1", TypeDouble, 23u, 31uy ] do
+                  let sql = "SELECT " + expression + " AS value"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) expression
+                  let shape (metadata: ColumnMetadata) = metadata.TypeId, metadata.ColumnLength, metadata.Decimals
+                  Expect.equal (current.LastResultColumnMetadata |> List.map shape)
+                      [ family, width, scale ] (expression + " execution descriptor")
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map (fun column -> shape column.Metadata))
+                      [ family, width, scale ] (expression + " prepare descriptor")
+
           testCase "binary prepared results retain unrounded approximate values"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

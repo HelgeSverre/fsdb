@@ -2187,6 +2187,41 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private scientificLiteralDescriptors =
+        { Name = "scientific-literal-descriptors"
+          Setup = [| "CREATE TABLE scientific_source(n INT PRIMARY KEY,f FLOAT,d DOUBLE(10,2))"
+                     "INSERT INTO scientific_source VALUES(1e0,1.25e0,1.25e0)" |]
+          Steps =
+            [| for index, expression in
+                   [ "1e0"; "1E+00"; "0001e000"; "1.00e0"; ".1e1"; "1.e0"
+                     "+1e0"; "-1e0"; "-(-1e0)"; "(1e0)"; "(SELECT 1e0)"
+                     "(SELECT 1e0 FROM scientific_source LIMIT 1)"
+                     "(SELECT x FROM (SELECT 1e0 AS x)t)"
+                     "1 DIV 2e0"; "2e0 DIV 1"
+                     "(SELECT 2e0 FROM scientific_source LIMIT 1) DIV 1"
+                     "1e0/2"; "ABS(1e0)"; "COALESCE(1e0,NULL)"; "1e0+0" ] |> List.indexed do
+                   let sql = "SELECT " + expression + " AS value"
+                   Contract.query (sprintf "literal-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "literal-%d-binary" index) sql [||]
+               let division = "SELECT f DIV 1 AS a,d DIV 1 AS b,d DIV 0.1 AS c,2 DIV d AS e FROM scientific_source"
+               Contract.query "division-columns-text" division
+               Contract.preparedQuery "division-columns-binary" division [||]
+               Contract.query "projection-names" "SELECT 1E+00,0001e000,.1e1"
+               Contract.execute "materialize" "CREATE TABLE scientific_materialized AS SELECT 1e0 AS value"
+               Contract.query "materialized-text" "SELECT value FROM scientific_materialized"
+               Contract.preparedQuery "materialized-binary" "SELECT value FROM scientific_materialized" [||]
+               Contract.execute "create-view" "CREATE VIEW scientific_projection AS SELECT 1e0 AS value"
+               Contract.query "view-text" "SELECT value FROM scientific_projection"
+               Contract.preparedQuery "view-binary" "SELECT value FROM scientific_projection" [||]
+               Contract.execute "assign-variable" "SET @scientific=1e0"
+               Contract.query "variable" "SELECT @scientific AS value"
+               Contract.query "indexed-predicate" "SELECT n FROM scientific_source WHERE n=1e0"
+               Contract.query "literal-membership" "SELECT n FROM scientific_source WHERE n IN(1e0,2e0)"
+               Contract.preparedQuery "inherited-parameter" "SELECT ?+1e0 AS value" [| box 2L |] |]
+          Cleanup = [| "DROP VIEW IF EXISTS scientific_projection"
+                       "DROP TABLE IF EXISTS scientific_materialized"; "DROP TABLE IF EXISTS scientific_source" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private approximateExpressionDescriptors =
         { Name = "approximate-expression-descriptors"
           Setup = [| "CREATE TABLE approximate_numbers(d DOUBLE,f FLOAT,df DOUBLE(10,2))"
@@ -2735,6 +2770,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            temporalNumericConversion
+           scientificLiteralDescriptors
            approximateExpressionDescriptors
            integerExpressionDescriptors
            divisionOperandDescriptors

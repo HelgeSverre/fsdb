@@ -1145,3 +1145,58 @@ let runApproximateExpressionDescriptors () =
             printfn "Approximate text | %A | %s -> %s" protocol expression expected
 
 runApproximateExpressionDescriptors ()
+
+
+let runScientificLiteralDescriptors () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        for sql in [ "CREATE DATABASE IF NOT EXISTS fsdb_type_oracle"; "USE fsdb_type_oracle"
+                     "CREATE TEMPORARY TABLE scientific_source(n INT,f FLOAT,d DOUBLE(10,2))"
+                     "INSERT INTO scientific_source VALUES(1,1.25,1.25)" ] do
+            use setup = new MySqlCommand(sql, connection)
+            setup.ExecuteNonQuery() |> ignore
+        for expression, expected, family, width, scale in
+            [ "1e0", "1", "DOUBLE", 3, 31
+              "1E+00", "1", "DOUBLE", 5, 31
+              "0001e000", "1", "DOUBLE", 8, 31
+              "1.00e0", "1", "DOUBLE", 6, 31
+              ".1e1", "1", "DOUBLE", 4, 31
+              "1.e0", "1", "DOUBLE", 4, 31
+              "+1e0", "1", "DOUBLE", 3, 31
+              "-1e0", "-1", "DOUBLE", 23, 31
+              "-(-1e0)", "1", "DOUBLE", 23, 31
+              "(1e0)", "1", "DOUBLE", 3, 31
+              "(SELECT 1e0)", "1", "DOUBLE", 3, 31
+              "(SELECT 1e0 FROM scientific_source LIMIT 1)", "1", "DOUBLE", 3, 31
+              "(SELECT x FROM (SELECT 1e0 AS x)t)", "1", "DOUBLE", 3, 31
+              "1 DIV 2e0", "0", "BIGINT", 22, 0
+              "2e0 DIV 1", "2", "BIGINT", 22, 0
+              "(SELECT 2e0 FROM scientific_source LIMIT 1) DIV 1", "2", "BIGINT", 22, 0
+              "1e0/2", "0.5", "DOUBLE", 23, 31
+              "ABS(1e0)", "1", "DOUBLE", 23, 31
+              "COALESCE(1e0,NULL)", "1", "DOUBLE", 23, 31
+              "1e0+0", "1", "DOUBLE", 23, 31
+              "(SELECT f DIV 1 FROM scientific_source)", "1", "BIGINT", 13, 0
+              "(SELECT d DIV 1 FROM scientific_source)", "1", "BIGINT", 21, 0
+              "(SELECT d DIV 0.1 FROM scientific_source)", "12", "BIGINT", 22, 0
+              "(SELECT 2 DIV d FROM scientific_source)", "1", "BIGINT", 4, 0 ] do
+            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
+               || reader.GetDataTypeName(0) <> family || metadata.ColumnSize <> Nullable width
+               || metadata.NumericScale <> Nullable scale then
+                failwithf "%A %s: expected %s width=%d scale=%d value=%s; got %s width=%O scale=%O"
+                    protocol expression family width scale expected (reader.GetDataTypeName 0) metadata.ColumnSize metadata.NumericScale
+            printfn "Scientific descriptor | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
+        for spelling in [ "1E+00"; "0001e000"; ".1e1" ] do
+            use command = new MySqlCommand("SELECT " + spelling, connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            if reader.GetName(0) <> spelling then failwithf "%A %s: unexpected projection name %s" protocol spelling (reader.GetName 0)
+
+runScientificLiteralDescriptors ()

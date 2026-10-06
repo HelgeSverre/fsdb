@@ -895,7 +895,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT 42, 3.14, 1.5e3")
                         (mkSelect(
-                            [ Lit(VInt 42L), None; Lit(VDecimal 3.14M), None; Lit(VDouble 1500.0), None ],
+                            [ Lit(VInt 42L), None; Lit(VDecimal 3.14M), None; ApproximateLiteral(1500.0, "1.5e3"), None ],
                             None,
                             None,
                             [],
@@ -903,6 +903,14 @@ let tests =
                             None
                         ))
                         "numeric literals"
+
+                testCase "scientific literal spelling survives SQL rendering"
+                <| fun _ ->
+                    for spelling in [ "1E+00"; "0001e000"; ".1e1"; "1.e0" ] do
+                        let expected = ApproximateLiteral(1.0, spelling)
+                        Expect.equal (parseOk ("SELECT " + spelling))
+                            (mkSelect([ expected, None ], None, None, [], None, None)) spelling
+                        Expect.equal (Fsdb.Sql.SqlText.expression expected) spelling "SQL rendering retains lexical width"
 
                 testCase "NULL, TRUE, FALSE literals"
                 <| fun _ ->
