@@ -525,11 +525,22 @@ literal's numeric interpretation and return true for numeric one. Scalar
 materialization therefore belongs outside the shared membership result cache.
 
 Remaining descriptors are observable: `b'01'+0` has MySQL wire length 5 and
-fsdb length 20; `b'01'/2` has MySQL length 9 and fsdb length 7. Conditional,
-grouped, and limited source-free scalar reduction remains incomplete. MySQL
-reduces a constant-true WHERE, materializes a user-variable WHERE, and removes
-LIMIT 0 on a reducible source-free scalar query. These optimizer-dependent
-boundaries remain in GAPS.md along with the remaining expression descriptors.
+fsdb length 20; `b'01'/2` has MySQL length 9 and fsdb length 7. Conditional
+source-free scalar reduction remains incomplete: MySQL reduces a constant-true
+WHERE but materializes a user-variable WHERE. Those boundaries remain in
+GAPS.md along with the remaining expression descriptors.
+
+A reducible source-free scalar query discards LIMIT and OFFSET, even LIMIT 0,
+and may include ordinary GROUP BY. ROLLUP, aggregates, windows, HAVING, and
+row sources prevent that reduction and retain their limits. This matches
+`Item_singlerow_subselect::fix_fields` in the
+[MySQL 8.4.11 source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_subselect.cc)
+and the pinned text/binary oracle. The executor keeps ordinary query validation
+and grouping, but removes the redundant scalar limit before execution.
+Multi-column row subqueries retain their limits and materialize literal bytes,
+including source-free rows: `ROW(1,1)=(SELECT b'01',b'01')` returns zero;
+adding LIMIT 0 makes that comparison NULL. Membership queries remain distinct
+from row-value subquery comparisons.
 
 Explicit `_binary` accepts quoted bit/hex literals and the lowercase `0b`/`0x`
 prefixes. The parser shares their existing byte decoders and removes numeric
@@ -540,7 +551,7 @@ Whitespace or a comment separates the introducer from a letter/digit prefix;
 remain intact.
 
 The contract manifest at
-`artifacts/runs/20261006T162508326-31210/contracts/manifest.json` verifies the
-literal contexts, scalar subqueries, and explicit binary introducers in text and
-binary execution, variable materialization, and numeric storage boundaries
-without differences.
+`artifacts/runs/20261006T164543504-37991/contracts/manifest.json` verifies the
+literal contexts, scalar/row subqueries and their limits, and explicit binary
+introducers in text and binary execution, variable materialization, and numeric
+storage boundaries without differences.

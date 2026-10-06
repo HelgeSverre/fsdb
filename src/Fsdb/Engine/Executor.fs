@@ -2415,18 +2415,16 @@ let private scalarSubqueryMaterializes registry (select: SelectStmt) =
     select.From.IsSome
     || not select.Joins.IsEmpty
     || select.Having.IsSome
+    || select.Rollup
     || (select.Projections |> List.exists (fun (expression, _) ->
         containsAggregate registry expression || not (collectWindowFuncs expression).IsEmpty))
 
-/// An unfiltered, source-free scalar projection has its expression's descriptor.
-let private tryUnfilteredScalarProjection registry (select: SelectStmt) =
+/// MySQL reduces source-free scalar projections before applying LIMIT/OFFSET.
+let private tryReducedScalarProjection registry (select: SelectStmt) =
     match select.Projections with
     | [ expression, _ ] when
         not (scalarSubqueryMaterializes registry select)
-        && select.Where.IsNone
-        && select.GroupBy.IsEmpty
-        && select.Limit.IsNone
-        && select.Offset.IsNone -> Some expression
+        && select.Where.IsNone -> Some expression
     | _ -> None
 
 type private DecimalShape =
@@ -2485,7 +2483,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         let rec literalBytes = function
             | Lit(VBinaryLiteral bytes) -> Some bytes
             | Distinct inner -> literalBytes inner
-            | Subquery select -> tryUnfilteredScalarProjection ctx.Registry select |> Option.bind literalBytes
+            | Subquery select -> tryReducedScalarProjection ctx.Registry select |> Option.bind literalBytes
             | _ -> None
         match literalBytes expression with
         | Some bytes ->
@@ -3092,7 +3090,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Case(_, whens, elseBranch) ->
         (whens |> List.map snd) @ [ elseBranch |> Option.defaultValue (Lit VNull) ] |> choose
     | Subquery select ->
-        tryUnfilteredScalarProjection ctx.Registry select
+        tryReducedScalarProjection ctx.Registry select
         |> Option.bind (metadataOfExpr ctx)
     | Placeholder _
     | Star _ -> None
@@ -5638,7 +5636,11 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             // of its text resultset — a bare-text round trip would make e.g.
             // `(SELECT MAX(n) FROM t) > (SELECT MIN(n) FROM t)` compare
             // lexicographically instead of numerically.
-            let subquery = runExpressionSubquery ctx select select
+            let executionSelect =
+                match tryReducedScalarProjection ctx.Registry select with
+                | Some _ when select.Limit.IsSome || select.Offset.IsSome -> { select with Limit = None; Offset = None }
+                | _ -> select
+            let subquery = runExpressionSubquery ctx select executionSelect
 
             match subquery.Result, subquery.Rows with
             | Err(code, message), _ -> Error(code, message)
@@ -5670,7 +5672,7 @@ and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, 
         | ResultSet(columns, _), [] ->
             Ok(subqueryRowOperand select subquery.ProjectionColumns (Array.create columns.Length VNull))
         | ResultSet(_, [ _ ]), [ row ] ->
-            Ok(subqueryRowOperand select subquery.ProjectionColumns row)
+            Ok(subqueryRowOperand select subquery.ProjectionColumns (Array.map Value.materialize row))
         | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
     | _ ->
         evalExpr ctx expr

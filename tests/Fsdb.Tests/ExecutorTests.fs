@@ -3742,6 +3742,16 @@ let tests =
                     let compared = runDefault store "SELECT (SELECT b'01' FROM scalar_origin)=1 AS scalar_value,1 IN (SELECT b'01' FROM scalar_origin) AS membership,1=ANY(SELECT b'01' FROM scalar_origin) AS quantified"
                     Expect.equal compared (ResultSet([ "scalar_value"; "membership"; "quantified" ], [ [ Some "0"; Some "1"; Some "1" ] ])) "scalar materialization does not change membership coercion"
 
+                testCase "row subqueries materialize literal bytes and retain limits"
+                <| fun _ ->
+                    let store = newStore ()
+                    for expression, expected in
+                        [ "ROW(1,1)=(SELECT b'01',b'01')", Some "0"
+                          "ROW(1,1)=(SELECT b'01',b'01' FROM (SELECT 1)t)", Some "0"
+                          "ROW(1,1)=(SELECT b'01',b'01' LIMIT 0)", None ] do
+                        let result = runDefault store ("SELECT " + expression + " AS value")
+                        Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) expression
+
                 testCase "numeric aggregates convert text before folding and DISTINCT"
                 <| fun _ ->
                     let store = newStore ()

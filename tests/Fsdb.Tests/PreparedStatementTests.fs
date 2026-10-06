@@ -419,6 +419,30 @@ let tests =
               let _, columns = preparedMetadata session statement.Ast count
               Expect.equal (columns |> List.map (fun column -> column.Metadata) |> families) expected "prepared families"
 
+          testCase "scalar reduction ignores limits but preserves materialized boundaries"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let cases =
+                  [ "(SELECT b'01' LIMIT 0)+0", Some "1", TypeLongLong
+                    "(SELECT b'01' LIMIT 1 OFFSET 10)+0", Some "1", TypeLongLong
+                    "(SELECT b'01' GROUP BY 1 LIMIT 0)+0", Some "1", TypeLongLong
+                    "SUM((SELECT b'01' GROUP BY 1 LIMIT 0))", Some "1", TypeNewDecimal
+                    "(SELECT b'01' GROUP BY 1 WITH ROLLUP LIMIT 1)+0", Some "0", TypeDouble
+                    "(SELECT b'01' GROUP BY 1 WITH ROLLUP LIMIT 0)+0", None, TypeDouble
+                    "(SELECT MIN(b'01') LIMIT 0)+0", None, TypeDouble
+                    "(SELECT FIRST_VALUE(b'01') OVER () LIMIT 0)+0", None, TypeDouble
+                    "(SELECT b'01' HAVING 1 LIMIT 0)+0", None, TypeDouble
+                    "(SELECT b'01' FROM (SELECT 1)t LIMIT 0)+0", None, TypeDouble ]
+              for expression, expected, family in cases do
+                  let sql = "SELECT " + expression + " AS value"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) expression
+                  Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ family ] (expression + " execution type")
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let statement = createPreparedStatement session sql ast count
+                  let _, columns = preparedMetadata session statement.Ast count
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId)) [ family ] (expression + " prepared type")
+
           testCase "binary literal variables discard numeric origin before binding"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

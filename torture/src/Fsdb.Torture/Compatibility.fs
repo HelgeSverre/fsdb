@@ -2118,6 +2118,10 @@ module ContractCatalog =
                      "casts", "SELECT CAST(b'01' AS UNSIGNED) AS u,CAST(b'01' AS DECIMAL) AS d,b'01'=1 AS numeric_equal,b'01'='1' AS string_equal"
                      "conditional", "SELECT IF(1,b'01',b'10')+0 AS branch_value,CASE WHEN 1 THEN b'01' ELSE b'10' END+0 AS case_value,COALESCE(b'01',b'10')+0 AS coalesced,IFNULL(b'01',b'10')+0 AS nonnull,CONCAT(b'01')+0 AS concatenated"
                      "scalar-reduced", "SELECT (SELECT b'01')+0 AS n,SUM((SELECT b'01')) AS s,AVG((SELECT b'01')) AS a,(SELECT 1.25)+0 AS d,(SELECT (SELECT b'01'))+0 AS nested"
+                     "scalar-limits", "SELECT (SELECT b'01' LIMIT 0)+0 AS zero_limit,(SELECT b'01' LIMIT 1 OFFSET 10)+0 AS offset_value,(SELECT b'01' GROUP BY 1 LIMIT 0)+0 AS grouped,SUM((SELECT b'01' GROUP BY 1 LIMIT 0)) AS total"
+                     "scalar-rollup", "SELECT (SELECT b'01' GROUP BY 1 WITH ROLLUP LIMIT 1)+0 AS first_row,(SELECT b'01' GROUP BY 1 WITH ROLLUP LIMIT 0)+0 AS no_rows"
+                     "scalar-preserved-limits", "SELECT (SELECT MIN(b'01') LIMIT 0)+0 AS aggregate_value,(SELECT FIRST_VALUE(b'01') OVER () LIMIT 0)+0 AS window_value,(SELECT b'01' HAVING 1 LIMIT 0)+0 AS having_value,(SELECT b'01' FROM (SELECT 1)t LIMIT 0)+0 AS source_value"
+                     "row-materialized", "SELECT ROW(1,1)=(SELECT b'01',b'01') AS source_free,ROW(1,1)=(SELECT b'01',b'01' FROM (SELECT 1)t) AS sourced,ROW(1,1)=(SELECT b'01',b'01' LIMIT 0) AS limited"
                      "scalar-materialized", "SELECT (SELECT b'01' FROM (SELECT 1) t)+0 AS sourced,(SELECT b'01' HAVING 1)+0 AS filtered"
                      "scalar-aggregate-window", "SELECT (SELECT MIN(b'01'))+0 AS minimum,(SELECT FIRST_VALUE(b'01') OVER ())+0 AS first_result"
                      "scalar-comparison", "SELECT (SELECT b'01' FROM (SELECT 1)t)=1 AS scalar_value,1 IN (SELECT b'01' FROM (SELECT 1)t) AS membership,1=ANY(SELECT b'01' FROM (SELECT 1)t) AS quantified"
@@ -2126,6 +2130,8 @@ module ContractCatalog =
                      "wide", "SELECT SUM(b'1111111111111111111111111111111111111111111111111111111111111111') AS s,b'1111111111111111111111111111111111111111111111111111111111111111'+0 AS arithmetic" ] do
                    Contract.query (name + "-text") sql
                    Contract.preparedQuery (name + "-binary") sql [||]
+               for limit in [ 0; 3 ] do
+                   Contract.preparedQuery (sprintf "scalar-limit-parameter-%d" limit) "SELECT (SELECT b'01' LIMIT ? OFFSET ?)+0 AS value" [| box limit; box 10 |]
                Contract.query "adjacent-introducer-identifier" "SELECT _binaryX'00ff'" |> Contract.fails 1054 "42S22"
                Contract.execute "storage-table" "CREATE TABLE literal_storage(b BIT(64),u BIGINT UNSIGNED,d DECIMAL(30),f DOUBLE,n TINYINT)"
                for name, literal in [ "wide", "X'010000000000000000'"; "padded", "X'000000000000000001'" ] do
