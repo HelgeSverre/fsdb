@@ -531,6 +531,76 @@ let tests =
                   Expect.equal result (ResultSet([ "value" ], [ [ Some "1" ] ])) predicate
                   Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLongLong ] (predicate + " type")
 
+          testCase "division descriptors follow operand numeric contexts"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET sql_mode=''"
+              for expression, expected, family, width, scale in
+                  [ "b'01'/2", Some "0.5000", TypeNewDecimal, 9u, 4uy
+                    "2/b'01'", Some "2.0000", TypeNewDecimal, 7u, 4uy
+                    "b''/2", Some "0.0000", TypeNewDecimal, 7u, 4uy
+                    "b'100000001'/2", Some "128.5000", TypeNewDecimal, 11u, 4uy
+                    "X'010001'/2", Some "32768.5000", TypeNewDecimal, 14u, 4uy
+                    "b'01'/2.00", Some "0.5000", TypeNewDecimal, 11u, 4uy
+                    "b'01'/2e0", Some "0.5", TypeDouble, 23u, 31uy
+                    "b'01'/'2'", Some "0.5", TypeDouble, 23u, 31uy
+                    "'1'/2", Some "0.5", TypeDouble, 23u, 31uy
+                    "1/'2'", Some "0.5", TypeDouble, 23u, 31uy
+                    "_binary X'31'/2", Some "0.5", TypeDouble, 23u, 31uy
+                    "_binary b'01'/2", Some "0", TypeDouble, 23u, 31uy
+                    "NULL/2", None, TypeDouble, 4u, 4uy
+                    "1/NULL", None, TypeDouble, 6u, 4uy
+                    "NULL/NULL", None, TypeDouble, 4u, 4uy
+                    "b'01'/NULL", None, TypeDouble, 5u, 4uy
+                    "NULL/b'01'", None, TypeDouble, 4u, 4uy
+                    "(SELECT b'01')/2", Some "0.5000", TypeNewDecimal, 9u, 4uy
+                    "(SELECT b'01' WHERE 1)/2", Some "0.5000", TypeNewDecimal, 9u, 4uy
+                    "(SELECT b'01' FROM (SELECT 1)t)/2", Some "0", TypeDouble, 5u, 4uy
+                    "CAST('2020-01-01' AS DATE)/2", Some "10100050.5000", TypeNewDecimal, 14u, 4uy
+                    "CAST('2020-01-02 03:04:05' AS DATETIME)/2", Some "10100051015202.5000", TypeNewDecimal, 20u, 4uy
+                    "CAST('2020-01-02 03:04:05.123456' AS DATETIME(6))/2", Some "10100051015202.5617280000", TypeNewDecimal, 26u, 10uy
+                    "CAST('-12:34:56.123456' AS TIME(6))/2", Some "-61728.0617280000", TypeNewDecimal, 19u, 10uy
+                    "CAST('2020-00-01' AS DATE)/2", Some "10100000.5000", TypeNewDecimal, 14u, 4uy
+                    "CAST('2020-00-01 03:04:05.123456' AS DATETIME(6))/2", Some "10100000515202.5617280000", TypeNewDecimal, 26u, 10uy
+                    "CAST('1' AS JSON)/2", Some "0.5", TypeDouble, 23u, 31uy ] do
+                  let sql = "SELECT " + expression + " AS value"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) expression
+                  Expect.equal (current.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength, item.Decimals))
+                      [ family, width, scale ] (expression + " descriptor")
+
+          testCase "approximate division retains finite scales and caps unspecified scale"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for increment, expression, width, scale in
+                  [ 0, "NULL/2", 0u, 0uy
+                    0, "1/NULL", 2u, 0uy
+                    0, "b'01'/NULL", 1u, 0uy
+                    0, "NULL/CAST('2020-01-01' AS DATETIME(6))", 6u, 6uy
+                    30, "NULL/2", 30u, 30uy
+                    30, "1/NULL", 32u, 30uy
+                    30, "b'01'/NULL", 31u, 30uy
+                    30, "NULL/CAST('2020-01-01' AS DATETIME(6))", 23u, 31uy ] do
+                  let session, _ = handle session (sprintf "SET div_precision_increment=%d" increment)
+                  let current, result = handle session ("SELECT " + expression + " AS value")
+                  Expect.equal result (ResultSet([ "value" ], [ [ None ] ])) expression
+                  Expect.equal (current.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength, item.Decimals))
+                      [ TypeDouble, width, scale ] (expression + " descriptor")
+
+          testCase "division of scalar string columns retains unspecified numeric scale"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE division_strings(s VARCHAR(10),b VARBINARY(10),j JSON)"
+              let session, _ = handle session "INSERT INTO division_strings VALUES('1','1','1')"
+              for increment in [ 0; 4; 10; 30 ] do
+                  let session, _ = handle session (sprintf "SET div_precision_increment=%d" increment)
+                  for column in [ "s"; "b"; "j" ] do
+                      let expression = sprintf "(SELECT %s FROM division_strings)/2" column
+                      let current, result = handle session ("SELECT " + expression + " AS value")
+                      Expect.equal result (ResultSet([ "value" ], [ [ Some "0.5" ] ])) expression
+                      Expect.equal (current.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength, item.Decimals))
+                          [ TypeDouble, 23u, 31uy ] (expression + " descriptor")
+
           testCase "temporal division retains complete fields fractional precision and descriptors"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

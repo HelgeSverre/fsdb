@@ -2187,6 +2187,62 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private divisionOperandDescriptors =
+        { Name = "division-operand-descriptors"
+          Setup = [| "SET sql_mode=''"
+                     "CREATE TABLE division_operands(n INT,s VARCHAR(10),b VARBINARY(10),j JSON)"
+                     "INSERT INTO division_operands VALUES(1,'1','1','1'),(NULL,NULL,NULL,NULL)" |]
+          Steps =
+            [| for increment in [ 0; 4; 10; 30 ] do
+                   Contract.execute (sprintf "increment-%d" increment) (sprintf "SET div_precision_increment=%d" increment)
+                   for index, expression in
+                       [ "b'01'/2"
+                         "2/b'01'"
+                         "b''/2"
+                         "b'100000001'/2"
+                         "X'010001'/2"
+                         "b'01'/2.00"
+                         "b'01'/2e0"
+                         "b'01'/'2'"
+                         "'1'/2"
+                         "1/'2'"
+                         "_binary X'31'/2"
+                         "_binary b'01'/2"
+                         "NULL/2"
+                         "1/NULL"
+                         "NULL/NULL"
+                         "b'01'/NULL"
+                         "NULL/b'01'"
+                         "(SELECT b'01')/2"
+                         "(SELECT b'01' WHERE 1)/2"
+                         "(SELECT b'01' FROM (SELECT 1)t)/2"
+                         "CAST('2020-01-01' AS DATE)/2"
+                         "CAST('2020-01-02 03:04:05' AS DATETIME)/2"
+                         "CAST('2020-01-02 03:04:05.123456' AS DATETIME(6))/2"
+                         "CAST('-12:34:56.123456' AS TIME(6))/2"
+                         "CAST('2020-00-01' AS DATE)/2"
+                         "CAST('2020-00-01 03:04:05.123456' AS DATETIME(6))/2"
+                         "CAST('1' AS JSON)/2"
+                         "CAST(1 AS UNSIGNED)/CAST(2 AS UNSIGNED)"
+                         "CAST(1.00 AS DECIMAL(5,2))/NULL"
+                         "CAST('2020-01-01' AS DATE)/NULL"
+                         "CAST('2020-01-01' AS DATETIME(6))/NULL"
+                         "NULL/CAST('2020-01-01' AS DATETIME(6))" ] |> List.indexed do
+                       let name = sprintf "increment-%d-operand-%d" increment index
+                       let sql = sprintf "SELECT %s AS value /* increment=%d */" expression increment
+                       Contract.query (name + "-text") sql
+                       Contract.preparedQuery (name + "-binary") sql [||]
+                   let sql = sprintf "SELECT n/2 AS n,s/2 AS s,b/2 AS b,j/2 AS j FROM division_operands ORDER BY n /* increment=%d */" increment
+                   Contract.query (sprintf "columns-%d-text" increment) sql
+                   Contract.preparedQuery (sprintf "columns-%d-binary" increment) sql [||]
+                   for column in [ "n"; "s"; "b"; "j" ] do
+                       let sql = sprintf "SELECT (SELECT %s FROM division_operands WHERE n=1)/2 AS value /* increment=%d */" column increment
+                       let name = sprintf "scalar-%s-%d" column increment
+                       Contract.query (name + "-text") sql
+                       Contract.preparedQuery (name + "-binary") sql [||] |]
+          Cleanup = [| "DROP TABLE IF EXISTS division_operands"; "SET sql_mode=DEFAULT"; "SET div_precision_increment=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private temporalArithmeticDescriptors =
         { Name = "temporal-arithmetic-descriptors"
           Setup = [| "SET sql_mode=''"; "SET time_zone='+00:00'"
@@ -2511,6 +2567,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            temporalNumericConversion
+           divisionOperandDescriptors
            temporalArithmeticDescriptors
            calendarCasts
            componentDateTimeFractions

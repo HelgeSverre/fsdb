@@ -624,7 +624,8 @@ The nested-condition and numeric-function contract manifest is
 `just prepared-type-oracle` pins division operand categories on MySQL 8.4.11
 with `div_precision_increment=4`, in text and binary execution. It checks the
 result family, display width, precision, scale, and value. The following
-comparisons use fsdb revision `d5388eb5`; these cases remain open.
+comparisons record the original mismatches at fsdb revision `d5388eb5`.
+The division operand regressions now match the MySQL descriptors and values.
 
 | Expression | MySQL family / width / scale | fsdb family / width / scale |
 | --- | --- | --- |
@@ -667,11 +668,26 @@ width. Temporal division values and descriptors have dedicated regressions.
 
 The temporal differential contract covers direct casts, stored columns,
 zero-component stored values, and TIMESTAMP division under UTC and a session
-UTC+02:00 zone. It does not enroll the remaining binary/text/NULL/JSON division
-descriptor mismatches as passing contracts or suppress them in the gap ledger.
+UTC+02:00 zone. The division operand contract additionally covers bare and
+introduced binary literals, reduced and materialized scalar subqueries, text,
+JSON, untyped NULL, and stored columns. It compares text and binary execution
+with `div_precision_increment` set to 0, 4, 10, and 30. The maintained oracle
+and Expecto regressions pin display widths and scales, including the transition
+to unspecified scale 31 for a fractional temporal operand divided with NULL.
 
-Permissive zero-component CAST acceptance and its remaining fractional-precision
-boundary are described below.
+Numeric-context classification remains separate from display metadata. Exact
+division uses the binary literal's numeric precision and retains unsignedness
+only when both operands are unsigned. Approximate division uses the original
+dividend width and both operand scales. Scalar string columns retain unspecified
+numeric scale even when their declared string metadata has zero decimals.
+
+The pinned-container division operand contract manifest is
+`artifacts/runs/20261006T185156369-63268/contracts/manifest.json`.
+Distinct SQL text for each increment avoids connector prepared-statement cache
+reuse. That matrix and the extended maintained oracle also pass against native
+MySQL 8.4.11; its contract manifest is
+`artifacts/runs/20261006T190046570-65205/contracts/manifest.json`.
+Native validation followed an unresponsive OrbStack API during container cleanup.
 
 The temporal numeric-conversion contract manifest is
 `artifacts/runs/20261006T173345886-48124/contracts/manifest.json`.

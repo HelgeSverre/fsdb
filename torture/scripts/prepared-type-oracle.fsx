@@ -730,6 +730,29 @@ let runDivisionOperandDescriptors () =
             printfn "Division operands | %A | %s -> %s length=%d precision=%A scale=%d value=%s"
                 protocol expression family length precision scale actual
 
+        // Distinct SQL prevents the connector cache from retaining another precision setting.
+        for increment, expression, width, scale in
+            [ 0, "NULL/2", 0, 0
+              0, "1/NULL", 2, 0
+              0, "b'01'/NULL", 1, 0
+              0, "NULL/CAST('2020-01-01' AS DATETIME(6))", 6, 6
+              30, "NULL/2", 30, 30
+              30, "1/NULL", 32, 30
+              30, "b'01'/NULL", 31, 30
+              30, "NULL/CAST('2020-01-01' AS DATETIME(6))", 23, 31 ] do
+            use setup = new MySqlCommand(sprintf "SET div_precision_increment=%d" increment, connection)
+            setup.ExecuteNonQuery() |> ignore
+            use command = new MySqlCommand(sprintf "SELECT %s AS value /* increment=%d */" expression increment, connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if not (reader.Read()) || not (reader.IsDBNull 0)
+               || reader.GetDataTypeName(0) <> "DOUBLE"
+               || metadata.ColumnSize <> Nullable width || metadata.NumericScale <> Nullable scale then
+                failwithf "%A %s increment=%d: expected NULL DOUBLE width=%d scale=%d; got %s width=%O scale=%O"
+                    protocol expression increment width scale (reader.GetDataTypeName 0) metadata.ColumnSize metadata.NumericScale
+            printfn "Division NULL scale | %A | %s | increment=%d -> width=%d scale=%d" protocol expression increment width scale
+
 runDivisionOperandDescriptors ()
 
 let runCalendarCasts () =

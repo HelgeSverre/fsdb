@@ -4982,7 +4982,6 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             { Value.columnMetadata typeId with
                 ColumnLength = columnLength
                 Decimals = if typeId = TypeDouble || typeId = TypeFloat then 31uy else 0uy }
-    let typeIdOf expression = metadataOfExpr ctx expression |> Option.map _.TypeId
     let numericMetadata expression =
         let rec literalBytes = function
             | Lit(VBinaryLiteral bytes) -> Some bytes
@@ -4998,6 +4997,39 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     let isTemporalMetadata (metadata: ColumnMetadata) =
         metadata.TypeId = TypeDate || metadata.TypeId = TypeDateTime
         || metadata.TypeId = TypeTimestamp || metadata.TypeId = TypeTime
+
+    let numericContextType metadata =
+        if isTemporalMetadata metadata then
+            if metadata.Decimals > 0uy then TypeNewDecimal else TypeLongLong
+        else metadata.TypeId
+
+    let rec divisionOperandMetadata expression =
+        let withNumericScale metadata =
+            if metadata.TypeId = TypeString || metadata.TypeId = TypeVarString
+               || metadata.TypeId = TypeBlob || metadata.TypeId = TypeJson then
+                { metadata with Decimals = 31uy }
+            else metadata
+        match expression with
+        | Distinct inner | OrderBy(inner, _) -> divisionOperandMetadata inner
+        | Subquery select ->
+            match tryReducedScalarProjection ctx select with
+            | Some projection -> divisionOperandMetadata projection
+            | None ->
+                match select.Projections with
+                | [ projection, _ ] when isLiteralConstantExpression ctx.Registry projection ->
+                    divisionOperandMetadata projection
+                | _ ->
+                    selectProjectionColumns ctx.Store ctx.DbName select
+                    |> List.tryHead
+                    |> Option.flatten
+                    |> Option.map (ColumnWire.metadataOfColumn >> withNumericScale)
+        | _ ->
+            metadataOfExpr ctx expression
+            |> Option.map (fun metadata ->
+                match expression with
+                | Lit(VBinaryLiteral _) -> metadata
+                | Lit(VInt _ | VUInt _) -> withDecimalShape (decimalShape expression (Some metadata)) metadata
+                | _ -> withNumericScale metadata)
 
     let temporalUnaryMetadata metadata =
         if isTemporalMetadata metadata then
@@ -5016,13 +5048,8 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         let leftMetadata = numericMetadata left
         let rightMetadata = numericMetadata right
 
-        let contextType metadata =
-            if isTemporalMetadata metadata then
-                if metadata.Decimals > 0uy then TypeNewDecimal else TypeLongLong
-            else metadata.TypeId
-
         let inferred =
-            match Option.map contextType leftMetadata, Option.map contextType rightMetadata with
+            match Option.map numericContextType leftMetadata, Option.map numericContextType rightMetadata with
             | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
             | _, Some rightType when rightType = TypeDouble || rightType = TypeFloat -> simple TypeDouble
             | Some leftType, _ when leftType = TypeString || leftType = TypeVarString || leftType = TypeBlob -> simple TypeDouble
@@ -5372,19 +5399,39 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             { Precision = min 65 (left.Precision + right.Precision)
               Scale = min 30 (left.Scale + right.Scale) }) left right
     | BinOp(Div, left, right) ->
-        match typeIdOf left, typeIdOf right with
-        | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
-        | _, Some rightType when rightType = TypeDouble || rightType = TypeFloat -> simple TypeDouble
-        | Some _, _
-        | _, Some _ ->
-            let dividend = decimalShape left (metadataOfExpr ctx left)
-            let divisor = decimalShape right (metadataOfExpr ctx right)
-            let increment = divisionPrecisionIncrement ()
+        let leftDisplay = divisionOperandMetadata left
+        let rightDisplay = divisionOperandMetadata right
+        let leftNumeric = numericMetadata left |> Option.orElse leftDisplay
+        let rightNumeric = numericMetadata right |> Option.orElse rightDisplay
+        let isExactNumeric =
+            Option.exists (fun metadata ->
+                let kind = numericContextType metadata
+                kind = TypeTiny || kind = TypeShort || kind = TypeLong || kind = TypeLongLong
+                || kind = TypeYear || kind = TypeBit || kind = TypeNewDecimal)
+        let increment = divisionPrecisionIncrement ()
+        if isExactNumeric leftNumeric && isExactNumeric rightNumeric then
+            let dividend = decimalShape left leftNumeric
+            let divisor = decimalShape right rightNumeric
             let shape =
                 { Precision = min 65 (dividend.Precision + divisor.Scale + increment)
                   Scale = min 30 (dividend.Scale + increment) }
-            simple TypeNewDecimal |> Option.map (withDecimalShape shape)
-        | _ -> None
+            let unsigned =
+                Option.exists (hasMetadataFlag UnsignedFlag) leftNumeric
+                && Option.exists (hasMetadataFlag UnsignedFlag) rightNumeric
+            simple TypeNewDecimal
+            |> Option.map (fun metadata ->
+                withDecimalShape shape { metadata with Flags = if unsigned then UnsignedFlag else 0us })
+        else
+            // Approximate division retains the dividend's original display width,
+            // including byte widths of binary literals and zero width of NULL.
+            let decimals metadata = metadata |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
+            let scale = min 31 (max (decimals leftDisplay) (decimals rightDisplay) + increment)
+            let width =
+                if scale = 31 then 23u
+                else
+                    let original = leftDisplay |> Option.map (fun item -> int64 item.ColumnLength - int64 item.Decimals) |> Option.defaultValue 0L
+                    uint32 (min (17L + int64 scale) (max 0L original + int64 scale))
+            simple TypeDouble |> Option.map (fun metadata -> { metadata with ColumnLength = width; Decimals = byte scale })
     | BinOp(IntDiv, _, _) -> simple TypeLongLong
     | Cast(value, ty) ->
         let metadata = ColumnWire.metadataOfType ty
