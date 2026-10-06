@@ -21,6 +21,7 @@ type DivisionByZeroPolicy =
     | Fail = 2
 
 exception EvaluationError of code: int * message: string
+exception RaisedCondition of SqlState.Error
 
 let private active = AsyncLocal<ResizeArray<Condition> option>()
 let private rowNumber = AsyncLocal<int option>()

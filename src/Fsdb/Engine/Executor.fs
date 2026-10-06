@@ -567,6 +567,9 @@ let internal withTriggerTextExecutor executor body =
 
 let private currentVariableContext () = variableContext.Value
 
+let internal currentUserVariables () =
+    currentVariableContext () |> Option.map _.UserVariables
+
 let private divisionPrecisionOverride = System.Threading.AsyncLocal<int option>()
 
 let withDivisionPrecisionIncrement increment body =

@@ -759,7 +759,8 @@ let private evaluateSessionExpression
     |> Result.mapError (fun (code, message) -> Err(code, message))
     |> Result.bind (fun () ->
         Executor.withVariableContext variables (fun () ->
-            Executor.evaluateExpression store (registryFor session) database expression))
+            try Executor.evaluateExpression store (registryFor session) database expression
+            with Diagnostics.RaisedCondition error -> Error(ErrInfo error)))
 
 let private likeSuffix (sql: string) : string option =
     let m = Regex.Match(sql, @"LIKE\s+'([^']*)'\s*$", RegexOptions.IgnoreCase)
@@ -3116,9 +3117,12 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                     lastInsertId, lastGeneratedId, result, [], None)
 
         let evaluateWithLockingView () =
-            match lockingReadView () with
-            | Some current -> Executor.withLockingReadStore current (lockWaitTimeout session) evaluate
-            | None -> evaluate ()
+            try
+                match lockingReadView () with
+                | Some current -> Executor.withLockingReadStore current (lockWaitTimeout session) evaluate
+                | None -> evaluate ()
+            with Diagnostics.RaisedCondition error ->
+                session.LastInsertId, session.LastGeneratedId, ErrInfo error, [], None
 
         let startedDynamicWriteRebase = beginDynamicWriteRebaseForStatement session store
 
@@ -6392,7 +6396,7 @@ let private evaluateEventTiming (session: Session) options (schedule: string) =
 
 let private raiseFunctionError result =
     match Executor.errorInfo result with
-    | Some error -> raise (Diagnostics.EvaluationError(error.Code, error.Message))
+    | Some error -> raise (Diagnostics.RaisedCondition error)
     | None -> raise (Diagnostics.EvaluationError(1105, "Stored function execution failed"))
 
 let rec private invokeStoredFunction
@@ -6401,7 +6405,12 @@ let rec private invokeStoredFunction
     (routine: SystemCatalog.StoredFunction.Entry)
     (arguments: Value list)
     =
+    let callerVariables = Executor.currentUserVariables ()
     let caller = storedFunctionSession.Value |> Option.defaultValue declaredSession
+    let caller =
+        match callerVariables with
+        | Some variables -> { caller with UserVariables = variables.Value }
+        | None -> caller
     let caller =
         match Executor.currentScalarExecutionAccount () with
         | Some account ->
@@ -6529,6 +6538,9 @@ let rec private invokeStoredFunction
         DynamicScope.withValue storedFunctionCalls (Some(key :: calls)) (fun () ->
             DynamicScope.withValue storedFunctionSession (Some executionSession) (fun () ->
                 Storage.withExecutionSettings executionStore capturedSettings run))
+
+    // User variables belong to the invoking session even when the function fails.
+    callerVariables |> Option.iter (fun variables -> variables.Value <- outcome.Session.UserVariables)
 
     match outcome.Error, outcome.Results, outcome.Flow with
     | Some error, _, _ -> raiseFunctionError error

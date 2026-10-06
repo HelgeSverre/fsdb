@@ -75,6 +75,27 @@ let tests =
                   let expectedWarnings = warnings |> List.map (fun text -> [ Some "Warning"; Some "1292"; Some("Truncated incorrect DOUBLE value: '" + text + "'") ])
                   Expect.equal actualWarnings (ResultSet([ "Level"; "Code"; "Message" ], expectedWarnings)) (sql + " warnings")
 
+          testCase "stored functions preserve caller variables and signaled SQLSTATE"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE FUNCTION tick() RETURNS INT NOT DETERMINISTIC NO SQL RETURN (@n:=COALESCE(@n,0)+1)"
+              let session, _ = handle session "CREATE FUNCTION twice_tick() RETURNS INT NOT DETERMINISTIC NO SQL RETURN tick()+tick()"
+              let session, created = handle session "CREATE FUNCTION fail_tick() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE ignored INT DEFAULT (@n:=COALESCE(@n,0)+1); SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='counter failed'; RETURN 0; END"
+              TestSupport.Sql.expectOk created "create failing counter"
+              let session, _ = handle session "SET @n=10"
+              let session, value = handle session "SELECT twice_tick() AS value"
+              Expect.equal value (ResultSet([ "value" ], [ [ Some "23" ] ])) "nested calls share caller variables"
+              let session, failed = handle session "SELECT fail_tick() AS value"
+              let error = errorInfo failed |> Option.defaultWith (fun () -> failtestf "expected a stored error, got %A" failed)
+              Expect.equal (error.Code, error.State, error.Message) (1644, "45000", "counter failed") "raised condition retains its SQLSTATE"
+              let _, calls = handle session "SELECT @n AS calls"
+              Expect.equal calls (ResultSet([ "calls" ], [ [ Some "13" ] ])) "assignments survive the error"
+              let other, value = handle (create 2 store) "SELECT tick() AS value"
+              Expect.equal value (ResultSet([ "value" ], [ [ Some "1" ] ])) "another session has independent variables"
+              let _, calls = handle other "SELECT @n AS calls"
+              Expect.equal calls (ResultSet([ "calls" ], [ [ Some "1" ] ])) "other session keeps its own assignment"
+
           testCase "block_encryption_mode selects AES mode per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
