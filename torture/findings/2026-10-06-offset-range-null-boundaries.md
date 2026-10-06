@@ -12,7 +12,7 @@ With keys NULL, NULL, 1, 3, 3, 7 and numeric text inputs 1x, 2x, 4x, 8x, 16x,
 returns 3, 3, NULL, 4, 4, 28. Reversing the ordering also requires a prefix
 for a current NULL row to include the preceding non-NULL rows.
 
-SUM/AVG accumulation for stable growing RANGE frames consumes each input once.
+SUM/AVG accumulation for growing RANGE frames consumes each materialized input once.
 This preserves MySQL's conversion warning multiplicity, including tied keys and
 empty initial frames. Suffix and bounded frames continue evaluating their own
 inputs, retaining repeated conversion warnings. Frame-boundary lookup still

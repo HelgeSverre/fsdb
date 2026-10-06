@@ -2659,6 +2659,55 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS aggregate_warning_input" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private volatileWindowInputs =
+        { Name = "volatile-window-inputs"
+          Setup =
+            [| "CREATE TABLE volatile_inputs(id INT PRIMARY KEY)"
+               "INSERT INTO volatile_inputs VALUES(1),(2),(3)"
+               "CREATE FUNCTION tick() RETURNS INT NOT DETERMINISTIC NO SQL RETURN (@n:=COALESCE(@n,0)+1)"
+               "CREATE FUNCTION twice_tick() RETURNS INT NOT DETERMINISTIC NO SQL RETURN tick()+tick()"
+               "CREATE FUNCTION fail_tick() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE ignored INT DEFAULT (@n:=COALESCE(@n,0)+1); SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='counter failed'; RETURN 0; END"
+               "CREATE FUNCTION guarded_value(v INT) RETURNS INT DETERMINISTIC NO SQL BEGIN IF v=2 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='invalid row'; END IF; RETURN v*10; END"
+               "CREATE TABLE guarded_inputs(id INT PRIMARY KEY,v INT)"
+               "INSERT INTO guarded_inputs VALUES(1,1),(2,2),(3,3)" |]
+          Steps =
+            [| for index, expression in
+                   [ "SUM(tick()) OVER()"
+                     "SUM(tick()) OVER(ORDER BY id)"
+                     "AVG(tick()) OVER(ORDER BY id)"
+                     "SUM(tick()) OVER(ORDER BY id DESC)"
+                     "SUM(tick()) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "SUM(tick()) OVER(ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING)"
+                     "SUM(tick()) OVER(ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)"
+                     "COUNT(tick()) OVER(ORDER BY id)"
+                     "MIN(tick()) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "MAX(tick()) OVER(ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING)"
+                     "SUM(CONCAT(tick(),'x')) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "JSON_ARRAYAGG(tick()) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "JSON_OBJECTAGG(id,tick()) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "JSON_OBJECTAGG(tick(),id) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "SUM(ABS(CONCAT(tick(),'x'))) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                     "BIT_OR(tick()) OVER(ORDER BY id)"
+                     "VAR_POP(tick()) OVER(ORDER BY id)" ] |> List.indexed do
+                   for prepare in [ false; true ] do
+                       let name = sprintf "%d-%b" index prepare
+                       Contract.execute (name + "-reset") "SET @n=0"
+                       let sql = "SELECT id," + expression + " AS value FROM volatile_inputs ORDER BY id"
+                       if prepare then Contract.preparedQuery name sql [||] else Contract.query name sql
+                       Contract.query (name + "-warnings") "SHOW WARNINGS"
+                       Contract.query (name + "-counter") "SELECT @n AS calls"
+               Contract.execute "nested-reset" "SET @n=10"
+               Contract.query "nested" "SELECT twice_tick() AS value"
+               Contract.query "nested-counter" "SELECT @n AS calls"
+               Contract.query "failed-call" "SELECT fail_tick() AS value" |> Contract.fails 1644 "45000"
+               Contract.query "failed-counter" "SELECT @n AS calls"
+               Contract.execute "failed-update" "UPDATE guarded_inputs SET v=guarded_value(id)" |> Contract.fails 1644 "45000"
+               Contract.query "update-atomicity" "SELECT id,v FROM guarded_inputs ORDER BY id"
+               Contract.execute "failed-insert" "INSERT INTO guarded_inputs SELECT id+10,guarded_value(id) FROM volatile_inputs" |> Contract.fails 1644 "45000"
+               Contract.query "insert-atomicity" "SELECT id,v FROM guarded_inputs ORDER BY id" |]
+          Cleanup = [| "DROP TABLE IF EXISTS guarded_inputs"; "DROP FUNCTION IF EXISTS guarded_value"; "DROP FUNCTION IF EXISTS fail_tick"; "DROP FUNCTION IF EXISTS twice_tick"; "DROP FUNCTION IF EXISTS tick"; "DROP TABLE IF EXISTS volatile_inputs"; "SET @n=NULL" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private offsetRangeAggregates =
         { Name = "offset-range-aggregates"
           Setup =
@@ -2870,6 +2919,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            offsetRangeAggregates
+           volatileWindowInputs
            temporalNumericConversion
            roundingPrecisionDescriptors
            integralRoundingDescriptors

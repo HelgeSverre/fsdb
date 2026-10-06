@@ -75,6 +75,33 @@ let tests =
                   let expectedWarnings = warnings |> List.map (fun text -> [ Some "Warning"; Some "1292"; Some("Truncated incorrect DOUBLE value: '" + text + "'") ])
                   Expect.equal actualWarnings (ResultSet([ "Level"; "Code"; "Message" ], expectedWarnings)) (sql + " warnings")
 
+          testCase "window aggregates materialize volatile arguments once per input"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE volatile_inputs(id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO volatile_inputs VALUES(1),(2),(3)"
+              let session, created = handle session "CREATE FUNCTION tick() RETURNS INT NOT DETERMINISTIC NO SQL RETURN (@n:=COALESCE(@n,0)+1)"
+              TestSupport.Sql.expectOk created "create counter function"
+              for expression, expected, warnings in
+                  [ "SUM(tick()) OVER()", [ Some "6"; Some "6"; Some "6" ], []
+                    "SUM(tick()) OVER(ORDER BY id)", [ Some "1"; Some "3"; Some "6" ], []
+                    "SUM(tick()) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)", [ Some "1"; Some "3"; Some "5" ], []
+                    "SUM(tick()) OVER(ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING)", [ Some "5"; Some "3"; None ], []
+                    "SUM(tick()) OVER(ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)", [ None; Some "1"; Some "3" ], []
+                    "COUNT(tick()) OVER(ORDER BY id)", [ Some "1"; Some "2"; Some "3" ], []
+                    "MIN(tick()) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)", [ Some "1"; Some "1"; Some "2" ], []
+                    "MAX(tick()) OVER(ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING)", [ Some "3"; Some "3"; None ], []
+                    "SUM(CONCAT(tick(),'x')) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)", [ Some "1"; Some "3"; Some "5" ], [ "1x"; "1x"; "2x"; "2x"; "3x" ] ] do
+                  let current, _ = handle session "SET @n=0"
+                  let sql = "SELECT " + expression + " AS value FROM volatile_inputs ORDER BY id"
+                  let current, actual = handle current sql
+                  Expect.equal actual (ResultSet([ "value" ], List.map List.singleton expected)) sql
+                  let current, actualWarnings = handle current "SHOW WARNINGS"
+                  let expectedWarnings = warnings |> List.map (fun value -> [ Some "Warning"; Some "1292"; Some("Truncated incorrect DOUBLE value: '" + value + "'") ])
+                  Expect.equal actualWarnings (ResultSet([ "Level"; "Code"; "Message" ], expectedWarnings)) (sql + " warnings")
+                  let _, calls = handle current "SELECT @n AS calls"
+                  Expect.equal calls (ResultSet([ "calls" ], [ [ Some "3" ] ])) (sql + " evaluates every input once")
+
           testCase "stored functions preserve caller variables and signaled SQLSTATE"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

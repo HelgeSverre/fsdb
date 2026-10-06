@@ -3795,7 +3795,7 @@ let tests =
                         | ResultSet(_, [ row ]) -> Expect.equal row (List.map Some expected) sql
                         | other -> failtestf "unexpected aggregate result: %A" other
 
-                testCase "prefix windows preserve evaluation of unclassified custom scalars"
+                testCase "prefix windows materialize custom scalars once per input"
                 <| fun _ ->
                     let store = newStore ()
                     let mutable next = 0L
@@ -3807,7 +3807,7 @@ let tests =
                     runDefault store "CREATE TABLE prefix_inputs(id INT)" |> ignore
                     runDefault store "INSERT INTO prefix_inputs VALUES(1),(2),(3)" |> ignore
                     let result = run store registry "SELECT SUM(NEXT_INPUT()) OVER(ORDER BY id) AS s FROM prefix_inputs ORDER BY id"
-                    Expect.equal result (ResultSet([ "s" ], [ [ Some "1" ]; [ Some "5" ]; [ Some "15" ] ])) "custom inputs retain per-frame evaluation"
+                    Expect.equal result (ResultSet([ "s" ], [ [ Some "1" ]; [ Some "3" ]; [ Some "6" ] ])) "custom inputs are materialized once"
 
                 testCase "empty bit aggregates return their MySQL identities"
                 <| fun _ ->
@@ -12022,6 +12022,16 @@ let tests =
                     match runDefault store "SELECT JSON_OBJECTAGG(k, v) a FROM kv WHERE id = 99" with
                     | ResultSet(_, [ [ None ] ]) -> ()
                     | other -> failtestf "expected NULL over an empty group, got %A" other
+
+                testCase "JSON_OBJECTAGG windows fold both arguments within each frame"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE kv_window (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO kv_window VALUES (1),(2),(3)" |> ignore
+                    let result = runDefault store "SELECT CAST(JSON_OBJECTAGG(id,id) OVER(ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS CHAR) AS value FROM kv_window ORDER BY id"
+                    Expect.equal result
+                        (ResultSet([ "value" ], [ [ Some "{\"1\": 1}" ]; [ Some "{\"1\": 1, \"2\": 2}" ]; [ Some "{\"2\": 2, \"3\": 3}" ] ]))
+                        "key and value arguments are retained across sliding frames"
 
                 testCase "JSON_OBJECTAGG with one argument is a syntax error"
                 <| fun _ ->

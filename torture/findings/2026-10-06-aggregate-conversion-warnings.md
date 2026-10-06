@@ -20,11 +20,12 @@ input values and sliding frames. Partition key order is also observable in
 the warning rows, so partition evaluation follows collation-aware key order.
 
 The executor shares its numeric accumulator between grouped aggregates and
-stable SUM/AVG inputs in growing ROWS and RANGE frames.
+materialized SUM/AVG inputs in growing ROWS and RANGE frames.
 Exact inputs retain DECIMAL accumulation; approximate inputs retain DOUBLE
 accumulation. DISTINCT suppresses diagnostics only around numeric conversion,
-leaving expression evaluation outside that suppression. Unclassified custom
-functions and volatile expressions retain their existing evaluation strategy.
+leaving expression evaluation outside that suppression. Window arguments,
+including custom functions and volatile expressions, are materialized once per
+input before frame evaluation.
 Offset RANGE frames preserve NULL peers at unbounded edges; see
 [the RANGE boundary evidence](2026-10-06-offset-range-null-boundaries.md).
 

@@ -1483,7 +1483,7 @@ let private windowFunctionNames =
         [ yield! windowOnlyFunctionNames
           "SUM"; "COUNT"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT"; "BIT_AND"; "BIT_OR"; "BIT_XOR"
           "STD"; "STDDEV"; "STDDEV_POP"; "STDDEV_SAMP"; "VARIANCE"; "VAR_POP"; "VAR_SAMP"
-          "JSON_ARRAYAGG" ],
+          "JSON_ARRAYAGG"; "JSON_OBJECTAGG" ],
         System.StringComparer.OrdinalIgnoreCase
     )
 

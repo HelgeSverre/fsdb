@@ -219,11 +219,11 @@ MySQL's UCA weight-table bytes.
 SUM and AVG convert text before accumulation, including single-row windows;
 their DISTINCT forms compare converted numbers while COUNT retains text
 collation equality. Text and binary-string conversions emit numeric-prefix
-warnings; DISTINCT suppresses those conversion warnings. Growing ROWS and RANGE
-frames consume stable SUM/AVG inputs once per partition; bounded sliding frames
-retain repeated conversion warnings. Offset RANGE frames preserve NULL peers
-at unbounded edges. Volatile window arguments still use per-frame evaluation,
-so their warning multiplicity remains part of the diagnostics gap.
+warnings; DISTINCT suppresses those conversion warnings. Window aggregates
+materialize each argument once per input, including volatile expressions.
+Growing ROWS and RANGE frames accumulate SUM/AVG incrementally; bounded sliding
+frames retain repeated conversion warnings. Offset RANGE frames preserve NULL
+peers at unbounded edges.
 
 MySQL Enterprise Encryption is not a Community Server compatibility gap. Its
 asymmetric key-management functions belong to the separately installed
@@ -463,8 +463,11 @@ trigger is created.
 
 ## 10. Stored routines, events, schedulers
 
-No open routine or event difference is recorded. The implemented boundary is
-summarized in the [compatibility guide](docs/compatibility.md#stored-routines-and-events).
+Stored function bodies reject standalone `SET @user_variable=...` statements.
+Assignment expressions in RETURN are supported, and their user-variable changes
+remain visible to the caller, including nested calls and errors. The rest of
+the implemented boundary is summarized in the
+[compatibility guide](docs/compatibility.md#stored-routines-and-events).
 
 ## 11. Full-text search
 

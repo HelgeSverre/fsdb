@@ -12590,10 +12590,14 @@ and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
 and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
 
 /// Evaluates one aggregate over rows already filtered by WHERE.
-and private evalAggregate
+and private evalAggregate registry ctxFor rows name args =
+    evalAggregateUsing (fun row _ expression -> evalExpr (ctxFor row) expression) registry ctxFor rows name args
+
+and private evalAggregateUsing<'row>
+    (evaluateArgument: 'row -> int -> Expr -> Result<Value, EvalError>)
     (registry: Registry)
-    (ctxFor: Value[] -> EvalContext)
-    (rows: Value[] list)
+    (ctxFor: 'row -> EvalContext)
+    (rows: 'row list)
     (name: string)
     (args: Expr list)
     : Result<Value, EvalError> =
@@ -12630,7 +12634,7 @@ and private evalAggregate
                 processed <- processed + 1
                 let ctx = ctxFor row
 
-                match evalExpr ctx innerExpr with
+                match evaluateArgument row 0 innerExpr with
                 | Error error -> failure <- Some error
                 | Ok VNull -> ()
                 | Ok value ->
@@ -12653,9 +12657,9 @@ and private evalAggregate
             | Some s -> s
             | None -> ","
 
-        let evalRow (row: Value[]) : Result<(Value * Value * (Value * Collation.Collation option) list) option, EvalError> =
+        let evalRow row : Result<(Value * Value * (Value * Collation.Collation option) list) option, EvalError> =
             let ctx = ctxFor row
-            evalExpr ctx innerExpr
+            evaluateArgument row 0 innerExpr
             |> Result.bind (function
                 | VNull -> Ok None
                 | v -> orderKeys |> traverse (fst >> evalOrderKey ctx) |> Result.map (fun keys -> Some(v, collationKeyOf ctx innerExpr v, keys)))
@@ -12721,7 +12725,7 @@ and private evalAggregate
             Ok VNull
         else
             rows
-            |> traverse (fun row -> evalExpr (ctxFor row) arg)
+            |> traverse (fun row -> evaluateArgument row 0 arg)
             |> Result.map Functions.jsonArrayAggregate
     | [ keyExpr; valueExpr ] when upper = "JSON_OBJECTAGG" ->
         if rows.IsEmpty then
@@ -12729,8 +12733,7 @@ and private evalAggregate
         else
             rows
             |> traverse (fun row ->
-                let ctx = ctxFor row
-                evalExpr ctx keyExpr |> Result.bind (fun k -> evalExpr ctx valueExpr |> Result.map (fun v -> k, v)))
+                evaluateArgument row 0 keyExpr |> Result.bind (fun k -> evaluateArgument row 1 valueExpr |> Result.map (fun v -> k, v)))
             |> Result.map Functions.jsonObjectAggregate
     | [ arg ] when not (directAggregateNames.Contains upper) ->
         let distinct, innerExpr = unwrapDistinct arg
@@ -12751,7 +12754,7 @@ and private evalAggregate
             |> traverse (fun row ->
                 let ctx = ctxFor row
 
-                evalExpr ctx innerExpr
+                evaluateArgument row 0 innerExpr
                 |> Result.map (fun v ->
                     let numericValue = if foldsNumerically then enumNumericOperand ctx innerExpr v else v
                     if isNumericBuiltin then
@@ -12771,7 +12774,7 @@ and private evalAggregate
                     // Reusing ORDER BY keys keeps text under its resolved
                     // collation and ENUM under its declaration ordinal.
                     if isMin || isMax then
-                        let aggregateCtx = ctxFor (List.tryHead rows |> Option.defaultValue [||])
+                        let aggregateCtx = ctxFor (List.head rows)
 
                         let choose best candidate =
                             let compared = compareAggregateOrder aggregateCtx innerExpr best candidate
@@ -12793,7 +12796,8 @@ and private evalAggregate
             let ctx = ctxFor row
 
             allArgs
-            |> traverse (fun e -> evalExpr ctx e |> Result.map (fun v -> v, collationKeyOf ctx e v)))
+            |> List.mapi (fun index expression -> evaluateArgument row index expression |> Result.map (fun value -> value, collationKeyOf ctx expression value))
+            |> traverse id)
         |> Result.map (fun tuples ->
             tuples
             |> List.filter (List.exists (fst >> function VNull -> true | _ -> false) >> not)
@@ -14666,10 +14670,6 @@ and private runWindowedSelect
                         |> Result.bind (fun lo ->
                             boundIndex frame.End false |> Result.map (fun hi -> max 0 lo, min last hi))
 
-                let frameRows group pos =
-                    frameRange group pos
-                    |> Result.map (fun (lo, hi) -> [ for i in lo .. hi -> rowAt group i ])
-
                 // The frame-relative row `FIRST_VALUE`/`LAST_VALUE`/
                 // `NTH_VALUE` read, or None when the frame is too short.
                 let frameRowAt group pos (pick: int -> int -> int option) =
@@ -14685,34 +14685,52 @@ and private runWindowedSelect
                         |> traverse id)
                     |> Result.map (List.collect id >> Array.ofList)
 
-                let aggregateOver (name: string) (args: Expr list) group pos =
-                    frameRows group pos |> Result.bind (fun rows -> evalAggregate registry ctxFor rows name args)
-
-                let prefixAggregate kind expression =
+                let aggregateValues name args =
                     partitions
                     |> traverse (fun group ->
-                        let accumulator = NumericAggregateAccumulator(kind, divisionPrecisionIncrement ())
-                        let mutable consumed = 0
-                        let mutable failure = None
+                        let contextAt index = ctxFor (rowAt group index)
+                        // Window arguments are materialized before frame reads; numeric conversion belongs to each fold.
                         group
-                        |> Array.mapi (fun pos (originalIndex, _) ->
-                            frameRange group pos
-                            |> Result.bind (fun (_, hi) ->
-                                while consumed <= hi && failure.IsNone do
-                                    Limits.checkQueryCancellation consumed
-                                    let ctx = ctxFor (rowAt group consumed)
-                                    match evalExpr ctx expression with
-                                    | Error error -> failure <- Some error
-                                    | Ok value ->
-                                        enumNumericOperand ctx expression value
-                                        |> Functions.numericAggregateValue
-                                        |> accumulator.Add
-                                    consumed <- consumed + 1
-                                match failure with
-                                | Some error -> Error error
-                                | None -> Ok(originalIndex, accumulator.Value)))
+                        |> Array.mapi (fun index _ ->
+                            Limits.checkQueryCancellation index
+                            let ctx = contextAt index
+                            args
+                            |> traverse (function
+                                | Star _ when equalsIgnoreCase name "COUNT" -> Ok VNull
+                                | expression -> evalExpr ctx expression)
+                            |> Result.map Array.ofList)
                         |> Array.toList
-                        |> traverse id)
+                        |> traverse id
+                        |> Result.bind (fun inputRows ->
+                            let inputs = Array.ofList inputRows
+                            let evaluate index argument _ = Ok inputs.[index].[argument]
+                            let prefix =
+                                match args with
+                                | [ expression ]
+                                    when frame.Start = UnboundedPreceding
+                                         && (equalsIgnoreCase name "SUM" || equalsIgnoreCase name "AVG")
+                                         && Functions.isUnmodifiedBuiltinAggregate name registry ->
+                                    let kind = if equalsIgnoreCase name "SUM" then SumValues else AverageValues
+                                    Some(expression, NumericAggregateAccumulator(kind, divisionPrecisionIncrement ()))
+                                | _ -> None
+                            let mutable consumed = 0
+                            group
+                            |> Array.mapi (fun pos (originalIndex, _) ->
+                                frameRange group pos
+                                |> Result.bind (fun (lo, hi) ->
+                                    match prefix with
+                                    | Some(expression, accumulator) ->
+                                        while consumed <= hi do
+                                            Limits.checkQueryCancellation consumed
+                                            enumNumericOperand (contextAt consumed) expression inputs.[consumed].[0]
+                                            |> Functions.numericAggregateValue
+                                            |> accumulator.Add
+                                            consumed <- consumed + 1
+                                        Ok accumulator.Value
+                                    | None -> evalAggregateUsing evaluate registry contextAt [ lo .. hi ] name args)
+                                |> Result.map (fun value -> originalIndex, value))
+                            |> Array.toList
+                            |> traverse id))
                     |> Result.map (List.collect id >> Array.ofList)
 
                 match fn with
@@ -14852,31 +14870,7 @@ and private runWindowedSelect
                     elif args |> List.exists (function Distinct _ -> true | _ -> false) then
                         Error(1235, "This version of MySQL doesn't yet support '<window function>(DISTINCT ..)'")
                     else
-                        let scope =
-                            { Columns = columns |> List.map (_.Name >> _.ToLowerInvariant()) |> Set.ofList
-                              Qualifiers = qualifiers |> Map.keys |> Seq.map _.ToLowerInvariant() |> Set.ofSeq }
-                        let canReuseInput expression =
-                            let unclassifiedFunction =
-                                expression
-                                |> Expression.exists (function
-                                    | FuncCall(name, _) when not (Functions.isUnmodifiedBuiltinScalar name registry) ->
-                                        registry.Extensions
-                                        |> Map.tryFind (name.ToUpperInvariant())
-                                        |> Option.forall (fun extension -> not extension.Deterministic)
-                                    | _ -> false)
-                            not unclassifiedFunction && isStatementStableExpr store registry dbName scope expression
-                        let growingFrame = frame.Start = UnboundedPreceding
-                        let values =
-                            match args with
-                            | [ expression ]
-                                when growingFrame
-                                     && (equalsIgnoreCase name "SUM" || equalsIgnoreCase name "AVG")
-                                     && Functions.isUnmodifiedBuiltinAggregate name registry
-                                     && canReuseInput expression ->
-                                // Growing frames consume each input once, including its diagnostics.
-                                let kind = if equalsIgnoreCase name "SUM" then SumValues else AverageValues
-                                prefixAggregate kind expression
-                            | _ -> perRow (aggregateOver name args)
+                        let values = aggregateValues name args
                         if equalsIgnoreCase name "AVG" && Functions.isUnmodifiedBuiltinAggregate name registry then
                             // MySQL materializes window averages at their declared scale before outer arithmetic.
                             let scale =
