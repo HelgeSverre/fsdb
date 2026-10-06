@@ -883,6 +883,65 @@ let tests =
               Expect.equal constants (ResultSet([ "unsigned_value"; "signed_value" ], [ [ Some "-18446744073709551615"; Some "9223372036854775808" ] ])) "constants promote to decimal"
               Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal; TypeNewDecimal ] "promoted constants advertise decimal"
 
+          testCase "rounding precision expressions preserve exact values and descriptors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, expected, family, width, scale in
+                  [ "ROUND(1.25,1+0)", Some "1.3", TypeNewDecimal, 5u, 1uy
+                    "TRUNCATE(1.25,1+0)", Some "1.2", TypeNewDecimal, 4u, 1uy
+                    "ROUND(CAST(1 AS DECIMAL(10,0)),0)", Some "1", TypeNewDecimal, 12u, 0uy
+                    "TRUNCATE(CAST(0.1 AS DECIMAL(4,4)),0)", Some "0", TypeNewDecimal, 2u, 0uy
+                    "ROUND(1.25,NULL)", None, TypeNewDecimal, 3u, 0uy
+                    "ROUND(1.25,1.5)", Some "1.25", TypeNewDecimal, 5u, 2uy
+                    "ROUND(1.25,1.5e0)", Some "1.25", TypeNewDecimal, 5u, 2uy
+                    "ROUND(1.25,'1.5')", Some "1.3", TypeNewDecimal, 5u, 1uy
+                    "TRUNCATE(1.29,1.5)", Some "1.29", TypeNewDecimal, 5u, 2uy
+                    "ROUND(1.25,30)", Some "1.25", TypeNewDecimal, 5u, 2uy
+                    "TRUNCATE(1.25,30)", Some "1.25", TypeNewDecimal, 5u, 2uy
+                    "TRUNCATE(9223372036854775807,0)", Some "9223372036854775807", TypeLongLong, 21u, 0uy
+                    "TRUNCATE(-9223372036854775808,-1)", Some "-9223372036854775800", TypeLongLong, 21u, 0uy
+                    "ROUND(1.25,18446744073709551615)", Some "1.25", TypeNewDecimal, 5u, 2uy
+                    "TRUNCATE(1.25,-9223372036854775808)", Some "0", TypeNewDecimal, 2u, 0uy
+                    "ROUND(1.25,-9223372036854775808)", Some "0", TypeNewDecimal, 3u, 0uy
+                    "ROUND('2.5')", Some "2", TypeDouble, 23u, 31uy
+                    "TRUNCATE(1.25e0,18446744073709551615)", Some "1.25", TypeDouble, 23u, 31uy
+                    "TRUNCATE(1.25e0,-9223372036854775808)", Some "0", TypeDouble, 23u, 31uy ] do
+                  let sql = "SELECT " + expression + " AS value"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) expression
+                  let shape (metadata: ColumnMetadata) = metadata.TypeId, metadata.ColumnLength, metadata.Decimals
+                  Expect.equal (current.LastResultColumnMetadata |> List.map shape)
+                      [ family, width, scale ] (expression + " execution descriptor")
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map (fun column -> shape column.Metadata))
+                      [ family, width, scale ] (expression + " prepare descriptor")
+
+          testCase "prepared rounding precision retains the input scale"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE rounding_parameters(d DECIMAL(10,2))"
+              let session, _ = handle session "INSERT INTO rounding_parameters VALUES(1.25)"
+              let session, _ = handle session "SET @digits=1"
+              for name, expected in [ "ROUND", "1.30"; "TRUNCATE", "1.20" ] do
+                  let sql = "SELECT " + name + "(d,?) AS value FROM rounding_parameters"
+                  let current, prepared = handle session ("PREPARE rounding_parameter FROM '" + sql + "'")
+                  Expect.equal prepared (Affected 0UL) "prepare succeeds"
+                  let current, result = handle current "EXECUTE rounding_parameter USING @digits"
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) "bound precision remains runtime-dependent"
+                  Expect.equal current.LastResultColumnMetadata.Head.Decimals 2uy "execution retains input scale"
+
+          testCase "rounding preserves nullability and reports signed overflow"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let current, result = handle session "SELECT ROUND(1.25,NULL) AS value"
+              Expect.equal result (ResultSet([ "value" ], [ [ None ] ])) "a NULL precision yields NULL"
+              Expect.equal (current.LastResultColumnMetadata.Head.Flags &&& NotNullFlag) 0us "NULL precision is nullable"
+              for value in [ "9223372036854775807"; "-9223372036854775808" ] do
+                  match handle session ("SELECT ROUND(" + value + ",-1)") |> snd with
+                  | Err(1690, _) -> ()
+                  | other -> failtestf "expected MySQL signed BIGINT overflow for %s, got %A" value other
+
           testCase "floor and ceiling derive whole-number result descriptors"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

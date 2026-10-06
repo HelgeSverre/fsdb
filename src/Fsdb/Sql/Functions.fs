@@ -363,6 +363,11 @@ let private roundNumeric (v: Value) : Value =
     | VDouble d -> VDouble(Math.Round(d, MidpointRounding.ToEven))
     | _ -> v
 
+/// Counts beyond DOUBLE's scaling range have identical rounding behavior.
+/// Numeric counts round to an integer; string counts truncate.
+let internal roundingDigits value =
+    roundNumeric value |> toDouble |> max -309.0 |> min 309.0 |> int
+
 let private coalesceFn (args: Value list) : Value =
     args |> List.tryFind (function VNull -> false | _ -> true) |> Option.defaultValue VNull |> Value.materialize
 
@@ -377,19 +382,9 @@ let private ifFn: Scalar =
     | [ cond; a; b ] -> if truthy cond = Some true then a else b
     | _ -> VNull
 
-/// `Math.Round` throws outside 0..15 (double) / 0..28 (decimal) digits, so
-/// `ROUND(x, -n)` — MySQL rounds to the left of the decimal point, e.g.
-/// `ROUND(123.456, -1) = 120` — needs its own scaling rather than passing a
-/// negative digit count straight through. Used for digit counts outside the
-/// BCL's supported range in either direction; a factor of 0/∞ (digits far
-/// outside a double's meaningful exponent range) collapses to 0, matching
-/// what rounding to a vastly-larger-than-the-value power of 10 means.
-/// Approximate-value rounding is half-to-*even* (MySQL defers to the C
-/// library here — `ROUND(2.5e0)` is 2, not 3, oracle-verified), unlike the
-/// half-away-from-zero `roundDecimalAt` uses for exact values.
-/// Past `Math.Round`'s 15-digit limit, scale up and divide back rather than
-/// multiplying by the reciprocal: `5551 / 1e20` and `5551 * 1e-20` are
-/// different doubles and MySQL's answer is the former.
+/// Negative digit counts round left of the point. Approximate values round to even.
+/// Positive scaling beyond DOUBLE's range leaves the value unchanged; negative
+/// scaling beyond that range yields zero. Divide back to avoid reciprocal error.
 let private roundDoubleAt (d: float) (digits: int) : float =
     if digits >= 0 && digits <= 15 then
         Math.Round(d, digits, MidpointRounding.ToEven)
@@ -406,42 +401,29 @@ let private roundDoubleAt (d: float) (digits: int) : float =
         else Math.Round(d / factor, MidpointRounding.ToEven) * factor
 
 let private roundDecimalAt (d: decimal) (digits: int) : decimal =
-    if digits >= 0 && digits <= 28 then
-        Math.Round(d, digits, MidpointRounding.AwayFromZero)
+    if digits >= 28 then d
+    elif digits >= 0 then Math.Round(d, digits, MidpointRounding.AwayFromZero)
+    elif digits <= -29 then 0M
     else
-        try
-            let factor = pown 10M -digits
-            Math.Round(d / factor, MidpointRounding.AwayFromZero) * factor
-        with :? OverflowException ->
-            0M
+        let factor = pown 10M -digits
+        Math.Round(d / factor, MidpointRounding.AwayFromZero) * factor
 
-/// ROUND(x) rounds to the nearest integer; ROUND(x, n) to `n` decimal
-/// places (negative `n` rounds left of the point). Exact values (INT,
-/// DECIMAL) round half away from zero; approximate ones (DOUBLE) round half
-/// to even — MySQL's split, not one rule for both.
-let private roundFn: Scalar =
-    function
-    | [ VNull ]
-    | [ VNull; _ ] -> VNull
-    | [ VInt i ] -> VInt i
-    | [ VInt i; VInt digits ] -> if digits >= 0L then VInt i else VInt(int64 (roundDecimalAt (decimal i) (int digits)))
-    // `BIGINT UNSIGNED` is exact and integral already, so a non-negative
-    // digit count is the identity; rounding left of the point can leave the
-    // unsigned domain (MySQL then raises 1690, which `Value.narrowUnsigned`
-    // does for the arithmetic path — here the exact `DECIMAL` is the answer
-    // MySQL gives for every in-domain case).
-    | [ VUInt u ] -> VUInt u
-    | [ VUInt u; VInt digits ] ->
-        if digits >= 0L then
-            VUInt u
-        else
-            Value.narrowUnsigned (roundDecimalAt (decimal u) (int digits))
-    | [ VDecimal d ] -> VDecimal(Math.Round(d, MidpointRounding.AwayFromZero))
-    | [ VDecimal d; VInt digits ] -> VDecimal(roundDecimalAt d (int digits))
-    | [ VDouble d ] -> VDouble(Math.Round(d, MidpointRounding.ToEven))
-    | [ VDouble d; VInt digits ] -> VDouble(roundDoubleAt d (int digits))
-    | [ v ] -> VDouble(Math.Round(toDouble v, MidpointRounding.AwayFromZero))
-    | [ v; VInt digits ] -> VDouble(roundDoubleAt (toDouble v) (int digits))
+let private signedRoundingResult number =
+    if number < decimal Int64.MinValue || number > decimal Int64.MaxValue then
+        raise Value.SignedOutOfRange
+    VInt(int64 number)
+
+/// Exact values round half away from zero; approximate values round to even.
+let private roundValueAt digits = function
+    | VNull -> VNull
+    | VInt number -> roundDecimalAt (decimal number) digits |> signedRoundingResult
+    | VUInt number -> roundDecimalAt (decimal number) digits |> Value.narrowUnsigned
+    | VDecimal number -> roundDecimalAt number digits |> VDecimal
+    | value -> roundDoubleAt (toDouble value) digits |> VDouble
+
+let private roundFn: Scalar = function
+    | [ value ] -> roundValueAt 0 value
+    | [ value; digits ] when digits <> VNull -> roundValueAt (roundingDigits digits) value
     | _ -> VNull
 
 /// `MOD(a, b)` (and `%`, which desugars to this in `Parser`) — MySQL's
@@ -4862,37 +4844,30 @@ let private signFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (sign (toDouble v)))
     | _ -> VNull
 
-/// `TRUNCATE(d, n)` on an exact value keeps scale `n` even when the kept
-/// digits are zeros — MySQL answers `68632858.00`, and .NET's `decimal`
-/// arithmetic alone would hand back a scale-0 `68632858`. Re-parsing a
-/// fixed-point rendering pads the scale back on.
-let private truncateFn: Scalar =
-    function
-    // Exact and integral: only a negative digit count changes anything, and
-    // it can only shrink the value, so it stays in the unsigned domain.
-    | [ VUInt u; d ] when not (anyNull [ d ]) ->
-        let digits = int (toDouble d)
+let private truncateDecimalAt (number: decimal) digits =
+    if digits >= 28 then number
+    elif digits >= 0 then Math.Round(number, digits, MidpointRounding.ToZero)
+    elif digits <= -29 then 0M
+    else
+        let factor = pown 10M -digits
+        Math.Truncate(number / factor) * factor
 
-        if digits >= 0 then VUInt u
-        // 10^20 already exceeds the whole domain, so anything beyond that
-        // truncates to 0 without asking `decimal` for an overflowing factor.
-        elif digits <= -20 then VUInt 0UL
-        else
-            let factor = pown 10M -digits
-            Value.narrowUnsigned (Math.Truncate(decimal u / factor) * factor)
-    | [ VDecimal dec; d ] when not (anyNull [ d ]) ->
-        let digits = int (toDouble d)
-        let factor = decimal (Math.Pow(10.0, float digits))
-        let truncated = Math.Truncate(dec * factor) / factor
+let private truncateDoubleAt number digits =
+    let factor = Math.Pow(10.0, float (abs digits))
+    if digits >= 0 then
+        if Double.IsInfinity factor || Double.IsInfinity(number * factor) then number
+        else Math.Truncate(number * factor) / factor
+    elif Double.IsInfinity factor then 0.0
+    else Math.Truncate(number / factor) * factor
 
-        if digits <= 0 then
-            VDecimal truncated
-        else
-            let scale = min digits 28
-            VDecimal(Decimal.Parse(truncated.ToString("F" + string scale, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture))
-    | [ v; d ] when not (anyNull [ v; d ]) ->
-        let factor = Math.Pow(10.0, float (int (toDouble d)))
-        VDouble(Math.Truncate(toDouble v * factor) / factor)
+let private truncateFn: Scalar = function
+    | [ value; precision ] when value <> VNull && precision <> VNull ->
+        let digits = roundingDigits precision
+        match value with
+        | VInt number -> truncateDecimalAt (decimal number) digits |> signedRoundingResult
+        | VUInt number -> truncateDecimalAt (decimal number) digits |> Value.narrowUnsigned
+        | VDecimal number -> truncateDecimalAt number digits |> VDecimal
+        | value -> truncateDoubleAt (toDouble value) digits |> VDouble
     | _ -> VNull
 
 let private random = Random()

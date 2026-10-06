@@ -2187,6 +2187,35 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private roundingPrecisionDescriptors =
+        { Name = "rounding-precision-descriptors"
+          Setup = [| "CREATE TABLE rounding_precision(d DECIMAL(10,2),n INT)"
+                     "INSERT INTO rounding_precision VALUES(1.25,1)" |]
+          Steps =
+            [| for index, expression in
+                   [ "ROUND(1.25,1+0)"; "TRUNCATE(1.25,1+0)"
+                     "ROUND(CAST(1 AS DECIMAL(10,0)),0)"; "TRUNCATE(CAST(0.1 AS DECIMAL(4,4)),0)"
+                     "ROUND(1.25,NULL)"; "ROUND(1.25,1.5)"; "ROUND(1.25,1.5e0)"; "ROUND(1.25,'1.5')"
+                     "TRUNCATE(1.29,1.5)"; "ROUND(1.25,30)"; "TRUNCATE(1.25,30)"
+                     "TRUNCATE(9223372036854775807,0)"; "TRUNCATE(-9223372036854775808,-1)"
+                     "ROUND(1.25,18446744073709551615)"; "TRUNCATE(1.25,-9223372036854775808)"
+                     "ROUND(1.25,-9223372036854775808)"; "ROUND('2.5')"
+                     "TRUNCATE(1.25e0,18446744073709551615)"; "TRUNCATE(1.25e0,-9223372036854775808)"
+                     "ROUND(d,n)"; "TRUNCATE(d,n)"; "ROUND(d,ABS(-1))"; "TRUNCATE(d,CAST(1 AS UNSIGNED))" ] |> List.indexed do
+                   let sql = "SELECT " + expression + " AS value FROM rounding_precision"
+                   Contract.query (sprintf "precision-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "precision-%d-binary" index) sql [||]
+               for index, value in [ "9223372036854775807"; "-9223372036854775808" ] |> List.indexed do
+                   let sql = "SELECT ROUND(" + value + ",-1)"
+                   Contract.query (sprintf "overflow-%d-text" index) sql |> Contract.fails 1690 "22003"
+                   Contract.preparedQuery (sprintf "overflow-%d-binary" index) sql [||] |> Contract.fails 1690 "22003"
+               Contract.preparedQuery "runtime-precision" "SELECT ROUND(d,?) AS value FROM rounding_precision" [| box 1 |]
+               Contract.preparedQuery "runtime-truncation" "SELECT TRUNCATE(d,?) AS value FROM rounding_precision" [| box 1 |]
+               Contract.preparedQuery "runtime-expression" "SELECT ROUND(d,?+0) AS value FROM rounding_precision" [| box 1 |]
+               Contract.preparedQuery "runtime-function" "SELECT TRUNCATE(d,ABS(?)) AS value FROM rounding_precision" [| box -1 |] |]
+          Cleanup = [| "DROP TABLE IF EXISTS rounding_precision" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private integralRoundingDescriptors =
         { Name = "integral-rounding-descriptors"
           Setup = [| "CREATE TABLE rounding_numbers(d DECIMAL(10,2),wide DECIMAL(20,2),u DECIMAL(20,2) UNSIGNED,f DOUBLE)"
@@ -2791,6 +2820,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            temporalNumericConversion
+           roundingPrecisionDescriptors
            integralRoundingDescriptors
            scientificLiteralDescriptors
            approximateExpressionDescriptors

@@ -4949,6 +4949,12 @@ let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Sta
     let rec retainRuntimeInference = function
         | Neg operand when hasParameter operand ->
             Some(Neg(RuntimeExpression(Expression.rewriteTree retainRuntimeInference operand)))
+        | FuncCall(name, [ value; precision ])
+            when (name.Equals("ROUND", System.StringComparison.OrdinalIgnoreCase)
+                  || name.Equals("TRUNCATE", System.StringComparison.OrdinalIgnoreCase)) && hasParameter precision ->
+            Some(FuncCall(name,
+                [ Expression.rewriteTree retainRuntimeInference value
+                  RuntimeExpression(Expression.rewriteTree retainRuntimeInference precision) ]))
         | Subquery select ->
             let retainBinding = function
                 | Placeholder _ as parameter -> Some(RuntimeExpression parameter)

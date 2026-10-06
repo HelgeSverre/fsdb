@@ -5602,15 +5602,22 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                 elif metadata.TypeId = TypeDouble then { metadata with ColumnLength = 23u; Decimals = 31uy }
                 elif metadata.TypeId <> TypeNewDecimal then metadata
                 else
-                    let scale =
+                    let argument = decimalShape arg (Some metadata)
+                    let digits =
                         match precision with
                         | [] -> 0
-                        | [ Lit(VInt digits) ] -> int (max 0L (min (int64 metadata.Decimals) digits))
-                        | _ -> int metadata.Decimals
-                    let argument = decimalShape arg (Some metadata)
-                    let carry = if equalsIgnoreCase name "ROUND" && scale < argument.Scale then 1 else 0
-                    let shape = { Precision = min 65 (argument.Precision - argument.Scale + scale + carry); Scale = scale }
+                        | [ expression ] ->
+                            tryClosedNumericValue ctx expression
+                            |> Option.map Functions.roundingDigits
+                            |> Option.defaultValue argument.Scale
+                        | _ -> argument.Scale
+                    let scale = max 0 (min argument.Scale digits)
+                    let carry = if equalsIgnoreCase name "ROUND" && (digits <= 0 || digits < argument.Scale) then 1 else 0
+                    let shape = { Precision = max 1 (min 65 (argument.Precision - argument.Scale + scale + carry)); Scale = scale }
                     withDecimalShape shape metadata)
+            |> Option.map (fun metadata ->
+                if precision |> List.forall (fun expression -> metadataOfExpr ctx expression |> Option.exists (hasMetadataFlag NotNullFlag)) then metadata
+                else { metadata with Flags = metadata.Flags &&& ~~~NotNullFlag })
         | "ABS", arg :: _ ->
             metadataOfExpr ctx arg
             |> Option.bind temporalUnaryMetadata

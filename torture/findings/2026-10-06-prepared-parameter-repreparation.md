@@ -996,3 +996,43 @@ no build warnings. The native MySQL 8.4.11 maintained oracle passes, and
 compatibility contracts pass 3,397 steps across 39 cases with no differences.
 Manifest: `artifacts/runs/20261006T210325090-93666/contracts/manifest.json`.
 The disposable native oracle server and data directory are cleaned up.
+
+
+## Rounding precision and exact values
+
+MySQL 8.4.11 derives ROUND/TRUNCATE metadata from constant precision expressions,
+including arithmetic, casts, numeric literals, and strings. `ROUND(1.25,1+0)`
+returns `1.3` with DECIMAL width 5 and scale 1; TRUNCATE returns `1.2` with width
+4 and scale 1. ROUND reserves a carry digit when rounding to zero or fewer
+places, including an input already declared with scale zero. TRUNCATE retains
+at least one precision digit when removing an entirely fractional input.
+
+Digit-count coercion is shared by evaluation and inference: numeric counts
+round to integers, while string counts truncate. NULL precision yields NULL
+and nullable metadata. Counts outside DOUBLE's exponent range are bounded before
+conversion to an implementation-sized integer. Thus extreme positive counts
+preserve values, and extreme negative counts yield zero without overflowing a
+scaling factor or wrapping an integer conversion.
+
+Exact rounding/truncation uses decimal arithmetic. Truncating signed BIGINT
+limits preserves every digit; rounding outside the signed domain reports
+1690/22003. Approximate values stay DOUBLE and round to even, including string
+inputs such as `ROUND('2.5') = 2`.
+
+Prepared precision parameters retain runtime origin after binding. MySQL keeps
+the input's scale for `ROUND(d,?)` and `TRUNCATE(d,?)`; for DECIMAL(10,2) with
+`d=1.25` and precision 1, the results are `1.30` and `1.20`. Constant precision
+expressions instead reduce scale. Shared expression rewriting preserves that
+distinction without changing runtime evaluation.
+
+The Expecto regressions cover values, execution/PREPARE descriptors, nullability,
+parameter binding, and signed overflow. The maintained oracle checks literal
+metadata in both protocols; the differential contract also exercises stored
+precision, parameterized precision, and expected overflow errors. This does not
+extend System.Decimal's precision range or complete unaudited constant functions.
+
+Validation: `DOTNET_PROCESSOR_COUNT=4 just check` passes all 2,832 tests with
+no build warnings. The maintained native MySQL 8.4.11 oracle passes; contracts
+pass 3,451 steps across 40 cases with no differences. Manifest:
+`artifacts/runs/20261006T211752574-95605/contracts/manifest.json`.
+The disposable native oracle server and data directory are cleaned up.

@@ -1232,3 +1232,40 @@ let runIntegralRoundingDescriptors () =
             printfn "Integral rounding | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
 
 runIntegralRoundingDescriptors ()
+
+
+let runRoundingPrecisionDescriptors () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        for expression, expected, family, width, scale in
+            [ "ROUND(1.25,1+0)", "1.3", "DECIMAL", 5, 1
+              "TRUNCATE(1.25,1+0)", "1.2", "DECIMAL", 4, 1
+              "ROUND(CAST(1 AS DECIMAL(10,0)),0)", "1", "DECIMAL", 12, 0
+              "TRUNCATE(CAST(0.1 AS DECIMAL(4,4)),0)", "0", "DECIMAL", 2, 0
+              "ROUND(1.25,NULL)", "NULL", "DECIMAL", 3, 0
+              "ROUND(1.25,1.5)", "1.25", "DECIMAL", 5, 2
+              "ROUND(1.25,1.5e0)", "1.25", "DECIMAL", 5, 2
+              "ROUND(1.25,'1.5')", "1.3", "DECIMAL", 5, 1
+              "TRUNCATE(1.29,1.5)", "1.29", "DECIMAL", 5, 2
+              "ROUND(1.25,30)", "1.25", "DECIMAL", 5, 2
+              "TRUNCATE(1.25,30)", "1.25", "DECIMAL", 5, 2
+              "TRUNCATE(9223372036854775807,0)", "9223372036854775807", "BIGINT", 21, 0
+              "TRUNCATE(-9223372036854775808,-1)", "-9223372036854775800", "BIGINT", 21, 0
+              "ROUND(1.25,18446744073709551615)", "1.25", "DECIMAL", 5, 2
+              "TRUNCATE(1.25,-9223372036854775808)", "0", "DECIMAL", 2, 0
+              "ROUND(1.25,-9223372036854775808)", "0", "DECIMAL", 3, 0 ] do
+            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
+               || reader.GetDataTypeName(0) <> family || metadata.ColumnSize <> Nullable width
+               || metadata.NumericScale <> Nullable scale then
+                failwithf "%A %s: expected %s width=%d scale=%d value=%s; got %s width=%O scale=%O"
+                    protocol expression family width scale expected (reader.GetDataTypeName 0) metadata.ColumnSize metadata.NumericScale
+            printfn "Rounding precision | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
+
+runRoundingPrecisionDescriptors ()
