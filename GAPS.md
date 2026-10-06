@@ -211,8 +211,9 @@ or locking retain the general SELECT pipeline.
 |---|---|---|
 | Remaining geographic spatial behavior | non-point distance and topology beyond line length, plus reference systems beyond EPSG 4326 | low |
 
-`CONVERT_TZ` and the session `time_zone` resolve numeric offsets and `SYSTEM`,
-but named zones remain unavailable without MySQL's optional time-zone tables.
+`CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
+and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
+(`Use_leap_seconds = Y`) remain unsupported.
 `WEIGHT_STRING()` returns host-ICU sort-key bytes for textual collations, not
 MySQL's UCA weight-table bytes.
 
@@ -510,10 +511,11 @@ protocol and SQL user-variable validation rules.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
+| Unaliased expression labels | source-shaped expression labels, including placeholders in prepared results | reconstructed labels can omit string quotes, normalize spacing, or substitute prepared parameter values; explicit aliases are preserved | low | divergence |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index conversion conditions, conditional DDL, ignored physical-directory options, unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |
-| System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset or `SYSTEM` time-zone variables are live; most others are inert or absent, named time zones are unavailable, and `system_time_zone` retains its static bootstrap label | medium | divergence |
+| System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset, `SYSTEM`, and catalog-backed named time-zone variables are live; most others are inert or absent, and `system_time_zone` retains its static bootstrap label | medium | divergence |
 
 ## 13. Authentication and privileges
 

@@ -675,7 +675,7 @@ let private registryFor (session: Session) : Functions.Registry =
         |> Option.defaultValue Functions.defaultTimeLocale
     let timeZone =
         sessionValue session "time_zone"
-        |> Option.bind Temporal.trySqlTimeZone
+        |> Option.bind (TimeZones.resolve session.Store)
         |> Option.defaultValue Temporal.SystemTimeZone
     let defaultWeekFormat =
         sessionValue session "default_week_format"
@@ -714,6 +714,7 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "TIMESTAMP" (Functions.timestampFn timeZone)
     |> Functions.registerScalar "UNIX_TIMESTAMP" (Functions.unixTimestampFn timeZone)
     |> Functions.registerScalar "FROM_UNIXTIME" (Functions.fromUnixTimeFn timeZone timeLocale)
+    |> Functions.registerScalar "CONVERT_TZ" (Functions.convertTzFn (TimeZones.resolve session.Store))
     |> Functions.registerScalar "WEEK" (Functions.weekFn defaultWeekFormat)
     |> Functions.registerScalar
         "ST_BUFFER_STRATEGY"
@@ -1623,7 +1624,7 @@ let private parseSetFragment
                         | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
                         | None -> Error(Err(1649, sprintf "Unknown locale: '%s'" value))
                     | Ok(VString value, sideEffects) when name = "time_zone" ->
-                        match Temporal.trySqlTimeZone value with
+                        match TimeZones.resolve session.Store value with
                         | Some zone -> Ok(SetVarAction(name, Some(Temporal.sqlTimeZoneText zone), isGlobal), sideEffects)
                         | None -> Error(Err(1298, sprintf "Unknown or incorrect time zone: '%s'" value))
                     | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" ->
@@ -1711,7 +1712,7 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
 
         if name = "time_zone" then
             value
-            |> Option.bind Temporal.trySqlTimeZone
+            |> Option.bind (TimeZones.resolve session.Store)
             |> Option.iter (fun timeZone ->
                 Storage.setTimeZone session.Store timeZone
                 session.Tx |> Option.iter (fun transaction -> Storage.setTimeZone transaction.Snapshot timeZone))

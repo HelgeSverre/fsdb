@@ -1,13 +1,64 @@
-/// MySQL temporal values whose date component contains a zero.
+/// MySQL temporal values, time-zone rules, and calendar boundaries.
 module Fsdb.Temporal
 
 open System
 open System.Globalization
 open System.Text.RegularExpressions
 
+/// Immutable rules loaded from MySQL's time-zone catalog.
+type NamedTimeZone =
+    private
+        { Name: string
+          InitialOffset: int
+          Transitions: (int64 * int) array
+          Offsets: int array }
+
+let namedTimeZone name initialOffset transitions =
+    let transitions = transitions |> Seq.sortBy fst |> Array.ofSeq
+
+    { Name = name
+      InitialOffset = initialOffset
+      Transitions = transitions
+      Offsets = Array.append [| initialOffset |] (Array.map snd transitions) |> Array.distinct }
+
+let private offsetAt zone seconds =
+    let mutable lower = 0
+    let mutable upper = zone.Transitions.Length
+
+    while lower < upper do
+        let middle = lower + (upper - lower) / 2
+        if fst zone.Transitions.[middle] <= seconds then lower <- middle + 1
+        else upper <- middle
+
+    if lower = 0 then zone.InitialOffset else snd zone.Transitions.[lower - 1]
+
+let private namedZoneToUtc zone (value: DateTime) =
+    let seconds = value.Ticks / TimeSpan.TicksPerSecond - DateTime.UnixEpoch.Ticks / TimeSpan.TicksPerSecond
+    let fraction = value.Ticks % TimeSpan.TicksPerSecond
+    let candidates =
+        zone.Offsets
+        |> Array.choose (fun offset ->
+            let utc = seconds - int64 offset
+            if offsetAt zone utc = offset then Some utc else None)
+    let utc, skipped =
+        if candidates.Length > 0 then Array.min candidates, false
+        else
+            // A spring-forward gap collapses to its first valid instant.
+            zone.Transitions
+            |> Array.mapi (fun index (transition, after) ->
+                let before = if index = 0 then zone.InitialOffset else snd zone.Transitions.[index - 1]
+                transition, before, after)
+            |> Array.tryPick (fun (transition, before, after) ->
+                if after > before && transition > seconds - int64 after && transition <= seconds - int64 before then
+                    Some(transition, true)
+                else None)
+            |> Option.defaultWith (fun () -> invalidArg "value" "Local time is outside the time-zone rules")
+    DateTime.UnixEpoch.AddSeconds(float utc).AddTicks(fraction), skipped
+
 type SqlTimeZone =
     | SystemTimeZone
     | FixedOffset of minutes: int
+    | NamedTimeZone of NamedTimeZone
 
 /// Parses the session/CONVERT_TZ forms available without MySQL's optional
 /// named-zone tables. Numeric offsets use MySQL's asymmetric range from
@@ -37,16 +88,27 @@ let trySqlTimeZone (value: string) : SqlTimeZone option =
         | _ -> None
 
 let sqlTimeZoneText = function
+    | NamedTimeZone zone -> zone.Name
     | SystemTimeZone -> "SYSTEM"
     | FixedOffset minutes -> sprintf "%c%02d:%02d" (if minutes < 0 then '-' else '+') (abs minutes / 60) (abs minutes % 60)
 
 let sqlTimeZoneToUtc zone (value: DateTime) =
     match zone with
+    | NamedTimeZone zone -> namedZoneToUtc zone value |> fst
     | FixedOffset minutes -> DateTime.SpecifyKind(value.AddMinutes(float -minutes), DateTimeKind.Utc)
     | SystemTimeZone -> TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(value, DateTimeKind.Unspecified), TimeZoneInfo.Local)
 
+let sqlTimeZoneSkipsLocalTime zone value =
+    match zone with
+    | NamedTimeZone zone -> namedZoneToUtc zone value |> snd
+    | SystemTimeZone
+    | FixedOffset _ -> false
+
 let sqlTimeZoneFromUtc zone (value: DateTime) =
     match zone with
+    | NamedTimeZone zone ->
+        let seconds = value.Ticks / TimeSpan.TicksPerSecond - DateTime.UnixEpoch.Ticks / TimeSpan.TicksPerSecond
+        DateTime.SpecifyKind(value.AddSeconds(float (offsetAt zone seconds)), DateTimeKind.Unspecified)
     | FixedOffset minutes -> DateTime.SpecifyKind(value.AddMinutes(float minutes), DateTimeKind.Unspecified)
     | SystemTimeZone ->
         TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(value, DateTimeKind.Utc), TimeZoneInfo.Local)

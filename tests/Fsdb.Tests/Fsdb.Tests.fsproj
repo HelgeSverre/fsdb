@@ -38,6 +38,7 @@
     <Compile Include="EmbeddingIntegrationTests.fs" />
     <Compile Include="VectorTests.fs" />
     <Compile Include="TemporalPrecisionTests.fs" />
+    <Compile Include="TimeZoneTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

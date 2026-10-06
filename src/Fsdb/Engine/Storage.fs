@@ -515,6 +515,8 @@ type Store =
       /// Detached XA branches remain shared across session clones and are
       /// reconstructed from WAL during recovery.
       PreparedXas: ConcurrentDictionary<Xa.Xid, PreparedXa>
+      /// MySQL keeps successfully loaded named zones until server restart.
+      TimeZones: ConcurrentDictionary<string, SqlTimeZone>
       /// An addressable cell keeps lock-owner IDs process-wide across snapshots.
       RowLockSequence: StrongBox<int64>
       TransactionLocks: TransactionLockContext option }
@@ -685,6 +687,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       AutoIncrementCounters = store.AutoIncrementCounters
       AccountResources = store.AccountResources
       PreparedXas = store.PreparedXas
+      TimeZones = store.TimeZones
       RowLockSequence = store.RowLockSequence
       LockWaits = store.LockWaits
       TransactionLocks = store.TransactionLocks }
@@ -2183,27 +2186,38 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     |> Option.defaultWith (fun () -> zeroDateFallback 1264)
                 | _ -> zeroDateFallback 1264
 
+            let incorrectDateTime () =
+                Error(
+                    ExpressionError(
+                        1292,
+                        sprintf
+                            "Incorrect datetime value: '%s' for column '%s' at row %d"
+                            (v |> toText |> Option.defaultValue "0000-00-00 00:00:00")
+                            col.Name
+                            (Diagnostics.currentRowNumber ())
+                    )
+                )
+
             let timestampRangeResult value =
                 match col.Type, value with
                 | TTimestamp _, VTimestamp utc when not (isMySqlTimestampInstant utc) ->
-                    if strict then
-                        Error(
-                            ExpressionError(
-                                1292,
-                                sprintf
-                                    "Incorrect datetime value: '%s' for column '%s' at row %d"
-                                    (v |> toText |> Option.defaultValue "0000-00-00 00:00:00")
-                                    col.Name
-                                    (Diagnostics.currentRowNumber ())
-                            )
-                        )
-                    else
-                        zeroDateFallback 1264
+                    if strict then incorrectDateTime () else zeroDateFallback 1264
                 | _ -> Ok value
 
             let tryAdjust value =
                 try
-                    adjust value |> timestampRangeResult
+                    let skipped =
+                        match col.Type with
+                        | TTimestamp _ -> sqlTimeZoneSkipsLocalTime mode.TimeZone (adjustDateTimeToFsp mode fsp value)
+                        | _ -> false
+
+                    if skipped && strict then
+                        incorrectDateTime ()
+                    else
+                        if skipped then
+                            warning 1299 (sprintf "Invalid TIMESTAMP value in column '%s'" col.Name)
+
+                        adjust value |> timestampRangeResult
                 with :? ArgumentException ->
                     temporalFallback ()
 
@@ -4361,6 +4375,7 @@ let create () : Store =
           Edges = Dictionary() }
       AccountResources = ConcurrentDictionary()
       PreparedXas = ConcurrentDictionary()
+      TimeZones = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       RowLockSequence = StrongBox 0L
       TransactionLocks = None }
 

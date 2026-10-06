@@ -3164,29 +3164,32 @@ let private makeDateFn: Scalar =
 /// datetimes are fixed points. Only the source instant is tested; the
 /// result may fall outside the window (`CONVERT_TZ('1970-01-01
 /// 00:00:01','+00:00','-05:00')` = '1969-12-31 19:00:01').
-let private convertTzFn: Scalar =
+let internal convertTzFn resolveZone : Scalar =
     let windowStart = DateTime(1970, 1, 1, 0, 0, 1)
     let windowEnd = DateTime(3001, 1, 18, 23, 59, 59)
 
-    function
-    | [ dt; f; t ] when not (anyNull [ dt; f; t ]) ->
-        match tryDateTimeValue dt, trySqlTimeZone (req f), trySqlTimeZone (req t) with
-        | Some d, Some fromZone, Some toZone ->
-            let utc =
-                try
-                    Some(sqlTimeZoneToUtc fromZone d)
-                with _ ->
-                    None
+    let invoke =
+        function
+        | [ dt; f; t ] when not (anyNull [ dt; f; t ]) ->
+            match tryDateTimeValue dt, resolveZone (req f), resolveZone (req t) with
+            | Some d, Some fromZone, Some toZone ->
+                let utc =
+                    try
+                        Some(sqlTimeZoneToUtc fromZone d)
+                    with _ ->
+                        None
 
-            match utc with
-            | Some u when u >= windowStart && u <= windowEnd ->
-                try
-                    VDateTime(sqlTimeZoneFromUtc toZone u)
-                with _ ->
-                    VDateTime d
-            | _ -> VDateTime d
+                match utc with
+                | Some u when u >= windowStart && u <= windowEnd ->
+                    try
+                        VDateTime(sqlTimeZoneFromUtc toZone u)
+                    with _ ->
+                        VDateTime d
+                | _ -> VDateTime d
+            | _ -> VNull
         | _ -> VNull
-    | _ -> VNull
+
+    exactArity "CONVERT_TZ" 3 invoke
 
 /// The `STR_TO_DATE` mirror of `formatDate`'s specifier table, translated
 /// to a .NET custom format string for `DateTime.TryParseExact`.
@@ -6368,7 +6371,7 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "EXTRACT" extractFn
     |> registerScalar "LAST_DAY" (exactArity "LAST_DAY" 1 lastDayFn)
     |> registerScalar "MAKEDATE" (exactArity "MAKEDATE" 2 makeDateFn)
-    |> registerScalar "CONVERT_TZ" (exactArity "CONVERT_TZ" 3 convertTzFn)
+    |> registerScalar "CONVERT_TZ" (convertTzFn trySqlTimeZone)
     |> registerScalar "STR_TO_DATE" (exactArity "STR_TO_DATE" 2 strToDateFn)
 
 let private registerStringBuiltins registry =

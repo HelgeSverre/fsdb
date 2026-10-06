@@ -544,7 +544,6 @@ let private reservedWords =
           "asc"
           "desc"
           "limit"
-          "offset"
           "insert"
           "into"
           "values"

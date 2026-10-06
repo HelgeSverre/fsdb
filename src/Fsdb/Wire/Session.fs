@@ -380,7 +380,7 @@ let create (connectionId: int) (store: Store) : Session =
     variables
     |> Map.tryFind "time_zone"
     |> Option.flatten
-    |> Option.bind trySqlTimeZone
+    |> Option.bind (TimeZones.resolve store)
     |> Option.iter (setTimeZone sessionStore)
 
     { ConnectionId = connectionId

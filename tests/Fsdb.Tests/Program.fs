@@ -35,6 +35,7 @@ let main argv =
                   CheckConstraintTests.tests
                   InformationSchemaTests.tests
                   TemporalPrecisionTests.tests
+                  TimeZoneTests.tests
                   IntegrationTests.tests
                   EmbeddingIntegrationTests.tests
                   VectorTests.tests ])

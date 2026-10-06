@@ -478,8 +478,8 @@ Charsets transcode on write. `SHOW CREATE TABLE` reports declared collations
 and column comments, while `information_schema.COLUMNS` exposes
 `CHARACTER_SET_NAME`, `COLLATION_NAME`, and `COLUMN_COMMENT`.
 
-Fixed-offset and `SYSTEM` session time zones drive current-time and Unix-epoch
-functions. A numeric offset appended to a DATETIME or TIMESTAMP input is
+Fixed-offset, `SYSTEM`, and catalog-backed named session time zones drive
+current-time and Unix-epoch functions. A numeric offset appended to a DATETIME or TIMESTAMP input is
 converted into the session zone before storage. TIMESTAMP columns then retain
 the UTC instant and render in the active session zone; DATETIME columns retain
 the converted wall-clock fields.
@@ -487,8 +487,9 @@ the converted wall-clock fields.
 `ALLOW_INVALID_DATES` preserves bounded invalid day-of-month combinations in
 DATE and DATETIME values, defaults, casts, and typed literals. Month and day
 fields remain bounded, zero-date modes stay independent, and TIMESTAMP always
-requires a valid calendar date. Named zones require MySQL's optional time-zone
-tables, which fsdb does not load.
+requires a valid calendar date. Named zones use populated `mysql.time_zone*`
+tables and retain their loaded rules until restart; leap-second-aware zones
+remain unsupported.
 
 The open compatibility ledger, including complex updatable views and
 replication, lives in [GAPS.md](GAPS.md). The

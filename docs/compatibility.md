@@ -237,10 +237,17 @@ server-owned file and refuse to replace one that already exists.
 
 ## Temporal values, zones, and offsets
 
-The session `time_zone` accepts MySQL's numeric offsets and `SYSTEM`. It drives
-current-time functions, Unix timestamp conversion, TIMESTAMP storage, and
-result rendering. Named zones depend on MySQL's optional time-zone tables and
-are not loaded by fsdb.
+The session `time_zone` accepts MySQL's numeric offsets, `SYSTEM`, and named
+zones populated in `mysql.time_zone*`. It drives current-time functions, Unix
+timestamp conversion, TIMESTAMP storage, and result rendering. `CONVERT_TZ`
+uses the same catalog rules. Successfully loaded zones are cached until restart,
+as in MySQL; load or update the tables before opening sessions that use them.
+Leap-second-aware zones (`Use_leap_seconds = Y`) remain unsupported.
+
+Repeated local times select the earlier UTC instant. Skipped local times map
+to the transition boundary while retaining fractional seconds. Strict TIMESTAMP
+writes reject skipped times with error 1292; non-strict writes normalize them
+and report warning 1299.
 
 DATETIME and TIMESTAMP strings may carry a numeric offset such as
 `2024-01-01 10:10:10.123456+05:30`. Both are converted into the active session

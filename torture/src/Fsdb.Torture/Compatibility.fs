@@ -1860,6 +1860,53 @@ module ContractCatalog =
             [| "statement:delete", [| "concurrency" |]
                "statement:insert", [| "concurrency" |] |] }
 
+    let private namedTimeZones =
+        { Name = "named-time-zones"
+          Setup =
+            [| "INSERT INTO mysql.time_zone (Time_zone_id,Use_leap_seconds) VALUES (900002,'N')"
+               "INSERT INTO mysql.time_zone_name VALUES ('Fsdb/Contract_Eastern',900002)"
+               "INSERT INTO mysql.time_zone_transition_type (Time_zone_id, Transition_type_id, Offset, Is_DST, Abbreviation) VALUES (900002,0,-18000,0,'EST'),(900002,1,-14400,1,'EDT')"
+               "INSERT INTO mysql.time_zone_transition VALUES (900002,1710054000,1),(900002,1730613600,0)"
+               "CREATE TABLE contract_zone (t TIMESTAMP(6), d DATETIME(6))" |]
+          Steps =
+            [| Contract.query "gap-and-fold"
+                   "SELECT CONVERT_TZ('2024-03-10 02:30:12.123456','Fsdb/Contract_Eastern','+00:00') AS gap_value, CONVERT_TZ('2024-11-03 01:30:12.123456','Fsdb/Contract_Eastern','+00:00') AS fold_value"
+               Contract.preparedQuery "bound-zone-conversion"
+                   "SELECT CONVERT_TZ(?, ?, ?) AS local_value, CONVERT_TZ(?, ?, ?) AS utc_value"
+                   [| box "2024-03-10 06:59:59.999999"; box "+00:00"; box "Fsdb/Contract_Eastern"
+                      box "1969-12-31 23:59:59.123456"; box "Fsdb/Contract_Eastern"; box "+00:00" |]
+               Contract.execute "session-zone" "SET time_zone='Fsdb/Contract_Eastern'"
+               Contract.query "unix-functions"
+                   "SELECT FROM_UNIXTIME(1710054000) AS local_value, UNIX_TIMESTAMP('2024-11-03 01:30:12.123456') AS epoch_value"
+               Contract.execute "strict-gap"
+                   "INSERT INTO contract_zone VALUES ('2024-03-10 02:30:12.123456','2024-03-10 02:30:12.123456')"
+                   |> Contract.fails 1292 "22007"
+               Contract.preparedExecute "fold-insert" "INSERT INTO contract_zone VALUES (?, ?)"
+                   [| box "2024-11-03 01:30:12.123456"; box "2024-11-03 01:30:12.123456" |]
+               Contract.execute "utc-session" "SET time_zone='+00:00'"
+               Contract.preparedQuery "stored-instant" "SELECT t,d FROM contract_zone" [||]
+               Contract.execute "non-strict" "SET sql_mode=''"
+               Contract.execute "restore-zone" "SET time_zone='Fsdb/Contract_Eastern'"
+               Contract.execute "normalize-gap"
+                   "INSERT INTO contract_zone VALUES ('2024-03-10 02:30:12.123456','2024-03-10 02:30:12.123456')"
+               Contract.query "gap-warning" "SHOW WARNINGS"
+               Contract.query "local-results" "SELECT t,d FROM contract_zone ORDER BY t"
+               Contract.execute "remove-types" "DELETE FROM mysql.time_zone_transition_type WHERE Time_zone_id=900002"
+               Contract.execute "cached-zone" "SET time_zone='fsdb/contract_eastern'"
+               Contract.query "cached-rules" "SELECT @@time_zone, FROM_UNIXTIME(1710054000)" |]
+          Cleanup =
+            [| "SET time_zone='SYSTEM'"
+               "SET sql_mode=DEFAULT"
+               "DROP TABLE IF EXISTS contract_zone"
+               "DELETE FROM mysql.time_zone_transition WHERE Time_zone_id=900002"
+               "DELETE FROM mysql.time_zone_transition_type WHERE Time_zone_id=900002"
+               "DELETE FROM mysql.time_zone_name WHERE Time_zone_id=900002"
+               "DELETE FROM mysql.time_zone WHERE Time_zone_id=900002" |]
+          Coverage =
+            [| "function:CONVERT_TZ", [| "text-differential"; "prepared-protocol" |]
+               "function:UNIX_TIMESTAMP", [| "text-differential" |]
+               "function:FROM_UNIXTIME", [| "text-differential" |] |] }
+
     let all =
         [| comments
            exactErrors
@@ -1872,6 +1919,7 @@ module ContractCatalog =
            functionFamilies
            aggregateFunctions
            geographicSpatial
+           namedTimeZones
            preparedInvalidation
            implicitCommit
            concurrentSessions
