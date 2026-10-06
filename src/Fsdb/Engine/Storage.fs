@@ -87,6 +87,7 @@ type StorageError =
     /// implicitly back-filling a `NOT NULL` temporal column with no
     /// `DEFAULT` on a non-empty table.
     | ZeroTemporalForColumn of typeName: string * literal: string * column: string
+    | TemporalRoundingFailure of literal: string * column: string
     | InvalidDefaultValue of column: string
     /// A write aimed at a registered `fsdb` virtual table — reads resolve to
     /// the host's overlay, so letting the write through would land it in an
@@ -125,6 +126,8 @@ let toMySqlError (err: StorageError) : int * string =
         3105, sprintf "The value specified for generated column '%s' in table '%s' is not allowed." column table
     | ZeroTemporalForColumn(typeName, literal, column) ->
         1292, sprintf "Incorrect %s value: '%s' for column '%s' at row 1" typeName literal column
+    | TemporalRoundingFailure(literal, column) ->
+        1292, sprintf "Incorrect datetime value: '%s' for column '%s' at row 1" literal column
     | InvalidDefaultValue column -> 1067, sprintf "Invalid default value for '%s'" column
     // MySQL's ER_OPEN_AS_READONLY — the closest real vocabulary for "this
     // table exists but refuses writes".
@@ -1486,31 +1489,27 @@ let private adjustDateTimeToFsp (mode: TemporalCoercionMode) (fsp: int) (value: 
 
 let private adjustDateTimeComponentsToFsp (mode: TemporalCoercionMode) (fsp: int) dateTime =
     let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
-    let microsPerSecond = 1_000_000L
-    let microsPerDay = 86_400L * microsPerSecond
-    let quantum = pown 10L (6 - fsp)
+    let quantum = pown 10 (6 - fsp)
+    let fraction =
+        if mode.TruncateFractional then microseconds / quantum * quantum
+        else (microseconds + quantum / 2) / quantum * quantum
 
-    let total =
-        (int64 hour * 3600L + int64 minute * 60L + int64 second) * microsPerSecond
-        + int64 microseconds
-
-    let adjusted =
-        if mode.TruncateFractional then
-            total / quantum * quantum
-        else
-            (total + quantum / 2L) / quantum * quantum
-
-    if adjusted >= microsPerDay then
+    if fraction < 1_000_000 then
+        tryZeroDateTime date hour minute second fraction |> Option.map VZeroDateTime
+    elif hasZeroMonthOrDay date || isInvalidDate date then
+        // A carry revalidates the calendar even when ALLOW_INVALID_DATES accepts the input.
         None
     else
-        let totalSeconds = adjusted / microsPerSecond
-
-        tryZeroDateTime
-            date
-            (int (totalSeconds / 3600L))
-            (int (totalSeconds % 3600L / 60L))
-            (int (totalSeconds % 60L))
-            (int (adjusted % microsPerSecond))
+        let _, month, day = zeroDateParts date
+        let seconds = hour * 3600 + minute * 60 + second + 1
+        if month = 12 && day = 31 && seconds = 86_400 then
+            Some(VDateTime(DateTime(1, 1, 1)))
+        else
+            // MySQL normalizes a carry within year zero to the all-zero date.
+            let seconds = seconds % 86_400
+            tryZeroDate 0 0 0
+            |> Option.bind (fun date -> tryZeroDateTime date (seconds / 3600) (seconds % 3600 / 60) (seconds % 60) 0)
+            |> Option.map VZeroDateTime
 
 let private truncateRunes (length: int) (text: string) =
     let runes = text.EnumerateRunes() |> Seq.toArray
@@ -2178,17 +2177,26 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     |> Option.map (VZeroDateTime >> Ok)
                     |> Option.defaultWith zeroDateError
 
+            let roundedComponentResult dateTime =
+                match adjustDateTimeComponentsToFsp mode fsp dateTime with
+                | Some value -> Ok value
+                | None when strict ->
+                    Error(TemporalRoundingFailure(v |> toText |> Option.defaultValue "", col.Name))
+                | None -> zeroDateFallback 1264
+
             let zeroDateResult dateTime =
-                let date, _, _, _, _ = zeroDateTimeParts dateTime
+                let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
                 let year, month, day = zeroDateParts date
                 let rejected = if year = 0 && month = 0 && day = 0 then mode.NoZeroDate else hasZeroMonthOrDay date && mode.NoZeroInDate
+                let nonzeroTimestamp =
+                    match col.Type with
+                    | TTimestamp _ ->
+                        year <> 0 || month <> 0 || day <> 0
+                        || hour <> 0 || minute <> 0 || second <> 0 || microseconds <> 0
+                    | _ -> false
 
-                if not rejected then
-                    Ok(VZeroDateTime dateTime)
-                elif strict then
-                    zeroDateError ()
-                else
-                    zeroDateFallback 1264
+                if rejected || nonzeroTimestamp then zeroDateFallback 1264
+                else roundedComponentResult dateTime
 
             let invalidZeroDateResult year month day =
                 let warningCode = if month > 12 || day > 31 then 1265 else 1264
@@ -2197,9 +2205,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             let invalidDateResult dateTime =
                 match col.Type with
                 | TDateTime _ when mode.AllowInvalidDates ->
-                    adjustDateTimeComponentsToFsp mode fsp dateTime
-                    |> Option.map (VZeroDateTime >> Ok)
-                    |> Option.defaultWith (fun () -> zeroDateFallback 1264)
+                    roundedComponentResult dateTime
                 | _ -> zeroDateFallback 1264
 
             let incorrectDateTime () =
@@ -2403,6 +2409,7 @@ let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Res
             |> Result.map (fun value -> { col with Default = Some(DConst value) })
             |> Result.mapError (function
                 | ZeroTemporalForColumn _
+                | TemporalRoundingFailure _
                 | DataTooLongForColumn _ -> InvalidDefaultValue col.Name
                 | error -> error)
     | Some(DExpression _) -> Ok col

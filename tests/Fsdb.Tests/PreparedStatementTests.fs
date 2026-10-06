@@ -552,6 +552,64 @@ let tests =
               Expect.equal (current.LastResultColumnMetadata |> List.map (fun value -> value.TypeId, value.ColumnLength, value.Decimals))
                   [ TypeNewDecimal, 14u, 4uy; TypeNewDecimal, 26u, 10uy ] "stored zero-component shapes"
 
+          testCase "component datetime fractions round truncate and reject calendar carries"
+          <| fun _ ->
+              for mode, truncate in [ "ALLOW_INVALID_DATES", false; "ALLOW_INVALID_DATES,TIME_TRUNCATE_FRACTIONAL", true ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session ("SET sql_mode='" + mode + "'")
+                  for date in [ "2020-00-01"; "0000-00-00"; "2023-02-31" ] do
+                      for fraction, rounded in [ "129", Some "13"; "999", None ] do
+                          let input = date + " 03:04:05." + fraction
+                          let expected =
+                              if truncate then Some(date + " 03:04:05." + fraction.Substring(0,2))
+                              else rounded |> Option.map (fun fraction -> date + " 03:04:05." + fraction)
+                          let current, result = handle session ("SELECT CAST('" + input + "' AS DATETIME(2)) AS value")
+                          Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) input
+                          let _, warnings = handle current "SHOW WARNINGS"
+                          Expect.equal warnings (ResultSet([ "Level"; "Code"; "Message" ], [])) "rounding rejection is silent in CAST"
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET sql_mode=''"
+              for input, expected in
+                  [ "0000-01-01 03:04:05.999", "0000-00-00 03:04:06.00"
+                    "0000-03-01 23:59:59.999", "0000-00-00 00:00:00.00"
+                    "0000-12-31 23:59:59.999", "0001-01-01 00:00:00.00" ] do
+                  let _, result = handle session ("SELECT CAST('" + input + "' AS DATETIME(2)) AS value")
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) input
+
+          testCase "stored component datetime rounding reports column errors and permissive fallback"
+          <| fun _ ->
+              for mode, strict in [ "", false; "STRICT_TRANS_TABLES", true ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session ("SET sql_mode='" + mode + "'")
+                  let session, _ = handle session "CREATE TABLE component_fraction(dt DATETIME(2))"
+                  let current, result = handle session "INSERT INTO component_fraction VALUES('2020-00-01 03:04:05.999')"
+                  if strict then
+                      Expect.equal result (Err(1292, "Incorrect datetime value: '2020-00-01 03:04:05.999' for column 'dt' at row 1")) "strict carry rejection"
+                  else
+                      let _, warnings = handle current "SHOW WARNINGS"
+                      Expect.equal warnings
+                          (ResultSet([ "Level"; "Code"; "Message" ], [ [ Some "Warning"; Some "1264"; Some "Out of range value for column 'dt' at row 1" ] ]))
+                          "permissive carry warning"
+                      let _, result = handle current "SELECT dt FROM component_fraction"
+                      Expect.equal result (ResultSet([ "dt" ], [ [ Some "0000-00-00 00:00:00.00" ] ])) "permissive zero fallback"
+
+          testCase "zero timestamps reject nonzero fields before fractional quantization"
+          <| fun _ ->
+              for mode, strict in [ "", false; "STRICT_TRANS_TABLES", true; "TIME_TRUNCATE_FRACTIONAL", false ] do
+                  for input in [ "0000-00-00 00:00:00.001"; "0000-00-00 00:00:00.129"; "2020-00-01 00:00:00"; "0000-01-01 00:00:00" ] do
+                      let session = create 1 (Fsdb.Storage.create ())
+                      let session, _ = handle session ("SET sql_mode='" + mode + "'")
+                      let session, _ = handle session "CREATE TABLE ts_fraction(ts TIMESTAMP(2))"
+                      let current, result = handle session ("INSERT INTO ts_fraction VALUES('" + input + "')")
+                      if strict then
+                          Expect.equal result (Err(1292, sprintf "Incorrect datetime value: '%s' for column 'ts' at row 1" input)) input
+                      else
+                          let _, warnings = handle current "SHOW WARNINGS"
+                          Expect.equal warnings
+                              (ResultSet([ "Level"; "Code"; "Message" ], [ [ Some "Warning"; Some "1264"; Some "Out of range value for column 'ts' at row 1" ] ])) input
+                          let _, result = handle current "SELECT ts FROM ts_fraction"
+                          Expect.equal result (ResultSet([ "ts" ], [ [ Some "0000-00-00 00:00:00.00" ] ])) "zero timestamp fallback"
+
           testCase "temporal text arguments retain declared fractional precision"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

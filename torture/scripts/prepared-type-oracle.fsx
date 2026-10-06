@@ -803,3 +803,38 @@ let runTemporalTextPrecision () =
             printfn "Temporal text precision | %A | %s -> %A" protocol expression actual
 
 runTemporalTextPrecision ()
+
+let runComponentDateTimeFractions () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        for mode, truncate in
+            [ "ALLOW_INVALID_DATES", false
+              "ALLOW_INVALID_DATES,STRICT_TRANS_TABLES", false
+              "ALLOW_INVALID_DATES,TIME_TRUNCATE_FRACTIONAL", true ] do
+            use setup = new MySqlCommand("SET sql_mode=" + quote mode, connection)
+            setup.ExecuteNonQuery() |> ignore
+            for source, rounded, truncated in
+                [ "2020-00-01 03:04:05.129", Some "2020-00-01 03:04:05.13", "2020-00-01 03:04:05.12"
+                  "2020-00-01 03:04:05.999", None, "2020-00-01 03:04:05.99"
+                  "0000-00-00 23:59:59.999", None, "0000-00-00 23:59:59.99"
+                  "2023-02-31 03:04:05.129", Some "2023-02-31 03:04:05.13", "2023-02-31 03:04:05.12"
+                  "2023-02-31 03:04:05.999", None, "2023-02-31 03:04:05.99"
+                  "0000-01-01 03:04:05.999", Some "0000-00-00 03:04:06.00", "0000-01-01 03:04:05.99"
+                  "0000-03-01 23:59:59.999", Some "0000-00-00 00:00:00.00", "0000-03-01 23:59:59.99"
+                  "0000-12-31 23:59:59.999", Some "0001-01-01 00:00:00.00", "0000-12-31 23:59:59.99" ] do
+                let sql = "SELECT CAST(CAST(" + quote source + " AS DATETIME(2)) AS CHAR) AS value"
+                let actual =
+                    use command = new MySqlCommand(sql, connection)
+                    if protocol = Binary then command.Prepare()
+                    use reader = command.ExecuteReader()
+                    if not (reader.Read()) then failwithf "%s returned no row" sql
+                    if reader.IsDBNull 0 then None else Some(reader.GetString 0)
+                let expected = if truncate then Some truncated else rounded
+                use warnings = new MySqlCommand("SHOW WARNINGS", connection)
+                use reader = warnings.ExecuteReader()
+                if actual <> expected || reader.Read() then
+                    failwithf "%A mode=%s %s: expected %A without warnings; got %A" protocol mode sql expected actual
+                printfn "Component datetime fractions | %A | mode=%s | %s -> %A" protocol mode sql actual
+
+runComponentDateTimeFractions ()

@@ -4849,6 +4849,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let mode = { Storage.temporalCoercionMode ctx.Store with Strict = true }
                 match coerce mode source with
                 | Ok value -> Ok value
+                | Error(Storage.TemporalRoundingFailure _) -> Ok VNull
                 | Error _ ->
                     Diagnostics.warning 1292 (sprintf "Incorrect datetime value: '%s'" (Value.toText v |> Option.defaultValue "NULL"))
                     Ok VNull

@@ -2209,6 +2209,57 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS temporal_numbers"; "DROP TABLE IF EXISTS temporal_zero"; "SET sql_mode=DEFAULT"; "SET time_zone=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private componentDateTimeFractions =
+        { Name = "component-datetime-fractions"
+          Setup = [| "CREATE TABLE component_fraction(dt DATETIME(2))"; "CREATE TABLE ts_fraction(ts TIMESTAMP(2))" |]
+          Steps =
+            [| for modeIndex, (mode, strict, truncate) in
+                   [ "ALLOW_INVALID_DATES", false, false
+                     "ALLOW_INVALID_DATES,STRICT_TRANS_TABLES", true, false
+                     "ALLOW_INVALID_DATES,TIME_TRUNCATE_FRACTIONAL", false, true ] |> List.indexed do
+                   Contract.execute (sprintf "mode-%d" modeIndex) ("SET sql_mode='" + mode + "'")
+                   for precision in 0..6 do
+                       for fraction in [ "123456"; "999999" ] do
+                           let name = sprintf "precision-%d-%d-%s" modeIndex precision fraction
+                           let sql = sprintf "SELECT CAST(CAST('2020-00-01 03:04:05.%s' AS DATETIME(%d)) AS CHAR) AS value" fraction precision
+                           Contract.query (name + "-text") sql
+                           Contract.preparedQuery (name + "-binary") sql [||]
+                   for dateIndex, (date, rejectsCarry) in
+                       [ "2020-00-01", true; "0000-00-00", true; "2023-02-31", true
+                         "0000-01-01", false; "0000-03-01", false; "0000-12-31", false ] |> List.indexed do
+                       for clockIndex, (clock, carries) in
+                           [ "03:04:05.129", false; "03:04:05.999", true; "23:59:59.999", true ] |> List.indexed do
+                           let name = sprintf "%d-%d-%d" modeIndex dateIndex clockIndex
+                           let input = date + " " + clock
+                           let sql = "SELECT CAST(CAST('" + input + "' AS DATETIME(2)) AS CHAR) AS value"
+                           Contract.query (name + "-cast") sql
+                           Contract.query (name + "-cast-warnings") "SHOW WARNINGS"
+                           Contract.preparedQuery (name + "-binary-cast") sql [||]
+                           Contract.query (name + "-binary-warnings") "SHOW WARNINGS"
+                           Contract.execute (name + "-clear") "DELETE FROM component_fraction"
+                           let insert = Contract.execute (name + "-insert") ("INSERT INTO component_fraction VALUES('" + input + "')")
+                           if strict && not truncate && rejectsCarry && carries then
+                               insert |> Contract.fails 1292 "22007"
+                           else insert
+                           Contract.query (name + "-insert-warnings") "SHOW WARNINGS"
+                           Contract.query (name + "-stored") "SELECT CAST(dt AS CHAR) AS value FROM component_fraction"
+               for modeIndex, (mode, strict) in [ "", false; "STRICT_TRANS_TABLES", true; "TIME_TRUNCATE_FRACTIONAL", false ] |> List.indexed do
+                   Contract.execute (sprintf "timestamp-mode-%d" modeIndex) ("SET sql_mode='" + mode + "'")
+                   for inputIndex, (input, valid) in
+                       [ "0000-00-00 00:00:00", true
+                         "0000-00-00 00:00:00.001", false
+                         "0000-00-00 00:00:00.129", false
+                         "2020-00-01 00:00:00", false
+                         "0000-01-01 00:00:00", false ] |> List.indexed do
+                       let name = sprintf "timestamp-%d-%d" modeIndex inputIndex
+                       Contract.execute (name + "-clear") "DELETE FROM ts_fraction"
+                       let insert = Contract.execute (name + "-insert") ("INSERT INTO ts_fraction VALUES('" + input + "')")
+                       if strict && not valid then insert |> Contract.fails 1292 "22007" else insert
+                       Contract.query (name + "-warnings") "SHOW WARNINGS"
+                       Contract.query (name + "-stored") "SELECT CAST(ts AS CHAR) AS value FROM ts_fraction" |]
+          Cleanup = [| "DROP TABLE IF EXISTS component_fraction"; "DROP TABLE IF EXISTS ts_fraction"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private calendarCasts =
         { Name = "calendar-casts"
           Setup = [||]
@@ -2423,6 +2474,7 @@ module ContractCatalog =
            numericAggregateConversion
            temporalNumericConversion
            calendarCasts
+           componentDateTimeFractions
            binaryLiteralContexts
            unsignedNegation
            preparedSchemaChanges

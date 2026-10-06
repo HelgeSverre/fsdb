@@ -708,12 +708,36 @@ Adding zero to a
 DATETIME(6) with zero microseconds also reports BIGINT on fsdb versus DECIMAL
 on MySQL; division retains the declared scale.
 
-Reduced fractional precision remains open. With an empty SQL mode, MySQL rounds
-`CAST('2020-00-01 03:04:05.129' AS DATETIME(2))` to `.13`; fsdb renders `.12`.
-For `.999`, MySQL returns NULL without a warning, even though the carry only
-advances the second. Under `TIME_TRUNCATE_FRACTIONAL`, MySQL returns `.12` and
-`.99`, respectively. The zero-component storage path does not yet quantize its
-fractional fields, so these cases are not enrolled as passing contracts.
+Component DATETIME coercion quantizes fractional fields before storage and CAST.
+It rounds half-up, or truncates under `TIME_TRUNCATE_FRACTIONAL`. A carry into
+the next second revalidates the calendar: zero month/day and bounded invalid
+calendar dates in nonzero years reject that carry even with `ALLOW_INVALID_DATES`. CAST returns
+NULL without a warning. INSERT reports error 1292 in strict mode, or warning
+1264 and an all-zero DATETIME in permissive mode.
+
+Year-zero dates with a nonzero month/day follow MySQL's normalization when a
+fraction carries: a carry within year zero produces the all-zero date while
+retaining the adjusted clock; a midnight carry from December 31 reaches
+`0001-01-01`. Validation of zero-date SQL modes precedes this rounding.
+
+TIMESTAMP permits the all-zero sentinel only when every date, time, and
+fractional field is zero. Nonzero microseconds are rejected before quantization,
+even when the declared precision would round them to zero. Strict insertion
+returns 1292; permissive insertion warns with 1264 and stores the sentinel.
+
+Year-zero leap-day validation remains open. MySQL rejects
+`CAST('0000-02-29 03:04:05.129' AS DATETIME(2))` without
+`ALLOW_INVALID_DATES`, returning NULL and warning 1292. With that mode it
+accepts the date and rounds to `.13`, but a fraction `.999` returns NULL
+without a warning. fsdb's component calendar uses a leap-year surrogate for
+year zero, so it accepts the date unconditionally and incorrectly normalizes
+the carry. This is a calendar-validation boundary, not a rounding exception.
 
 The calendar CAST and temporal text-precision contract manifest is
 `artifacts/runs/20261006T175534381-51819/contracts/manifest.json`.
+
+The component fractional-rounding and zero-TIMESTAMP contract manifest is
+`artifacts/runs/20261006T180810304-53230/contracts/manifest.json`. It compares
+text and prepared casts at precision 0 through 6, rounding and truncation,
+calendar carry rejection, year-zero normalization, and strict/permissive
+storage outcomes with their warnings.
