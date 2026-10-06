@@ -77,6 +77,7 @@ FSDB_BENCH_METHODS=JoinUsersOrders,CompositeJoinWithResidualEquality \
   just bench-quick
 
 FSDB_BENCH_CATEGORIES=Planner just bench-quick
+FSDB_BENCH_CATEGORIES=Numeric just bench-quick
 ```
 
 `FSDB_BENCH_METHODS` accepts comma-separated method names.
@@ -86,6 +87,13 @@ The data-size variables `FSDB_BENCH_USERS`, `FSDB_BENCH_ORDERS`, and
 
 A focused result is evidence for that shape, not a replacement for the broader
 suite. Keep the generated provenance header with any tracked artifact.
+
+The `Numeric` category covers binary-literal arithmetic, scalar subqueries,
+text-to-number SUM/AVG/DISTINCT conversion over users, and prepared numeric
+expressions. `PreparedNumericExpressions` includes command creation, preparation,
+execution, and disposal on an open connection; it does not measure repeated
+execution of a retained prepared handle. Include `PointSelectByPk` via
+`FSDB_BENCH_METHODS` when collecting a loopback baseline alongside these cases.
 
 ## Methodology
 

@@ -755,6 +755,32 @@ type ServerBenchmarks() =
         this.Query "SELECT id, name FROM users WHERE meta->>'$.plan' = 'pro' LIMIT 20"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
+    member this.LiteralNumericExpressions() =
+        this.Query "SELECT b'01'+0,X'01'+0,_binary 0x01+0,CAST(b'01' AS DECIMAL(10,2)),AVG(b'01'),1.25/3.00"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
+    member this.ScalarLiteralSubqueries() =
+        this.Query "SELECT (SELECT b'01')+0,(SELECT b'01' FROM users WHERE id=1)+0,SUM((SELECT b'01')),AVG((SELECT b'01'))"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
+    member this.TextNumericAggregates() =
+        this.Query "SELECT SUM(CAST(age AS CHAR)),AVG(CAST(age AS CHAR)),SUM(DISTINCT CAST(age AS CHAR)) FROM users"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
+    member this.PreparedNumericExpressions() =
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- "SELECT CAST(@value AS DECIMAL(10,2))/3,SUM(b'01'),AVG((SELECT b'01'))"
+        cmd.Parameters.AddWithValue("@value", 1.25M) |> ignore
+        cmd.Prepare()
+        use reader = cmd.ExecuteReader()
+        while reader.Read() do
+            ()
+
+    [<Benchmark>]
     member this.PreparedPointSelect() =
         use cmd = conn.CreateCommand()
         cmd.CommandText <- "SELECT id, name, email, age FROM users WHERE id = @id"
