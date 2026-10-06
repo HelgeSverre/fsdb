@@ -552,6 +552,46 @@ let tests =
               Expect.equal (current.LastResultColumnMetadata |> List.map (fun value -> value.TypeId, value.ColumnLength, value.Decimals))
                   [ TypeNewDecimal, 14u, 4uy; TypeNewDecimal, 26u, 10uy ] "stored zero-component shapes"
 
+          testCase "calendar casts respect independent zero-date modes and report invalid input"
+          <| fun _ ->
+              for mode, rejectZero, rejectPartial, allowInvalid in
+                  [ "", false, false, false
+                    "NO_ZERO_DATE", true, false, false
+                    "NO_ZERO_IN_DATE", false, true, false
+                    "NO_ZERO_DATE,NO_ZERO_IN_DATE", true, true, false
+                    "STRICT_TRANS_TABLES", false, false, false
+                    "ALLOW_INVALID_DATES", false, false, true ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session ("SET sql_mode='" + mode + "'")
+                  for input, rejected in
+                      [ "2020-00-01", rejectPartial; "0000-00-00", rejectZero
+                        "0000-01-01", false; "2023-02-31", not allowInvalid
+                        "2020-13-01", true; "nonsense", true; "0", true ] do
+                      for target in [ "DATE"; "DATETIME(6)" ] do
+                          let sql = sprintf "SELECT CAST('%s' AS %s) AS value" input target
+                          let current, result = handle session sql
+                          let expected = if rejected then None else Some(input + (if target = "DATE" then "" else " 00:00:00.000000"))
+                          Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) (mode + " " + sql)
+                          let _, warnings = handle current "SHOW WARNINGS"
+                          let rows = if rejected then [ [ Some "Warning"; Some "1292"; Some(sprintf "Incorrect datetime value: '%s'" input) ] ] else []
+                          Expect.equal warnings (ResultSet([ "Level"; "Code"; "Message" ], rows)) (mode + " " + sql + " warnings")
+
+          testCase "calendar casts distinguish numeric zero and preserve year zero"
+          <| fun _ ->
+              for mode, zero in [ "", Some "0000-00-00"; "NO_ZERO_DATE", None ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session ("SET sql_mode='" + mode + "'")
+                  let _, result = handle session "SELECT CAST(0 AS DATE) AS zero,CAST(20200101 AS DATE) AS compact"
+                  Expect.equal result (ResultSet([ "zero"; "compact" ], [ [ zero; Some "2020-01-01" ] ])) mode
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE'"
+              let _, literals = handle session "SELECT DATE '0000-01-01' AS d,TIMESTAMP '0000-01-01 03:04:05' AS dt"
+              Expect.equal literals (ResultSet([ "d"; "dt" ], [ [ Some "0000-01-01"; Some "0000-01-01 03:04:05" ] ])) "year zero literals"
+              let session, _ = handle session "CREATE TABLE calendar_year(d DATE,dt DATETIME(6))"
+              let session, _ = handle session "INSERT INTO calendar_year VALUES('0000-01-01','0000-01-01 03:04:05.123456')"
+              let _, stored = handle session "SELECT d,dt FROM calendar_year"
+              Expect.equal stored (ResultSet([ "d"; "dt" ], [ [ Some "0000-01-01"; Some "0000-01-01 03:04:05.123456" ] ])) "year zero columns"
+
           testCase "binary literal variables discard numeric origin before binding"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

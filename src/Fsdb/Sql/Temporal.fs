@@ -336,6 +336,10 @@ let hasZeroDatePart date =
     let year, month, day = zeroDateParts date
     year = 0 || month = 0 || day = 0
 
+let hasZeroMonthOrDay date =
+    let _, month, day = zeroDateParts date
+    month = 0 || day = 0
+
 let isInvalidDate date =
     let year, month, day = zeroDateParts date
     not (hasZeroDatePart date) && not (calendarDayIsValid year month day)

@@ -2209,6 +2209,33 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS temporal_numbers"; "DROP TABLE IF EXISTS temporal_zero"; "SET sql_mode=DEFAULT"; "SET time_zone=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private calendarCasts =
+        { Name = "calendar-casts"
+          Setup = [||]
+          Steps =
+            [| for index, mode in
+                   [ ""; "NO_ZERO_DATE"; "NO_ZERO_IN_DATE"; "NO_ZERO_DATE,NO_ZERO_IN_DATE"
+                     "STRICT_TRANS_TABLES"; "ALLOW_INVALID_DATES" ] |> List.indexed do
+                   Contract.execute (sprintf "mode-%d" index) ("SET sql_mode='" + mode + "'")
+                   for inputIndex, source in
+                       [ "'2020-00-01'"; "'0000-00-00'"; "'0000-01-01'"; "'2023-02-31'"
+                         "'2020-13-01'"; "'nonsense'"; "'0'"; "0"; "20200101"
+                         "'2020-00-01 03:04:05.123456'" ] |> List.indexed do
+                       for target in [ "DATE"; "DATETIME(6)" ] do
+                           let name = sprintf "%d-%d-%s" index inputIndex target
+                           let sql = sprintf "SELECT CAST(%s AS %s)/1 AS value" source target
+                           Contract.query (name + "-text") sql
+                           Contract.query (name + "-text-warnings") "SHOW WARNINGS"
+                           Contract.preparedQuery (name + "-binary") sql [||]
+                           Contract.query (name + "-binary-warnings") "SHOW WARNINGS"
+               Contract.execute "strict-zero-modes" "SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE'"
+               Contract.query "year-zero-literals" "SELECT DATE '0000-01-01'/1 AS d,TIMESTAMP '0000-01-01 03:04:05'/1 AS dt"
+               Contract.execute "year-zero-table" "CREATE TABLE calendar_year(d DATE,dt DATETIME(6))"
+               Contract.execute "year-zero-insert" "INSERT INTO calendar_year VALUES('0000-01-01','0000-01-01 03:04:05.123456')"
+               Contract.query "year-zero-columns" "SELECT d/1 AS d,dt/1 AS dt FROM calendar_year" |]
+          Cleanup = [| "DROP TABLE IF EXISTS calendar_year"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private numericAggregateConversion =
         { Name = "numeric-aggregate-conversion"
           Setup = [||]
@@ -2385,6 +2412,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            temporalNumericConversion
+           calendarCasts
            binaryLiteralContexts
            unsignedNegation
            preparedSchemaChanges

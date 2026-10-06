@@ -2104,7 +2104,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     if year = 0 && month = 0 && day = 0 then
                         mode.NoZeroDate
                     else
-                        mode.NoZeroInDate
+                        hasZeroMonthOrDay date && mode.NoZeroInDate
 
                 if not rejected then
                     Ok(VZeroDate date)
@@ -2181,7 +2181,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             let zeroDateResult dateTime =
                 let date, _, _, _, _ = zeroDateTimeParts dateTime
                 let year, month, day = zeroDateParts date
-                let rejected = if year = 0 && month = 0 && day = 0 then mode.NoZeroDate else mode.NoZeroInDate
+                let rejected = if year = 0 && month = 0 && day = 0 then mode.NoZeroDate else hasZeroMonthOrDay date && mode.NoZeroInDate
 
                 if not rejected then
                     Ok(VZeroDateTime dateTime)

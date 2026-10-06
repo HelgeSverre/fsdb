@@ -4139,14 +4139,14 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         let year, month, day = Temporal.zeroDateParts date
         (Temporal.isInvalidDate date && not ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates)
         || (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
-        || (Temporal.hasZeroDatePart date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
+        || (Temporal.hasZeroMonthOrDay date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATE value: '%s'" (Temporal.formatZeroDate date))
     | Lit(VZeroDateTime dateTime) when
         let date, _, _, _, _ = Temporal.zeroDateTimeParts dateTime
         let year, month, day = Temporal.zeroDateParts date
         (Temporal.isInvalidDate date && not ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates)
         || (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
-        || (Temporal.hasZeroDatePart date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
+        || (Temporal.hasZeroMonthOrDay date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | Lit v -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
@@ -4806,18 +4806,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | TDecimal _ | TDouble _ | TFloat _ -> enumOrdinalFor ctx e v |> Option.defaultValue v
             | _ -> v)
         |> Result.bind (fun v ->
-            // Reuses `Storage.coerceValue` against a throwaway column of the
-            // cast's target type rather than a second coercion table, always
-            // non-strict: MySQL's own CAST never raises 1366 for an
-            // out-of-range/unparseable conversion, independent of
-            // STRICT_TRANS_TABLES — `CAST('abc' AS SIGNED)` is `0` (with a
-            // warning), `CAST('abc' AS DATE)` is `NULL`, under the session's
-            // *default* strict sql_mode included. A numeric target still
-            // needs its own leading-numeric-prefix parse first
-            // (`leadingNumericPrefix`): `coerceValue`'s own `parseNumeric`
-            // requires the *whole* string to parse, so `CAST('12abc' AS
-            // SIGNED)` (MySQL: `12`) would otherwise fall all the way to the
-            // non-strict `0` fallback instead of `12`.
+            // Storage owns coercion rules. Calendar casts use strict validation
+            // to distinguish invalid input from an allowed zero-component date;
+            // rejection becomes a warning and NULL rather than a statement error.
             let castCol: ColumnDef =
                 { Name = "CAST"
                   Type = ty
@@ -4844,22 +4835,32 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     VString(leadingNumericPrefix leadingFloatPrefixRegex s |> Option.defaultValue "")
                 | _ -> v
 
-            match
-                Diagnostics.suppress (fun () ->
-                    Storage.coerceValueWithMode
-                        { Strict = false
-                          NoZeroDate = true
-                          NoZeroInDate = true
-                          AllowInvalidDates = ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates
-                          TruncateFractional = ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional
-                          TimeZone = ctx.Store.ExecutionSettings.TimeZone }
-                        castCol
-                        v)
-            with
-            | Ok(VZeroDate date) when Temporal.hasZeroDatePart date -> Ok VNull
-            | Ok(VZeroDateTime dateTime) when Temporal.hasZeroDatePart (Temporal.zeroDateOfDateTime dateTime) -> Ok VNull
-            | Ok v' -> Ok v'
-            | Error err -> Error(Storage.toMySqlError err))
+            let coerce mode value =
+                Diagnostics.suppress (fun () -> Storage.coerceValueWithMode mode castCol value)
+            match ty with
+            | TDate | TDateTime _ ->
+                let source =
+                    match v with
+                    | VInt 0L | VUInt 0UL | VDecimal 0M | VDouble 0.0 -> VString "0000-00-00"
+                    | VInt _ | VUInt _ | VDecimal _ | VDouble _ ->
+                        Functions.tryDateTimeValue v |> Option.map VDateTime |> Option.defaultValue v
+                    | _ -> v
+                let mode = { Storage.temporalCoercionMode ctx.Store with Strict = true }
+                match coerce mode source with
+                | Ok value -> Ok value
+                | Error _ ->
+                    Diagnostics.warning 1292 (sprintf "Incorrect datetime value: '%s'" (Value.toText v |> Option.defaultValue "NULL"))
+                    Ok VNull
+            | _ ->
+                coerce
+                    { Strict = false
+                      NoZeroDate = true
+                      NoZeroInDate = true
+                      AllowInvalidDates = ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates
+                      TruncateFractional = ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional
+                      TimeZone = ctx.Store.ExecutionSettings.TimeZone }
+                    v
+                |> Result.mapError Storage.toMySqlError)
     | Exists select ->
         match (runExpressionSubquery ctx select (existsEarlyExitSelect select)).Result with
         | ResultSet(_, rows) -> Ok(boolToValue (not (List.isEmpty rows)))

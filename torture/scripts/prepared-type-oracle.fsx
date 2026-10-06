@@ -731,3 +731,52 @@ let runDivisionOperandDescriptors () =
                 protocol expression family length precision scale actual
 
 runDivisionOperandDescriptors ()
+
+let runCalendarCasts () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        for mode, rejectZero, rejectPartial, allowInvalid in
+            [ "", false, false, false
+              "NO_ZERO_DATE", true, false, false
+              "NO_ZERO_IN_DATE", false, true, false
+              "NO_ZERO_DATE,NO_ZERO_IN_DATE", true, true, false
+              "STRICT_TRANS_TABLES", false, false, false
+              "ALLOW_INVALID_DATES", false, false, true ] do
+            use setup = new MySqlCommand("SET sql_mode=" + quote mode, connection)
+            setup.ExecuteNonQuery() |> ignore
+            for source, expectedDate, rejected in
+                [ "'2020-00-01'", "2020-00-01", rejectPartial
+                  "'0000-00-00'", "0000-00-00", rejectZero
+                  "'0000-01-01'", "0000-01-01", false
+                  "'2023-02-31'", "2023-02-31", not allowInvalid
+                  "'2020-13-01'", "", true
+                  "'nonsense'", "", true
+                  "'0'", "", true
+                  "0", "0000-00-00", rejectZero
+                  "20200101", "2020-01-01", false ] do
+                for target in [ "DATE"; "DATETIME(6)" ] do
+                    let sql = sprintf "SELECT CAST(CAST(%s AS %s) AS CHAR) AS value" source target
+                    let actual =
+                        use command = new MySqlCommand(sql, connection)
+                        if protocol = Binary then command.Prepare()
+                        use reader = command.ExecuteReader()
+                        if not (reader.Read()) then failwithf "%s returned no row" sql
+                        if reader.IsDBNull 0 then None else Some(reader.GetString 0)
+                    let expected =
+                        if rejected then None
+                        else Some(expectedDate + (if target = "DATE" then "" else " 00:00:00.000000"))
+                    use warnings = new MySqlCommand("SHOW WARNINGS", connection)
+                    use reader = warnings.ExecuteReader()
+                    let actualWarnings =
+                        [ while reader.Read() do
+                              yield reader.GetString 0, reader.GetInt32 1, reader.GetString 2 ]
+                    let expectedWarnings =
+                        if rejected then [ "Warning", 1292, sprintf "Incorrect datetime value: '%s'" (source.Trim('\'')) ]
+                        else []
+                    if actual <> expected || actualWarnings <> expectedWarnings then
+                        failwithf "%A mode=%s %s: expected %A / %A; got %A / %A"
+                            protocol mode sql expected expectedWarnings actual actualWarnings
+                    printfn "Calendar casts | %A | mode=%s | %s -> %A / %A" protocol mode sql actual actualWarnings
+
+runCalendarCasts ()

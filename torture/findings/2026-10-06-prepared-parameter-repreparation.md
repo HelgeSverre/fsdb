@@ -670,11 +670,43 @@ zero-component stored values, and TIMESTAMP division under UTC and a session
 UTC+02:00 zone. It does not enroll the remaining binary/text/NULL/JSON division
 descriptor mismatches as passing contracts or suppress them in the gap ledger.
 
-Permissive zero-component CAST remains a separate acceptance mismatch:
-MySQL accepts `CAST('2020-00-01' AS DATE)` with an empty SQL mode, while fsdb
-returns NULL. The maintained oracle covers that expression and its DATETIME
-counterpart; arithmetic tests use stored zero-component values so the numeric
-conversion fix does not hide the unresolved CAST behavior.
+Permissive zero-component CAST acceptance and its remaining fractional-precision
+boundary are described below.
 
 The temporal numeric-conversion contract manifest is
 `artifacts/runs/20261006T173345886-48124/contracts/manifest.json`.
+
+### Calendar CAST modes
+
+DATE and DATETIME casts preserve allowed zero-component values. `NO_ZERO_DATE`
+rejects the all-zero date; `NO_ZERO_IN_DATE` rejects a zero month or day in a
+nonzero date. Year zero alone is valid, including with both flags enabled.
+Strict mode does not turn an invalid CAST into a statement error: rejection
+returns NULL and warning 1292, `Incorrect datetime value: '<input>'`.
+`ALLOW_INVALID_DATES` permits February 31 but does not permit month 13.
+
+The maintained MySQL 8.4.11 oracle checks each flag separately, their combination,
+strict mode alone, and `ALLOW_INVALID_DATES`, in text and binary execution.
+Numeric zero converts to the all-zero date when allowed, while the string `'0'`
+is invalid. Numeric `20200101` converts to January 1, 2020. This does not establish
+support for every compact numeric date/time spelling.
+
+Shared storage and literal validation also allow year zero when month and day
+are nonzero. Expecto regressions cover mode-dependent CAST results and warning
+text, numeric inputs, year-zero literals, and stored columns. The differential
+contract compares calendar values through division by one because the driver's
+.NET DateTime reader cannot represent zero-component dates. CAST AS CHAR exposes
+another remaining precision boundary: fsdb omits trailing fractional zeroes from
+DATETIME(6), whereas MySQL preserves the declared precision. Adding zero to a
+DATETIME(6) with zero microseconds also reports BIGINT on fsdb versus DECIMAL
+on MySQL; division retains the declared scale.
+
+Reduced fractional precision remains open. With an empty SQL mode, MySQL rounds
+`CAST('2020-00-01 03:04:05.129' AS DATETIME(2))` to `.13`; fsdb renders `.12`.
+For `.999`, MySQL returns NULL without a warning, even though the carry only
+advances the second. Under `TIME_TRUNCATE_FRACTIONAL`, MySQL returns `.12` and
+`.99`, respectively. The zero-component storage path does not yet quantize its
+fractional fields, so these cases are not enrolled as passing contracts.
+
+The calendar CAST contract manifest is
+`artifacts/runs/20261006T174535160-50020/contracts/manifest.json`.
