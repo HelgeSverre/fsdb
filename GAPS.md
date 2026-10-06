@@ -595,9 +595,13 @@ routines, events, and administrative probes.
 
 ## 15. Differential-testing and performance tails
 
-The remaining campaign is planner constant factors. Indexed joins,
-equality/`IN`, and secondary ranges retain measurable fixed overhead compared
-with MySQL.
+The remaining campaigns include planner and numeric-expression overhead.
+Indexed joins, equality/`IN`, and secondary ranges retain measurable fixed
+overhead compared with MySQL. The [numeric-expression snapshot](benchmarks/results/c29d188d-numeric.md)
+also records higher scalar-subquery/prepared-expression latency and larger
+text-to-number aggregate scan costs. Its repeatability check passes, but
+between-run variation and the absence of a pre-change baseline limit it to
+profiling guidance rather than a regression claim.
 
 Unless an artifact header says otherwise, the linked planner profiles compare
 native in-memory fsdb with native durable MySQL. They expose query-shape and

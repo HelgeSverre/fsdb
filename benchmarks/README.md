@@ -246,6 +246,15 @@ runs:
 These reports explain a measured revision pair. They do not replace the live
 compatibility and performance boundaries in [GAPS.md](../GAPS.md).
 
+The [numeric-expression snapshot](results/c29d188d-numeric.md) covers literal
+arithmetic, scalar subqueries, text-to-number aggregates, and prepared numeric
+queries on native fsdb and MySQL 8.4.11. Small expression queries take roughly
+160–309 µs in fsdb versus 27–43 µs in MySQL. The three-aggregate text-conversion
+scan over 10,000 users takes 39.9 ms versus 2.3 ms, making it the clearest
+profiling target in that matrix. The point-query repeat meets the documented
+stability threshold, but between-run variation makes these directional values;
+there is no pre-change baseline for the new workloads.
+
 ### Latency and scale snapshot
 
 The [10k/50k latency](results/98bc883-quick.md) and
