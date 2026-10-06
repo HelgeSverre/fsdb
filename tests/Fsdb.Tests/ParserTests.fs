@@ -4117,12 +4117,25 @@ let tests =
                   | Ok(Select { Projections = [ FuncCall("POSITION", [ Lit(VString "ood"); Lit(VString "Moodle") ]), None ] }) -> ()
                   | other -> failtestf "unexpected POSITION parse for %s: %A" sql other
 
-          testCase "binary-introduced hexadecimal literals allow adjacent introducers"
+          testCase "binary introducers materialize quoted and unquoted byte literals"
           <| fun _ ->
-              for sql in [ "SELECT _binaryX'00ff'"; "SELECT _binary X'00ff'" ] do
-                  match Fsdb.Parser.parse sql with
-                  | Ok(Select { Projections = [ Lit(VBytes [| 0uy; 255uy |]), None ] }) -> ()
-                  | other -> failtestf "unexpected binary hexadecimal parse for %s: %A" sql other
+              for literal, expected in
+                  [ "_binary X'00ff'", [| 0uy; 255uy |]
+                    "_binary b'000000001'", [| 0uy; 1uy |]
+                    "_BINARY B''", [||]
+                    "_binary 0b000000001", [| 0uy; 1uy |]
+                    "_binary 0xabc", [| 10uy; 188uy |]
+                    "_binary/*separator*/b'1'", [| 1uy |] ] do
+                  match Fsdb.Parser.parse ("SELECT " + literal) with
+                  | Ok(Select { Projections = [ Lit(VBytes bytes), None ] }) -> Expect.equal bytes expected literal
+                  | other -> failtestf "unexpected binary literal parse for %s: %A" literal other
+
+          testCase "binary introducers require a token boundary before a byte prefix"
+          <| fun _ ->
+              for name in [ "_binaryX"; "_binaryb"; "_nosuch" ] do
+                  match Fsdb.Parser.parse ("SELECT " + name + "'00ff'") with
+                  | Ok(Select { Projections = [ Col column, Some "00ff" ] }) -> Expect.equal column name "identifier with string alias"
+                  | other -> failtestf "expected a column reference, got %A" other
 
           testCase "REGEXP, ANY, and SOME are reserved in expression position"
           <| fun _ ->

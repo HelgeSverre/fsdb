@@ -518,11 +518,17 @@ shapes in text and binary execution.
 Remaining descriptors are observable: `b'01'+0` has MySQL wire length 5 and
 fsdb length 20; `b'01'/2` has MySQL length 9 and fsdb length 7. A scalar
 `(SELECT b'01')+0` retains value 1 in both engines, but fsdb reports DOUBLE
-where MySQL reports BIGINT. Explicit `_binary b'01'` is still rejected by
-fsdb's parser; MySQL accepts it as ordinary bytes whose numeric value is zero.
-These remaining differences stay in GAPS.md.
+where MySQL reports BIGINT. These remaining differences stay in GAPS.md.
+
+Explicit `_binary` accepts quoted bit/hex literals and the lowercase `0b`/`0x`
+prefixes. The parser shares their existing byte decoders and removes numeric
+origin: `_binary b'01'+0` and `SUM(_binary b'01')` both return DOUBLE zero.
+Whitespace or a comment separates the introducer from a letter/digit prefix;
+`_binaryX'00ff'` instead names column `_binaryX` with alias `00ff` and raises
+1054/42S22 when that column is absent. Empty and leading-zero byte sequences
+remain intact.
 
 The contract manifest at
-`artifacts/runs/20261006T160526327-26477/contracts/manifest.json` verifies the
-literal contexts in text and binary execution, variable materialization, and
-numeric storage boundaries without differences.
+`artifacts/runs/20261006T161206447-27814/contracts/manifest.json` verifies the
+literal contexts and explicit binary introducers in text and binary execution,
+variable materialization, and numeric storage boundaries without differences.

@@ -768,8 +768,10 @@ let private stringLit: Parser<Value, unit> = quoted '\'' <|> quoted '"'
 let private introducedStringLit: Parser<Expr, unit> =
     let introducer =
         attempt (
-            pchar '_'
-            >>. many1Chars (satisfy isIdentChar)
+            (pchar '_' >>. many1Chars (satisfy isIdentChar)
+             >>= fun name ->
+                 if charsetIntroducerNames.Contains("_" + name) then preturn name
+                 else fail "expected a character set introducer")
             .>> ws
             .>> followedBy (anyOf "'\"")
         )
@@ -805,17 +807,6 @@ let private hexBytesLit: Parser<Value, unit> =
         else
             preturn (VBinaryLiteral(Convert.FromHexString digits))
 
-let private introducedBinaryHexLit: Parser<Value, unit> =
-    attempt (pstringCI "_binary" .>> ws .>> pstringCI "X" .>> pchar '\'')
-    >>. manyChars (satisfy Uri.IsHexDigit)
-    .>> pchar '\''
-    .>> ws
-    >>= fun digits ->
-        if digits.Length % 2 <> 0 then
-            fail "a hexadecimal binary literal must contain an even number of digits"
-        else
-            preturn (VBytes(Convert.FromHexString digits))
-
 let private bytesOfBits (digits: string) : byte[] =
     if digits.Length = 0 then
         [||]
@@ -842,12 +833,20 @@ let private bitBytesLit: Parser<Value, unit> =
 
     (quoted <|> unquoted) .>> ws |>> (bytesOfBits >> VBinaryLiteral)
 
+/// An explicit binary introducer removes the numeric origin of bit/hex literals.
+let private introducedBinaryLit: Parser<Value, unit> =
+    let prefix = choice [ pstringCI "X'"; pstringCI "B'"; pstring "0x"; pstring "0b" ]
+    let hexadecimalNumber = followedBy (pstring "0x") >>. numberLit
+    attempt (keyword "_binary" .>> followedBy prefix)
+    >>. choice [ hexBytesLit; bitBytesLit; hexadecimalNumber ]
+    |>> Value.materialize
+
 let private nationalStringLit: Parser<Value, unit> =
     attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>. stringLit
 
 let private literalValue: Parser<Value, unit> =
     choice
-        [ introducedBinaryHexLit
+        [ introducedBinaryLit
           bitBytesLit
           numberLit
           hexBytesLit
@@ -2000,7 +1999,7 @@ let private atom: Parser<Expr, unit> =
           temporalLit
           windowCallAtom
           groupConcatAtom
-          introducedBinaryHexLit |>> Lit
+          introducedBinaryLit |>> Lit
           bitBytesLit |>> Lit
           numberLit |>> Lit
           hexBytesLit |>> Lit

@@ -2109,6 +2109,8 @@ module ContractCatalog =
           Steps =
             [| for name, sql in
                    [ "arithmetic", "SELECT b'01'+0 AS bit_value,X'01'+0 AS hex_value,_binary X'01'+0 AS bytes_value,-b'01' AS negative,ABS(b'01') AS absolute"
+                     "introduced", "SELECT _binary b'01' AS quoted,_binary 0b000000001 AS unquoted,_binary 0xabc AS hexadecimal,_BINARY B'' AS empty_value,_binary/*separator*/b'1' AS separated"
+                     "introduced-numeric", "SELECT _binary b'01'+0 AS value,SUM(_binary b'01') AS total,_binary 0x01+0 AS hexadecimal"
                      "aggregates", "SELECT SUM(b'01') AS s,AVG(b'01') AS a,SUM(DISTINCT b'01') AS d"
                      "raw", "SELECT b'01' AS bit_value,X'01' AS hex_value,b'000000001' AS leading_zero,CONCAT(b'01') AS concatenated"
                      "negative-boundary", "SELECT -b'1000000000000000000000000000000000000000000000000000000000000000' AS negative"
@@ -2120,6 +2122,7 @@ module ContractCatalog =
                      "wide", "SELECT SUM(b'1111111111111111111111111111111111111111111111111111111111111111') AS s,b'1111111111111111111111111111111111111111111111111111111111111111'+0 AS arithmetic" ] do
                    Contract.query (name + "-text") sql
                    Contract.preparedQuery (name + "-binary") sql [||]
+               Contract.query "adjacent-introducer-identifier" "SELECT _binaryX'00ff'" |> Contract.fails 1054 "42S22"
                Contract.execute "storage-table" "CREATE TABLE literal_storage(b BIT(64),u BIGINT UNSIGNED,d DECIMAL(30),f DOUBLE,n TINYINT)"
                for name, literal in [ "wide", "X'010000000000000000'"; "padded", "X'000000000000000001'" ] do
                    for column in [ "b"; "u"; "d"; "f"; "n" ] do

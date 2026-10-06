@@ -202,7 +202,7 @@ let tests =
 
                 testCase "binary-introduced hexadecimal literals retain their bytes"
                 <| fun _ ->
-                    match runDefault (newStore ()) "SELECT HEX(_binaryX'01A03D')" with
+                    match runDefault (newStore ()) "SELECT HEX(_binary X'01A03D')" with
                     | ResultSet(_, [ [ Some "01A03D" ] ]) -> ()
                     | other -> failtestf "expected the introduced bytes, got %A" other
 
@@ -813,10 +813,9 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected the ascii subset to fold under the connection collation, got %A" other
 
-                    // an unknown charset is a syntax error, like MySQL
-                    match Fsdb.Parser.parse "SELECT _nosuchcharset'x'" with
-                    | Error _ -> ()
-                    | Ok _ -> failtestf "expected an unknown introducer charset to be a parse error"
+                    match runDefault store "SELECT _nosuchcharset'x'" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected an unknown column, got %A" other
 
                 testCase "CONVERT(expr USING charset) transcodes with MySQL's cp1252/lossy rules"
                 <| fun _ ->
@@ -3716,6 +3715,7 @@ let tests =
                     let store = newStore ()
                     let cases =
                         [ "SELECT b'01'+0,X'01'+0,_binary X'01'+0,-b'01',ABS(b'01')", [ "1"; "1"; "0"; "-1"; "1" ]
+                          "SELECT _binary b'01'+0,SUM(_binary b'01'),_binary 0b01+0,_binary 0x01+0", [ "0"; "0"; "0"; "0" ]
                           "SELECT SUM(b'01'),AVG(b'01'),SUM(DISTINCT b'01')", [ "1"; "1.0000"; "1" ]
                           "SELECT CAST(b'01' AS UNSIGNED),CAST(b'01' AS DECIMAL),b'01'=1,b'01'='1'", [ "1"; "1"; "1"; "0" ]
                           "SELECT IF(1,b'01',b'10')+0,CASE WHEN 1 THEN b'01' ELSE b'10' END+0,COALESCE(b'01',b'10')+0,CONCAT(b'01')+0", [ "1"; "1"; "0"; "0" ]
