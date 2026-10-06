@@ -83,6 +83,7 @@ type Statement =
     | Signal of condition: ConditionValue * information: (string * Expr) list
     | Resignal of condition: ConditionValue option * information: (string * Expr) list
     | GetDiagnostics of DiagnosticsStatement
+    | SetUserVariables of assignments: (UserVariableRef * Expr) list
     | SetLocal of name: string * value: Expr
     | Return of value: Expr
 
@@ -148,6 +149,13 @@ let validationError =
     | RedefiningLabel name -> 1309, sprintf "Redefining label %s" name
     | UnknownLabel(operation, name) -> 1308, sprintf "%s with no matching label: %s" operation name
 
+/// Routine SET assignments are separate execution steps, including CONTINUE handler resumption.
+let nextStatement = function
+    | SetUserVariables(first :: second :: remaining) :: rest ->
+        Some(SetUserVariables [ first ], SetUserVariables(second :: remaining) :: rest)
+    | first :: rest -> Some(first, rest)
+    | [] -> None
+
 let rec private collectSqlStatements includeCursors =
     function
     | Sql statement
@@ -173,6 +181,7 @@ let rec private collectSqlStatements includeCursors =
     | GetDiagnostics _
     | Signal _
     | Resignal _
+    | SetUserVariables _
     | SetLocal _
     | Return _
     | Leave _
@@ -235,6 +244,7 @@ let rec expressions =
     | OpenCursor _
     | FetchCursor _
     | CloseCursor _ -> []
+    | SetUserVariables assignments -> List.map snd assignments
     | SetLocal(_, value) -> [ value ]
     | Return value -> [ value ]
     | Leave _
@@ -1129,6 +1139,21 @@ let private parseWithFallback
     (isSupportedText: string -> bool)
     (body: string)
     : Result<Statement list, string> =
+    let parseSql text =
+        match Parser.tryParseUserVariableSetWithOptions options text with
+        | Some assignments -> Ok(SetUserVariables assignments)
+        | None ->
+            match if allowLocalSelectInto then tryParseSelectInto options text else Ok None with
+            | Ok(Some statement) -> Ok statement
+            | Error error -> Error error
+            | Ok None ->
+                match Parser.parseStoredStatementWithOptions options text with
+                | Ok statement -> Ok(Sql statement)
+                | Error _
+                    when not (text.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase))
+                         && isSupportedText text -> Ok(TextSql text)
+                | Error error -> Error error
+
     let compound = compoundPattern.Match body
 
     if compound.Success then
@@ -1404,15 +1429,7 @@ let private parseWithFallback
                 |> Result.bind (fun condition ->
                     parseSignalInformation options resignal.Groups.["information"].Value
                     |> Result.map (fun information -> Resignal(condition, information)))
-            | Ok None ->
-                match if allowLocalSelectInto then tryParseSelectInto options text else Ok None with
-                | Ok(Some statement) -> Ok statement
-                | Error error -> Error error
-                | Ok None ->
-                    match Parser.parseStoredStatementWithOptions options text with
-                    | Ok statement -> Ok(Sql statement)
-                    | Error _ when isSupportedText text -> Ok(TextSql text)
-                    | Error error -> Error error
+            | Ok None -> parseSql text
 
         match rootLabel, rootEndLabel with
         | None, Some actual -> Error(sprintf "End label '%s' has no matching start label" actual)
@@ -1440,17 +1457,7 @@ let private parseWithFallback
             |> Result.map (fun value ->
                 [ SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value) ])
         else
-            match if allowLocalSelectInto then tryParseSelectInto options body else Ok None with
-            | Ok(Some statement) -> Ok [ statement ]
-            | Error error -> Error error
-            | Ok None ->
-                match Parser.parseStoredStatementWithOptions options body with
-                | Ok statement -> Ok [ Sql statement ]
-                | Error _
-                    when not (body.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase))
-                         && isSupportedText body ->
-                    Ok [ TextSql body ]
-                | Error error -> Error error
+            parseSql body |> Result.map List.singleton
 
 let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
     parseWithFallback options false (fun _ -> false) body
@@ -1514,7 +1521,8 @@ let private validateProgram allowReturn (parameters: Parameter list) (statements
         function
         | [] -> Ok scope
         | Sql _ :: rest
-        | TextSql _ :: rest -> validateStatements afterStatement rest
+        | TextSql _ :: rest
+        | SetUserVariables _ :: rest -> validateStatements afterStatement rest
         | SelectInto(_, targets) :: _ when targets |> List.exists (fun name -> not (Set.contains name scope.Names)) ->
             targets
             |> List.find (fun name -> not (Set.contains name scope.Names))

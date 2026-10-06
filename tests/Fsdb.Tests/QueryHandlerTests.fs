@@ -123,6 +123,56 @@ let tests =
               let _, calls = handle other "SELECT @n AS calls"
               Expect.equal calls (ResultSet([ "calls" ], [ [ Some "1" ] ])) "other session keeps its own assignment"
 
+          testCase "stored functions execute user-variable SET with local values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created = handle session "CREATE FUNCTION set_tick(step INT) RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE delta INT DEFAULT step; SET @n=COALESCE(@n,0)+delta,@label=CONCAT('count,',@n); RETURN @n; END"
+              TestSupport.Sql.expectOk created "create function with user-variable SET"
+              let session, _ = handle session "SET @n=10"
+              let session, value = handle session "SELECT set_tick(2) AS value"
+              Expect.equal value (ResultSet([ "value" ], [ [ Some "12" ] ])) "SET resolves function locals"
+              let session, value = handle session "SELECT @n AS n,@label AS label"
+              Expect.equal value (ResultSet([ "n"; "label" ], [ [ Some "12"; Some "count,12" ] ])) "later assignments observe earlier values"
+              let session, value = handle session "SELECT set_tick(3) AS value"
+              Expect.equal value (ResultSet([ "value" ], [ [ Some "15" ] ])) "caller state survives another call"
+              let _, value = handle session "SELECT @label AS label"
+              Expect.equal value (ResultSet([ "label" ], [ [ Some "count,15" ] ])) "quoted commas remain inside an expression"
+
+          testCase "stored SET resumes at the next assignment after a handled error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created = handle session "CREATE FUNCTION raise_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='failed assignment'; RETURN 0; END"
+              TestSupport.Sql.expectOk created "create failing expression"
+              let session, created = handle session "CREATE FUNCTION handled_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE CONTINUE HANDLER FOR SQLSTATE '45000' SET @handled=1; SET @n=@n+1,@bad=raise_set(),@tail=7; RETURN @n; END"
+              TestSupport.Sql.expectOk created "create handled SET"
+              let session, _ = handle session "SET @n=10,@handled=0,@tail=0"
+              let session, result = handle session "SELECT handled_set() AS value"
+              Expect.equal result (ResultSet([ "value" ], [ [ Some "11" ] ])) "earlier assignment survives"
+              let _, result = handle session "SELECT @n AS n,@handled AS handled,@tail AS tail"
+              Expect.equal result (ResultSet([ "n"; "handled"; "tail" ], [ [ Some "11"; Some "1"; Some "7" ] ])) "handler resumes at the next assignment"
+
+          testCase "trigger SET resumes at the next assignment after a handled function error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE trigger_inputs(id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE FUNCTION raise_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='failed assignment'; RETURN 0; END"
+              let session, created = handle session "CREATE TRIGGER handled_trigger BEFORE INSERT ON trigger_inputs FOR EACH ROW BEGIN DECLARE CONTINUE HANDLER FOR SQLSTATE '45000' SET @handled=1; SET @n=NEW.id,@bad=raise_set(),@tail=NEW.id+1; END"
+              TestSupport.Sql.expectOk created "create trigger with handler"
+              let session, _ = handle session "SET @n=0,@handled=0,@tail=0"
+              let session, inserted = handle session "INSERT INTO trigger_inputs VALUES(41)"
+              TestSupport.Sql.expectOk inserted "handler continues the insert"
+              let _, result = handle session "SELECT @n AS n,@handled AS handled,@tail AS tail"
+              Expect.equal result (ResultSet([ "n"; "handled"; "tail" ], [ [ Some "41"; Some "1"; Some "42" ] ])) "handler resumes at the next assignment"
+
+          testCase "top-level user-variable SET reads the original assignment values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @n=10,@label='old'"
+              let session, result = handle session "SET @n=@n+2,@label=CONCAT('count,',@n)"
+              TestSupport.Sql.expectOk result "top-level SET"
+              let _, result = handle session "SELECT @n AS n,@label AS label"
+              Expect.equal result (ResultSet([ "n"; "label" ], [ [ Some "12"; Some "count,10" ] ])) "top-level SET keeps its distinct evaluation boundary"
+
           testCase "block_encryption_mode selects AES mode per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

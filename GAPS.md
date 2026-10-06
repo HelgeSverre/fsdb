@@ -463,11 +463,11 @@ trigger is created.
 
 ## 10. Stored routines, events, schedulers
 
-Stored function bodies reject standalone `SET @user_variable=...` statements.
-Assignment expressions in RETURN are supported, and their user-variable changes
-remain visible to the caller, including nested calls and errors. The rest of
-the implemented boundary is summarized in the
+The implemented routine and event boundary is summarized in the
 [compatibility guide](docs/compatibility.md#stored-routines-and-events).
+In stored programs, user-variable SET supports local expressions, sequential
+assignments, and CONTINUE handler resumption; assignments remain visible to callers after
+nested calls and errors ([oracle](torture/findings/2026-10-07-stored-function-set.md)).
 
 ## 11. Full-text search
 

@@ -5734,16 +5734,16 @@ let private runRoutineStatements
           Error = None
           Flow = flow }
 
-    let rec run scope current locals results affectedRows =
-        function
-        | [] ->
+    let rec run scope current locals results affectedRows statements =
+        match StoredProgram.nextStatement statements with
+        | None ->
             { Session = current
               Locals = locals
               Results = List.rev results
               AffectedRows = affectedRows
               Error = None
               Flow = StoredProgram.Flow.Complete }
-        | statement :: rest ->
+        | Some(statement, rest) ->
             match statement with
             | StoredProgram.Sql sql ->
                 executeWithDiagnostics current (fun () ->
@@ -5804,6 +5804,10 @@ let private runRoutineStatements
                         rest
                         (Err(1172, "Result consisted of more than one row"))
                 | error -> handleQueryResult scope next locals results affectedRows rest error
+            | StoredProgram.SetUserVariables assignments ->
+                executeWithDiagnostics current (fun () ->
+                    Executor.withRoutineVariables locals (fun () -> executeUserVariableSet current assignments))
+                ||> continueAfterSql scope locals results affectedRows rest
             | StoredProgram.TextSql sql ->
                 let routineState = ref locals
 
@@ -6599,11 +6603,11 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
     let sql = normalizeDispatchedSql parserOptions rawSql
 
     withStatementHints parserOptions rawSql (fun () ->
-        withTriggerTextExecution session (fun () ->
+        withTriggerSessionExecution session (fun () ->
             dispatchNormalized session rawSql parserOptions sql))
 
-and private withTriggerTextExecution session body =
-    let executeTriggerText (context: Executor.TriggerTextExecution) sql =
+and private withTriggerSessionExecution session body =
+    let executeTriggerSessionStatement (context: Executor.TriggerSessionExecution) statement =
         let triggerSession =
             { session with
                 User = context.TriggerAccount.Name
@@ -6618,12 +6622,14 @@ and private withTriggerTextExecution session body =
 
         let executed, result =
             DynamicScope.withValue storedProgramProtectedTables context.TriggerProtectedTables (fun () ->
-                dispatch triggerSession sql)
+                match statement with
+                | Executor.TriggerText sql -> dispatch triggerSession sql
+                | Executor.TriggerUserVariables assignments -> executeUserVariableSet triggerSession assignments)
 
         context.TriggerUserVariables.Value <- executed.UserVariables
         result
 
-    Executor.withTriggerTextExecutor executeTriggerText body
+    Executor.withTriggerSessionExecutor executeTriggerSessionStatement body
 
 and private dispatchNormalized session rawSql parserOptions sql =
 
@@ -7645,7 +7651,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                     try
                         let executed, result =
                             withStatementHints parserOptions rawSql (fun () ->
-                                withTriggerTextExecution session (fun () ->
+                                withTriggerSessionExecution session (fun () ->
                                     dispatchNormalized session rawSql parserOptions sql))
                         let executed =
                             if resetsPassword && terminalErrorInfo result |> Option.isNone then
@@ -7672,7 +7678,7 @@ let executeEventBody (session: Session) (body: string) : Session * QueryResult =
     match StoredProgram.parseRoutine options (isSupportedStoredProgramText options) body with
     | Error _ -> session, syntaxError body
     | Ok statements ->
-        withTriggerTextExecution session (fun () ->
+        withTriggerSessionExecution session (fun () ->
             withStoredFunctionRegistry dispatch session (fun current ->
                 let outcome =
                     runRoutineStatements
@@ -7774,7 +7780,7 @@ let executeLoadedData (session: Session) (load: Parser.LoadRequest) (rows: Value
     let executed, result =
         recordDiagnostics session false (fun () ->
             try
-                withTriggerTextExecution session (fun () ->
+                withTriggerSessionExecution session (fun () ->
                     withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
             with
             | :? OperationCanceledException -> reraise ()
@@ -7841,7 +7847,7 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                                 | Ok() ->
                                     let executed, result =
                                         Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
-                                            withTriggerTextExecution session (fun () ->
+                                            withTriggerSessionExecution session (fun () ->
                                                 withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement)))
 
                                     (if resetsPassword && terminalErrorInfo result |> Option.isNone then

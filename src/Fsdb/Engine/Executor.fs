@@ -76,7 +76,11 @@ type RoutineVariable =
     { Column: ColumnDef
       Value: Value }
 
-type internal TriggerTextExecution =
+type internal TriggerSessionStatement =
+    | TriggerText of string
+    | TriggerUserVariables of (UserVariableRef * Expr) list
+
+type internal TriggerSessionExecution =
     { TriggerStore: Store
       TriggerRegistry: Registry
       TriggerDatabase: string
@@ -537,7 +541,7 @@ let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 let private viewMergeDepth = System.Threading.AsyncLocal<int>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
-let private triggerTextExecutor = System.Threading.AsyncLocal<(TriggerTextExecution -> string -> QueryResult) option>()
+let private triggerSessionExecutor = System.Threading.AsyncLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private metadataProbe = System.Threading.AsyncLocal<bool>()
 let private planningProbe = System.Threading.AsyncLocal<bool>()
@@ -562,8 +566,8 @@ let currentRoutineVariables () = routineVariables.Value |> Option.map _.Value
 let replaceRoutineVariables variables =
     routineVariables.Value |> Option.iter (fun current -> current.Value <- variables)
 
-let internal withTriggerTextExecutor executor body =
-    DynamicScope.withValue triggerTextExecutor (Some executor) body
+let internal withTriggerSessionExecutor executor body =
+    DynamicScope.withValue triggerSessionExecutor (Some executor) body
 
 let private currentVariableContext () = variableContext.Value
 
@@ -18910,10 +18914,31 @@ let rec executeAs
 
                                 generated |> List.iter Diagnostics.record
 
+                            let runSessionStatement statement =
+                                match triggerSessionExecutor.Value, currentVariableContext () with
+                                | Some execute, Some variables ->
+                                    let execution =
+                                        { TriggerStore = runStore
+                                          TriggerRegistry = definerRegistry
+                                          TriggerDatabase = db
+                                          TriggerAccount = account
+                                          TriggerProtectedTables = protectedTables
+                                          TriggerUserVariables = variables.UserVariables }
+
+                                    withRoutineVariableState locals (fun () -> execute execution statement)
+                                    |> function
+                                        | ResultSet _
+                                        | MultipleResults _ ->
+                                            Err(1415, "Not allowed to return a result set from a trigger")
+                                        | result -> result
+                                    |> complete
+                                | _ ->
+                                    Err(1235, "Session statements are not supported in triggers") |> complete
+
                             let rec runStatements scope statements =
-                                match statements with
-                                | [] -> complete (Affected 0UL)
-                                | statement :: rest ->
+                                match StoredProgram.nextStatement statements with
+                                | None -> complete (Affected 0UL)
+                                | Some(statement, rest) ->
                                     let result, generated =
                                         match statement with
                                         | StoredProgram.GetDiagnostics _ -> runStatement scope statement, []
@@ -18937,26 +18962,8 @@ let rec executeAs
                                 | StoredProgram.SelectInto _ ->
                                     Err(1235, "SELECT INTO local variables is not supported in triggers")
                                     |> complete
-                                | StoredProgram.TextSql sql ->
-                                    match triggerTextExecutor.Value, currentVariableContext () with
-                                    | Some execute, Some variables ->
-                                        let execution =
-                                            { TriggerStore = runStore
-                                              TriggerRegistry = definerRegistry
-                                              TriggerDatabase = db
-                                              TriggerAccount = account
-                                              TriggerProtectedTables = protectedTables
-                                              TriggerUserVariables = variables.UserVariables }
-
-                                        withRoutineVariableState locals (fun () -> execute execution sql)
-                                        |> function
-                                            | ResultSet _
-                                            | MultipleResults _ ->
-                                                Err(1415, "Not allowed to return a result set from a trigger")
-                                            | result -> result
-                                        |> complete
-                                    | _ ->
-                                        Err(1235, "Text-only statements are not supported in triggers") |> complete
+                                | StoredProgram.TextSql sql -> runSessionStatement (TriggerText sql)
+                                | StoredProgram.SetUserVariables assignments -> runSessionStatement (TriggerUserVariables assignments)
                                 | StoredProgram.DeclareCondition _
                                 | StoredProgram.DeclareHandler _ -> complete (Affected 0UL)
                                 | StoredProgram.Signal(condition, information) ->

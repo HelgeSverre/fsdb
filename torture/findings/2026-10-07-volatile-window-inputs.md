@@ -22,9 +22,9 @@ reuse the numeric accumulator over the materialized inputs.
 Stored function invocation also transfers user-variable values between the
 caller and routine session. Each invocation sees preceding assignments, and
 routine changes remain visible after return or an error. Raised conditions retain
-their SQLSTATE across the expression boundary. A separate parser
-limitation remains: standalone SET of a user variable is rejected in stored
-function bodies; the counter probe uses an assignment expression in RETURN.
+their SQLSTATE across the expression boundary. The counter probe uses an
+assignment expression in RETURN; standalone SET and its per-assignment handler
+behavior have a separate [oracle](2026-10-07-stored-function-set.md).
 
 Multiple volatile aggregates can interleave their calls differently between
 engines. MySQL explicitly leaves [user-variable expression evaluation order

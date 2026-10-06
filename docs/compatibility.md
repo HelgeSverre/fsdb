@@ -424,13 +424,15 @@ mutual recursion.
 
 Stored functions support typed parameters and return coercion, compound
 control flow, handlers, cursors, subqueries, typed local `SELECT ... INTO`,
-nested routine calls, prepared execution, and metadata. MySQL's recursion
-refusal and creation-time SQL mode, charset, and collation behavior are
-retained.
+nested routine calls, user-variable SET, prepared execution, and metadata.
+Routine SET assignments execute individually: later expressions see earlier
+assignments, and CONTINUE handlers resume at the next assignment. User-variable
+changes remain visible after return or an error. MySQL's recursion refusal and
+creation-time SQL mode, charset, and collation behavior are retained.
 
 Data-changing routine bodies share the invoking statement's transaction.
-Failed statements discard their effects, and error 1442 protects tables read
-or written by the invoking statement. Metadata probes do not invoke function
+Failed data-changing statements discard row changes, and error 1442 protects
+tables read or written by the invoking statement. Metadata probes do not invoke function
 bodies, while function writes during `CREATE TABLE ... AS SELECT` return 1746.
 
 One-time and recurring events retain schedules, status, body, name, definer,

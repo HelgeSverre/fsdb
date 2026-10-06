@@ -2659,6 +2659,55 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS aggregate_warning_input" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private storedFunctionSet =
+        { Name = "stored-function-set"
+          Setup =
+            [| "CREATE FUNCTION set_tick(step INT) RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE delta INT DEFAULT step; SET @n=COALESCE(@n,0)+delta,@label=CONCAT('count,',@n); RETURN @n; END"
+               "CREATE FUNCTION nested_set(step INT) RETURNS INT NOT DETERMINISTIC NO SQL BEGIN SET @nested=set_tick(step); RETURN @nested; END"
+               "CREATE FUNCTION raise_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='failed assignment'; RETURN 0; END"
+               "CREATE FUNCTION handled_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE CONTINUE HANDLER FOR SQLSTATE '45000' SET @handled=1; SET @n=@n+1,@bad=raise_set(),@tail=7; RETURN @n; END"
+               "CREATE FUNCTION failed_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN SET @n=@n+1,@bad=raise_set(),@tail=9; RETURN 0; END"
+               "CREATE FUNCTION loop_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE i INT DEFAULT 0; WHILE i<3 DO SET @n=COALESCE(@n,0)+i; SET i=i+1; END WHILE; RETURN @n; END"
+               "CREATE FUNCTION structured_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE i INT DEFAULT 0; counting: LOOP SET i=i+1; IF i=3 THEN LEAVE counting; END IF; END LOOP counting; REPEAT SET @n=COALESCE(@n,0)+1; SET i=i-1; UNTIL i=0 END REPEAT; RETURN @n; END"
+               "CREATE PROCEDURE set_pair(IN value INT) SET @n=value,@label=CONCAT('pair,',@n),@'quoted,name'=@n"
+               "CREATE TABLE set_inputs(id INT PRIMARY KEY)"
+               "INSERT INTO set_inputs VALUES(1),(2),(3)"
+               "CREATE TRIGGER set_capture BEFORE INSERT ON set_inputs FOR EACH ROW SET @n=NEW.id,@label=CONCAT('row,',@n)" |]
+          Steps =
+            [| for prepare in [ false; true ] do
+                   let query name sql =
+                       if prepare then Contract.preparedQuery (name + "-prepared") sql [||]
+                       else Contract.query name sql
+                   Contract.execute "reset" "SET @n=10,@handled=0,@tail=0"
+                   query "local-set" "SELECT set_tick(2) AS value"
+                   Contract.query "local-state" "SELECT @n AS n,@label AS label"
+                   query "nested-set" "SELECT nested_set(3) AS value"
+                   Contract.query "nested-state" "SELECT @n AS n,@label AS label,@nested AS nested"
+                   query "handled-set" "SELECT handled_set() AS value"
+                   Contract.query "handled-state" "SELECT @n AS n,@handled AS handled,@tail AS tail"
+                   Contract.execute "tail-reset" "SET @tail=0"
+                   query "failed-set" "SELECT failed_set() AS value" |> Contract.fails 1644 "45000"
+                   Contract.query "failed-state" "SELECT @n AS n,@tail AS tail"
+                   query "loop-set" "SELECT loop_set() AS value"
+                   query "structured-set" "SELECT structured_set() AS value"
+                   Contract.execute "window-reset" "SET @n=0"
+                   query "window-set" "SELECT id,SUM(set_tick(1)) OVER(ORDER BY id) AS value FROM set_inputs ORDER BY id"
+                   Contract.query "window-state" "SELECT @n AS n,@label AS label"
+               Contract.execute "procedure-set" "CALL set_pair(23)"
+               Contract.query "procedure-state" "SELECT @n AS n,@label AS label,@'quoted,name' AS quoted"
+               Contract.execute "trigger-set" "INSERT INTO set_inputs VALUES(31)"
+               Contract.query "trigger-state" "SELECT @n AS n,@label AS label"
+               Contract.execute "top-level-reset" "SET @n=10,@label='old'"
+               Contract.execute "top-level-set" "SET @n=@n+2,@label=CONCAT('count,',@n)"
+               Contract.query "top-level-state" "SELECT @n AS n,@label AS label" |]
+          Cleanup =
+            [| "DROP TABLE IF EXISTS set_inputs"
+               "DROP PROCEDURE IF EXISTS set_pair"
+               for name in [ "structured_set"; "loop_set"; "failed_set"; "handled_set"; "raise_set"; "nested_set"; "set_tick" ] do
+                   "DROP FUNCTION IF EXISTS " + name
+               "SET @n=NULL,@label=NULL,@nested=NULL,@handled=NULL,@tail=NULL,@bad=NULL,@'quoted,name'=NULL" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private volatileWindowInputs =
         { Name = "volatile-window-inputs"
           Setup =
@@ -2920,6 +2969,7 @@ module ContractCatalog =
            numericAggregateConversion
            offsetRangeAggregates
            volatileWindowInputs
+           storedFunctionSet
            temporalNumericConversion
            roundingPrecisionDescriptors
            integralRoundingDescriptors
