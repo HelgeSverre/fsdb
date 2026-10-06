@@ -910,3 +910,33 @@ let runTemporalArithmeticDescriptors () =
             check "binary DATETIME parameter" "DECIMAL" 23 6 expected bound
 
 runTemporalArithmeticDescriptors ()
+
+let runConstantNegationDescriptors () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        for operand, width, expected in
+            [ "COALESCE(18446744073709551615,0)", 21, "-18446744073709551615"
+              "IFNULL(18446744073709551615,0)", 21, "-18446744073709551615"
+              "IF(1,18446744073709551615,0)", 21, "-18446744073709551615"
+              "GREATEST(18446744073709551615,0)", 21, "-18446744073709551615"
+              "LEAST(18446744073709551615,18446744073709551615)", 21, "-18446744073709551615"
+              "NULLIF(18446744073709551615,0)", 21, "-18446744073709551615"
+              "ROUND(18446744073709551615,0)", 22, "-18446744073709551615"
+              "TRUNCATE(18446744073709551615,0)", 22, "-18446744073709551615"
+              "CASE WHEN 1 THEN 18446744073709551615 ELSE 0 END", 21, "-18446744073709551615"
+              "COALESCE(CAST(-9223372036854775808 AS SIGNED),0)", 21, "9223372036854775808" ] do
+            use command = new MySqlCommand("SELECT -" + operand + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
+               || reader.GetDataTypeName(0) <> "DECIMAL"
+               || metadata.ColumnSize <> Nullable width || metadata.NumericScale <> Nullable 0 then
+                failwithf "%A -%s: expected DECIMAL width=%d scale=0 value=%s; got %s width=%O scale=%O"
+                    protocol operand width expected (reader.GetDataTypeName 0) metadata.ColumnSize metadata.NumericScale
+            printfn "Constant negation | %A | -%s -> DECIMAL width=%d value=%s" protocol operand width expected
+
+runConstantNegationDescriptors ()

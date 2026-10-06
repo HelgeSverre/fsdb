@@ -2381,38 +2381,6 @@ let private castUnsignedValue v =
         | None -> VUInt 0UL
     | other -> wrap (decimal (toDouble other))
 
-/// Only closed numeric syntax and the original ABS builtin participate in
-/// descriptor inference; user functions and runtime bindings are never invoked.
-let rec private tryClosedNumericValue registry expression =
-    let recurse = tryClosedNumericValue registry
-    try
-        match expression with
-        | Lit value -> Some value
-        | Collate(inner, _) -> recurse inner
-        | Cast(inner, TBigInt true) -> recurse inner |> Option.map castUnsignedValue
-        | Cast(inner, TBigInt false) ->
-            recurse inner |> Option.bind (function
-                | VInt _ as value -> Some value
-                | VUInt value -> Some(VInt(int64 value))
-                | VNull -> Some VNull
-                | _ -> None)
-        | Neg inner -> recurse inner |> Option.map Value.negateConstant
-        | BinOp((Add | Sub | SignedSub | Mul as operator), left, right) ->
-            match recurse left, recurse right with
-            | Some left, Some right ->
-                let operation = match operator with Add -> Value.add | Mul -> Value.mul | SignedSub -> Value.subSigned | _ -> Value.sub
-                Some(operation left right)
-            | _ -> None
-        | NamedFunction "ABS" [ inner ] when Functions.isUnmodifiedBuiltinScalar "ABS" registry ->
-            match recurse inner, Functions.lookup "ABS" registry with
-            | Some value, Some absolute -> Some(absolute [ value ])
-            | _ -> None
-        | _ -> None
-    with
-    | Value.UnsignedOutOfRange | Value.SignedOutOfRange -> None
-    | :? System.OverflowException -> None
-    | Functions.SqlError _ -> None
-
 let private scalarSubqueryMaterializes registry (select: SelectStmt) =
     select.From.IsSome
     || not select.Joins.IsEmpty
@@ -4200,7 +4168,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Neg operand ->
         try
             let negate =
-                if tryClosedNumericValue ctx.Registry operand |> Option.isSome then Value.negateConstant else Value.negate
+                if isLiteralConstantExpression ctx.Registry operand then Value.negateConstant else Value.negate
             eval operand |> Result.map (enumNumericOperand ctx operand >> negate)
         with Value.SignedOutOfRange ->
             Error(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql expr))
@@ -4542,7 +4510,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
                 tryWhens whens
 
-        expressionCollation ctx caseExpression |> Result.bind (fun _ -> evaluate ())
+        expressionCollation ctx caseExpression
+        |> Result.bind (fun _ -> evaluate ())
+        |> Result.map (normalizeCompoundNumericResult ctx caseExpression)
     | Between(e, lo, hi) ->
         eval e
         |> Result.bind (fun ve ->
@@ -4727,6 +4697,10 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
                         let invoke () =
                             let value = fn values
+                            let value =
+                                if descriptor.IsSome && Functions.isUnmodifiedBuiltinScalar name ctx.Registry then
+                                    normalizeCompoundNumericResult ctx expr value
+                                else value
                             descriptor |> Option.map (fun descriptor -> normalizeCompoundString descriptor value) |> Option.defaultValue value
 
                         match registryAccount ctx.Registry with
@@ -4927,6 +4901,26 @@ and private isLiteralConstantExpression registry expression =
             | _ -> false
         audited && Functions.isUnmodifiedBuiltinScalar name registry && List.forall closed arguments
     | _ -> false
+
+and private normalizeCompoundNumericResult ctx expression value =
+    let promote number =
+        if metadataOfExpr ctx expression |> Option.exists (fun metadata -> metadata.TypeId = TypeNewDecimal) then
+            VDecimal number
+        else value
+    match value with
+    | VInt number -> promote (decimal number)
+    | VUInt number -> promote (decimal number)
+    | _ -> value
+
+and private tryClosedNumericValue ctx expression =
+    if not (isLiteralConstantExpression ctx.Registry expression) then None
+    else
+        try
+            Diagnostics.suppress (fun () -> evalExpr ctx expression) |> Result.toOption
+        with
+        | Value.UnsignedOutOfRange | Value.SignedOutOfRange -> None
+        | :? System.OverflowException -> None
+        | Functions.SqlError _ -> None
 
 /// A condition may be false or NULL without ever being true. IF treats both
 /// alike, while NOT must preserve the distinction. Other expression contexts
@@ -5144,7 +5138,10 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             |> Some
         | _ when metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) ->
             simple TypeDouble |> Option.map withNullability
-        | _ when metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal) ->
+        | _ when metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal)
+                 || (metadata |> List.forall isInteger
+                     && metadata |> List.exists (fun item -> item.TypeId = TypeLongLong && hasMetadataFlag UnsignedFlag item)
+                     && metadata |> List.exists (fun item -> isInteger item && not (hasMetadataFlag UnsignedFlag item))) ->
             let shape =
                 inferred
                 |> List.map (fun (expression, metadata) -> decimalShape expression metadata)
@@ -5305,7 +5302,10 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             else TypeLongLong
 
         simple typeId |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
-    | Lit(VUInt _) -> Some { Value.columnMetadata TypeLongLong with Flags = UnsignedFlag ||| NotNullFlag }
+    | Lit(VUInt value) ->
+        Some { Value.columnMetadata TypeLongLong with
+                   ColumnLength = uint32 (value.ToString(System.Globalization.CultureInfo.InvariantCulture).Length)
+                   Flags = UnsignedFlag ||| NotNullFlag }
     | Lit(VBit(width, _)) ->
         Some { Value.columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag ||| NotNullFlag }
     | Lit(VDouble _) -> simple TypeDouble |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
@@ -5381,7 +5381,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                 if metadata.TypeId <> TypeLongLong then metadata
                 else
                     let promoted =
-                        tryClosedNumericValue ctx.Registry operand
+                        tryClosedNumericValue ctx operand
                         |> Option.map Value.negateConstant
                         |> Option.exists (function VDecimal _ -> true | _ -> false)
                     let length =
@@ -5516,7 +5516,10 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         | ("ROUND" | "TRUNCATE"), arg :: precision ->
             numericUnary arg
             |> Option.map (fun metadata ->
-                if metadata.TypeId <> TypeNewDecimal then metadata
+                if metadata.TypeId = TypeTiny || metadata.TypeId = TypeShort || metadata.TypeId = TypeLong
+                   || metadata.TypeId = TypeLongLong || metadata.TypeId = TypeYear then
+                    { metadata with TypeId = TypeLongLong; ColumnLength = 21u }
+                elif metadata.TypeId <> TypeNewDecimal then metadata
                 else
                     let scale =
                         match precision with

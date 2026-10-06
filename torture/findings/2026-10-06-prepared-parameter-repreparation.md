@@ -795,3 +795,31 @@ The temporal arithmetic descriptor contract manifest is
 `artifacts/runs/20261006T184034246-60870/contracts/manifest.json`. It covers
 integer and fractional temporal operands, binary arithmetic, negation, ABS,
 MOD, written literal precision, stored columns, and a reused DATETIME parameter.
+
+### Constant negation and mixed integer results
+
+MySQL 8.4.11 promotes closed integer functions during unary negation when the
+result exceeds signed BIGINT. `-LEAST(18446744073709551615,18446744073709551615)`
+and `-NULLIF(18446744073709551615,0)` return DECIMAL with width 21 and scale 0.
+Negated ROUND and TRUNCATE of the same unsigned literal have width 22: their
+integer operands reserve width 21 before negation adds its sign.
+
+Mixed signed/unsigned BIGINT choices already have a DECIMAL result before
+negation. COALESCE, IFNULL, IF, CASE, GREATEST, and LEAST combine the declared
+ranges of their branches. This type applies to the chosen value as well as its
+wire descriptor, so `COALESCE(18446744073709551615,0)+1` remains exact instead of
+raising unsigned overflow. NULLIF preserves its first operand's type.
+
+Closed-expression negation and descriptor inference share the audited constant
+predicate and normal expression evaluator. Descriptor evaluation suppresses
+warnings and rejects host overrides and runtime bindings. Prepared parameters
+remain runtime expressions: an all-unsigned COALESCE result still raises 1690
+when negated beyond signed BIGINT, while a mixed signed/unsigned result uses
+DECIMAL. The maintained oracle checks constant values and descriptors through
+text and binary execution; the negation differential contract also covers
+arithmetic and prepared runtime boundaries.
+
+The native MySQL 8.4.11 contract manifest is
+`artifacts/runs/20261006T191407359-66965/contracts/manifest.json`.
+The native oracle was used because the OrbStack API did not answer its health
+probe. The disposable server was stopped and its data directory removed.

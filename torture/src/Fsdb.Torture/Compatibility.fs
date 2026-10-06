@@ -2471,7 +2471,31 @@ module ContractCatalog =
                Contract.invokeWith "bound-overflow" "negation" [| box UInt64.MaxValue |] |> Contract.fails 1690 "22003"
                Contract.invokeWith "bound-recovery" "negation" [| box 2UL |]
                Contract.close "close" "negation"
-               Contract.preparedQuery "bare-parameter" "SELECT -? AS value" [| box UInt64.MaxValue |] |]
+               Contract.preparedQuery "bare-parameter" "SELECT -? AS value" [| box UInt64.MaxValue |]
+               for index, operand in
+                   [ "COALESCE(18446744073709551615,0)"
+                     "IFNULL(18446744073709551615,0)"
+                     "IF(1,18446744073709551615,0)"
+                     "GREATEST(18446744073709551615,0)"
+                     "LEAST(18446744073709551615,18446744073709551615)"
+                     "NULLIF(18446744073709551615,0)"
+                     "ROUND(18446744073709551615,0)"
+                     "TRUNCATE(18446744073709551615,0)"
+                     "CASE WHEN 1 THEN 18446744073709551615 ELSE 0 END"
+                     "COALESCE(CAST(-9223372036854775808 AS SIGNED),0)" ] |> List.indexed do
+                   let sql = "SELECT -" + operand + " AS value"
+                   Contract.query (sprintf "constant-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "constant-%d-binary" index) sql [||]
+               for index, expression in
+                   [ "COALESCE(18446744073709551615,0)+1"
+                     "IF(1,18446744073709551615,0)+1"
+                     "CASE WHEN 1 THEN 18446744073709551615 ELSE 0 END+1" ] |> List.indexed do
+                   let sql = "SELECT " + expression + " AS value"
+                   Contract.query (sprintf "mixed-arithmetic-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "mixed-arithmetic-%d-binary" index) sql [||]
+               Contract.preparedQuery "conditional-runtime-decimal" "SELECT -COALESCE(CAST(? AS UNSIGNED),0) AS value" [| box UInt64.MaxValue |]
+               Contract.preparedQuery "conditional-runtime-overflow" "SELECT -COALESCE(CAST(? AS UNSIGNED),CAST(0 AS UNSIGNED)) AS value" [| box UInt64.MaxValue |]
+               |> Contract.fails 1690 "22003" |]
           Cleanup = [| "DROP TABLE negation_values" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 

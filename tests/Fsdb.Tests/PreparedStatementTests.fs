@@ -883,6 +883,48 @@ let tests =
               Expect.equal constants (ResultSet([ "unsigned_value"; "signed_value" ], [ [ Some "-18446744073709551615"; Some "9223372036854775808" ] ])) "constants promote to decimal"
               Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal; TypeNewDecimal ] "promoted constants advertise decimal"
 
+          testCase "closed conditional and numeric functions support negation promotion"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for operand, expected, width in
+                  [ "COALESCE(18446744073709551615,0)", "-18446744073709551615", 21u
+                    "IFNULL(18446744073709551615,0)", "-18446744073709551615", 21u
+                    "IF(1,18446744073709551615,0)", "-18446744073709551615", 21u
+                    "GREATEST(18446744073709551615,0)", "-18446744073709551615", 21u
+                    "LEAST(18446744073709551615,18446744073709551615)", "-18446744073709551615", 21u
+                    "NULLIF(18446744073709551615,0)", "-18446744073709551615", 21u
+                    "ROUND(18446744073709551615,0)", "-18446744073709551615", 22u
+                    "TRUNCATE(18446744073709551615,0)", "-18446744073709551615", 22u
+                    "CASE WHEN 1 THEN 18446744073709551615 ELSE 0 END", "-18446744073709551615", 21u
+                    "COALESCE(CAST(-9223372036854775808 AS SIGNED),0)", "9223372036854775808", 21u ] do
+                  let current, result = handle session ("SELECT -" + operand + " AS value")
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) operand
+                  Expect.equal (current.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength, item.Decimals))
+                      [ TypeNewDecimal, width, 0uy ] (operand + " descriptor")
+
+          testCase "mixed integer conditional results carry decimal semantics into arithmetic"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, expected in
+                  [ "COALESCE(18446744073709551615,0)+1", "18446744073709551616"
+                    "IF(1,18446744073709551615,0)+1", "18446744073709551616"
+                    "CASE WHEN 1 THEN 18446744073709551615 ELSE 0 END+1", "18446744073709551616" ] do
+                  let current, result = handle session ("SELECT " + expression + " AS value")
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) expression
+                  Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal ] "decimal arithmetic"
+              for fallback, expected in
+                  [ "0", Some "-18446744073709551615"; "CAST(0 AS UNSIGNED)", None ] do
+                  let sql = "SELECT -COALESCE(CAST(? AS UNSIGNED)," + fallback + ") AS value"
+                  let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+                  let statement = createPreparedStatement session sql ast count
+                  let current, result = executePrepared session statement [ VUInt UInt64.MaxValue ]
+                  match expected, result with
+                  | Some expected, ResultSet([ "value" ], [ [ Some actual ] ]) ->
+                      Expect.equal actual expected "mixed runtime signedness"
+                      Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal ] "mixed runtime descriptor"
+                  | None, Err(1690, _) -> ()
+                  | _ -> failtestf "Unexpected conditional runtime negation: %A" result
+
           testCase "prepared unsigned negation keeps runtime overflow checks after binding"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
