@@ -674,3 +674,55 @@ let runConditionalScalarBindings () =
             check (sprintf "%s [variable=%d]" predicate value) family expected direct
 
 runConditionalScalarBindings ()
+
+let runDivisionOperandDescriptors () =
+    let cases =
+        [ "b'01'/2", "DECIMAL", 9, Some 7, 4, "0.5"
+          "2/b'01'", "DECIMAL", 7, Some 5, 4, "2"
+          "b''/2", "DECIMAL", 7, Some 5, 4, "0"
+          "b'100000001'/2", "DECIMAL", 11, Some 9, 4, "128.5"
+          "X'010001'/2", "DECIMAL", 14, Some 12, 4, "32768.5"
+          "b'01'/2.00", "DECIMAL", 11, Some 9, 4, "0.5"
+          "b'01'/2e0", "DOUBLE", 23, None, 31, "0.5"
+          "b'01'/'2'", "DOUBLE", 23, None, 31, "0.5"
+          "'1'/2", "DOUBLE", 23, None, 31, "0.5"
+          "1/'2'", "DOUBLE", 23, None, 31, "0.5"
+          "_binary X'31'/2", "DOUBLE", 23, None, 31, "0.5"
+          "_binary b'01'/2", "DOUBLE", 23, None, 31, "0"
+          "NULL/2", "DOUBLE", 4, None, 4, "NULL"
+          "1/NULL", "DOUBLE", 6, None, 4, "NULL"
+          "NULL/NULL", "DOUBLE", 4, None, 4, "NULL"
+          "b'01'/NULL", "DOUBLE", 5, None, 4, "NULL"
+          "NULL/b'01'", "DOUBLE", 4, None, 4, "NULL"
+          "(SELECT b'01')/2", "DECIMAL", 9, Some 7, 4, "0.5"
+          "(SELECT b'01' WHERE 1)/2", "DECIMAL", 9, Some 7, 4, "0.5"
+          "(SELECT b'01' FROM (SELECT 1)t)/2", "DOUBLE", 5, None, 4, "0"
+          "CAST('2020-01-01' AS DATE)/2", "DECIMAL", 14, Some 12, 4, "10100050.5"
+          "CAST('1' AS JSON)/2", "DOUBLE", 23, None, 31, "0.5" ]
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        use setup = new MySqlCommand("SET div_precision_increment=4", connection)
+        setup.ExecuteNonQuery() |> ignore
+        for expression, family, length, precision, scale, expected in cases do
+            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if not (reader.Read()) then failwithf "%s returned no row" expression
+            let expectedPrecision = precision |> Option.map Nullable |> Option.defaultValue (Nullable())
+            let actual = renderValue(reader.GetValue 0)
+            if reader.GetDataTypeName(0) <> family
+               || metadata.ColumnSize <> Nullable length
+               || metadata.NumericPrecision <> expectedPrecision
+               || metadata.NumericScale <> Nullable scale
+               || actual <> expected then
+                failwithf "%A %s: expected %s length=%d precision=%A scale=%d value=%s; got %s length=%O precision=%O scale=%O value=%s"
+                    protocol expression family length precision scale expected (reader.GetDataTypeName 0)
+                    metadata.ColumnSize metadata.NumericPrecision metadata.NumericScale actual
+            printfn "Division operands | %A | %s -> %s length=%d precision=%A scale=%d value=%s"
+                protocol expression family length precision scale actual
+
+runDivisionOperandDescriptors ()

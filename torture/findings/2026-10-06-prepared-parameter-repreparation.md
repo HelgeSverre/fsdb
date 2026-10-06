@@ -618,3 +618,48 @@ LIMIT 0 and the NULL-sensitive NOT case.
 
 The nested-condition and numeric-function contract manifest is
 `artifacts/runs/20261006T171738627-45712/contracts/manifest.json`.
+
+### Division operand descriptors
+
+`just prepared-type-oracle` pins division operand categories on MySQL 8.4.11
+with `div_precision_increment=4`, in text and binary execution. It checks the
+result family, display width, precision, scale, and value. The following
+comparisons use fsdb revision `d5388eb5`; these cases remain open.
+
+| Expression | MySQL family / width / scale | fsdb family / width / scale |
+| --- | --- | --- |
+| `b'01'/2` | DECIMAL / 9 / 4 | DECIMAL / 7 / 4 |
+| `b'01'/2.00` | DECIMAL / 11 / 4 | DECIMAL / 9 / 4 |
+| `'1'/2` | DOUBLE / 23 / 31 | DECIMAL / 7 / 4 |
+| `NULL/2` | DOUBLE / 4 / 4 | DECIMAL / 6 / 4 |
+| `NULL/NULL` | DOUBLE / 4 / 4 | VAR_STRING / 0 / 0 |
+| `(SELECT b'01' FROM (SELECT 1)t)/2` | DOUBLE / 5 / 4 | DECIMAL / 6 / 4 |
+| `CAST('1' AS JSON)/2` | DOUBLE / 23 / 31 | DECIMAL / 7 / 4 |
+
+MySQL uses byte capacity to obtain the numeric precision of a bare binary
+literal, but retains its original byte width when another operand makes the
+result approximate: `b'01'/NULL` is DOUBLE with width 5 and scale 4.
+An introduced byte string instead has unspecified numeric scale:
+`_binary X'31'/2` is DOUBLE with width 23 and scale 31. A materialized scalar
+binary literal retains width 1 and scale 0 for the division descriptor even
+though its numeric interpretation becomes approximate. Numeric result kind
+and original display properties therefore cannot be represented by replacing
+all operand metadata with an integer descriptor.
+
+`Item_num_op::set_numeric_type`, `Item_func_div::result_precision`, and
+`Item_func_div::resolve_type` in the
+[MySQL 8.4.11 source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_func.cc)
+separate numeric-context classification from operand precision and display
+properties. Exact division adds the divisor's scale and the session increment
+to dividend precision. Approximate division derives scale from both operands
+and width from the original dividend descriptor; it does not always use the
+usual DOUBLE width of 23.
+
+Temporal operands also expose a value mismatch:
+`CAST('2020-01-01' AS DATE)/2` returns DECIMAL 10100050.5000 with width 14
+on MySQL, but fsdb returns 1010 with width 15. The value path currently coerces
+the formatted date through its leading numeric prefix. A descriptor-only fix
+would leave that arithmetic error intact. The oracle retains this case so
+numeric-context work covers values as well as metadata. These unresolved cases
+are not enrolled as passing fsdb differential contracts or added to the
+known-gap suppression ledger.
