@@ -531,6 +531,27 @@ let tests =
                   Expect.equal result (ResultSet([ "value" ], [ [ Some "1" ] ])) predicate
                   Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLongLong ] (predicate + " type")
 
+          testCase "temporal division retains complete fields fractional precision and descriptors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET sql_mode=''"
+              for expression, expected, length, scale in
+                  [ "CAST('2020-01-01' AS DATE)/2", "10100050.5000", 14u, 4uy
+                    "CAST('2020-01-02 03:04:05' AS DATETIME)/2", "10100051015202.5000", 20u, 4uy
+                    "CAST('2020-01-02 03:04:05.123456' AS DATETIME(6))/2", "10100051015202.5617280000", 26u, 10uy
+                    "CAST('-12:34:56.123456' AS TIME(6))/2", "-61728.0617280000", 19u, 10uy ] do
+                  let sql = "SELECT " + expression + " AS value"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) expression
+                  let shape metadata = metadata.TypeId, metadata.ColumnLength, metadata.Decimals
+                  Expect.equal (current.LastResultColumnMetadata |> List.map shape) [ TypeNewDecimal, length, scale ] (expression + " shape")
+              let session, _ = handle session "CREATE TABLE temporal_zero(d DATE,dt DATETIME(6))"
+              let session, _ = handle session "INSERT INTO temporal_zero VALUES('2020-00-01','2020-00-01 03:04:05.123456')"
+              let current, result = handle session "SELECT d/2 AS d,dt/2 AS dt FROM temporal_zero"
+              Expect.equal result (ResultSet([ "d"; "dt" ], [ [ Some "10100000.5000"; Some "10100000515202.5617280000" ] ])) "stored zero-component fields"
+              Expect.equal (current.LastResultColumnMetadata |> List.map (fun value -> value.TypeId, value.ColumnLength, value.Decimals))
+                  [ TypeNewDecimal, 14u, 4uy; TypeNewDecimal, 26u, 10uy ] "stored zero-component shapes"
+
           testCase "binary literal variables discard numeric origin before binding"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

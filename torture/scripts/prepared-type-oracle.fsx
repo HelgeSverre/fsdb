@@ -698,13 +698,18 @@ let runDivisionOperandDescriptors () =
           "(SELECT b'01' WHERE 1)/2", "DECIMAL", 9, Some 7, 4, "0.5"
           "(SELECT b'01' FROM (SELECT 1)t)/2", "DOUBLE", 5, None, 4, "0"
           "CAST('2020-01-01' AS DATE)/2", "DECIMAL", 14, Some 12, 4, "10100050.5"
+          "CAST('2020-01-02 03:04:05' AS DATETIME)/2", "DECIMAL", 20, Some 18, 4, "10100051015202.5"
+          "CAST('2020-01-02 03:04:05.123456' AS DATETIME(6))/2", "DECIMAL", 26, Some 24, 10, "10100051015202.561728"
+          "CAST('-12:34:56.123456' AS TIME(6))/2", "DECIMAL", 19, Some 17, 10, "-61728.061728"
+          "CAST('2020-00-01' AS DATE)/2", "DECIMAL", 14, Some 12, 4, "10100000.5"
+          "CAST('2020-00-01 03:04:05.123456' AS DATETIME(6))/2", "DECIMAL", 26, Some 24, 10, "10100000515202.561728"
           "CAST('1' AS JSON)/2", "DOUBLE", 23, None, 31, "0.5" ]
     for protocol in [ Sql; Binary ] do
         use connection = new MySqlConnection(connectionString)
         connection.Open()
         if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
             failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
-        use setup = new MySqlCommand("SET div_precision_increment=4", connection)
+        use setup = new MySqlCommand("SET div_precision_increment=4,sql_mode=''", connection)
         setup.ExecuteNonQuery() |> ignore
         for expression, family, length, precision, scale, expected in cases do
             use command = new MySqlCommand("SELECT " + expression + " AS value", connection)

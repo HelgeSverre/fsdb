@@ -1611,20 +1611,43 @@ let private compareDecimalString (value: decimal) (text: string) =
 let private compareBitString (value: uint64) (text: string) =
     compareDecimalString (decimal value) text
 
-/// MySQL's implicit numeric coercion, used by both comparison and
-/// arithmetic: numeric types convert directly, strings parse their leading
-/// numeric prefix, and anything else coerces through its text rendering.
-let private timeNumber (value: TimeValue) =
-    let ticks = timeTicks value
-    let sign = if ticks < 0L then -1.0 else 1.0
-    let magnitude = abs ticks
-    let totalSeconds = magnitude / TimeSpan.TicksPerSecond
-    let hours = totalSeconds / 3600L
-    let minutes = totalSeconds % 3600L / 60L
-    let seconds = totalSeconds % 60L
-    let micros = magnitude % TimeSpan.TicksPerSecond / 10L
-    sign * (float (hours * 10000L + minutes * 100L + seconds) + float micros / 1_000_000.0)
+let private fractionalNumber whole microseconds =
+    if microseconds = 0L then decimal whole
+    else decimal whole + decimal microseconds / 1_000_000M
 
+let private dateNumber year month day =
+    int64 year * 10000L + int64 month * 100L + int64 day
+
+let private dateTimeNumber date hour minute second microseconds =
+    let whole = date * 1_000_000L + int64 hour * 10000L + int64 minute * 100L + int64 second
+    fractionalNumber whole (int64 microseconds)
+
+/// Temporal numeric context uses written fields, including zero components,
+/// and exact microseconds rather than a formatted string or floating point.
+let private (|TemporalNumber|_|) = function
+    | VDate value -> Some(decimal (dateNumber value.Year value.Month value.Day))
+    | VDateTime value
+    | VTimestamp value ->
+        let date = dateNumber value.Year value.Month value.Day
+        Some(dateTimeNumber date value.Hour value.Minute value.Second (int (value.Ticks % TimeSpan.TicksPerSecond / 10L)))
+    | VZeroDate value ->
+        let year, month, day = zeroDateParts value
+        Some(decimal (dateNumber year month day))
+    | VZeroDateTime value ->
+        let date, hour, minute, second, microseconds = zeroDateTimeParts value
+        let year, month, day = zeroDateParts date
+        Some(dateTimeNumber (dateNumber year month day) hour minute second microseconds)
+    | VTime value ->
+        let ticks = timeTicks value
+        let magnitude = abs ticks
+        let totalSeconds = magnitude / TimeSpan.TicksPerSecond
+        let whole = (totalSeconds / 3600L) * 10000L + (totalSeconds % 3600L / 60L) * 100L + totalSeconds % 60L
+        let number = fractionalNumber whole (magnitude % TimeSpan.TicksPerSecond / 10L)
+        Some(if ticks < 0L then -number else number)
+    | _ -> None
+
+/// Numeric types and temporal fields convert directly; strings and byte
+/// strings parse their leading numeric prefix.
 let toDouble (v: Value) : float =
     match v with
     | VNull -> 0.0
@@ -1635,15 +1658,8 @@ let toDouble (v: Value) : float =
     | VDouble d -> d
     | VDecimal d -> float d
     | VString s -> parseLeadingNumeric s
-    | VTime value -> timeNumber value
-    | VBytes _
-    | VDate _
-    | VDateTime _
-    | VTimestamp _
-    | VZeroDate _
-    | VZeroDateTime _
-    | VJson _
-    | VGeometry _ -> v |> toText |> Option.map parseLeadingNumeric |> Option.defaultValue 0.0
+    | TemporalNumber number -> float number
+    | other -> other |> toText |> Option.map parseLeadingNumeric |> Option.defaultValue 0.0
 
 /// String comparison under the server's default MySQL collation. Collation
 /// owns accent, case, and padding behavior. This is the folded order
@@ -1980,8 +1996,8 @@ let truthy (v: Value) : bool option =
     | VNull -> None
     | _ -> Some(toDouble v <> 0.0)
 
-/// The three numeric kinds arithmetic promotes between; anything
-/// non-numeric coerces through `toDouble` like MySQL's implicit cast.
+/// Arithmetic keeps numeric and temporal fields exact until an approximate
+/// operand requires promotion. Other values coerce through `toDouble`.
 type private NumKind =
     | KInt of int64
     /// `BIGINT UNSIGNED`. Kept apart from `KInt` because MySQL's promotion
@@ -2001,16 +2017,10 @@ let private classify (v: Value) : NumKind option =
     | VBinaryLiteral bytes -> Some(KInt(int64 (binaryLiteralNumber bytes)))
     | VDecimal d -> Some(KDecimal d)
     | VDouble d -> Some(KDouble d)
-    | VString _
-    | VBytes _
-    | VDate _
-    | VDateTime _
-    | VTimestamp _
-    | VTime _
-    | VZeroDate _
-    | VZeroDateTime _
-    | VJson _
-    | VGeometry _ -> Some(KDouble(toDouble v))
+    | TemporalNumber number ->
+        if Decimal.Truncate number = number then Some(KInt(int64 number))
+        else Some(KDecimal number)
+    | other -> Some(KDouble(toDouble other))
 
 let private asDouble =
     function

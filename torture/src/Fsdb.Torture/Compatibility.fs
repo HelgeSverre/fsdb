@@ -2187,6 +2187,28 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private temporalNumericConversion =
+        { Name = "temporal-numeric-conversion"
+          Setup = [| "SET sql_mode=''"; "SET time_zone='+00:00'"
+                     "CREATE TABLE temporal_numbers(d DATE,dt DATETIME(6),tm TIME(6),ts TIMESTAMP(6))"
+                     "INSERT INTO temporal_numbers VALUES('2020-01-01','2020-01-02 03:04:05.123456','-12:34:56.123456','2020-01-02 03:04:05.123456')"
+                     "CREATE TABLE temporal_zero(d DATE,dt DATETIME(6))"
+                     "INSERT INTO temporal_zero VALUES('2020-00-01','2020-00-01 03:04:05.123456')" |]
+          Steps =
+            [| for name, sql in
+                   [ "date", "SELECT CAST('2020-01-01' AS DATE)/2 AS divided,CAST('2020-01-01' AS DATE)+0 AS added,CAST('2020-01-01' AS DATE)=20200101 AS compared"
+                     "datetime", "SELECT CAST('2020-01-02 03:04:05.123456' AS DATETIME(6))/2 AS divided,CAST('2020-01-02 03:04:05.123456' AS DATETIME(6))+0 AS added"
+                     "time", "SELECT CAST('-12:34:56.123456' AS TIME(6))/2 AS divided"
+                     "zero", "SELECT d/2 AS date_value,dt/2 AS datetime_value FROM temporal_zero"
+                     "columns", "SELECT d/2 AS d,dt/2 AS dt,tm/2 AS tm,ts/2 AS ts FROM temporal_numbers" ] do
+                   Contract.query (name + "-text") sql
+                   Contract.preparedQuery (name + "-binary") sql [||]
+               Contract.execute "local-zone" "SET time_zone='+02:00'"
+               Contract.query "local-timestamp-text" "SELECT ts/2 AS value FROM temporal_numbers"
+               Contract.preparedQuery "local-timestamp-binary" "SELECT ts/2 AS value FROM temporal_numbers" [||] |]
+          Cleanup = [| "DROP TABLE IF EXISTS temporal_numbers"; "DROP TABLE IF EXISTS temporal_zero"; "SET sql_mode=DEFAULT"; "SET time_zone=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private numericAggregateConversion =
         { Name = "numeric-aggregate-conversion"
           Setup = [||]
@@ -2362,6 +2384,7 @@ module ContractCatalog =
            divisionPrecisionIncrement
            approximateAggregateDescriptors
            numericAggregateConversion
+           temporalNumericConversion
            binaryLiteralContexts
            unsignedNegation
            preparedSchemaChanges

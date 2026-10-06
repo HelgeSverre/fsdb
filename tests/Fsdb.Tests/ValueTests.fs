@@ -27,7 +27,25 @@ let private callAgg (name: string) (args: Value list) : Value =
 let tests =
     testList
         "Value"
-        [ testList
+        [ testCase "temporal arithmetic uses complete exact numeric fields"
+          <| fun _ ->
+              let date = VDate(DateOnly(2020, 1, 1))
+              let timestamp = DateTime(2020, 1, 2, 3, 4, 5).AddTicks(1234560L)
+              let zeroDate = tryDateComponents 2020 0 1 |> Option.get
+              let zeroTimestamp = tryZeroDateTime zeroDate 3 4 5 123456 |> Option.get
+              let cases =
+                  [ date, 10100050.5M
+                    VDateTime timestamp, 10100051015202.561728M
+                    VTimestamp timestamp, 10100051015202.561728M
+                    VZeroDate zeroDate, 10100000.5M
+                    VZeroDateTime zeroTimestamp, 10100000515202.561728M
+                    VTime(tryTimeValue (-452961234560L) |> Option.get), -61728.061728M ]
+              for value, expected in cases do
+                  Expect.equal (divWithIntermediatePrecision 4 value (VInt 2L)) (VDecimal expected) "exact division"
+              Expect.equal (add date (VInt 0L)) (VInt 20200101L) "date integer arithmetic"
+              Expect.equal (toDouble date) 20200101.0 "date approximate conversion"
+
+          testList
               "toText"
               [ testCase "VNull renders as None (the lenenc-null wire marker)"
                 <| fun _ -> Expect.equal (toText VNull) None "null"

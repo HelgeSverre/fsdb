@@ -655,11 +655,26 @@ to dividend precision. Approximate division derives scale from both operands
 and width from the original dividend descriptor; it does not always use the
 usual DOUBLE width of 23.
 
-Temporal operands also expose a value mismatch:
+Temporal operands at revision `d5388eb5` also expose a value mismatch:
 `CAST('2020-01-01' AS DATE)/2` returns DECIMAL 10100050.5000 with width 14
-on MySQL, but fsdb returns 1010 with width 15. The value path currently coerces
-the formatted date through its leading numeric prefix. A descriptor-only fix
-would leave that arithmetic error intact. The oracle retains this case so
-numeric-context work covers values as well as metadata. These unresolved cases
-are not enrolled as passing fsdb differential contracts or added to the
-known-gap suppression ledger.
+on MySQL, versus 1010 with width 15 on that revision. The shared value layer
+now converts DATE, DATETIME, TIME, TIMESTAMP, and stored zero-component values
+from their complete numeric fields. Fractional seconds use decimal arithmetic
+before exact division; DATETIME(6) therefore retains microseconds instead of
+rounding them through DOUBLE. Temporal operand precision derives from numeric
+digits and declared fractional precision rather than punctuation in the display
+width. Temporal division values and descriptors have dedicated regressions.
+
+The temporal differential contract covers direct casts, stored columns,
+zero-component stored values, and TIMESTAMP division under UTC and a session
+UTC+02:00 zone. It does not enroll the remaining binary/text/NULL/JSON division
+descriptor mismatches as passing contracts or suppress them in the gap ledger.
+
+Permissive zero-component CAST remains a separate acceptance mismatch:
+MySQL accepts `CAST('2020-00-01' AS DATE)` with an empty SQL mode, while fsdb
+returns NULL. The maintained oracle covers that expression and its DATETIME
+counterpart; arithmetic tests use stored zero-component values so the numeric
+conversion fix does not hide the unresolved CAST behavior.
+
+The temporal numeric-conversion contract manifest is
+`artifacts/runs/20261006T173345886-48124/contracts/manifest.json`.

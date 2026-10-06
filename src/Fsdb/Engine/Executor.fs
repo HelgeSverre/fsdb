@@ -2424,10 +2424,17 @@ type private DecimalShape =
       Scale: int }
 
 let private declaredDecimalShape (metadata: ColumnMetadata) =
-    let scale = if metadata.TypeId = TypeNewDecimal then int metadata.Decimals else 0
-    let sign = if hasMetadataFlag UnsignedFlag metadata then 0 else 1
-    { Precision = min 65 (max 1 (int metadata.ColumnLength - sign - (if scale > 0 then 1 else 0)))
-      Scale = scale }
+    if metadata.TypeId = TypeDate then
+        { Precision = 8; Scale = 0 }
+    elif metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp || metadata.TypeId = TypeTime then
+        let scale = int metadata.Decimals
+        let wholeDigits = if metadata.TypeId = TypeTime then 7 else 14
+        { Precision = wholeDigits + scale; Scale = scale }
+    else
+        let scale = if metadata.TypeId = TypeNewDecimal then int metadata.Decimals else 0
+        let sign = if hasMetadataFlag UnsignedFlag metadata then 0 else 1
+        { Precision = min 65 (max 1 (int metadata.ColumnLength - sign - (if scale > 0 then 1 else 0)))
+          Scale = scale }
 
 let rec private decimalShape expression (metadata: ColumnMetadata option) =
     match expression, metadata with
