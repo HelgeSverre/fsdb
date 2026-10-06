@@ -2054,6 +2054,48 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE user_assignment"; "DEALLOCATE PREPARE delayed_assignment"; "DEALLOCATE PREPARE mixed_assignment"; "DEALLOCATE PREPARE failing_assignment" |]
           Coverage = [| "statement:set", [| "text-differential" |] |] }
 
+    let private preparedSchemaChanges =
+        { Name = "prepared-schema-type-refresh"
+          Setup = [| "CREATE TABLE schema_source(id INT)"; "INSERT INTO schema_source VALUES(1)"; "CREATE TABLE schema_other(id INT)" |]
+          Steps =
+            [| Contract.execute "initial" "SET @schema_v=-2"
+               Contract.execute "prepare" "PREPARE schema_type FROM 'SELECT @schema_v AS value FROM schema_source'"
+               Contract.execute "decimal-value" "SET @schema_v=1.75"
+               Contract.query "retained" "EXECUTE schema_type"
+               Contract.execute "row-write" "UPDATE schema_source SET id=2"
+               Contract.query "after-row-write" "EXECUTE schema_type"
+               Contract.execute "unrelated-ddl" "ALTER TABLE schema_other ADD COLUMN extra INT"
+               Contract.query "after-unrelated-ddl" "EXECUTE schema_type"
+               Contract.execute "column-ddl" "ALTER TABLE schema_source ADD COLUMN extra INT"
+               Contract.query "after-column-ddl" "EXECUTE schema_type"
+               Contract.execute "double-value" "SET @schema_v=1.5e0"
+               Contract.execute "index-ddl" "CREATE INDEX schema_ix ON schema_source(id)"
+               Contract.query "after-index-ddl" "EXECUTE schema_type"
+               Contract.execute "string-value" "SET @schema_v='hello'"
+               Contract.execute "comment-ddl" "ALTER TABLE schema_source COMMENT='changed'"
+               Contract.query "after-comment-ddl" "EXECUTE schema_type"
+               Contract.execute "noop-value" "SET @schema_v=2.75"
+               Contract.execute "noop-ddl" "ALTER TABLE schema_source COMMENT='changed'"
+               Contract.query "after-noop-ddl" "EXECUTE schema_type"
+               Contract.execute "analyze-value" "SET @schema_v=1.5e0"
+               Contract.execute "analyze" "ANALYZE TABLE schema_source"
+               Contract.query "after-analyze" "EXECUTE schema_type"
+               Contract.execute "truncate-value" "SET @schema_v=-8"
+               Contract.execute "truncate" "TRUNCATE TABLE schema_source"
+               Contract.execute "insert-after-truncate" "INSERT INTO schema_source(id) VALUES(3)"
+               Contract.query "after-truncate" "EXECUTE schema_type"
+               Contract.execute "view" "CREATE VIEW schema_view AS SELECT id FROM schema_source"
+               Contract.execute "nested-view" "CREATE VIEW schema_nested AS SELECT id FROM schema_view"
+               Contract.execute "view-prepare" "PREPARE schema_view_type FROM 'SELECT @schema_v AS value FROM schema_nested'"
+               Contract.execute "view-value" "SET @schema_v=1.75"
+               Contract.execute "view-base-ddl" "ALTER TABLE schema_source ADD COLUMN another INT"
+               Contract.query "after-view-base-ddl" "EXECUTE schema_view_type"
+               Contract.execute "view-double-value" "SET @schema_v=1.5e0"
+               Contract.execute "view-ddl" "ALTER VIEW schema_view AS SELECT id+1 AS id FROM schema_source"
+               Contract.query "after-view-ddl" "EXECUTE schema_view_type" |]
+          Cleanup = [| "DEALLOCATE PREPARE schema_type"; "DEALLOCATE PREPARE schema_view_type"; "DROP VIEW schema_nested"; "DROP VIEW schema_view"; "DROP TABLE schema_source,schema_other" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let all =
         [| comments
            exactErrors
@@ -2065,6 +2107,7 @@ module ContractCatalog =
            preparedTypeHistory
            preparedUserVariables
            preparedUserAssignments
+           preparedSchemaChanges
            columnTypes
            generatedFunctionFamilies
            functionFamilies

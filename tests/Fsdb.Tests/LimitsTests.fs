@@ -928,7 +928,8 @@ let tests =
                             Sql = preparedSql
                             ParamCount = 0
                             LastParamTypes = None
-                            ParameterTypes = None }
+                            ParameterTypes = None
+                            SchemaDependencies = Map.empty }
 
                       match executePrepared session prepared [] |> snd with
                       | Err(3134, _) -> ()

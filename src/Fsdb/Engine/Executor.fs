@@ -19540,8 +19540,9 @@ let rec executeAs
                 prepareColumnChanges ()
                 |> Result.bind (fun () ->
                     match partitionTruncation with
-                    | Some(TruncatePartitions selected) -> truncateHashPartitions snapshot registry db table selected
-                    | _ when physicalActions.IsEmpty -> scan snapshot db table |> Result.map ignore
+                    | Some(TruncatePartitions selected) ->
+                        truncateHashPartitions snapshot registry db table selected
+                        |> Result.bind (fun () -> alterTable snapshot db table [])
                     | _ -> alterTable snapshot db table physicalActions)
                 |> Result.bind (fun () ->
                     if crossesDatabases then

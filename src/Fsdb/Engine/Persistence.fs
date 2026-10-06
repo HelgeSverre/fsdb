@@ -1571,6 +1571,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
 
     reindexTable
         { OriginalName = originalName
+          SchemaRevision = 0L
           Columns = columns
           Indexes = indexes
           ForeignKeys = fks

@@ -192,13 +192,19 @@ let globalVariablesSnapshot (store: Store) : Map<string, string option> =
     globalVariablesOf store
     |> Seq.fold (fun m (kv: System.Collections.Generic.KeyValuePair<string, string option>) -> Map.add kv.Key kv.Value m) (liveDefaults ())
 
+[<RequireQualifiedAccess>]
+type PreparedDependency =
+    | Table of created: DateTime * revision: int64
+    | View of Fsdb.Engine.SystemCatalog.View.Entry
+
 /// A connection-local prepared statement with independent SQL-derived and wire-decoding types.
 type PreparedStmt =
     { Ast: Statement option
       Sql: string
       ParamCount: int
       LastParamTypes: (byte * bool) list option
-      ParameterTypes: Fsdb.PreparedMetadata.ParameterTypes option }
+      ParameterTypes: Fsdb.PreparedMetadata.ParameterTypes option
+      SchemaDependencies: Map<string * string, PreparedDependency option> }
 
 /// A materialized read-only result retained between COM_STMT_FETCH calls.
 type PreparedCursor =

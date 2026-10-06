@@ -115,7 +115,8 @@ let tests =
                         Sql = sql
                         ParamCount = 1
                         LastParamTypes = None
-                        ParameterTypes = None }
+                        ParameterTypes = None
+                        SchemaDependencies = Map.empty }
 
                   match executePrepared session statement [ VString "name" ] |> snd with
                   | ResultSet(_, [ [ Some "name"; Some "varchar(255)"; Some "NO"; Some ""; None; Some "" ] ]) -> ()
@@ -135,7 +136,7 @@ let tests =
                       match prepareStatement sql with
                       | Ok prepared -> prepared
                       | Error error -> failtestf "prepare failed: %A" error
-                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None }
+                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None; SchemaDependencies = Map.empty }
                   for value in [ VInt -2L; VInt 7L; VNull ] do
                       match executePrepared session statement (List.replicate count value) |> snd with
                       | ResultSet(columns, _) -> Expect.equal columns names sql
@@ -299,6 +300,69 @@ let tests =
                   [ TypeLongLong; TypeLongLong ]
                   "derived types survive the failed execution"
 
+          testCase "prepared variable types refresh for referenced DDL but not row writes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE type_source (id INT)"
+              let session, _ = handle session "INSERT INTO type_source VALUES (1)"
+              let session, _ = handle session "CREATE TABLE unrelated_source (id INT)"
+              let session, _ = handle session "SET @v=-2"
+              let session, _ = handle session "PREPARE schema_types FROM 'SELECT @v FROM type_source'"
+              let session, _ = handle session "SET @v=1.75"
+              let execute session expected =
+                  let session, result = handle session "EXECUTE schema_types"
+                  match result with
+                  | ResultSet(_, [ _ ]) -> ()
+                  | other -> failtestf "expected one row, got %A" other
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ expected ] "retained or refreshed type"
+                  session
+              let session, _ = handle session "UPDATE type_source SET id=2"
+              let session = execute session TypeLongLong
+              let session, _ = handle session "ALTER TABLE unrelated_source ADD COLUMN extra INT"
+              let session = execute session TypeLongLong
+              let session, _ = handle session "ALTER TABLE type_source ADD COLUMN extra INT"
+              let session = execute session TypeNewDecimal
+              let session, _ = handle session "SET @v=1.5e0"
+              let session, _ = handle session "ALTER TABLE type_source ENGINE=InnoDB"
+              execute session TypeDouble |> ignore
+
+          testCase "prepared schema dependencies include nested views and temporary tables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE schema_base (id INT)"
+              let session, _ = handle session "INSERT INTO schema_base VALUES(1)"
+              let session, _ = handle session "CREATE VIEW schema_view AS SELECT id FROM schema_base"
+              let session, _ = handle session "CREATE VIEW schema_nested AS SELECT id FROM schema_view"
+              let session, _ = handle session "SET @v=-2"
+              let session, _ = handle session "PREPARE view_types FROM 'SELECT @v FROM schema_nested'"
+              let session, _ = handle session "SET @v=1.75"
+              let session, _ = handle session "ALTER TABLE schema_base ADD COLUMN extra INT"
+              let session, _ = handle session "EXECUTE view_types"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal ] "base DDL refreshes a nested view dependency"
+              let session, _ = handle session "SET @v=1.5e0"
+              let session, _ = handle session "ALTER VIEW schema_view AS SELECT id+1 AS id FROM schema_base"
+              let session, _ = handle session "EXECUTE view_types"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeDouble ] "view definition changes refresh types"
+              let session, _ = handle session "CREATE TEMPORARY TABLE schema_temp(id INT)"
+              let session, _ = handle session "INSERT INTO schema_temp VALUES(1)"
+              let session, _ = handle session "SET @v=-2"
+              let session, _ = handle session "PREPARE temp_types FROM 'SELECT @v FROM schema_temp'"
+              let session, _ = handle session "SET @v=1.75"
+              let session, _ = handle session "ALTER TABLE schema_temp ADD COLUMN extra INT"
+              let session, _ = handle session "EXECUTE temp_types"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal ] "temporary DDL refreshes types"
+
+          testCase "dependency expansion stops at a temporary table shadowing a view"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE shadow_base(id INT)"
+              let session, _ = handle session "CREATE VIEW shadow_view AS SELECT id FROM shadow_base"
+              let table = Fsdb.Storage.tableSnapshot session.Store "fsdb" "shadow_base" |> Result.defaultWith (failtestf "%A")
+              let temporary = Map.ofList [ "fsdb", Map.ofList [ "shadow_view", table ] ]
+              let statement = Fsdb.Parser.parse "SELECT @v FROM shadow_view" |> Result.defaultWith (failtestf "%A")
+              let dependencies = Fsdb.TableLocks.dependenciesForStatement session.Store temporary "fsdb" statement
+              Expect.equal (dependencies |> List.map _.Table) [ "shadow_view" ] "the hidden view is not expanded"
+
           testCase "prepared SET retains variable types and delays outer assignments"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -454,7 +518,8 @@ let tests =
                         Sql = "INSERT INTO ps_t (id, name) VALUES (?, ?)"
                         ParamCount = 2
                         LastParamTypes = None
-                        ParameterTypes = None }
+                        ParameterTypes = None
+                        SchemaDependencies = Map.empty }
 
                   // The name carries a quote and a backslash — bound as a
                   // `Value` into the AST, never re-spliced SQL text, so there
@@ -485,7 +550,8 @@ let tests =
                         Sql = sql
                         ParamCount = 5
                         LastParamTypes = None
-                        ParameterTypes = None }
+                        ParameterTypes = None
+                        SchemaDependencies = Map.empty }
 
                   let parameters =
                       [ VString "1.9"; VDouble 1.5; VDouble 1.5; VDouble 1.5; VString "255.5" ]
@@ -528,7 +594,8 @@ let tests =
                         Sql = sql
                         ParamCount = 1
                         LastParamTypes = None
-                        ParameterTypes = None }
+                        ParameterTypes = None
+                        SchemaDependencies = Map.empty }
 
                   match executePrepared session statement [ VString "1.5" ] |> snd with
                   | ResultSet(_, []) -> ()
@@ -560,7 +627,8 @@ let tests =
                             Sql = sql
                             ParamCount = 1
                             LastParamTypes = None
-                            ParameterTypes = None }
+                            ParameterTypes = None
+                            SchemaDependencies = Map.empty }
                           [ value ]
                       |> snd
                   | other -> failtestf "expected one LIMIT parameter in %s, got %A" sql other
@@ -632,7 +700,8 @@ let tests =
                         Sql = sql
                         ParamCount = 2
                         LastParamTypes = None
-                        ParameterTypes = None }
+                        ParameterTypes = None
+                        SchemaDependencies = Map.empty }
 
                   let session, result = executePrepared session statement [ VInt 2L; VInt 99L ]
                   Expect.equal result (Affected 1UL) "the selected row updates"
@@ -655,7 +724,8 @@ let tests =
                         Sql = sql
                         ParamCount = 2
                         LastParamTypes = None
-                        ParameterTypes = None }
+                        ParameterTypes = None
+                        SchemaDependencies = Map.empty }
 
                   match executePrepared session statement [ VInt 3L; VInt 4L ] |> snd with
                   | ResultSet(_, [ [ Some "1" ] ]) -> ()
@@ -692,7 +762,8 @@ let tests =
                         Sql = "SELECT RANDOM_BYTES(?)"
                         ParamCount = 1
                         LastParamTypes = None
-                        ParameterTypes = None }
+                        ParameterTypes = None
+                        SchemaDependencies = Map.empty }
 
                   let session, result = executePrepared session statement [ VInt 0L ]
 

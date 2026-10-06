@@ -701,7 +701,12 @@ let private storedProgramStatements
 
     collect Set.empty defaultDb options statements
 
-let private expandDependencies store accesses =
+let private isTemporary (catalog: Catalog) access =
+    catalog
+    |> Map.tryFind (normalize access.Database)
+    |> Option.exists (Map.containsKey (normalizeTableName access.Table))
+
+let private expandDependencies store temporaryCatalog accesses =
     let views = viewEntries store
     let triggers = lazy (triggerEntries store)
     let routines = lazy (routineEntries store)
@@ -709,7 +714,7 @@ let private expandDependencies store accesses =
     let rec expand visited access =
         let key = tableKey access.Database access.Table
 
-        if Set.contains key visited then
+        if Set.contains key visited || isTemporary temporaryCatalog access then
             [ access ]
         else
             let visited = Set.add key visited
@@ -749,16 +754,11 @@ let private expandDependencies store accesses =
 
     accesses |> List.collect (expand Set.empty) |> mergeAccesses
 
-let private isTemporary (catalog: Catalog) access =
-    catalog
-    |> Map.tryFind (normalize access.Database)
-    |> Option.exists (Map.containsKey (normalizeTableName access.Table))
-
 let private requiresOwnership temporaryCatalog access =
     not (access.Database.Equals("information_schema", StringComparison.OrdinalIgnoreCase))
     && not (isTemporary temporaryCatalog access)
 
-let accessesForStatement store temporaryCatalog defaultDb statement =
+let private statementDependencies store defaultDb statement =
     let direct = directStatementAccesses defaultDb statement
 
     let fallback =
@@ -771,9 +771,18 @@ let accessesForStatement store temporaryCatalog defaultDb statement =
             |> List.filter (fun access -> not (Set.contains (tableKey access.Database access.Table) represented))
 
     direct @ fallback
+
+/// Includes temporary tables while respecting their shadowing of stored views.
+let dependenciesForStatement store temporaryCatalog defaultDb statement =
+    statementDependencies store defaultDb statement
+    |> mergeAccesses
+    |> expandDependencies store temporaryCatalog
+
+let accessesForStatement store temporaryCatalog defaultDb statement =
+    statementDependencies store defaultDb statement
     |> List.filter (requiresOwnership temporaryCatalog)
     |> mergeAccesses
-    |> expandDependencies store
+    |> expandDependencies store temporaryCatalog
 
 let private resolveExplicitAccesses ignoreTemporary store temporaryCatalog defaultDb locks =
     let views = viewEntries store
@@ -799,7 +808,7 @@ let private resolveExplicitAccesses ignoreTemporary store temporaryCatalog defau
                 | _, true -> resolve (current :: resolved) rest
                 | Error _, false -> Error(1146, sprintf "Table '%s.%s' doesn't exist" database table)
 
-    resolve [] locks |> Result.map (expandDependencies store)
+    resolve [] locks |> Result.map (expandDependencies store temporaryCatalog)
 
 let explicitAccesses store temporaryCatalog defaultDb locks =
     resolveExplicitAccesses true store temporaryCatalog defaultDb locks

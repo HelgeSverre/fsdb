@@ -4805,6 +4805,30 @@ let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Sta
 let bindPlaceholders statement values =
     bindParameterExpressions statement (List.map Lit values)
 
+/// Keeps only dependency definitions, never table rows or catalog snapshots.
+let private preparedDependencies (session: Session) statement =
+    let store = Session.currentStore session
+    let schema = session.Database |> Option.defaultValue defaultDatabase
+    let views = lazy (
+        match Storage.scanList store "mysql" "views" with
+        | Ok(_, rows) ->
+            rows
+            |> List.choose SystemCatalog.View.tryRead
+            |> List.map (fun view -> CatalogOverlay.tableKey view.Schema view.Name, view)
+            |> Map.ofList
+        | Error _ -> Map.empty)
+    TableLocks.dependenciesForStatement store session.TemporaryCatalog schema statement
+    |> List.map (fun access -> CatalogOverlay.tableKey access.Database access.Table)
+    |> List.distinct
+    |> List.map (fun ((database, table) as key) ->
+        let definition =
+            CatalogOverlay.tryTable session.TemporaryCatalog key
+            |> Option.orElseWith (fun () -> Storage.tableSnapshot store database table |> Result.toOption)
+            |> Option.map (fun table -> PreparedDependency.Table(table.CreateTime, table.SchemaRevision))
+            |> Option.orElseWith (fun () -> views.Value |> Map.tryFind key |> Option.map PreparedDependency.View)
+        key, definition)
+    |> Map.ofList
+
 let private bindPreparedPlaceholders source (session: Session) (prepared: PreparedStmt) statement (values: Value list) =
     if values.Length <> prepared.ParamCount then
         Error(1210, "Incorrect arguments to EXECUTE")
@@ -4813,10 +4837,15 @@ let private bindPreparedPlaceholders source (session: Session) (prepared: Prepar
         let registry = registryFor session
         let schema = session.Database |> Option.defaultValue defaultDatabase
 
+        let dependencies = preparedDependencies session statement
+        let schemaChanged = dependencies <> prepared.SchemaDependencies
         let refreshVariables = PreparedVariables.capture session.UserVariables
-        PreparedMetadata.bindParameters source store registry schema refreshVariables statement prepared.ParameterTypes values
+        PreparedMetadata.bindParameters source store registry schema schemaChanged refreshVariables statement prepared.ParameterTypes values
         |> Result.map (fun (types, statement, expressions) ->
-            { prepared with Ast = Some statement; ParameterTypes = Some types }, bindParameterExpressions statement expressions)
+            { prepared with
+                Ast = Some statement
+                ParameterTypes = Some types
+                SchemaDependencies = dependencies }, bindParameterExpressions statement expressions)
 
 /// Renumbers surviving `Placeholder` nodes densely in traversal (= source)
 /// order, returning the statement and the true parameter count. FParsec's
@@ -4901,7 +4930,8 @@ let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
       Sql = sql
       ParamCount = count
       LastParamTypes = None
-      ParameterTypes = types }
+      ParameterTypes = types
+      SchemaDependencies = ast |> Option.map (preparedDependencies session) |> Option.defaultValue Map.empty }
 
 let preparedMetadata
     (session: Session)

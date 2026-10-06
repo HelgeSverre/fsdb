@@ -132,8 +132,6 @@ Remaining boundaries:
 
 - Prepared system-variable and mixed user/system SET forms still follow the
   text-probed path without a retained expression AST.
-- Schema changes that leave explicit parameter contexts unchanged do not trigger
-  a fresh variable-type capture.
 - Decimal result-scale propagation beyond the covered ABS expression still
   needs a broader expression-family oracle corpus.
 - MySQL's direct decimal variable read after assigning 'abc' produces decimal
@@ -167,3 +165,30 @@ publishing outer assignments only after all expressions succeed. Ordinary
 user-variable SET also now uses the SQL parser's string unescaping: an escaped
 quote is stored as a quote rather than retaining its escape backslash, matching
 the oracle.
+
+## Schema-triggered repreparation
+
+MySQL 8.4.11 refreshes captured user-variable types after DDL on a referenced
+table, even when the statement contains no parameter markers. The differential
+history prepares `SELECT @v FROM schema_source` while @v is an integer, then
+changes @v before each operation:
+
+- UPDATE of existing rows and ALTER of an unrelated table retain the old type.
+- Adding a column or index, changing a table comment, repeating the same
+  comment, and TRUNCATE refresh the captured type.
+- A no-op `ALTER TABLE ... ENGINE=InnoDB` refreshes types; ANALYZE does not.
+- Base-table DDL beneath nested views and an altered view definition both
+  refresh the captured type.
+- ALTER of a temporary table also refreshes the type.
+
+fsdb retains dependency definitions per prepared handle. Base tables carry an
+in-memory DDL revision, including no-op alterations; row writes preserve it.
+The revision is deliberately absent from snapshots because prepared handles
+cannot survive restart. Creation times distinguish replacement tables, while
+view catalog definitions identify view changes. Dependency stamps contain no
+row roots.
+
+A separate oracle probe showed that a temporary table may shadow a permanent
+view. fsdb currently refuses the CREATE TEMPORARY TABLE with error 1050. This
+is recorded under views in GAPS.md; the dependency traversal nevertheless stops
+at a temporary-table entry rather than expanding a hidden view.

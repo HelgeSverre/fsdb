@@ -225,6 +225,8 @@ let private tryIndexTraversal requested stored =
 /// parent side), gated by `Store.ForeignKeyChecks`.
 type Table =
     { OriginalName: string
+      /// In-memory DDL revision; prepared handles do not survive recovery.
+      SchemaRevision: int64
       Columns: ColumnDef list
       /// Published pages are immutable so captured catalog roots remain
       /// valid while a write copies only the pages it changes.
@@ -2898,6 +2900,7 @@ let reindexTable (table: Table) : Table =
 
 let private sameTableSchema (left: Table) (right: Table) =
     left.OriginalName = right.OriginalName
+    && left.SchemaRevision = right.SchemaRevision
     && left.Columns = right.Columns
     && left.Indexes = right.Indexes
     && left.ForeignKeys = right.ForeignKeys
@@ -3975,6 +3978,7 @@ let private rootUserRow: Value[] =
 let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexes: IndexDef list) (rows: Value[] list) : Table =
     let table =
         { OriginalName = name
+          SchemaRevision = 0L
           Columns = columns
           RowsArray = RowStore.ofSeq rows
           NextAutoId = 1L
@@ -5568,6 +5572,7 @@ let private retargetForeignKeys
                 table
             else
                 { table with
+                    SchemaRevision = table.SchemaRevision + 1L
                     ForeignKeys =
                         table.ForeignKeys
                         |> List.map (fun foreignKey ->
@@ -6153,6 +6158,7 @@ let createTableSeeded
 
                                         let table =
                                             { OriginalName = tableName
+                                              SchemaRevision = 0L
                                               Columns = columns
                                               RowsArray = RowStore.empty
                                               NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
@@ -6970,6 +6976,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 // `MODIFY COLUMN`), so a full rebuild rather than an
                 // incremental patch — ALTER isn't a hot path.
                 |> Result.map (fun (finalKey, finalTable) ->
+                    let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
                     let database = Map.remove origKey db |> Map.add finalKey (reindexTable finalTable)
                     let updatedCatalog = setCatalogDatabase dbName database catalog
                     invalidateAutoIncrementCounter store dbName origKey
@@ -7057,6 +7064,7 @@ let private moveTableInCatalog
                 let moved =
                     { table with
                         OriginalName = targetTableName
+                        SchemaRevision = table.SchemaRevision + 1L
                         ForeignKeys = foreignKeys }
 
                 let withoutSource =

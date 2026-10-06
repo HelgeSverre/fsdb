@@ -620,7 +620,7 @@ let private parameterType metadata =
         | _ -> TVarchar 16383)
 
 /// Converts supplied values before deciding whether the entire statement must be reprepared.
-let internal bindParameters source store registry schema refreshVariables statement retained (values: Value list) =
+let internal bindParameters source store registry schema schemaChanged refreshVariables statement retained (values: Value list) =
     let analysis = inferParameters store registry schema statement values.Length
     let original = analysis.Definitions |> List.map (Option.defaultValue generic)
     let retained = retained |> Option.defaultValue { Context = original; Derived = original }
@@ -664,7 +664,8 @@ let internal bindParameters source store registry schema refreshVariables statem
             | Some UnsignedIntegerOnly -> value
             | _ -> convert expected value)
     let reprepare =
-        retained.Context <> original
+        schemaChanged
+        || retained.Context <> original
         || (List.zip3 analysis.Bindings expected actual
             |> List.exists (fun (binding, expected, value) -> not (inherited binding) && not (accepts expected value)))
 
