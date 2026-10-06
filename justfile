@@ -58,6 +58,12 @@ test *ARGS:
     #!/usr/bin/env bash
     dotnet run --project tests/Fsdb.Tests -- "$@"
 
+# Verify prepared-type histories against the pinned MySQL oracle
+[group('qa')]
+prepared-type-oracle:
+    dotnet build tests/Fsdb.Tests --nologo
+    dotnet fsi --nologo torture/scripts/prepared-type-oracle.fsx
+
 # Build + tests
 [group('qa')]
 check: build test
