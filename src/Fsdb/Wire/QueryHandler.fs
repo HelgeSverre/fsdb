@@ -3406,7 +3406,12 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
         |> Set.fold (fun catalog (db, table) ->
             if Set.contains (db, table) beforeKeys then catalog else CatalogOverlay.setTable catalog db table None) combined
 
-    let working = Storage.beginTransactionSnapshotFromCatalog baseStore combined
+    let working =
+        { Storage.beginTransactionSnapshotFromCatalog baseStore combined with
+            TableShadows =
+                Set.union beforeKeys targets
+                |> Seq.map (fun key -> key, CatalogOverlay.tryTable baseCatalog key)
+                |> Map.ofSeq }
     let workingSession = { session with Store = working; Tx = None }
     let executed, result = executeParsedCoreUnderLock workingSession stmt
 
@@ -3458,28 +3463,42 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let usesTemporary = action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt
     let beforeKeys = temporaryKeys session.TemporaryCatalog
+    let changesView = match stmt with CreateView _ | DropView _ -> true | _ -> false
+    let implicitCommit = causesImplicitCommit stmt && (not usesTemporary || changesView)
 
-    let statementAccesses () =
+    let statementAccesses session =
+        let permanentViewTargets =
+            match stmt with
+            | CreateView view -> [ view.Name ]
+            | DropView(names, _) -> names
+            | _ -> []
+        let temporaryCatalog =
+            permanentViewTargets
+            |> List.fold (fun catalog name ->
+                let database, table = splitQualified dbName name
+                CatalogOverlay.setTable catalog database table None) session.TemporaryCatalog
         TableLocks.accessesForStatement
             (Session.currentStore session)
-            session.TemporaryCatalog
+            temporaryCatalog
             dbName
             stmt
 
     let executed, result =
         if mixesTemporaryAndPermanentRenames dbName beforeKeys stmt then
             session, Err(1105, "RENAME TABLE cannot mix temporary and permanent tables")
+        elif implicitCommit && xaAssociation session |> Option.isSome then
+            let state = xaAssociation session |> Option.map (snd >> xaStateName) |> Option.defaultValue "NON-EXISTING"
+            session, xaRmFail state
+        elif implicitCommit && insideFunctionOrTrigger session then
+            session, Err(1422, "Explicit or implicit commit is not allowed in stored function or trigger.")
         elif usesTemporary && xaAssociation session |> Option.isSome then
             session, Err(4091, "XA: Temporary tables cannot be accessed inside XA transactions when xa_detach_on_prepare=ON")
         elif usesTemporary then
-            executeWithTemporaryStatementAccess session (statementAccesses ()) (fun () ->
+            let session = if implicitCommit then commitSession session else session
+            if implicitCommit then TableLocks.releaseExplicit session.Store session.ConnectionId
+            executeWithTemporaryStatementAccess session (statementAccesses session) (fun () ->
                 executeWithTemporaryCatalog action session stmt)
-        elif causesImplicitCommit stmt && xaAssociation session |> Option.isSome then
-            let state = xaAssociation session |> Option.map (snd >> xaStateName) |> Option.defaultValue "NON-EXISTING"
-            session, xaRmFail state
-        elif causesImplicitCommit stmt && insideFunctionOrTrigger session then
-            session, Err(1422, "Explicit or implicit commit is not allowed in stored function or trigger.")
-        elif causesImplicitCommit stmt then
+        elif implicitCommit then
             let session = commitSession session
             TableLocks.releaseExplicit session.Store session.ConnectionId
 
@@ -3535,7 +3554,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
                         rollbackSession working |> ignore
                         reraise ()
 
-                executeWithStatementAccess session (statementAccesses ()) executeAutocommit
+                executeWithStatementAccess session (statementAccesses session) executeAutocommit
 
     TableHandler.invalidate session stmt executed result, result
 
@@ -4500,9 +4519,14 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let viewColumns = Executor.viewColumns store (registryFor session)
         session,
         InformationSchema.withViewer store (accountOf session) session.ActiveRoles (fun () ->
-            InformationSchema.showColumns
+            let showColumns =
+                if CatalogOverlay.containsTable session.TemporaryCatalog dbName table then
+                    InformationSchema.showTemporaryColumns
+                else
+                    fun catalog -> InformationSchema.showColumns catalog (Some viewColumns)
+
+            showColumns
                 (catalogWithOverlay session dbName table)
-                (Some viewColumns)
                 full
                 dbName
                 table
@@ -4524,9 +4548,14 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let viewColumns = Executor.viewColumns store (registryFor session)
         session,
         InformationSchema.withViewer store (accountOf session) session.ActiveRoles (fun () ->
-            InformationSchema.showColumns
+            let showColumns =
+                if CatalogOverlay.containsTable session.TemporaryCatalog dbName table then
+                    InformationSchema.showTemporaryColumns
+                else
+                    fun catalog -> InformationSchema.showColumns catalog (Some viewColumns)
+
+            showColumns
                 (catalogWithOverlay session dbName table)
-                (Some viewColumns)
                 false
                 dbName
                 table
@@ -4805,6 +4834,19 @@ let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Sta
 let bindPlaceholders statement values =
     bindParameterExpressions statement (List.map Lit values)
 
+let private preparedStore (session: Session) =
+    let store = Session.currentStore session
+    if session.TemporaryCatalog.IsEmpty then
+        store
+    else
+        let permanentCatalog = store.Catalog
+        let catalog = CatalogOverlay.merge permanentCatalog session.TemporaryCatalog
+        { Storage.beginTransactionSnapshotFromCatalog store catalog with
+            TableShadows =
+                temporaryKeys session.TemporaryCatalog
+                |> Seq.map (fun key -> key, CatalogOverlay.tryTable permanentCatalog key)
+                |> Map.ofSeq }
+
 /// Keeps only dependency definitions, never table rows or catalog snapshots.
 let private preparedDependencies (session: Session) statement =
     let store = Session.currentStore session
@@ -4833,7 +4875,7 @@ let private bindPreparedPlaceholders source (session: Session) (prepared: Prepar
     if values.Length <> prepared.ParamCount then
         Error(1210, "Incorrect arguments to EXECUTE")
     else
-        let store = Session.currentStore session
+        let store = preparedStore session
         let registry = registryFor session
         let schema = session.Database |> Option.defaultValue defaultDatabase
 
@@ -4920,7 +4962,7 @@ let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
     let types =
         ast |> Option.map (fun statement ->
             PreparedMetadata.initialTypes
-                (Session.currentStore session)
+                (preparedStore session)
                 (registryFor session)
                 (session.Database |> Option.defaultValue defaultDatabase)
                 statement
@@ -4943,7 +4985,7 @@ let preparedMetadata
     match statement with
     | None -> List.replicate parameterCount generic, []
     | Some statement ->
-        let store = Session.currentStore session
+        let store = preparedStore session
         let schema = session.Database |> Option.defaultValue defaultDatabase
         let registry = registryFor session
 

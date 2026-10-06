@@ -9755,6 +9755,93 @@ let tests =
               Expect.equal store.Catalog.[Fsdb.Storage.defaultDatabase].Count 1 "shared catalog contains only the permanent table"
               Expect.isEmpty commits "temporary changes emit no shared commit events"
 
+          testCase "star projection ordinals order expanded columns"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE ordinal_source(a INT, b INT)"
+              let session, _ = handle session "INSERT INTO ordinal_source VALUES(2,10),(1,20)"
+              Expect.equal (handle session "SELECT * FROM ordinal_source ORDER BY 2" |> snd)
+                  (ResultSet([ "a"; "b" ], [ [ Some "2"; Some "10" ]; [ Some "1"; Some "20" ] ]))
+                  "an ordinal indexes expanded columns"
+              Expect.equal (handle session "SELECT s.*, -b AS reversed FROM ordinal_source s ORDER BY 3" |> snd)
+                  (ResultSet([ "a"; "b"; "reversed" ],
+                      [ [ Some "1"; Some "20"; Some "-20" ]; [ Some "2"; Some "10"; Some "-10" ] ]))
+                  "columns after a qualified star retain their output positions"
+
+          testCase "temporary tables shadow permanent views without changing their definitions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let second = create 2 store
+              let first, _ = handle first "CREATE TABLE view_source(id INT)"
+              let first, _ = handle first "INSERT INTO view_source VALUES(42)"
+              let first, _ = handle first "CREATE VIEW shadowed_view AS SELECT id FROM view_source"
+              let commits = ResizeArray<Fsdb.Storage.CommitEvent>()
+              store.OnCommit.Add commits.Add
+              let first, result = handle first "CREATE TEMPORARY TABLE shadowed_view(label VARCHAR(12))"
+              Expect.equal result (Affected 0UL) "a temporary table may hide a permanent view"
+              Expect.equal (handle first "DESCRIBE shadowed_view" |> snd)
+                  (ResultSet([ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ],
+                      [ [ Some "label"; Some "varchar(12)"; Some "YES"; Some ""; None; Some "NULL" ] ]))
+                  "temporary metadata uses MySQL's empty Extra label"
+              let first, result = handle first "INSERT INTO shadowed_view VALUES('temporary')"
+              Expect.equal result (Affected 1UL) "the insert targets the temporary table"
+              let first, result = handle first "UPDATE shadowed_view SET label='changed'"
+              Expect.equal result (Affected 1UL) "the update targets the temporary table"
+              Expect.equal (handle first "SELECT * FROM shadowed_view" |> snd)
+                  (ResultSet([ "label" ], [ [ Some "changed" ] ])) "the temporary row is visible"
+              Expect.equal (handle second "SELECT * FROM shadowed_view" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "42" ] ])) "another session still reads the view"
+              match handle first "SHOW CREATE VIEW shadowed_view" |> snd with
+              | ResultSet(_, [ [ Some "shadowed_view"; Some definition; _; _ ] ]) ->
+                  Expect.stringContains definition "view_source" "the permanent definition remains visible"
+              | other -> failtestf "expected the permanent view definition, got %A" other
+              let ast, count = prepareStatement "SELECT * FROM shadowed_view" |> Result.defaultWith (failtestf "%A")
+              let _, columns = preparedMetadata first ast count
+              Expect.equal (columns |> List.map _.Name) [ "label" ] "prepared descriptors resolve the temporary table"
+              let first, result = handle first "DROP TEMPORARY TABLE shadowed_view"
+              Expect.equal result (Affected 0UL) "only the temporary table is dropped"
+              Expect.equal (handle first "SELECT * FROM shadowed_view" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "42" ] ])) "dropping reveals the view"
+              Expect.isEmpty commits "temporary writes never publish shared changes"
+
+          testCase "view DDL cannot replace a permanent table hidden by a temporary table"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE collision(id INT)"
+              let session, _ = handle session "CREATE TEMPORARY TABLE collision(label VARCHAR(12))"
+              for sql, code in
+                  [ "CREATE VIEW collision AS SELECT 1 AS id", 1050
+                    "ALTER VIEW collision AS SELECT 1 AS id", 1347 ] do
+                  match handle session sql |> snd with
+                  | Err(actual, _) -> Expect.equal actual code "the permanent table retains its object kind"
+                  | other -> failtestf "expected error %d, got %A" code other
+
+          testCase "view DDL resolves the permanent view beneath a temporary table"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE view_source(id INT)"
+              let session, _ = handle session "INSERT INTO view_source VALUES(42)"
+              let session, _ = handle session "CREATE VIEW shadowed_view AS SELECT id FROM view_source"
+              let session, _ = handle session "CREATE TEMPORARY TABLE shadowed_view(label VARCHAR(12))"
+              let session, _ = handle session "INSERT INTO shadowed_view VALUES('temporary')"
+              let session, _ = handle session "START TRANSACTION"
+              let session, _ = handle session "INSERT INTO view_source VALUES(50)"
+              let session, result = handle session "ALTER VIEW shadowed_view AS SELECT id+1 AS id FROM view_source"
+              Expect.equal result (Affected 0UL) "ALTER VIEW reaches the permanent definition"
+              let session, _ = handle session "ROLLBACK"
+              Expect.equal (handle session "SELECT id FROM view_source ORDER BY id" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "42" ]; [ Some "50" ] ])) "view DDL commits the transaction"
+              let session, result = handle session "CREATE VIEW invalid_view AS SELECT * FROM shadowed_view"
+              match result with
+              | Err(1352, _) -> ()
+              | other -> failtestf "expected rejection of a temporary view source, got %A" other
+              Expect.equal (handle session "SELECT * FROM shadowed_view" |> snd)
+                  (ResultSet([ "label" ], [ [ Some "temporary" ] ])) "view DDL leaves the temporary row alone"
+              let session, _ = handle session "DROP TEMPORARY TABLE shadowed_view"
+              Expect.equal (handle session "SELECT * FROM shadowed_view ORDER BY id" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "43" ]; [ Some "51" ] ])) "the altered view becomes visible"
+
           testCase "temporary sources can feed permanent writes without publication"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

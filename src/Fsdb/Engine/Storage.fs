@@ -479,6 +479,8 @@ type Store =
       mutable ForeignKeyChecks: bool
       /// Re-derived from session variables before each statement.
       mutable ExecutionSettings: ExecutionSettings
+      /// Session-local names map to the permanent tables they hide, if any.
+      TableShadows: Map<string * string, Table option>
       /// Lowercase names overlay real tables in the reserved fsdb schema.
       mutable VirtualTables: Map<string, Functions.VirtualTable>
       /// Synchronous ordered subscribers run after catalog publication.
@@ -675,6 +677,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       ExecutionSettings =
         { store.ExecutionSettings with
             SqlMode = { store.ExecutionSettings.SqlMode with Strict = true } }
+      TableShadows = store.TableShadows
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
       Durability = store.Durability
@@ -4363,6 +4366,7 @@ let create () : Store =
     { Databases = databases
       ForeignKeyChecks = true
       ExecutionSettings = ExecutionSettings.defaults
+      TableShadows = Map.empty
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
       Durability = { Sink = None }

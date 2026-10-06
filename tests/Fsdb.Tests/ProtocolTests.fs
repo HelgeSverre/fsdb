@@ -584,6 +584,10 @@ let tests =
 
               Expect.equal (sqlStateForCode 1049) "42000" "unknown database state"
 
+          testCase "existing table errors retain their MySQL SQLSTATE"
+          <| fun _ ->
+              Expect.equal (sqlStateForCode 1050) "42S01" "table already exists"
+
           testCase "binary protocol geometry parameters retain their SRID and WKB"
           <| fun _ ->
               let bytes = Convert.FromHexString "E61000000101000000000000000000F83F00000000000000C0"

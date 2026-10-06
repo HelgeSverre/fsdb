@@ -3623,7 +3623,7 @@ let showDatabases (catalog: Catalog) (fsdbVisible: bool) (likeOpt: string option
 /// `SHOW [FULL] COLUMNS FROM t [FROM db] [LIKE 'pattern']` and
 /// `DESCRIBE`/`DESC t` (which are just `SHOW COLUMNS`'s narrower 5-column
 /// form under a different name).
-let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool) (dbName: string) (tableName: string) (likeOpt: string option) : ShowResult =
+let private showColumnsWithExtra (extra: ColumnDef -> string) (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool) (dbName: string) (tableName: string) (likeOpt: string option) : ShowResult =
     let columns =
         match findTable catalog dbName tableName with
         | Ok table -> Ok(table.Columns, fun (column: ColumnDef) -> columnKey table column)
@@ -3636,7 +3636,6 @@ let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool
     |> Result.map (fun (columns, keyOf) ->
         let isNullable (c: ColumnDef) = if c.PrimaryKey || not c.Nullable then "NO" else "YES"
         let defaultCol (c: ColumnDef) = defaultText c
-        let extra = extraText
 
         let visibleColumn (column: ColumnDef) =
             match currentViewer.Value with
@@ -3692,6 +3691,18 @@ let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool
                     [ Some c.Name; Some(columnTypeTextOfColumn c); Some(isNullable c); Some(keyOf c); defaultCol c; Some(extra c) ])
 
             [ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows)
+
+let showColumns catalog viewColumns full dbName tableName likeOpt =
+    showColumnsWithExtra extraText catalog viewColumns full dbName tableName likeOpt
+
+/// MySQL's temporary-table metadata uses a literal NULL label when Extra is empty.
+let showTemporaryColumns catalog full dbName tableName likeOpt =
+    let extra column =
+        match extraText column with
+        | "" -> "NULL"
+        | value -> value
+
+    showColumnsWithExtra extra catalog None full dbName tableName likeOpt
 
 let private backtick (s: string) = "`" + s.Replace("`", "``") + "`"
 

@@ -2096,6 +2096,39 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE schema_type"; "DEALLOCATE PREPARE schema_view_type"; "DROP VIEW schema_nested"; "DROP VIEW schema_view"; "DROP TABLE schema_source,schema_other" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private temporaryViewShadowing =
+        { Name = "temporary-view-shadowing"
+          Setup = [| "CREATE TABLE shadow_source(id INT)"; "INSERT INTO shadow_source VALUES(42)"; "CREATE VIEW shadow_view AS SELECT id FROM shadow_source" |]
+          Steps =
+            [| Contract.execute "create-temporary" "CREATE TEMPORARY TABLE shadow_view(label VARCHAR(12))"
+               Contract.execute "insert-temporary" "INSERT INTO shadow_view VALUES('temporary')"
+               Contract.query "read-temporary" "SELECT * FROM shadow_view"
+               Contract.query "read-permanent" "SELECT * FROM shadow_view" |> Contract.on "observer"
+               Contract.query "describe-temporary" "DESCRIBE shadow_view"
+               Contract.prepare "prepare-temporary" "shadow-query" Query "SELECT * FROM shadow_view ORDER BY 1" [||]
+               Contract.invoke "execute-temporary" "shadow-query" OracleSuccess
+               Contract.execute "update-temporary" "UPDATE shadow_view SET label='changed'"
+               Contract.invoke "execute-updated" "shadow-query" OracleSuccess
+               Contract.execute "begin" "START TRANSACTION"
+               Contract.execute "insert-permanent" "INSERT INTO shadow_source VALUES(50)"
+               Contract.execute "alter-permanent-view" "ALTER VIEW shadow_view AS SELECT id+1 AS id FROM shadow_source"
+               Contract.execute "rollback" "ROLLBACK"
+               Contract.query "ddl-committed" "SELECT id FROM shadow_source ORDER BY id" |> Contract.on "observer"
+               Contract.execute "reject-temporary-source" "CREATE VIEW invalid_shadow AS SELECT * FROM shadow_view" |> Contract.fails 1352 "HY000"
+               Contract.query "temporary-unchanged" "SELECT * FROM shadow_view"
+               Contract.execute "drop-temporary" "DROP TEMPORARY TABLE shadow_view"
+               Contract.invoke "execute-revealed-view" "shadow-query" OracleSuccess
+               Contract.close "close-query" "shadow-query"
+               Contract.query "read-revealed-view" "SELECT * FROM shadow_view ORDER BY id"
+               Contract.execute "create-collision" "CREATE TABLE shadow_collision(id INT)"
+               Contract.execute "hide-collision" "CREATE TEMPORARY TABLE shadow_collision(label VARCHAR(12))"
+               Contract.execute "reject-create-collision" "CREATE VIEW shadow_collision AS SELECT 1 AS id" |> Contract.fails 1050 "42S01"
+               Contract.execute "reject-alter-collision" "ALTER VIEW shadow_collision AS SELECT 1 AS id" |> Contract.fails 1347 "HY000"
+               Contract.execute "drop-collision-shadow" "DROP TEMPORARY TABLE shadow_collision"
+               Contract.execute "drop-collision" "DROP TABLE shadow_collision" |]
+          Cleanup = [| "DROP TEMPORARY TABLE IF EXISTS shadow_view"; "DROP VIEW shadow_view"; "DROP TABLE shadow_source" |]
+          Coverage = [| "statement:create_table", [| "text-differential"; "prepared-protocol" |] |] }
+
     let all =
         [| comments
            exactErrors
@@ -2108,6 +2141,7 @@ module ContractCatalog =
            preparedUserVariables
            preparedUserAssignments
            preparedSchemaChanges
+           temporaryViewShadowing
            columnTypes
            generatedFunctionFamilies
            functionFamilies

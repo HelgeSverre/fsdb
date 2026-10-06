@@ -724,7 +724,7 @@ let private registryForView (store: Store) (registry: Registry) (view: StoredVie
 /// names are JSON so every legal quoted identifier round-trips without inventing
 /// a second escaping convention. Invalid catalog text is treated as an absent
 /// list so direct catalog damage cannot crash the query worker.
-let private tryStoredView (store: Store) (dbName: string) (viewName: string) : StoredView option =
+let private tryStoredViewDefinition (store: Store) (dbName: string) (viewName: string) : StoredView option =
     let columns (value: string) =
         if value = "" then
             []
@@ -751,6 +751,12 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
               CheckOption = view.CheckOption
               SecurityType = view.SecurityType
               Algorithm = view.Algorithm })
+
+let private tryStoredView (store: Store) (dbName: string) (viewName: string) =
+    if store.TableShadows.ContainsKey(dbName.ToLowerInvariant(), viewName.ToLowerInvariant()) then
+        None
+    else
+        tryStoredViewDefinition store dbName viewName
 
 let private parseStoredViewStatement definition =
     Parser.parseViewDefinition definition |> Result.map _.Statement
@@ -14994,11 +15000,32 @@ and private runSelect
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
-    // ORDER BY may name a 1-based projection position (`ORDER BY 1`) —
-    // resolve that first against the projection list; `resolveOrderKey`
-    // below handles the alias/output-column case (and its `*`/`t.*`
-    // expansion) itself.
-    let resolveOrderExpr = resolveOrderPosition projections
+    // Ordinals address output columns, including each column expanded from a star.
+    // Qualify expanded sources so joins with repeated column names stay unambiguous.
+    let orderProjections =
+        let sourceColumn position (column: ColumnDef) =
+            qualifiers
+            |> Map.toSeq
+            |> Seq.tryPick (fun (qualifier, (sourceColumns, offset)) ->
+                if position >= offset && position < offset + sourceColumns.Length then
+                    Some(QualifiedCol(qualifier, column.Name), None)
+                else
+                    None)
+            |> Option.defaultValue (Col column.Name, None)
+
+        projections
+        |> List.collect (fun (expression, alias) ->
+            match expression with
+            | Star None -> columns |> List.mapi sourceColumn
+            | Star(Some qualifier) ->
+                qualifiers
+                |> Map.tryFind (qualifier.ToLowerInvariant())
+                |> Option.map (fun (sourceColumns, _) ->
+                    sourceColumns |> List.map (fun column -> QualifiedCol(qualifier, column.Name), None))
+                |> Option.defaultValue [ expression, alias ]
+            | _ -> [ expression, alias ])
+
+    let resolveOrderExpr = resolveOrderPosition orderProjections
 
     let directOrderExpression expression =
         match resolveOrderExpr expression with
@@ -19737,7 +19764,7 @@ let rec executeAs
 
     | CreateView viewSpec ->
         let db, viewName = splitQualified dbName viewSpec.Name
-        let existing = tryStoredView store db viewName
+        let existing = tryStoredViewDefinition store db viewName
         let altering = viewSpec.Action = AlterViewDdl
 
         let parsedView, viewDefinition, checkOption =
@@ -19751,22 +19778,37 @@ let rec executeAs
             |> List.tryFind (fun (_, count) -> count > 1)
 
         let baseObjectExists =
-            store.Catalog
-            |> Map.tryFind db
-            |> Option.exists (Map.containsKey (normalizeTableName viewName))
+            match Map.tryFind (db.ToLowerInvariant(), viewName.ToLowerInvariant()) store.TableShadows with
+            | Some permanentTable -> permanentTable.IsSome
+            | None ->
+                store.Catalog
+                |> Map.tryFind db
+                |> Option.exists (Map.containsKey (normalizeTableName viewName))
 
         let virtualObjectExists =
             System.String.Equals(db, defaultDatabase, System.StringComparison.OrdinalIgnoreCase)
             && store.VirtualTables.ContainsKey(normalizeTableName viewName)
 
+        let temporarySource =
+            parsedView
+            |> Result.toOption
+            |> Option.bind (fun statement ->
+                Auth.requiredPrivileges db statement
+                |> List.tryPick (function
+                    | _, Auth.OnTable(database, table) when store.TableShadows.ContainsKey(database.ToLowerInvariant(), table.ToLowerInvariant()) -> Some table
+                    | _ -> None))
+
         let objectError =
-            match viewSpec.Action, baseObjectExists || virtualObjectExists, existing with
-            | AlterViewDdl, true, _ -> Some(1347, sprintf "'%s.%s' is not VIEW" db viewName)
-            | AlterViewDdl, false, None -> Some(1146, sprintf "Table '%s.%s' doesn't exist" db viewName)
-            | CreateViewDdl true, true, _ -> Some(1347, sprintf "'%s.%s' is not VIEW" db viewName)
-            | CreateViewDdl false, true, _
-            | CreateViewDdl false, false, Some _ -> Some(1050, sprintf "Table '%s' already exists" viewName)
-            | _ -> None
+            match temporarySource with
+            | Some table -> Some(1352, sprintf "View's SELECT refers to a temporary table '%s'" table)
+            | None ->
+                match viewSpec.Action, baseObjectExists || virtualObjectExists, existing with
+                | AlterViewDdl, true, _ -> Some(1347, sprintf "'%s.%s' is not VIEW" db viewName)
+                | AlterViewDdl, false, None -> Some(1146, sprintf "Table '%s.%s' doesn't exist" db viewName)
+                | CreateViewDdl true, true, _ -> Some(1347, sprintf "'%s.%s' is not VIEW" db viewName)
+                | CreateViewDdl false, true, _
+                | CreateViewDdl false, false, Some _ -> Some(1050, sprintf "Table '%s' already exists" viewName)
+                | _ -> None
 
         let algorithm =
             match viewSpec.Algorithm, existing with
