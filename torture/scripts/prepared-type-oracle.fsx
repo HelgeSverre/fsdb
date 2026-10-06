@@ -143,3 +143,49 @@ let histories =
 for protocol in [Binary; Sql] do
     for sql, executions in histories do
         run protocol sql executions
+
+let runSetHistory sql expected =
+    use connection = new MySqlConnection(connectionString)
+    connection.Open()
+    if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+        failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+
+    let execute sql =
+        use command = new MySqlCommand(sql, connection)
+        command.ExecuteNonQuery() |> ignore
+
+    execute "SET @v=2,@x=9"
+    execute ("PREPARE probe FROM " + quote sql)
+    List.zip [Exact 1.75M; Text "abc"; Null; Integer 3L] expected
+    |> List.iter (fun (value, expectedRow) ->
+        execute ("SET @v=" + sqlValue value)
+        execute "EXECUTE probe"
+        // Explicit LIMIT keeps a captured NULL's zero sql_select_limit observable.
+        use command = new MySqlCommand("SELECT @x,@@session.sql_select_limit LIMIT 1", connection)
+        use reader = command.ExecuteReader()
+        if not (reader.Read()) then failwithf "%s returned no inspection row" sql
+        let actual =
+            [ for column in 0 .. reader.FieldCount - 1 ->
+                reader.GetDataTypeName(column) + ":" + renderValue(reader.GetValue(column)) ]
+        if actual <> expectedRow then
+            failwithf "%s after %A: expected %A; got %A" sql value expectedRow actual
+        printfn "SQL SET | %s | %A -> %s" sql value (String.concat " | " actual))
+    execute "DEALLOCATE PREPARE probe"
+
+runSetHistory "SET @x=@v, SESSION sql_select_limit=100"
+    [ ["BIGINT:2"; "BIGINT:100"]
+      ["BIGINT:0"; "BIGINT:100"]
+      ["BIGINT:NULL"; "BIGINT:100"]
+      ["BIGINT:3"; "BIGINT:100"] ]
+
+runSetHistory "SET SESSION sql_select_limit=@v"
+    [ ["BIGINT:9"; "BIGINT:2"]
+      ["BIGINT:9"; "BIGINT:0"]
+      ["BIGINT:9"; "BIGINT:0"]
+      ["BIGINT:9"; "BIGINT:3"] ]
+
+runSetHistory "SET SESSION sql_select_limit=@v, @x=@v"
+    [ ["BIGINT:2"; "BIGINT:2"]
+      ["BIGINT:0"; "BIGINT:0"]
+      ["BIGINT:NULL"; "BIGINT:0"]
+      ["BIGINT:3"; "BIGINT:3"] ]

@@ -166,6 +166,26 @@ user-variable SET also now uses the SQL parser's string unescaping: an escaped
 quote is stored as a quote rather than retaining its escape backslash, matching
 the oracle.
 
+## Prepared system-variable and mixed SET oracle
+
+`just prepared-type-oracle` includes independent histories for
+`SET @x=@v, SESSION sql_select_limit=100`,
+`SET SESSION sql_select_limit=@v`, and
+`SET SESSION sql_select_limit=@v, @x=@v`, prepared with integer @v=2.
+Changing @v to decimal 1.75, invalid numeric text, NULL, and integer 3 retains
+the captured integer interpretation throughout. The resulting user-variable
+values are 2, 0, NULL, and 3, all with BIGINT metadata.
+
+For the system-variable target, the retained integer NULL becomes 0 rather
+than remaining NULL. A fresh ordinary assignment of NULL or decimal 1.75 to
+`sql_select_limit` instead returns 1232/42000. The inspection query explicitly
+uses `LIMIT 1` so a zero session limit does not hide its result.
+
+These forms remain an open compatibility gap. `systemSetAction` separates
+assignment normalization from expression evaluation so retained prepared
+expressions can use the same system-variable validation and defaults as
+ordinary SET.
+
 ## Schema-triggered repreparation
 
 MySQL 8.4.11 refreshes captured user-variable types after DDL on a referenced
