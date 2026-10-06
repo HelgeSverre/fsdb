@@ -264,7 +264,42 @@ let private readWireDefinition (packet: Packet) =
 let tests =
     testList
         "Integration"
-        [ testCase "mysql client can connect, SELECT 1, and read @@version"
+        [ testCase "caching SHA2 accepts a single NUL for an empty password and rejects other bytes"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let capabilities = ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+
+                  for plugin in [ "caching_sha2_password"; "mysql_native_password" ] do
+                      for response, accepted in [ [||], true; [| 0uy |], true; [| 0uy; 0uy |], false; [| 1uy |], false ] do
+                          use client = new Net.Sockets.TcpClient()
+                          do! client.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                          let stream = client.GetStream()
+                          let! sequence, _, _ = readHandshake stream
+                          let payload = handshakeResponseWithAuth capabilities "root" response plugin
+                          do! writePacketAsync stream { SeqId = sequence + 1uy; Payload = payload } |> Async.Ignore
+                          let! first = readPacketAsync stream
+                          let! result =
+                              async {
+                                  if plugin = "mysql_native_password" then
+                                      Expect.equal first.Value.Payload.[0] 0xfeuy "server selects the account's SHA2 plugin"
+                                      do! writePacketAsync stream { SeqId = first.Value.SeqId + 1uy; Payload = response } |> Async.Ignore
+                                      return! readPacketAsync stream
+                                  else
+                                      return first
+                              }
+                          let reader = Reader(result.Value.Payload)
+                          if accepted then
+                              Expect.equal (reader.ReadByte()) 0uy "empty password is accepted"
+                          else
+                              Expect.equal (reader.ReadByte()) 0xffuy "nonempty response is rejected"
+                              Expect.equal (reader.ReadInt16LE()) 1045 "access denied"
+                              Expect.equal (reader.ReadByte()) (byte '#') "SQLSTATE marker"
+                              Expect.equal (Text.Encoding.ASCII.GetString(reader.ReadBytes 5)) "28000" "authorization SQLSTATE"
+              }
+              |> Async.RunSynchronously
+
+          testCase "mysql client can connect, SELECT 1, and read @@version"
           <| fun _ ->
               async {
                   use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty

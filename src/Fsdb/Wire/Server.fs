@@ -1220,8 +1220,10 @@ let private authenticateAccount
 
                 if stored = "" then
                     let emptyPassword =
-                        authResponse.Length = 0
-                        || (plugin = Authentication.Sha256Password && authResponse = [| 0uy |])
+                        match plugin, authResponse with
+                        | _, [||]
+                        | (Authentication.CachingSha2Password | Authentication.Sha256Password), [| 0uy |] -> true
+                        | _ -> false
 
                     if emptyPassword then
                         return! accept authSeq selected cols row
