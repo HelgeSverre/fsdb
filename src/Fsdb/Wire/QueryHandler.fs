@@ -1467,6 +1467,135 @@ let private transactionIsolationScope (prefix: string) =
     | "@@GLOBAL." -> GlobalIsolation
     | _ -> SessionIsolation
 
+/// Normalizes system assignments independently of how their expressions are evaluated.
+let private systemSetAction
+    (session: Session)
+    (scope: string)
+    (name: string)
+    (usesDefault: bool)
+    (resolved: Result<Value * Map<string, Value>, QueryResult>)
+    : Result<SetAction * Map<string, Value>, QueryResult> =
+    let isGlobal = isGlobalScope scope
+    let sqlModeAction value sideEffects =
+        match SqlMode.tryNormalize value with
+        | Ok canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
+        | Error invalid -> Error(Err(1231, sprintf "Variable 'sql_mode' can't be set to the value of '%s'" invalid))
+
+    match resolved with
+    | Error result -> Error result
+    | Ok(value, sideEffects) when readOnlySystemVariables.Contains name ->
+        Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
+    | Ok(_, sideEffects) when usesDefault && name = "max_sp_recursion_depth" ->
+        let depth =
+            if isGlobal then
+                0
+            else
+                Session.tryGlobalVariable session.Store name
+                |> Option.flatten
+                |> Option.bind tryInt32
+                |> Option.defaultValue 0
+
+        Ok(SetRoutineRecursionDepthAction(depth, isGlobal, None), sideEffects)
+    | Ok(_, sideEffects) when usesDefault && name = "max_points_in_geometry" ->
+        let limit =
+            if isGlobal then
+                Limits.defaultMaxPointsInGeometry
+            else
+                Session.tryGlobalVariable session.Store name
+                |> Option.flatten
+                |> Option.bind tryInt32
+                |> Option.defaultValue Limits.defaultMaxPointsInGeometry
+
+        Ok(SetVarAction(name, Some(string limit), isGlobal), sideEffects)
+    | Ok(_, sideEffects)
+        when usesDefault
+             && (name = "activate_all_roles_on_login"
+                 || name = "event_scheduler"
+                 || name = "mandatory_roles"
+                 || name = "protocol_compression_algorithms") ->
+        Ok(SetVarAction(name, Session.defaultVariables.[name], isGlobal), sideEffects)
+    | Ok(_, sideEffects)
+        when usesDefault
+             && (name = "completion_type" || name = "session_track_transaction_info") ->
+        let value =
+            if isGlobal then
+                Session.defaultVariables.[name]
+            else
+                Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
+
+        Ok(SetVarAction(name, value, isGlobal), sideEffects)
+    | Ok(_, sideEffects) when usesDefault && name = "sql_mode" ->
+        let value =
+            if isGlobal then
+                Session.defaultVariables.[name]
+            else
+                Session.tryGlobalVariable session.Store name
+                |> Option.defaultValue Session.defaultVariables.[name]
+
+        match value with
+        | Some value -> sqlModeAction value sideEffects
+        | None -> Error(Err(1231, "Variable 'sql_mode' can't be set to the value of 'NULL'"))
+    | Ok(_, sideEffects) when usesDefault && name = "time_zone" ->
+        let value =
+            if isGlobal then
+                Session.defaultVariables.[name]
+            else
+                Session.tryGlobalVariable session.Store name
+                |> Option.defaultValue Session.defaultVariables.[name]
+
+        Ok(SetVarAction(name, value, isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "max_sp_recursion_depth" ->
+        normalizeRoutineRecursionDepth value
+        |> Result.map (fun (depth, warning) ->
+            SetRoutineRecursionDepthAction(depth, isGlobal, warning), sideEffects)
+    | Ok(value, sideEffects) when name = "max_points_in_geometry" ->
+        normalizeGeometryPointLimit value
+        |> Result.map (fun limit -> SetVarAction(name, Some(string limit), isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "sql_mode" ->
+        match toText value with
+        | Some value -> sqlModeAction value sideEffects
+        | None -> Error(Err(1231, "Variable 'sql_mode' can't be set to the value of 'NULL'"))
+    | Ok(VString value, sideEffects) when name = "block_encryption_mode" ->
+        match Functions.tryBlockEncryptionMode value with
+        | Some canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
+        | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name value))
+    | Ok(VString value, sideEffects) when name = "transaction_isolation" ->
+        transactionIsolationOf value
+        |> Result.map (fun isolation ->
+            SetTransactionIsolationAction(transactionIsolationScope scope, isolation), sideEffects)
+    | Ok(_, _) when name = "transaction_isolation" ->
+        Error(Err(1231, "Variable 'transaction_isolation' can't be set to the value of 'NULL'"))
+    | Ok(VString value, sideEffects) when name = "collation_connection" ->
+        match Collation.tryFind value with
+        | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
+        | None -> Error(Err(1273, sprintf "Unknown collation: '%s'" value))
+    | Ok(VString value, sideEffects) when name = "lc_time_names" ->
+        match Functions.tryTimeLocale value with
+        | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
+        | None -> Error(Err(1649, sprintf "Unknown locale: '%s'" value))
+    | Ok(VString value, sideEffects) when name = "time_zone" ->
+        match TimeZones.resolve session.Store value with
+        | Some zone -> Ok(SetVarAction(name, Some(Temporal.sqlTimeZoneText zone), isGlobal), sideEffects)
+        | None -> Error(Err(1298, sprintf "Unknown or incorrect time zone: '%s'" value))
+    | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" ->
+        normalizeOnOff name value
+        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "session_track_transaction_info" ->
+        normalizeTransactionTrackingInfo value
+        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "completion_type" ->
+        normalizeCompletionType value
+        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "mandatory_roles" ->
+        match toText value with
+        | Some value when Session.tryParseMandatoryRoles value |> Option.isSome ->
+            Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
+        | Some value -> Error(Err(1231, sprintf "Variable 'mandatory_roles' can't be set to the value of '%s'" value))
+        | None -> Error(Err(1231, "Variable 'mandatory_roles' can't be set to the value of 'NULL'"))
+    | Ok(VNull, sideEffects) when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None, isGlobal), sideEffects)
+    | Ok(VNull, _) -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
+    | Ok(value, sideEffects) -> Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
+
 /// Parses one SET fragment without mutating the session. Nested assignments
 /// remain visible to subsequent right-hand sides in the same statement.
 let private parseSetFragment
@@ -1501,7 +1630,6 @@ let private parseSetFragment
             let varMatch = setVar.Match fragment
 
             if varMatch.Success then
-                let isGlobal = isGlobalScope varMatch.Groups.[1].Value
                 let name = stripIdentifierQuotes varMatch.Groups.[2].Value |> _.ToLowerInvariant()
 
                 if Session.tryGlobalVariable session.Store name |> Option.isNone then
@@ -1509,11 +1637,6 @@ let private parseSetFragment
                 else
                     let rhs = varMatch.Groups.[3].Value
                     let usesDefault = rhs.Trim().Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
-
-                    let sqlModeAction value sideEffects =
-                        match SqlMode.tryNormalize value with
-                        | Ok canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
-                        | Error invalid -> Error(Err(1231, sprintf "Variable 'sql_mode' can't be set to the value of '%s'" invalid))
 
                     let resolved =
                         if name = "max_sp_recursion_depth" && not usesDefault then
@@ -1528,120 +1651,7 @@ let private parseSetFragment
                         else
                             resolveSystemSetRhs session userVariables sql rhs
 
-                    match resolved with
-                    | Error result -> Error result
-                    | Ok(value, sideEffects) when readOnlySystemVariables.Contains name ->
-                        Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
-                    | Ok(_, sideEffects) when usesDefault && name = "max_sp_recursion_depth" ->
-                        let depth =
-                            if isGlobal then
-                                0
-                            else
-                                Session.tryGlobalVariable session.Store name
-                                |> Option.flatten
-                                |> Option.bind tryInt32
-                                |> Option.defaultValue 0
-
-                        Ok(SetRoutineRecursionDepthAction(depth, isGlobal, None), sideEffects)
-                    | Ok(_, sideEffects) when usesDefault && name = "max_points_in_geometry" ->
-                        let limit =
-                            if isGlobal then
-                                Limits.defaultMaxPointsInGeometry
-                            else
-                                Session.tryGlobalVariable session.Store name
-                                |> Option.flatten
-                                |> Option.bind tryInt32
-                                |> Option.defaultValue Limits.defaultMaxPointsInGeometry
-
-                        Ok(SetVarAction(name, Some(string limit), isGlobal), sideEffects)
-                    | Ok(_, sideEffects)
-                        when usesDefault
-                             && (name = "activate_all_roles_on_login"
-                                 || name = "event_scheduler"
-                                 || name = "mandatory_roles"
-                                 || name = "protocol_compression_algorithms") ->
-                        Ok(SetVarAction(name, Session.defaultVariables.[name], isGlobal), sideEffects)
-                    | Ok(_, sideEffects)
-                        when usesDefault
-                             && (name = "completion_type" || name = "session_track_transaction_info") ->
-                        let value =
-                            if isGlobal then
-                                Session.defaultVariables.[name]
-                            else
-                                Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
-
-                        Ok(SetVarAction(name, value, isGlobal), sideEffects)
-                    | Ok(_, sideEffects) when usesDefault && name = "sql_mode" ->
-                        let value =
-                            if isGlobal then
-                                Session.defaultVariables.[name]
-                            else
-                                Session.tryGlobalVariable session.Store name
-                                |> Option.defaultValue Session.defaultVariables.[name]
-
-                        match value with
-                        | Some value -> sqlModeAction value sideEffects
-                        | None -> Error(Err(1231, "Variable 'sql_mode' can't be set to the value of 'NULL'"))
-                    | Ok(_, sideEffects) when usesDefault && name = "time_zone" ->
-                        let value =
-                            if isGlobal then
-                                Session.defaultVariables.[name]
-                            else
-                                Session.tryGlobalVariable session.Store name
-                                |> Option.defaultValue Session.defaultVariables.[name]
-
-                        Ok(SetVarAction(name, value, isGlobal), sideEffects)
-                    | Ok(value, sideEffects) when name = "max_sp_recursion_depth" ->
-                        normalizeRoutineRecursionDepth value
-                        |> Result.map (fun (depth, warning) ->
-                            SetRoutineRecursionDepthAction(depth, isGlobal, warning), sideEffects)
-                    | Ok(value, sideEffects) when name = "max_points_in_geometry" ->
-                        normalizeGeometryPointLimit value
-                        |> Result.map (fun limit -> SetVarAction(name, Some(string limit), isGlobal), sideEffects)
-                    | Ok(value, sideEffects) when name = "sql_mode" ->
-                        match toText value with
-                        | Some value -> sqlModeAction value sideEffects
-                        | None -> Error(Err(1231, "Variable 'sql_mode' can't be set to the value of 'NULL'"))
-                    | Ok(VString value, sideEffects) when name = "block_encryption_mode" ->
-                        match Functions.tryBlockEncryptionMode value with
-                        | Some canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
-                        | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name value))
-                    | Ok(VString value, sideEffects) when name = "transaction_isolation" ->
-                        transactionIsolationOf value
-                        |> Result.map (fun isolation ->
-                            SetTransactionIsolationAction(transactionIsolationScope varMatch.Groups.[1].Value, isolation), sideEffects)
-                    | Ok(_, _) when name = "transaction_isolation" ->
-                        Error(Err(1231, "Variable 'transaction_isolation' can't be set to the value of 'NULL'"))
-                    | Ok(VString value, sideEffects) when name = "collation_connection" ->
-                        match Collation.tryFind value with
-                        | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
-                        | None -> Error(Err(1273, sprintf "Unknown collation: '%s'" value))
-                    | Ok(VString value, sideEffects) when name = "lc_time_names" ->
-                        match Functions.tryTimeLocale value with
-                        | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
-                        | None -> Error(Err(1649, sprintf "Unknown locale: '%s'" value))
-                    | Ok(VString value, sideEffects) when name = "time_zone" ->
-                        match TimeZones.resolve session.Store value with
-                        | Some zone -> Ok(SetVarAction(name, Some(Temporal.sqlTimeZoneText zone), isGlobal), sideEffects)
-                        | None -> Error(Err(1298, sprintf "Unknown or incorrect time zone: '%s'" value))
-                    | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" ->
-                        normalizeOnOff name value
-                        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
-                    | Ok(value, sideEffects) when name = "session_track_transaction_info" ->
-                        normalizeTransactionTrackingInfo value
-                        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
-                    | Ok(value, sideEffects) when name = "completion_type" ->
-                        normalizeCompletionType value
-                        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
-                    | Ok(value, sideEffects) when name = "mandatory_roles" ->
-                        match toText value with
-                        | Some value when Session.tryParseMandatoryRoles value |> Option.isSome ->
-                            Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
-                        | Some value -> Error(Err(1231, sprintf "Variable 'mandatory_roles' can't be set to the value of '%s'" value))
-                        | None -> Error(Err(1231, "Variable 'mandatory_roles' can't be set to the value of 'NULL'"))
-                    | Ok(VNull, sideEffects) when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None, isGlobal), sideEffects)
-                    | Ok(VNull, _) -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
-                    | Ok(value, sideEffects) -> Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
+                    systemSetAction session varMatch.Groups.[1].Value name usesDefault resolved
             else
                 Error(syntaxError sql)
 
