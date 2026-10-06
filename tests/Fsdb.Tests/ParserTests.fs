@@ -3816,6 +3816,19 @@ let tests =
                       "the function call leaves BEGIN as the only compound level"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "statement batches preserve stored function loops"
+          <| fun _ ->
+              for loop in
+                  [ "WHILE i<3 DO SET @n=COALESCE(@n,0)+i; SET i=i+1; END WHILE"
+                    "counting/* label */: WHILE i<3 DO SET i=i+1; END WHILE counting"
+                    "`counting`/* label */: WHILE i<3 DO SET i=i+1; END WHILE counting"
+                    "REPEAT SET i=i+1; UNTIL i=3 END REPEAT"
+                    "counting: LOOP SET i=i+1; IF i=3 THEN LEAVE counting; END IF; END LOOP counting"
+                    "IF i=0 THEN WHILE i<3 DO SET i=i+1; END WHILE; ELSE SET i=3; END IF"
+                    "DO IF(1,2,3); SET i=3" ] do
+                  let definition = "CREATE FUNCTION loop_set() RETURNS INT NO SQL BEGIN DECLARE i INT DEFAULT 0; " + loop + "; RETURN i; END"
+                  Expect.equal (splitStatements (definition + "; SELECT 1")) (Ok [ stripVersionComments definition; "SELECT 1" ]) "loop END does not close the function body"
+
           testCase "statement batches preserve compound function bodies"
           <| fun _ ->
               let sql =

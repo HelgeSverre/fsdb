@@ -5257,6 +5257,7 @@ let splitStatements (sql: string) : Result<string list, string> =
     let mutable lineComment = false
     let mutable compoundDepth = 0
     let mutable compoundStatementStart = false
+    let mutable compoundLabelCandidate = false
     let headerWords = ResizeArray<string>()
     let mutable compoundHeader = None
 
@@ -5310,6 +5311,8 @@ let splitStatements (sql: string) : Result<string list, string> =
 
             i <- i + 1
         | None when sql.[i] = '\'' || sql.[i] = '"' || sql.[i] = '`' ->
+            compoundLabelCandidate <- compoundDepth > 0 && compoundStatementStart && sql.[i] = '`'
+            compoundStatementStart <- false
             quote <- Some sql.[i]
             i <- i + 1
         | None when sql.[i] = '#' ->
@@ -5334,23 +5337,34 @@ let splitStatements (sql: string) : Result<string list, string> =
 
             let word = sql.[i .. stop - 1]
             headerWords.Add word
+            compoundLabelCandidate <- false
 
             if word.Equals("BEGIN", StringComparison.OrdinalIgnoreCase) then
                 if compoundDepth > 0 || startsCompound () then
                     compoundDepth <- compoundDepth + 1
                     compoundStatementStart <- true
-            elif compoundDepth > 0 && compoundStatementStart && word.Equals("IF", StringComparison.OrdinalIgnoreCase) then
+            elif compoundDepth > 0 && compoundStatementStart
+                 && (word.Equals("IF", StringComparison.OrdinalIgnoreCase)
+                     || word.Equals("WHILE", StringComparison.OrdinalIgnoreCase)
+                     || word.Equals("LOOP", StringComparison.OrdinalIgnoreCase)
+                     || word.Equals("REPEAT", StringComparison.OrdinalIgnoreCase)) then
                 compoundDepth <- compoundDepth + 1
-                compoundStatementStart <- false
+                compoundStatementStart <-
+                    word.Equals("LOOP", StringComparison.OrdinalIgnoreCase)
+                    || word.Equals("REPEAT", StringComparison.OrdinalIgnoreCase)
             elif compoundDepth > 0 && word.Equals("CASE", StringComparison.OrdinalIgnoreCase) then
                 compoundDepth <- compoundDepth + 1
                 compoundStatementStart <- false
             elif compoundDepth > 0 && word.Equals("END", StringComparison.OrdinalIgnoreCase) then
                 compoundDepth <- compoundDepth - 1
                 compoundStatementStart <- false
-            elif compoundDepth > 0 && word.Equals("THEN", StringComparison.OrdinalIgnoreCase) then
+            elif compoundDepth > 0
+                 && (word.Equals("THEN", StringComparison.OrdinalIgnoreCase)
+                     || word.Equals("ELSE", StringComparison.OrdinalIgnoreCase)
+                     || (not compoundStatementStart && word.Equals("DO", StringComparison.OrdinalIgnoreCase))) then
                 compoundStatementStart <- true
             elif compoundDepth > 0 then
+                compoundLabelCandidate <- compoundStatementStart
                 compoundStatementStart <- false
 
             i <- stop
@@ -5359,11 +5373,19 @@ let splitStatements (sql: string) : Result<string list, string> =
             start <- i + 1
             headerWords.Clear()
             compoundHeader <- None
+            compoundLabelCandidate <- false
             i <- i + 1
         | None when sql.[i] = ';' ->
+            compoundLabelCandidate <- false
             compoundStatementStart <- true
             i <- i + 1
-        | None -> i <- i + 1
+        | None when sql.[i] = ':' && compoundLabelCandidate ->
+            compoundStatementStart <- true
+            compoundLabelCandidate <- false
+            i <- i + 1
+        | None ->
+            if not (Char.IsWhiteSpace sql.[i]) then compoundLabelCandidate <- false
+            i <- i + 1
 
     match quote, blockComment with
     | Some _, _ -> Result.Error "unterminated quoted string"
