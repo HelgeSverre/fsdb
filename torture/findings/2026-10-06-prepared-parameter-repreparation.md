@@ -966,3 +966,33 @@ ratio test (3.26 versus the 2.5 ceiling); that test passes when run alone with
 An earlier full gate passed before the additional optimizer regressions.
 The final functional tests include spelling, persistence, prepared descriptors,
 and indexed DOUBLE lookup coverage. No timing threshold was changed.
+
+
+## Integral rounding descriptors
+
+MySQL 8.4.11 chooses FLOOR, CEIL, and CEILING result families from the input's
+declared shape. Integer inputs produce BIGINT with width 21 and retain their
+signedness. DECIMAL inputs reserve their whole digits plus a carry digit when
+the input has a fractional part. Fewer than 19 resulting digits use signed
+BIGINT; wider results use signed DECIMAL with scale zero. For example,
+`FLOOR(CAST(1.25 AS DECIMAL(19,2)))` returns BIGINT, while
+`CEIL(CAST(1.25 AS DECIMAL(20,2)))` returns DECIMAL with width 20 and scale zero.
+This matches MySQL's
+[`Item_func_int_val::resolve_type_inner`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_func.cc).
+
+Approximate and string inputs produce DOUBLE with width 23 and scale 31.
+`FLOOR(1e20)` and `CEIL(-1e20)` preserve their large floating-point values;
+converting through a signed 64-bit integer would corrupt them. Exact rounding
+uses decimal arithmetic, then normalizes the value to its inferred result family
+so surrounding arithmetic and aggregates consume the same family as the wire.
+
+The Expecto regression checks values and execution/PREPARE descriptors. The
+maintained native oracle checks text and binary protocol metadata, and the
+integral-rounding contract covers stored, unsigned, parameterized, nested,
+aggregate, and UNION expressions. Broader scalar descriptor gaps remain open.
+
+Validation: `DOTNET_PROCESSOR_COUNT=4 just check` passes all 2,829 tests with
+no build warnings. The native MySQL 8.4.11 maintained oracle passes, and
+compatibility contracts pass 3,397 steps across 39 cases with no differences.
+Manifest: `artifacts/runs/20261006T210325090-93666/contracts/manifest.json`.
+The disposable native oracle server and data directory are cleaned up.

@@ -2187,6 +2187,27 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private integralRoundingDescriptors =
+        { Name = "integral-rounding-descriptors"
+          Setup = [| "CREATE TABLE rounding_numbers(d DECIMAL(10,2),wide DECIMAL(20,2),u DECIMAL(20,2) UNSIGNED,f DOUBLE)"
+                     "INSERT INTO rounding_numbers VALUES(-1.25,1.25,1.25,1e20)" |]
+          Steps =
+            [| for index, expression in
+                   [ "FLOOR(1.25)"; "CEIL(-1.25)"; "FLOOR(1)"; "CEILING(CAST(1 AS UNSIGNED))"
+                     "FLOOR(CAST(1.25 AS DECIMAL(19,2)))"; "CEILING(CAST(1.25 AS DECIMAL(20,2)))"
+                     "FLOOR(CAST(1.25 AS DECIMAL(30,2)))"; "CEIL(999999999999999999.99)"
+                     "FLOOR(NULL)"; "FLOOR('1.25')"; "FLOOR(1e20)"; "CEIL(-1e20)"
+                     "FLOOR(d)"; "CEIL(wide)"; "FLOOR(u)"; "CEIL(f)"
+                     "FLOOR(d)+1"; "SUM(FLOOR(d))"; "COALESCE(FLOOR(d),0)"
+                     "CAST(FLOOR(d) AS CHAR)"; "FLOOR(d)/2" ] |> List.indexed do
+                   let sql = "SELECT " + expression + " AS value FROM rounding_numbers"
+                   Contract.query (sprintf "rounding-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "rounding-%d-binary" index) sql [||]
+               Contract.preparedQuery "parameter" "SELECT FLOOR(?) AS value" [| box 1.25M |]
+               Contract.query "union" "SELECT FLOOR(d) AS value FROM rounding_numbers UNION ALL SELECT CEIL(wide) FROM rounding_numbers" |]
+          Cleanup = [| "DROP TABLE IF EXISTS rounding_numbers" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private scientificLiteralDescriptors =
         { Name = "scientific-literal-descriptors"
           Setup = [| "CREATE TABLE scientific_source(n INT PRIMARY KEY,f FLOAT,d DOUBLE(10,2))"
@@ -2770,6 +2791,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            temporalNumericConversion
+           integralRoundingDescriptors
            scientificLiteralDescriptors
            approximateExpressionDescriptors
            integerExpressionDescriptors

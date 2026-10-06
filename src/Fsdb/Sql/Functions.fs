@@ -4771,16 +4771,13 @@ let private requiredRegexpFunction name =
 // Math/misc.
 // ---------------------------------------------------------------------------
 
-/// FLOOR/CEILING keep the argument's *type family*, they don't collapse it:
-/// MySQL answers a DECIMAL argument with a scale-0 DECIMAL, not a BIGINT, so
-/// `FLOOR(exact_value)` comes back on the wire as NEWDECIMAL. Going through
-/// `toDouble` for a decimal would also lose digits past 2^53.
+/// Exact rounding avoids losing DECIMAL digits through floating-point conversion.
 let private ceilFn: Scalar =
     function
     | [ VInt i ] -> VInt i
     | [ VUInt u ] -> VUInt u
     | [ VDecimal d ] -> VDecimal(Math.Ceiling d)
-    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Math.Ceiling(toDouble v)))
+    | [ v ] when not (anyNull [ v ]) -> VDouble(Math.Ceiling(toDouble v))
     | _ -> VNull
 
 let private floorFn: Scalar =
@@ -4788,7 +4785,7 @@ let private floorFn: Scalar =
     | [ VInt i ] -> VInt i
     | [ VUInt u ] -> VUInt u
     | [ VDecimal d ] -> VDecimal(Math.Floor d)
-    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Math.Floor(toDouble v)))
+    | [ v ] when not (anyNull [ v ]) -> VDouble(Math.Floor(toDouble v))
     | _ -> VNull
 
 let private powFn: Scalar =

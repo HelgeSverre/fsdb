@@ -883,6 +883,32 @@ let tests =
               Expect.equal constants (ResultSet([ "unsigned_value"; "signed_value" ], [ [ Some "-18446744073709551615"; Some "9223372036854775808" ] ])) "constants promote to decimal"
               Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal; TypeNewDecimal ] "promoted constants advertise decimal"
 
+          testCase "floor and ceiling derive whole-number result descriptors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, expected, family, width, scale in
+                  [ "FLOOR(1.25)", Some "1", TypeLongLong, 21u, 0uy
+                    "CEIL(-1.25)", Some "-1", TypeLongLong, 21u, 0uy
+                    "FLOOR(1)", Some "1", TypeLongLong, 21u, 0uy
+                    "FLOOR(CAST(1.25 AS DECIMAL(19,2)))", Some "1", TypeLongLong, 21u, 0uy
+                    "CEILING(CAST(1.25 AS DECIMAL(20,2)))", Some "2", TypeNewDecimal, 20u, 0uy
+                    "FLOOR(CAST(1.25 AS DECIMAL(30,2)))", Some "1", TypeNewDecimal, 30u, 0uy
+                    "CEIL(999999999999999999.99)", Some "1000000000000000000", TypeNewDecimal, 20u, 0uy
+                    "FLOOR(NULL)", None, TypeDouble, 23u, 31uy
+                    "FLOOR('1.25')", Some "1", TypeDouble, 23u, 31uy
+                    "FLOOR(1e20)", Some "1e20", TypeDouble, 23u, 31uy
+                    "CEIL(-1e20)", Some "-1e20", TypeDouble, 23u, 31uy ] do
+                  let sql = "SELECT " + expression + " AS value"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) expression
+                  let shape (metadata: ColumnMetadata) = metadata.TypeId, metadata.ColumnLength, metadata.Decimals
+                  Expect.equal (current.LastResultColumnMetadata |> List.map shape)
+                      [ family, width, scale ] (expression + " execution descriptor")
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map (fun column -> shape column.Metadata))
+                      [ family, width, scale ] (expression + " prepare descriptor")
+
           testCase "scientific literals retain spelling widths across projection boundaries"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

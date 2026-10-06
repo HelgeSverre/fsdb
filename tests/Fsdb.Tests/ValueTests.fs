@@ -2764,15 +2764,14 @@ let tests =
                     "Math and misc"
                     [ testCase "CEIL/FLOOR round toward +/- infinity"
                       <| fun _ ->
-                          Expect.equal (call "CEIL" [ VDouble 1.1 ]) (VInt 2L) "ceil"
-                          Expect.equal (call "FLOOR" [ VDouble 1.9 ]) (VInt 1L) "floor"
-                          // An integer passes through unchanged, and a
-                          // numeric string is coerced the same way a plain
-                          // value would be.
+                          Expect.equal (call "CEIL" [ VDouble 1.1 ]) (VDouble 2.0) "ceil"
+                          Expect.equal (call "FLOOR" [ VDouble 1.9 ]) (VDouble 1.0) "floor"
+                          Expect.equal (call "FLOOR" [ VDouble 1e20 ]) (VDouble 1e20) "large doubles avoid integer narrowing"
+                          Expect.equal (call "CEIL" [ VDouble -1e20 ]) (VDouble -1e20) "negative doubles avoid integer narrowing"
                           Expect.equal (call "CEIL" [ VInt 3L ]) (VInt 3L) "int ceil passthrough"
                           Expect.equal (call "FLOOR" [ VInt 3L ]) (VInt 3L) "int floor passthrough"
-                          Expect.equal (call "CEIL" [ VString "1.1" ]) (VInt 2L) "string ceil coerced"
-                          Expect.equal (call "FLOOR" [ VString "1.9" ]) (VInt 1L) "string floor coerced"
+                          Expect.equal (call "CEIL" [ VString "1.1" ]) (VDouble 2.0) "string ceil coerced"
+                          Expect.equal (call "FLOOR" [ VString "1.9" ]) (VDouble 1.0) "string floor coerced"
                           Expect.equal (call "CEIL" [ VNull ]) VNull "null ceil"
                           Expect.equal (call "FLOOR" [ VNull ]) VNull "null floor"
 

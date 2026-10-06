@@ -1200,3 +1200,35 @@ let runScientificLiteralDescriptors () =
             if reader.GetName(0) <> spelling then failwithf "%A %s: unexpected projection name %s" protocol spelling (reader.GetName 0)
 
 runScientificLiteralDescriptors ()
+
+
+let runIntegralRoundingDescriptors () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        for expression, expected, family, width, scale in
+            [ "FLOOR(1.25)", "1", "BIGINT", 21, 0
+              "CEIL(-1.25)", "-1", "BIGINT", 21, 0
+              "FLOOR(1)", "1", "BIGINT", 21, 0
+              "FLOOR(CAST(1.25 AS DECIMAL(19,2)))", "1", "BIGINT", 21, 0
+              "CEILING(CAST(1.25 AS DECIMAL(20,2)))", "2", "DECIMAL", 20, 0
+              "FLOOR(CAST(1.25 AS DECIMAL(30,2)))", "1", "DECIMAL", 30, 0
+              "CEIL(999999999999999999.99)", "1000000000000000000", "DECIMAL", 20, 0
+              "FLOOR(NULL)", "NULL", "DOUBLE", 23, 31
+              "FLOOR('1.25')", "1", "DOUBLE", 23, 31
+              "FLOOR(1e20)", "1E+20", "DOUBLE", 23, 31
+              "CEIL(-1e20)", "-1E+20", "DOUBLE", 23, 31 ] do
+            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
+               || reader.GetDataTypeName(0) <> family || metadata.ColumnSize <> Nullable width
+               || metadata.NumericScale <> Nullable scale then
+                failwithf "%A %s: expected %s width=%d scale=%d value=%s; got %s width=%O scale=%O"
+                    protocol expression family width scale expected (reader.GetDataTypeName 0) metadata.ColumnSize metadata.NumericScale
+            printfn "Integral rounding | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
+
+runIntegralRoundingDescriptors ()

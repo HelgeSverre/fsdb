@@ -4540,7 +4540,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
         expressionCollation ctx caseExpression
         |> Result.bind (fun _ -> evaluate ())
-        |> Result.map (normalizeCompoundNumericResult ctx caseExpression)
+        |> Result.map (normalizeNumericResult ctx caseExpression)
     | Between(e, lo, hi) ->
         eval e
         |> Result.bind (fun ve ->
@@ -4726,8 +4726,13 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         let invoke () =
                             let value = fn values
                             let value =
-                                if descriptor.IsSome && Functions.isUnmodifiedBuiltinScalar name ctx.Registry then
-                                    normalizeCompoundNumericResult ctx expr value
+                                let hasNumericDescriptor =
+                                    descriptor.IsSome
+                                    || (match name.ToUpperInvariant() with
+                                        | "FLOOR" | "CEIL" | "CEILING" -> true
+                                        | _ -> false)
+                                if hasNumericDescriptor && Functions.isUnmodifiedBuiltinScalar name ctx.Registry then
+                                    normalizeNumericResult ctx expr value
                                 else value
                             descriptor |> Option.map (fun descriptor -> normalizeCompoundString descriptor value) |> Option.defaultValue value
 
@@ -4931,16 +4936,22 @@ and private isLiteralConstantExpression registry expression =
         audited && Functions.isUnmodifiedBuiltinScalar name registry && List.forall closed arguments
     | _ -> false
 
-and private normalizeCompoundNumericResult ctx expression value =
-    let promote number =
+and private normalizeNumericResult ctx expression value =
+    let normalize number =
         match metadataOfExpr ctx expression with
         | Some metadata when metadata.TypeId = TypeNewDecimal -> VDecimal number
         | Some metadata when metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat -> VDouble(Value.toDouble value)
+        | Some metadata when metadata.TypeId = TypeLongLong && System.Decimal.Truncate number = number ->
+            if hasMetadataFlag UnsignedFlag metadata then
+                if number >= 0M && number <= decimal System.UInt64.MaxValue then VUInt(uint64 number)
+                else value
+            elif number >= decimal System.Int64.MinValue && number <= decimal System.Int64.MaxValue then VInt(int64 number)
+            else value
         | _ -> value
     match value with
-    | VInt number -> promote (decimal number)
-    | VUInt number -> promote (decimal number)
-    | VDecimal number -> promote number
+    | VInt number -> normalize (decimal number)
+    | VUInt number -> normalize (decimal number)
+    | VDecimal number -> normalize number
     | _ -> value
 
 and private tryClosedNumericValue ctx expression =
@@ -5608,7 +5619,14 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             numericUnary arg
             |> Option.map (fun metadata ->
                 if metadata.TypeId = TypeDouble then { metadata with ColumnLength = 23u; Decimals = 31uy }
-                else metadata)
+                elif isIntegerMetadata metadata then { metadata with TypeId = TypeLongLong; ColumnLength = 21u; Decimals = 0uy }
+                else
+                    let argument = decimalShape arg (Some metadata)
+                    let precision = argument.Precision - argument.Scale + (if argument.Scale = 0 then 0 else 1)
+                    // MySQL reserves a carry digit and uses BIGINT only when the signed width is below 20.
+                    let metadata = { metadata with Flags = metadata.Flags &&& ~~~UnsignedFlag }
+                    if precision < 19 then { metadata with TypeId = TypeLongLong; ColumnLength = 21u; Decimals = 0uy }
+                    else withDecimalShape { Precision = min 65 precision; Scale = 0 } metadata)
         | "MOD", [ left; right ] ->
             numeric signedNumericResult (fun left right ->
                 { Precision = max left.Precision right.Precision
