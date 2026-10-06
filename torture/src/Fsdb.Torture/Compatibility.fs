@@ -2103,6 +2103,19 @@ module ContractCatalog =
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private numericAggregateConversion =
+        { Name = "numeric-aggregate-conversion"
+          Setup = [||]
+          Steps =
+            [| for name, sql in
+                   [ "single", "SELECT SUM('001.25') AS s,AVG('001.25') AS a,SUM('foo') AS invalid_sum,SUM('12abc') AS prefix_sum"
+                     "distinct", "SELECT SUM(DISTINCT v) AS s,AVG(DISTINCT v) AS a,COUNT(DISTINCT v) AS c FROM (SELECT '1' AS v UNION ALL SELECT '01' UNION ALL SELECT '2') t"
+                     "window", "SELECT SUM(v) OVER () AS s,AVG(v) OVER () AS a FROM (SELECT '001.25' AS v) t" ] do
+                   Contract.query (name + "-text") sql
+                   Contract.preparedQuery (name + "-binary") sql [||] |]
+          Cleanup = [||]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private approximateAggregateDescriptors =
         { Name = "approximate-aggregate-descriptors"
           Setup = [||]
@@ -2264,6 +2277,7 @@ module ContractCatalog =
            preparedDecimalDivision
            divisionPrecisionIncrement
            approximateAggregateDescriptors
+           numericAggregateConversion
            unsignedNegation
            preparedSchemaChanges
            temporaryViewShadowing

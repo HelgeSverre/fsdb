@@ -3711,6 +3711,18 @@ let tests =
                     | ResultSet([ "c"; "cn"; "s"; "a" ], [ [ Some "3"; Some "2"; Some "30"; Some "15.0000" ] ]) -> ()
                     | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other
 
+                testCase "numeric aggregates convert text before folding and DISTINCT"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "SELECT SUM('001.25'),AVG('001.25'),SUM('foo'),SUM('12abc')", [ "1.25"; "1.25"; "0"; "12" ]
+                          "SELECT SUM(DISTINCT v),AVG(DISTINCT v),COUNT(DISTINCT v) FROM (SELECT '1' AS v UNION ALL SELECT '01' UNION ALL SELECT '2') t", [ "3"; "1.5"; "3" ]
+                          "SELECT SUM(v) OVER (),AVG(v) OVER () FROM (SELECT '001.25' AS v) t", [ "1.25"; "1.25" ] ]
+                    for sql, expected in cases do
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) -> Expect.equal row (List.map Some expected) sql
+                        | other -> failtestf "unexpected aggregate result: %A" other
+
                 testCase "empty bit aggregates return their MySQL identities"
                 <| fun _ ->
                     let store = newStore ()

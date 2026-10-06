@@ -216,6 +216,10 @@ and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.
 `WEIGHT_STRING()` returns host-ICU sort-key bytes for textual collations, not
 MySQL's UCA weight-table bytes.
+SUM and AVG convert text before accumulation, including single-row windows;
+their DISTINCT forms compare converted numbers while COUNT retains text
+collation equality. Numeric-prefix conversion warnings remain part of the
+broader diagnostics gap.
 
 MySQL Enterprise Encryption is not a Community Server compatibility gap. Its
 asymmetric key-management functions belong to the separately installed
@@ -255,6 +259,7 @@ metadata paths. Virtual generated values are recomputed when queried.
 |---|---|---|---|---|
 | Spatial indexes and operations | R-tree indexes and geographic SRS rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays, geometry property/member accessors, and independently configurable square/circle point, flat/round end, and miter/round join buffer strategies work; EPSG 4326 constructors and text/binary serializers honor MySQL axis options and coordinate domains, point distance and line length use MySQL's Andoyer strategy and linear-unit registry, and `ST_DISTANCE_SPHERE` supports point and multipoint inputs with MySQL's default, SRS-derived, or explicit radius; broader non-point geographic distance/topology and other SRS definitions remain absent, and the internal augmented interval tree is not an R-tree | low | subset |
 | Constant unary negation inference | constant integer expressions can promote to DECIMAL; runtime BIGINT operands retain overflow checks | literal, BIGINT-cast, basic arithmetic, and original ABS constants support promotion; broader constant functions and exact integer-expression precision descriptors remain incomplete. Column and bound-parameter boundaries follow signed BIGINT checks | low | divergence/refusal |
+| Bit-literal numeric context | bit literals retain an integer interpretation in SUM/AVG | parsed binary bytes lose literal origin, so `SUM(b'01')` and `AVG(b'01')` do not produce MySQL's exact numeric results | low | divergence |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes

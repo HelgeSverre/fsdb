@@ -12265,7 +12265,7 @@ and private evalAggregate
                 | Error error -> failure <- Some error
                 | Ok VNull -> ()
                 | Ok value ->
-                    add (if upper = "COUNT" then value else enumNumericOperand ctx innerExpr value)
+                    add (if upper = "COUNT" then value else enumNumericOperand ctx innerExpr value |> Functions.numericAggregateValue)
 
         match failure with
         | Some error -> Error error
@@ -12378,6 +12378,8 @@ and private evalAggregate
         // numeric context is its declaration ordinal — `SUM(status)` adds
         // ordinals, while `MAX(status)` still returns the label.
         let foldsNumerically = not (isCount || isMin || isMax)
+        let isNumericBuiltin =
+            (upper = "SUM" || upper = "AVG") && Functions.isUnmodifiedBuiltinAggregate name registry
 
         match Functions.lookupAggregate name registry with
         | None -> Error(unknownFunction name)
@@ -12388,16 +12390,16 @@ and private evalAggregate
 
                 evalExpr ctx innerExpr
                 |> Result.map (fun v ->
-                    let key = collationKeyOf ctx innerExpr v
-
-                    let v = if foldsNumerically then enumNumericOperand ctx innerExpr v else v
-
-                    v, key))
+                    let numericValue = if foldsNumerically then enumNumericOperand ctx innerExpr v else v
+                    if isNumericBuiltin then
+                        let value = Functions.numericAggregateValue numericValue
+                        value, value
+                    else
+                        numericValue, collationKeyOf ctx innerExpr v))
             |> Result.map (fun keyed ->
                 let nonNull = keyed |> List.filter (fst >> function VNull -> false | _ -> true)
-                // `DISTINCT` folds by the expression's own collation
-                // (MySQL-verified: COUNT(DISTINCT name) over åge/age/ÅGE
-                // is 1 under ai_ci, 3 under bin).
+                // SUM/AVG compare converted numbers; COUNT/MIN/MAX retain
+                // the argument's collation equality.
                 let deduped = if distinct then nonNull |> List.distinctBy snd |> List.map fst else nonNull |> List.map fst
 
                 if isCount || not deduped.IsEmpty then

@@ -423,3 +423,27 @@ replacing them with generic stored-column metadata.
 The differential manifest at
 `artifacts/runs/20261006T152124423-20024/contracts/manifest.json` verifies
 matching aggregate values and type families in text and binary execution.
+
+### Numeric aggregate conversion
+
+MySQL 8.4.11 returns DOUBLE values 1.25, 1.25, 0, and 12 for
+`SUM('001.25'), AVG('001.25'), SUM('foo'), SUM('12abc')`. SUM converts even a
+single input before accumulation. The same rule holds for a one-row window.
+For text rows '1', '01', and '2', SUM(DISTINCT) is 3 and AVG(DISTINCT) is 1.5,
+while COUNT(DISTINCT) remains 3. Numeric conversion precedes numeric aggregate
+deduplication; it does not change COUNT's text equality.
+
+The shared aggregate conversion preserves exact integers and decimals,
+converts BIT column values to unsigned integers, and converts other inputs to
+DOUBLE. Streaming accumulation, ordinary builtin folds, and numeric DISTINCT
+use it; registered aggregate replacements retain their existing input contract.
+The contract manifest at
+`artifacts/runs/20261006T152601781-20910/contracts/manifest.json` verifies text
+and binary execution for single-row, DISTINCT, and window cases.
+
+A separate oracle probe finds a remaining literal-origin gap:
+`SUM(b'01'), AVG(b'01')` return DECIMAL 1 and 1.0000 in MySQL, while fsdb's
+parser represents the literal as bytes without its numeric interpretation.
+A BIT(4) column containing 1 and 2 returns DECIMAL 3 and 1.5000 in MySQL;
+column values retain their numeric representation. Numeric conversion warning
+coverage remains a separate diagnostics limitation.

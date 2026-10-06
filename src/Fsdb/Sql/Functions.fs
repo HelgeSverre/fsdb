@@ -5260,6 +5260,11 @@ let private isIpv4MappedFn =
 
 let private countAgg: Aggregate = fun vs -> VInt(int64 (List.length vs))
 
+let internal numericAggregateValue = function
+    | VBit(_, value) -> VUInt value
+    | (VNull | VInt _ | VUInt _ | VDecimal _ | VDouble _) as value -> value
+    | value -> VDouble(toDouble value)
+
 /// MySQL promotes SUM over exact integer inputs to DECIMAL rather than
 /// preserving the integer runtime type. Besides avoiding BIGINT overflow,
 /// this is observable in the resultset's column-definition packet: drivers
@@ -5268,6 +5273,7 @@ let private countAgg: Aggregate = fun vs -> VInt(int64 (List.length vs))
 /// produce a result larger than BIGINT without overflowing along the way.
 let private sumAgg: Aggregate =
     fun values ->
+        let values = List.map numericAggregateValue values
         if
             values
             |> List.forall (function
