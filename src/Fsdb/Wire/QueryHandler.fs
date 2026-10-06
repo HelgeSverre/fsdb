@@ -4928,13 +4928,20 @@ let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Sta
             None
 
     let hasParameter = Expression.exists (function Placeholder _ -> true | _ -> false)
-    let rec retainRuntimeNegation = function
+    let rec retainRuntimeInference = function
         | Neg operand when hasParameter operand ->
-            Some(Neg(RuntimeExpression(Expression.rewriteTree retainRuntimeNegation operand)))
+            Some(Neg(RuntimeExpression(Expression.rewriteTree retainRuntimeInference operand)))
+        | Subquery select ->
+            let retainBinding = function
+                | Placeholder _ as parameter -> Some(RuntimeExpression parameter)
+                | _ -> None
+            let select =
+                { select with Where = select.Where |> Option.map (Expression.rewrite retainBinding) }
+            Some(Subquery(Expression.rewriteSelectExpressions retainRuntimeInference select))
         | _ -> None
 
     stmt
-    |> Expression.rewriteStatement retainRuntimeNegation
+    |> Expression.rewriteStatement retainRuntimeInference
     |> Expression.rewriteStatementWithProjectionNames
         parameterName
         (function Placeholder index -> Some(List.item index values) | _ -> None)

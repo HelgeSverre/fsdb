@@ -3742,6 +3742,25 @@ let tests =
                     let compared = runDefault store "SELECT (SELECT b'01' FROM scalar_origin)=1 AS scalar_value,1 IN (SELECT b'01' FROM scalar_origin) AS membership,1=ANY(SELECT b'01' FROM scalar_origin) AS quantified"
                     Expect.equal compared (ResultSet([ "scalar_value"; "membership"; "quantified" ], [ [ Some "0"; Some "1"; Some "1" ] ])) "scalar materialization does not change membership coercion"
 
+                testCase "conditional scalar inference does not invoke overridden builtins"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "ABS" (fun _ ->
+                            calls <- calls + 1
+                            VInt 1L)
+                    let store = newStore ()
+                    let statement =
+                        Fsdb.Parser.parse "SELECT (SELECT b'01' WHERE ABS(-1)=1)+0 AS value"
+                        |> Result.defaultWith (fun error -> failtestf "%A" error)
+                    Fsdb.Executor.statementColumns store registry "test" statement |> ignore
+                    Fsdb.Executor.statementNumericMetadata store registry "test" statement |> ignore
+                    Expect.equal calls 0 "metadata cannot invoke an extension callback"
+                    let result = run store registry "SELECT (SELECT b'01' WHERE ABS(-1)=1)+0 AS value"
+                    Expect.equal result (ResultSet([ "value" ], [ [ Some "0" ] ])) "runtime predicates materialize the result"
+                    Expect.isGreaterThan calls 0 "execution evaluates the runtime predicate"
+
                 testCase "row subqueries materialize literal bytes and retain limits"
                 <| fun _ ->
                     let store = newStore ()

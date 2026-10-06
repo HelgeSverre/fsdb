@@ -388,6 +388,10 @@ let rec private rewriteStatementWith rules =
 let rewriteTree replace expression =
     rewriteTreeWith { Replace = replace; ProjectionName = fun _ -> None } expression
 
+/// Rewrites every expression inside a SELECT, including nested query bodies.
+let rewriteSelectExpressions replace select =
+    rewriteSelect { Replace = replace; ProjectionName = fun _ -> None } select
+
 /// Rewrites every executable expression position in a statement.
 let rewriteStatement replace statement =
     rewriteStatementWith { Replace = replace; ProjectionName = fun _ -> None } statement

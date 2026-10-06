@@ -2118,6 +2118,10 @@ module ContractCatalog =
                      "casts", "SELECT CAST(b'01' AS UNSIGNED) AS u,CAST(b'01' AS DECIMAL) AS d,b'01'=1 AS numeric_equal,b'01'='1' AS string_equal"
                      "conditional", "SELECT IF(1,b'01',b'10')+0 AS branch_value,CASE WHEN 1 THEN b'01' ELSE b'10' END+0 AS case_value,COALESCE(b'01',b'10')+0 AS coalesced,IFNULL(b'01',b'10')+0 AS nonnull,CONCAT(b'01')+0 AS concatenated"
                      "scalar-reduced", "SELECT (SELECT b'01')+0 AS n,SUM((SELECT b'01')) AS s,AVG((SELECT b'01')) AS a,(SELECT 1.25)+0 AS d,(SELECT (SELECT b'01'))+0 AS nested"
+                     "scalar-true-conditions", "SELECT (SELECT b'01' WHERE 1)+0 AS literal_value,(SELECT b'01' WHERE 1=1)+0 AS compared,(SELECT b'01' WHERE ABS(-1)=1)+0 AS computed,(SELECT b'01' WHERE 'a'='A')+0 AS collated,(SELECT b'01' WHERE COALESCE(NULL,1))+0 AS coalesced"
+                     "scalar-runtime-conditions", "SELECT (SELECT b'01' WHERE 0)+0 AS false_value,(SELECT b'01' WHERE NULL)+0 AS null_value,(SELECT b'01' WHERE RAND()>=0)+0 AS random_value,(SELECT b'01' WHERE EXISTS(SELECT 1))+0 AS existence"
+                     "scalar-condition-limits", "SELECT (SELECT b'01' WHERE 1 LIMIT 0)+0 AS removed_limit,(SELECT b'01' WHERE RAND()>=0 LIMIT 0)+0 AS retained_limit,(SELECT b'01' WHERE 0 LIMIT 0)+0 AS empty_value"
+                     "scalar-condition-collations", "SELECT (SELECT b'01' WHERE 'a' COLLATE utf8mb4_bin='A')+0 AS binary_value,(SELECT b'01' WHERE NULL OR 1)+0 AS disjunction,(SELECT b'01' WHERE NULL AND 1)+0 AS conjunction"
                      "scalar-limits", "SELECT (SELECT b'01' LIMIT 0)+0 AS zero_limit,(SELECT b'01' LIMIT 1 OFFSET 10)+0 AS offset_value,(SELECT b'01' GROUP BY 1 LIMIT 0)+0 AS grouped,SUM((SELECT b'01' GROUP BY 1 LIMIT 0)) AS total"
                      "scalar-rollup", "SELECT (SELECT b'01' GROUP BY 1 WITH ROLLUP LIMIT 1)+0 AS first_row,(SELECT b'01' GROUP BY 1 WITH ROLLUP LIMIT 0)+0 AS no_rows"
                      "scalar-preserved-limits", "SELECT (SELECT MIN(b'01') LIMIT 0)+0 AS aggregate_value,(SELECT FIRST_VALUE(b'01') OVER () LIMIT 0)+0 AS window_value,(SELECT b'01' HAVING 1 LIMIT 0)+0 AS having_value,(SELECT b'01' FROM (SELECT 1)t LIMIT 0)+0 AS source_value"
@@ -2132,6 +2136,17 @@ module ContractCatalog =
                    Contract.preparedQuery (name + "-binary") sql [||]
                for limit in [ 0; 3 ] do
                    Contract.preparedQuery (sprintf "scalar-limit-parameter-%d" limit) "SELECT (SELECT b'01' LIMIT ? OFFSET ?)+0 AS value" [| box limit; box 10 |]
+               Contract.execute "scalar-condition-binding" "SET @scalar_condition=1"
+               Contract.execute "prepare-scalar-condition" "PREPARE scalar_condition FROM 'SELECT (SELECT b''01'' WHERE @scalar_condition)+0 AS value'"
+               Contract.execute "prepare-scalar-disjunction" "PREPARE scalar_disjunction FROM 'SELECT (SELECT b''01'' WHERE 1 OR @scalar_condition)+0 AS value'"
+               for index, value in [ 1; 0; 1 ] |> List.indexed do
+                   Contract.execute (sprintf "set-scalar-condition-%d" index) (sprintf "SET @scalar_condition=%d" value)
+                   Contract.query (sprintf "scalar-condition-text-%d" index) "SELECT (SELECT b'01' WHERE @scalar_condition)+0 AS value"
+                   Contract.query (sprintf "scalar-condition-reuse-%d" index) "EXECUTE scalar_condition"
+                   Contract.query (sprintf "scalar-disjunction-reuse-%d" index) "EXECUTE scalar_disjunction"
+                   Contract.preparedQuery (sprintf "scalar-condition-binary-%d" index) "SELECT (SELECT b'01' WHERE ?)+0 AS value" [| box value |]
+               Contract.execute "close-scalar-condition" "DEALLOCATE PREPARE scalar_condition"
+               Contract.execute "close-scalar-disjunction" "DEALLOCATE PREPARE scalar_disjunction"
                Contract.query "adjacent-introducer-identifier" "SELECT _binaryX'00ff'" |> Contract.fails 1054 "42S22"
                Contract.execute "storage-table" "CREATE TABLE literal_storage(b BIT(64),u BIGINT UNSIGNED,d DECIMAL(30),f DOUBLE,n TINYINT)"
                for name, literal in [ "wide", "X'010000000000000000'"; "padded", "X'000000000000000001'" ] do

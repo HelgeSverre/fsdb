@@ -2419,14 +2419,6 @@ let private scalarSubqueryMaterializes registry (select: SelectStmt) =
     || (select.Projections |> List.exists (fun (expression, _) ->
         containsAggregate registry expression || not (collectWindowFuncs expression).IsEmpty))
 
-/// MySQL reduces source-free scalar projections before applying LIMIT/OFFSET.
-let private tryReducedScalarProjection registry (select: SelectStmt) =
-    match select.Projections with
-    | [ expression, _ ] when
-        not (scalarSubqueryMaterializes registry select)
-        && select.Where.IsNone -> Some expression
-    | _ -> None
-
 type private DecimalShape =
     { Precision: int
       Scale: int }
@@ -4867,8 +4859,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             // of its text resultset — a bare-text round trip would make e.g.
             // `(SELECT MAX(n) FROM t) > (SELECT MIN(n) FROM t)` compare
             // lexicographically instead of numerically.
+            let reducedProjection = tryReducedScalarProjection ctx select
             let executionSelect =
-                match tryReducedScalarProjection ctx.Registry select with
+                match reducedProjection with
                 | Some _ when select.Limit.IsSome || select.Offset.IsSome -> { select with Limit = None; Offset = None }
                 | _ -> select
             let subquery = runExpressionSubquery ctx select executionSelect
@@ -4881,11 +4874,63 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(_, []), _ -> Ok VNull
             | ResultSet(_, [ _ ]), [ row ] ->
                 let value = row |> Array.tryHead |> Option.defaultValue VNull
-                if scalarSubqueryMaterializes ctx.Registry select then
+                if reducedProjection.IsNone then
                     Ok(Value.materialize value)
                 else
                     Ok value
             | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
+
+/// Only audited, original builtins can execute during descriptor inference.
+/// Runtime bindings and subqueries retain their materialization boundary.
+and private isLiteralConstantExpression registry expression =
+    let closed = isLiteralConstantExpression registry
+    match expression with
+    | Lit _ -> true
+    | Neg _ | Not _ | IsNull _ | IsNotNull _ | IsTrue _ | IsFalse _
+    | BinOp _ | Cast _ | Collate _ | Like _ | Between _ | In _ | Case _ ->
+        Expression.children expression |> List.forall closed
+    | FuncCall(name, arguments) ->
+        let audited =
+            match name.ToUpperInvariant() with
+            | "ABS" | "COALESCE" | "IFNULL" | "IF"
+            | "ROUND" | "TRUNCATE" | "MOD"
+            | "LOWER" | "LCASE" | "UPPER" | "UCASE"
+            | "LENGTH" | "OCTET_LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH"
+            | "CONCAT" | "CONCAT_WS" -> true
+            | _ -> false
+        audited && Functions.isUnmodifiedBuiltinScalar name registry && List.forall closed arguments
+    | _ -> false
+
+and private tryConstantCondition ctx expression =
+    let constant expression =
+        if isLiteralConstantExpression ctx.Registry expression then
+            Diagnostics.suppress (fun () -> evalExpr ctx expression) |> Result.toOption
+        else None
+    match expression with
+    | BinOp((And | Or as operator), left, right) ->
+        let left = tryConstantCondition ctx left
+        let right = tryConstantCondition ctx right
+        let decisive = if operator = And then false else true
+        if [ left; right ] |> List.exists (Option.exists (fun value -> truthy value = Some decisive)) then
+            Some(boolToValue decisive)
+        else
+            match left, right with
+            | Some left, Some right ->
+                (if operator = And then evalLogicalAnd else evalLogicalOr) (Ok left) (fun () -> Ok right)
+                |> Result.toOption
+            | _ -> None
+    | _ -> constant expression
+
+/// MySQL removes constant-true conditions before scalar reduction and LIMIT.
+and private tryReducedScalarProjection ctx (select: SelectStmt) =
+    match select.Projections with
+    | [ expression, _ ] when not (scalarSubqueryMaterializes ctx.Registry select) ->
+        let conditionReduces =
+            select.Where
+            |> Option.map (fun condition -> tryConstantCondition ctx condition |> Option.bind truthy = Some true)
+            |> Option.defaultValue true
+        if conditionReduces then Some expression else None
+    | _ -> None
 
 and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
     let simple typeId =
@@ -4912,7 +4957,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         let rec literalBytes = function
             | Lit(VBinaryLiteral bytes) -> Some bytes
             | Distinct inner -> literalBytes inner
-            | Subquery select -> tryReducedScalarProjection ctx.Registry select |> Option.bind literalBytes
+            | Subquery select -> tryReducedScalarProjection ctx select |> Option.bind literalBytes
             | _ -> None
         match literalBytes expression with
         | Some bytes ->
@@ -5519,7 +5564,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     | Case(_, whens, elseBranch) ->
         (whens |> List.map snd) @ [ elseBranch |> Option.defaultValue (Lit VNull) ] |> choose
     | Subquery select ->
-        tryReducedScalarProjection ctx.Registry select
+        tryReducedScalarProjection ctx select
         |> Option.bind (metadataOfExpr ctx)
     | Placeholder _
     | Star _ -> None
@@ -6009,7 +6054,7 @@ and private resolveTableRef
                             selectRows [] (List.ofSeq table.RowsArray)
 
 /// Derives query columns from schema and expression metadata without reading
-/// rows or evaluating user expressions.
+/// rows or invoking extension functions.
 and private describeQueryColumns
     (store: Store)
     (registry: Registry)
@@ -17033,12 +17078,12 @@ let runTopLevelUnion
         let result, types, values = runUnionStmtWithOuter store registry dbName executable rest orderBy limit offset None
         result, types, None, values
 
-/// Describes a stored view without evaluating its query or its expressions.
+/// Describes a stored view without reading rows or invoking extension functions.
 let viewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
     describeStoredViewColumns store registry schema name
 
 /// Describes the result columns a statement fixes at prepare time without
-/// evaluating its expressions or reading its rows.
+/// reading rows or invoking extension functions.
 let statementColumns (store: Store) (registry: Registry) (schema: string) (statement: Statement) : ColumnDef list option =
     match statement with
     | Select select when not (SelectStmt.hasDestination select) ->

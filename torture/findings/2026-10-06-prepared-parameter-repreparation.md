@@ -526,9 +526,9 @@ materialization therefore belongs outside the shared membership result cache.
 
 Remaining descriptors are observable: `b'01'+0` has MySQL wire length 5 and
 fsdb length 20; `b'01'/2` has MySQL length 9 and fsdb length 7. Conditional
-source-free scalar reduction remains incomplete: MySQL reduces a constant-true
-WHERE but materializes a user-variable WHERE. Those boundaries remain in
-GAPS.md along with the remaining expression descriptors.
+source-free scalar reduction distinguishes supported constant-true WHERE
+conditions from runtime predicates. Broader constant-function coverage and
+expression descriptors remain in GAPS.md.
 
 A reducible source-free scalar query discards LIMIT and OFFSET, even LIMIT 0,
 and may include ordinary GROUP BY. ROLLUP, aggregates, windows, HAVING, and
@@ -579,7 +579,21 @@ MySQL's `Query_block::setup_conds` and `simplify_const_condition` in
 [sql_resolver.cc](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_resolver.cc)
 remove eligible constant-true conditions before scalar reduction checks whether
 WHERE is absent. This makes condition simplification part of the compatibility
-boundary. fsdb still needs shared condition normalization that respects runtime
-bindings, collation, and SQL null semantics; neither materializing every WHERE
-nor folding current bound values is sufficient. These oracle cases document
-an open gap and are not enrolled as passing fsdb differential contracts.
+boundary. fsdb uses its scalar evaluator for literal operators and audited original
+builtins, sharing SQL null and collation rules with execution. AND/OR combine
+constant truth values without evaluating runtime operands during inference.
+Bound parameters retain runtime origin inside scalar WHERE conditions, and
+non-reduced scalar results materialize their bytes. The original query still
+passes through ordinary validation and execution, preserving error reporting.
+
+The audited function set includes ABS, COALESCE, IF/IFNULL, ROUND, TRUNCATE,
+MOD, case conversion, string lengths, and concatenation. Overridden functions,
+other functions, variables, and subqueries cannot execute during inference.
+Broader constant functions and logical simplification beneath other operators
+remain open. The conditional cases now participate in text/binary differential
+contracts, including retained SQL PREPARE bindings. The maintained MySQL oracle
+also checks a retained binary prepared handle across changing bindings.
+
+The conditional contract manifest is
+`artifacts/runs/20261006T170623905-43982/contracts/manifest.json`; it also checks
+constant versus runtime LIMIT 0, binary collation, and NULL logical operands.

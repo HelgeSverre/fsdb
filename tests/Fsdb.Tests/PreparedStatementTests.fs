@@ -443,6 +443,51 @@ let tests =
                   let _, columns = preparedMetadata session statement.Ast count
                   Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId)) [ family ] (expression + " prepared type")
 
+          testCase "conditional scalar reduction distinguishes literals from runtime predicates"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let cases =
+                  [ "1", Some "1", TypeLongLong
+                    "0", None, TypeDouble
+                    "NULL", None, TypeDouble
+                    "1=1", Some "1", TypeLongLong
+                    "ABS(-1)=1", Some "1", TypeLongLong
+                    "'a'='A'", Some "1", TypeLongLong
+                    "COALESCE(NULL,1)", Some "1", TypeLongLong
+                    "RAND()>=0", Some "0", TypeDouble
+                    "EXISTS(SELECT 1)", Some "0", TypeDouble
+                    "1 LIMIT 0", Some "1", TypeLongLong
+                    "RAND()>=0 LIMIT 0", None, TypeDouble
+                    "'a' COLLATE utf8mb4_bin='A'", None, TypeDouble
+                    "NULL OR 1", Some "1", TypeLongLong
+                    "NULL AND 1", None, TypeDouble ]
+              for predicate, expected, family in cases do
+                  let sql = "SELECT (SELECT b'01' WHERE " + predicate + ")+0 AS value"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) predicate
+                  Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ family ] (predicate + " execution type")
+
+          testCase "conditional scalar reduction preserves retained variable and parameter bindings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @condition=1"
+              let session, _ = handle session "PREPARE scalar_variable FROM 'SELECT (SELECT b''01'' WHERE @condition)+0 AS value'"
+              let session, _ = handle session "PREPARE scalar_parameter FROM 'SELECT (SELECT b''01'' WHERE ?)+0 AS value'"
+              let session, _ = handle session "PREPARE scalar_disjunction FROM 'SELECT (SELECT b''01'' WHERE 1 OR @condition)+0 AS value'"
+              [ 1; 0; 1 ]
+              |> List.fold (fun session value ->
+                  let session, _ = handle session (sprintf "SET @condition=%d" value)
+                  for sql, expected, family in
+                      [ "SELECT (SELECT b'01' WHERE @condition)+0 AS value", (if value = 0 then None else Some "0"), TypeDouble
+                        "EXECUTE scalar_variable", (if value = 0 then None else Some "0"), TypeDouble
+                        "EXECUTE scalar_parameter USING @condition", (if value = 0 then None else Some "0"), TypeDouble
+                        "EXECUTE scalar_disjunction", Some "1", TypeLongLong ] do
+                      let current, result = handle session sql
+                      Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) (sprintf "%s binding=%d" sql value)
+                      Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ family ] (sql + " execution type")
+                  session) session
+              |> ignore
+
           testCase "binary literal variables discard numeric origin before binding"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
