@@ -2228,6 +2228,16 @@ module ContractCatalog =
                            Contract.query (name + "-text-warnings") "SHOW WARNINGS"
                            Contract.preparedQuery (name + "-binary") sql [||]
                            Contract.query (name + "-binary-warnings") "SHOW WARNINGS"
+               Contract.execute "text-precision-mode" "SET sql_mode=''"
+               for index, expression in
+                   [ "CAST(CAST('2020-00-01' AS DATETIME(6)) AS CHAR)"
+                     "CONCAT(CAST('2020-01-01' AS DATETIME(3)))"
+                     "CAST(CAST('-12:34:56.12' AS TIME(4)) AS CHAR)"
+                     "CAST(CAST(NULL AS DATETIME(6)) AS CHAR)"
+                     "HEX(CAST(CAST('2020-01-01' AS DATETIME(3)) AS BINARY))" ] |> List.indexed do
+                   let sql = "SELECT " + expression + " AS value"
+                   Contract.query (sprintf "text-precision-%d" index) sql
+                   Contract.preparedQuery (sprintf "binary-text-precision-%d" index) sql [||]
                Contract.execute "strict-zero-modes" "SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE'"
                Contract.query "year-zero-literals" "SELECT DATE '0000-01-01'/1 AS d,TIMESTAMP '0000-01-01 03:04:05'/1 AS dt"
                Contract.execute "year-zero-table" "CREATE TABLE calendar_year(d DATE,dt DATETIME(6))"

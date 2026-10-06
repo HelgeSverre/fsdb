@@ -552,6 +552,29 @@ let tests =
               Expect.equal (current.LastResultColumnMetadata |> List.map (fun value -> value.TypeId, value.ColumnLength, value.Decimals))
                   [ TypeNewDecimal, 14u, 4uy; TypeNewDecimal, 26u, 10uy ] "stored zero-component shapes"
 
+          testCase "temporal text arguments retain declared fractional precision"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET sql_mode=''"
+              for expression, expected in
+                  [ "CAST(CAST('2020-00-01' AS DATETIME(6)) AS CHAR)", "2020-00-01 00:00:00.000000"
+                    "CONCAT(CAST('2020-01-01' AS DATETIME(3)))", "2020-01-01 00:00:00.000"
+                    "CAST(CAST('-12:34:56.12' AS TIME(4)) AS CHAR)", "-12:34:56.1200"
+                    "HEX(CAST(CAST('2020-01-01' AS DATETIME(3)) AS BINARY))", "323032302D30312D30312030303A30303A30302E303030" ] do
+                  let _, result = handle session ("SELECT " + expression + " AS value")
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) expression
+              let _, result = handle session "SELECT CAST(CAST(NULL AS DATETIME(6)) AS CHAR) AS value"
+              Expect.equal result (ResultSet([ "value" ], [ [ None ] ])) "NULL remains NULL"
+              let session, _ = handle session "SET time_zone='+00:00'"
+              let session, _ = handle session "CREATE TABLE text_temporal(dt DATETIME(3),tm TIME(4),ts TIMESTAMP(6))"
+              let session, _ = handle session "INSERT INTO text_temporal VALUES('2020-01-01','-12:34:56.12','2020-01-01')"
+              let session, _ = handle session "SET time_zone='+02:00'"
+              let _, result = handle session "SELECT CAST(dt AS CHAR) AS dt,CONCAT(tm) AS tm,CAST(ts AS CHAR) AS ts FROM text_temporal"
+              Expect.equal result
+                  (ResultSet([ "dt"; "tm"; "ts" ], [ [ Some "2020-01-01 00:00:00.000"; Some "-12:34:56.1200"; Some "2020-01-01 02:00:00.000000" ] ]))
+                  "stored precision and local timestamp"
+
+
           testCase "calendar casts respect independent zero-date modes and report invalid input"
           <| fun _ ->
               for mode, rejectZero, rejectPartial, allowInvalid in

@@ -4804,6 +4804,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             match ty with
             | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _
             | TDecimal _ | TDouble _ | TFloat _ -> enumOrdinalFor ctx e v |> Option.defaultValue v
+            | TChar _ | TVarchar _ | TBinary _ | TVarBinary _ -> displayValueForText ctx e v
             | _ -> v)
         |> Result.bind (fun v ->
             // Storage owns coercion rules. Calendar casts use strict validation
@@ -5709,9 +5710,12 @@ and private displayValueForText (ctx: EvalContext) expression value =
         |> Option.defaultValue VNull
     | _ ->
         let format = outputFormatOfExpr ctx expression
-        if format.DecimalScale.IsSome then
+        match value with
+        | VDateTime _ | VTimestamp _ | VZeroDateTime _ | VTime _ ->
             renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
-        else value
+        | _ when format.DecimalScale.IsSome ->
+            renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
+        | _ -> value
 
 and private prepareScalarArguments ctx name expressions values =
     List.zip expressions values

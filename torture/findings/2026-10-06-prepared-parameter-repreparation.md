@@ -695,9 +695,16 @@ Shared storage and literal validation also allow year zero when month and day
 are nonzero. Expecto regressions cover mode-dependent CAST results and warning
 text, numeric inputs, year-zero literals, and stored columns. The differential
 contract compares calendar values through division by one because the driver's
-.NET DateTime reader cannot represent zero-component dates. CAST AS CHAR exposes
-another remaining precision boundary: fsdb omits trailing fractional zeroes from
-DATETIME(6), whereas MySQL preserves the declared precision. Adding zero to a
+.NET DateTime reader cannot represent zero-component dates.
+
+Text and binary casts and text-function arguments preserve declared temporal
+fractional precision through the shared output formatter, including trailing
+zeroes and zero-component DATETIME values. SHA2 hashes the declared precision:
+`SHA2(CAST('2024-01-01 00:00:00.5' AS DATETIME(3)),256)` hashes the
+text ending in `.500`, rather than `.500000`. Stored TIMESTAMP text retains
+fractional precision after conversion to the session time zone.
+
+Adding zero to a
 DATETIME(6) with zero microseconds also reports BIGINT on fsdb versus DECIMAL
 on MySQL; division retains the declared scale.
 
@@ -708,5 +715,5 @@ advances the second. Under `TIME_TRUNCATE_FRACTIONAL`, MySQL returns `.12` and
 `.99`, respectively. The zero-component storage path does not yet quantize its
 fractional fields, so these cases are not enrolled as passing contracts.
 
-The calendar CAST contract manifest is
-`artifacts/runs/20261006T174535160-50020/contracts/manifest.json`.
+The calendar CAST and temporal text-precision contract manifest is
+`artifacts/runs/20261006T175534381-51819/contracts/manifest.json`.

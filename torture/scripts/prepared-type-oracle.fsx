@@ -780,3 +780,26 @@ let runCalendarCasts () =
                     printfn "Calendar casts | %A | mode=%s | %s -> %A / %A" protocol mode sql actual actualWarnings
 
 runCalendarCasts ()
+
+let runTemporalTextPrecision () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        use setup = new MySqlCommand("SET sql_mode=''", connection)
+        setup.ExecuteNonQuery() |> ignore
+        for expression, expected in
+            [ "CAST(CAST('2020-00-01' AS DATETIME(6)) AS CHAR)", Some "2020-00-01 00:00:00.000000"
+              "CONCAT(CAST('2020-01-01' AS DATETIME(3)))", Some "2020-01-01 00:00:00.000"
+              "CAST(CAST('-12:34:56.12' AS TIME(4)) AS CHAR)", Some "-12:34:56.1200"
+              "CAST(CAST(NULL AS DATETIME(6)) AS CHAR)", None
+              "HEX(CAST(CAST('2020-01-01' AS DATETIME(3)) AS BINARY))", Some "323032302D30312D30312030303A30303A30302E303030" ] do
+            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            if not (reader.Read()) then failwithf "%s returned no row" expression
+            let actual = if reader.IsDBNull 0 then None else Some(reader.GetString 0)
+            if actual <> expected then
+                failwithf "%A %s: expected %A; got %A" protocol expression expected actual
+            printfn "Temporal text precision | %A | %s -> %A" protocol expression actual
+
+runTemporalTextPrecision ()

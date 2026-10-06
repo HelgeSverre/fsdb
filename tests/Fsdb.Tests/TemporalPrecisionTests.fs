@@ -414,8 +414,8 @@ let tests =
                     | other -> failtestf "expected duplicate-key error 1062, got %A" other ]
 
           testList
-              "scalar functions stringify temporals without the expression's fsp (known divergence)"
-              [ testCase "SHA2 over an int matches MySQL; over a CAST DATETIME(3) it hashes six digits, not fsp-padded three"
+              "scalar functions retain temporal fractional precision"
+              [ testCase "SHA2 hashes numeric text and declared temporal precision"
                 <| fun _ ->
                     // SHA2(123, 256) hashes the decimal string '123' — same
                     // as MySQL.
@@ -424,19 +424,10 @@ let tests =
                         [ Some "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3" ]
                         "SHA2 of an int hashes its decimal string"
 
-                    // Known divergence: MySQL renders the CAST at its
-                    // declared fsp=3 and hashes '2024-01-01 00:00:00.500'
-                    // (-> cf0c35779c80fb3d9ca4fc0c138402f1e0eb7417bcf07f49f98f26c3a798e165);
-                    // fsdb's function-argument stringification has no fsp,
-                    // so `Value.toText` renders six digits and it hashes
-                    // '2024-01-01 00:00:00.500000' instead. Fixing this
-                    // means fsp-aware temporal arg rendering across all
-                    // string-taking scalars (MD5/CONCAT/... share it), not a
-                    // SHA2-local patch — this pins the current behavior.
                     Expect.equal
                         (oneRow [ "SELECT SHA2(CAST('2024-01-01 00:00:00.5' AS DATETIME(3)), 256)" ])
-                        [ Some "a575d69101492a18a6de9a6104f8e4abaa0306ab1c464b89eb6a5c9f3896a304" ]
-                        "current behavior: hashes the fsp-6 rendering" ]
+                        [ Some "cf0c35779c80fb3d9ca4fc0c138402f1e0eb7417bcf07f49f98f26c3a798e165" ]
+                        "hashes the declared three fractional digits" ]
 
           testList
               "persistence round-trips fsp"
