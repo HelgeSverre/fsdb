@@ -5647,10 +5647,7 @@ let private runRoutineStatements
     let cursors = ref Map.empty<string, StoredProgram.Cursor>
 
     let updateDiagnostics generated result =
-        let conditions =
-            match Executor.errorInfo result with
-            | Some error -> generated @ [ Diagnostics.fromError error ]
-            | None -> generated
+        let conditions = Diagnostics.complete (Executor.errorInfo result) generated
 
         let rowCount =
             match result with
@@ -5672,9 +5669,9 @@ let private runRoutineStatements
                 | Some result -> current, result
                 | None -> reraise ()
 
-        let (next, result), generated = Diagnostics.capture execute
+        let (next, result), generated = Diagnostics.captureStatement execute
         updateDiagnostics generated result
-        generated |> List.iter propagatedConditions.Add
+        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
         next, result
 
     let valuesOfResultRow (session: Session) (row: string option list) =
@@ -5783,16 +5780,16 @@ let private runRoutineStatements
                         run scope next locals results affectedRows rest
                 | ResultSet(_, [ row ]) ->
                     let values = valuesOfResultRow next row
-                    let assigned, generated = Diagnostics.capture (fun () -> assignSelectedValues targets values locals)
+                    let assigned, generated = Diagnostics.captureStatement (fun () -> assignSelectedValues targets values locals)
 
                     match assigned with
                     | Ok locals ->
                         updateDiagnostics generated (Affected 0UL)
-                        generated |> List.iter propagatedConditions.Add
+                        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
                         run scope next locals results affectedRows rest
                     | Error error ->
                         updateDiagnostics generated error
-                        generated |> List.iter propagatedConditions.Add
+                        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
                         handleQueryResult scope next locals results affectedRows rest error
                 | ResultSet _ ->
                     handleQueryResult
@@ -5865,7 +5862,7 @@ let private runRoutineStatements
                     cursors.Value <- nextCursors
 
                     let assigned, generated =
-                        Diagnostics.capture (fun () ->
+                        Diagnostics.captureStatement (fun () ->
                             List.zip targets (Array.toList row)
                             |> List.fold
                                 (fun assigned (target, value) ->
@@ -5882,11 +5879,11 @@ let private runRoutineStatements
                     match assigned with
                     | Ok locals ->
                         updateDiagnostics generated (Affected 0UL)
-                        generated |> List.iter propagatedConditions.Add
+                        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
                         run scope current locals results affectedRows rest
                     | Error error ->
                         updateDiagnostics generated error
-                        generated |> List.iter propagatedConditions.Add
+                        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
                         handleQueryResult scope current locals results affectedRows rest error
             | StoredProgram.CloseCursor name ->
                 match StoredProgram.tryCloseCursor name cursors.Value with
@@ -5894,7 +5891,7 @@ let private runRoutineStatements
                     handleQueryResult scope current locals results affectedRows rest (ErrInfo error)
                 | Ok nextCursors ->
                     cursors.Value <- nextCursors
-                    updateDiagnostics [] (Affected 0UL)
+                    updateDiagnostics { BeforeError = []; AfterError = [] } (Affected 0UL)
                     run scope current locals results affectedRows rest
             | StoredProgram.GetDiagnostics diagnostics ->
                 runDiagnostics scope diagnostics current locals results affectedRows rest
@@ -7459,12 +7456,8 @@ let private recordDiagnostics
     : Session * QueryResult =
     let previous = session
     let session = if preserve then session else { session with Diagnostics = [] }
-    let (session, result), generated = Diagnostics.capture execute
-
-    let generated =
-        match terminalErrorInfo result with
-        | Some error -> generated @ [ Diagnostics.fromError error ]
-        | None -> generated
+    let (session, result), captured = Diagnostics.captureStatement execute
+    let generated = Diagnostics.complete (terminalErrorInfo result) captured
 
     let session = if preserve then session else { session with Diagnostics = generated }
     let session, result = recordResult (session, result)

@@ -623,6 +623,12 @@ let expression expr =
         emptyContext
         expr
 
+let expressionInSources options sources expr =
+    let context =
+        { emptyContext with
+            Sources = sources |> List.map (renderFromItem options emptyContext >> snd) }
+    renderViewExpression options context expr
+
 let viewDefinition options =
     function
     | Select select -> renderSelect options emptyContext select |> fst |> Some

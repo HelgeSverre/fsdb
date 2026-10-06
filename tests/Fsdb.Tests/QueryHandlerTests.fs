@@ -28,6 +28,29 @@ let tests =
                   Expect.equal rows [ [ Some "1" ] ] "row value"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "deferred diagnostics retain error order and capture scope"
+          <| fun _ ->
+              let error = Fsdb.SqlState.create 1690 "boundary overflow"
+              let inner, captured =
+                  Fsdb.Diagnostics.captureStatement (fun () ->
+                      Fsdb.Diagnostics.warning 1292 "before"
+                      let _, nested =
+                          Fsdb.Diagnostics.captureStatement (fun () ->
+                              Fsdb.Diagnostics.afterError (fun () -> Fsdb.Diagnostics.warning 1292 "nested"))
+                      Fsdb.Diagnostics.suppress (fun () ->
+                          Fsdb.Diagnostics.afterError (fun () -> Fsdb.Diagnostics.warning 1292 "suppressed"))
+                      Fsdb.Diagnostics.afterError (fun () -> Fsdb.Diagnostics.warning 1292 "after")
+                      nested)
+              let describe = List.map (fun (condition: Fsdb.Diagnostics.Condition) -> condition.Level, condition.Message)
+              Expect.equal (Fsdb.Diagnostics.complete (Some error) captured |> describe)
+                  [ Fsdb.Diagnostics.Warning, "before"; Fsdb.Diagnostics.Error, "boundary overflow"; Fsdb.Diagnostics.Warning, "after" ]
+                  "the terminal error separates its preceding and following conditions"
+              Expect.equal (Fsdb.Diagnostics.conditions inner |> describe)
+                  [ Fsdb.Diagnostics.Warning, "nested" ] "nested conditions remain isolated"
+              Expect.equal (Fsdb.Diagnostics.complete None captured |> describe)
+                  [ Fsdb.Diagnostics.Warning, "before"; Fsdb.Diagnostics.Warning, "after" ]
+                  "handled failures do not synthesize a terminal error"
+
           testCase "numeric aggregate warnings follow conversion and window boundaries"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -56,6 +79,81 @@ let tests =
                   let _, actualWarnings = handle current "SHOW WARNINGS"
                   let expectedWarnings = warnings |> List.map (fun text -> [ Some "Warning"; Some "1292"; Some("Truncated incorrect DOUBLE value: '" + text + "'") ])
                   Expect.equal actualWarnings (ResultSet([ "Level"; "Code"; "Message" ], expectedWarnings)) (expression + " warnings")
+
+          testCase "RANGE integer boundaries reject unsigned overflow"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE range_overflow(k BIGINT UNSIGNED,v INT)"
+              let session, _ = handle session "INSERT INTO range_overflow VALUES(18446744073709551615,1)"
+              let _, result = handle session "SELECT SUM(v) OVER(ORDER BY k RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM range_overflow"
+              match result with
+              | Err(1690, message) -> Expect.stringContains message "BIGINT UNSIGNED" "integer boundary arithmetic retains its domain"
+              | other -> failtestf "expected unsigned boundary overflow, got %A" other
+
+          testCase "RANGE frame errors stop conversion of later rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE range_failure(k BIGINT UNSIGNED,v VARCHAR(20))"
+              let session, _ = handle session "INSERT INTO range_failure VALUES(18446744073709551615,'32x'),(3,'4x'),(NULL,'1x')"
+              let session, result = handle session "SELECT SUM(v) OVER(ORDER BY k DESC RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM range_failure"
+              match result with
+              | Err(1690, message) ->
+                  let _, warnings = handle session "SHOW WARNINGS"
+                  Expect.equal warnings
+                      (ResultSet([ "Level"; "Code"; "Message" ], [ [ Some "Error"; Some "1690"; Some message ] ]))
+                      "no later frame is evaluated after overflow"
+              | other -> failtestf "expected boundary overflow, got %A" other
+
+          testCase "RANGE overflow preserves the candidate conversion warning after the error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE range_failure(k BIGINT UNSIGNED,v VARCHAR(20))"
+              let session, _ = handle session "INSERT INTO range_failure VALUES(18446744073709551615,'32x'),(3,'4x'),(NULL,'1x')"
+              let session, result = handle session "SELECT SUM(v) OVER(ORDER BY k DESC RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) FROM range_failure"
+              match result with
+              | Err(1690, message) ->
+                  let _, warnings = handle session "SHOW WARNINGS"
+                  Expect.equal warnings
+                      (ResultSet([ "Level"; "Code"; "Message" ],
+                          [ [ Some "Error"; Some "1690"; Some message ]
+                            [ Some "Warning"; Some "1292"; Some "Truncated incorrect DOUBLE value: '32x'" ] ]))
+                      "the failing candidate is converted after its boundary comparison"
+              | other -> failtestf "expected boundary overflow, got %A" other
+
+          testCase "RANGE boundary arithmetic preserves numeric domains and subtraction mode"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE range_domains(id INT PRIMARY KEY,u BIGINT UNSIGNED,s BIGINT,v INT)"
+              let session, _ = handle session "INSERT INTO range_domains VALUES(1,0,-9223372036854775808,1),(2,18446744073709551615,9223372036854775807,2)"
+              for mode in [ ""; "NO_UNSIGNED_SUBTRACTION" ] do
+                  let session, _ = handle session ("SET sql_mode='" + mode + "'")
+                  for key, filter, direction, value, integerResult in
+                      [ "u", "id<=1", "PRECEDING", "1", (if mode = "" then Error "BIGINT UNSIGNED" else Ok "1")
+                        "u", "id>=2", "FOLLOWING", "2", Error "BIGINT UNSIGNED"
+                        "u", "id>=2", "PRECEDING", "2", (if mode = "" then Ok "2" else Error "BIGINT")
+                        "s", "id<=1", "PRECEDING", "1", Error "BIGINT"
+                        "s", "id>=2", "FOLLOWING", "2", Error "BIGINT" ] do
+                      for offset in [ "1"; "1.0"; "1e0" ] do
+                          let frame = if direction = "PRECEDING" then offset + " PRECEDING AND CURRENT ROW" else "CURRENT ROW AND " + offset + " FOLLOWING"
+                          let sql = sprintf "SELECT SUM(v) OVER(ORDER BY %s RANGE BETWEEN %s) AS value FROM range_domains WHERE %s" key frame filter
+                          let _, actual = handle session sql
+                          match (if offset = "1" then integerResult else Ok value), actual with
+                          | Ok expected, ResultSet(columns, rows) ->
+                              Expect.equal columns [ "value" ] sql
+                              Expect.equal rows [ [ Some expected ] ] sql
+                          | Error domain, Err(1690, message) -> Expect.stringStarts message (domain + " value is out of range") sql
+                          | expected, actual -> failtestf "%s: expected %A; got %A" sql expected actual
+
+          testCase "RANGE offset frames discard ordering from a constant table"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE range_constant(id INT PRIMARY KEY,k BIGINT UNSIGNED,v INT)"
+              let session, _ = handle session "INSERT INTO range_constant VALUES(1,0,1),(2,18446744073709551615,2)"
+              for key in [ "k"; "r.k"; "k+0"; "CAST(k AS UNSIGNED)" ] do
+                  for filter, expected in [ "id=2", Some "2"; "id>=2", None; "k=18446744073709551615", None ] do
+                      let sql = "SELECT SUM(v) OVER(ORDER BY " + key + " RANGE BETWEEN 2 PRECEDING AND 1 PRECEDING) AS value FROM range_constant AS r WHERE " + filter
+                      let _, result = handle session sql
+                      Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) sql
 
           testCase "offset RANGE frames retain NULL peers at unbounded edges"
           <| fun _ ->

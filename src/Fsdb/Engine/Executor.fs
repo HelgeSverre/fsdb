@@ -3712,8 +3712,12 @@ type private RowOperand =
     | RowValues of RowOperand list
 
 type private RangeOffset =
-    | NumericRangeOffset of decimal
+    | NumericRangeOffset of Value
     | TemporalRangeOffset of Value
+
+type private WindowFrameFailure =
+    { Cause: EvalError
+      CandidateRows: int list }
 
 let private comparisonResult
     (ctx: EvalContext)
@@ -14060,6 +14064,16 @@ and private runWindowedSelect
     | Ok matched ->
         let matchedByIndex = lazy (Array.ofList matched)
         let mutable streamedRowOrder: int[] option = None
+        let constantSource =
+            lazy (
+                match select.From, select.Joins with
+                | Some(FromTable tableRef), [] ->
+                    tryEqualityAccessWith CandidateNarrowing store registry dbName tableRef select.Where
+                    |> Option.exists (fun plan ->
+                        plan.Unique && plan.UsesFullKey && plan.CandidateCount = 1
+                        && (plan.Rows.Value
+                            |> List.forall (fun (_, row) -> plan.ColumnIndices |> List.forall (fun index -> row.[index] <> VNull))))
+                | _ -> false)
 
         // One partitioned-and-ordered pass per distinct window function.
         // Original row indexes break equal ORDER BY keys so peers retain
@@ -14150,6 +14164,8 @@ and private runWindowedSelect
                 | VUInt n -> Ok(int64 n)
                 | _ -> Error(1210, sprintf "Incorrect arguments to %s" funcName))
 
+        let noUnsignedSubtraction = (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText).NoUnsignedSubtraction
+
         // The numeric position a RANGE frame measures distances along.
         let rangeKeyOf (v: Value) : decimal option =
             match v with
@@ -14168,7 +14184,6 @@ and private runWindowedSelect
 
             let partitionBy = spec.PartitionBy
             let windowOrderBy = spec.OrderBy
-            let dirs = windowOrderBy |> List.map snd
 
             // MySQL's default frame: a running one when the window is
             // ordered, the whole partition when it isn't.
@@ -14213,7 +14228,7 @@ and private runWindowedSelect
                 evalExpr literalCtx e
                 |> Result.bind (fun v ->
                     match rangeKeyOf v, tryIntervalArgument v with
-                    | Some distance, _ when distance >= 0M -> Ok(NumericRangeOffset distance)
+                    | Some distance, _ when distance >= 0M -> Ok(NumericRangeOffset v)
                     | _, Some(amount, _) when amount >= 0.0 -> Ok(TemporalRangeOffset v)
                     | _ -> badOffset ())
 
@@ -14273,10 +14288,21 @@ and private runWindowedSelect
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
                 exprs |> traverse (evalExpr (ctxFor row))
 
+            let effectiveOrderBy =
+                if hasRangeOffset && constantSource.Value then
+                    let scope =
+                        { Qualifiers = qualifiers |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+                          Columns = columns |> List.map (_.Name >> fun name -> name.ToLowerInvariant()) |> Set.ofList }
+                    windowOrderBy
+                    |> List.filter (fun (expression, _) -> not (isStatementStableExpr store registry dbName scope expression))
+                else
+                    windowOrderBy
+
+            let dirs = effectiveOrderBy |> List.map snd
             let orderTerms =
                 let context = ctxFor (probeRow columns)
 
-                windowOrderBy
+                effectiveOrderBy
                 |> List.map (fun (expression, _) ->
                     expression,
                     tryColumnDefForExpr context expression,
@@ -14577,14 +14603,39 @@ and private runWindowedSelect
                             let applyOffset preceding expression =
                                 rangeOffset expression
                                 |> Result.bind (function
-                                    | NumericRangeOffset distance ->
-                                        match rangeKeyOf current with
-                                        | None -> badRangeOrderType ()
-                                        | Some value ->
-                                            let direction =
-                                                if preceding <> descending then -1M else 1M
+                                    | NumericRangeOffset offset ->
+                                        let subtract = preceding <> descending
+                                        let overflow unsigned =
+                                            let options: SqlText.ViewRenderOptions =
+                                                { DefaultSchema = dbName
+                                                  IncludeSchema = true
+                                                  RelationColumns = fun schema table ->
+                                                      scan store schema table |> Result.toOption |> Option.map (fst >> List.map _.Name) }
+                                            let sources = Option.toList select.From @ (select.Joins |> List.map _.Table)
+                                            let key = windowOrderBy |> List.head |> fst |> SqlText.expressionInSources options sources
+                                            let domain = if unsigned then "BIGINT UNSIGNED" else "BIGINT"
+                                            let operator = if subtract then "-" else "+"
+                                            Error(1690, sprintf "%s value is out of range in '(<cache>(%s) %s %s)'" domain key operator (SqlText.expression expression))
 
-                                            Ok(Some(VDecimal(value + direction * distance)))
+                                        let integerValue = function
+                                            | VInt value -> Some(decimal value)
+                                            | VUInt value -> Some(decimal value)
+                                            | _ -> None
+                                        match integerValue current, integerValue offset with
+                                        | Some value, Some distance ->
+                                            let result = if subtract then value - distance else value + distance
+                                            let unsigned =
+                                                (match current, offset with VUInt _, _ | _, VUInt _ -> true | _ -> false)
+                                                && not (subtract && noUnsignedSubtraction)
+                                            if unsigned then
+                                                if result < 0M || result > decimal System.UInt64.MaxValue then overflow true
+                                                else Ok(Some(VUInt(uint64 result)))
+                                            elif result < decimal System.Int64.MinValue || result > decimal System.Int64.MaxValue then
+                                                overflow false
+                                            else
+                                                Ok(Some(VInt(int64 result)))
+                                        | _ when rangeKeyOf current |> Option.isNone -> badRangeOrderType ()
+                                        | _ -> Ok(Some(if subtract then Value.sub current offset else Value.add current offset))
                                     | TemporalRangeOffset interval ->
                                         let direction = if preceding <> descending then -1.0 else 1.0
 
@@ -14609,24 +14660,40 @@ and private runWindowedSelect
                             | BoundPreceding expression -> applyOffset true expression
                             | BoundFollowing expression -> applyOffset false expression
 
+                        let startsAfter startValue other =
+                            startValue
+                            |> Option.forall (fun start ->
+                                let compared = compareRangeValues other start
+                                if descending then compared <= 0 else compared >= 0)
+
+                        // A failed comparison reads equal; another finite-bound check stops before accumulation.
+                        let failure startValue canAccumulate cause =
+                            let candidates =
+                                if fst cause <> 1690 || not canAccumulate then []
+                                else
+                                    group
+                                    |> Array.indexed
+                                    |> Array.choose (fun (index, (_, (_, key, _))) ->
+                                        match key |> List.tryHead |> Option.map fst with
+                                        | Some value when value <> VNull && startsAfter startValue value -> Some index
+                                        | _ -> None)
+                                    |> Array.toList
+                            { Cause = cause; CandidateRows = candidates }
+
                         boundary startBound
+                        |> Result.mapError (failure None (endBound = UnboundedFollowing))
                         |> Result.bind (fun startValue ->
                             boundary endBound
+                            |> Result.mapError (failure startValue true)
                             |> Result.map (fun endValue ->
                                 let within other =
-                                    let startsAfter =
-                                        startValue
-                                        |> Option.forall (fun start ->
-                                            let compared = compareRangeValues other start
-                                            if descending then compared <= 0 else compared >= 0)
-
                                     let endsBefore =
                                         endValue
                                         |> Option.forall (fun finish ->
                                             let compared = compareRangeValues other finish
                                             if descending then compared >= 0 else compared <= 0)
 
-                                    startsAfter && endsBefore
+                                    startsAfter startValue other && endsBefore
 
                                 let inFrame =
                                     group
@@ -14647,7 +14714,7 @@ and private runWindowedSelect
 
                 // [lo, hi] row indexes (inclusive; `hi < lo` means an empty
                 // frame) this row's frame covers within its partition.
-                let frameRange group pos : Result<int * int, EvalError> =
+                let frameRange group pos : Result<int * int, WindowFrameFailure> =
                     let last = Array.length group - 1
 
                     let boundIndex (bound: FrameBound) (isStart: bool) : Result<int, EvalError> =
@@ -14673,20 +14740,21 @@ and private runWindowedSelect
                         boundIndex frame.Start true
                         |> Result.bind (fun lo ->
                             boundIndex frame.End false |> Result.map (fun hi -> max 0 lo, min last hi))
+                        |> Result.mapError (fun cause -> { Cause = cause; CandidateRows = [] })
 
                 // The frame-relative row `FIRST_VALUE`/`LAST_VALUE`/
                 // `NTH_VALUE` read, or None when the frame is too short.
                 let frameRowAt group pos (pick: int -> int -> int option) =
                     frameRange group pos
+                    |> Result.mapError _.Cause
                     |> Result.map (fun (lo, hi) -> pick lo hi |> Option.filter (fun i -> i >= lo && i <= hi) |> Option.map (rowAt group))
 
                 let perRow (compute: WindowRow[] -> int -> Result<Value, EvalError>) =
                     partitions
                     |> traverse (fun group ->
                         group
-                        |> Array.mapi (fun pos (origIdx, _) -> compute group pos |> Result.map (fun v -> origIdx, v))
-                        |> Array.toList
-                        |> traverse id)
+                        |> traverseArrayIndexed (fun pos (origIdx, _) -> compute group pos |> Result.map (fun v -> origIdx, v))
+                        |> Result.map Array.toList)
                     |> Result.map (List.collect id >> Array.ofList)
 
                 let aggregateValues name args =
@@ -14695,7 +14763,7 @@ and private runWindowedSelect
                         let contextAt index = ctxFor (rowAt group index)
                         // Window arguments are materialized before frame reads; numeric conversion belongs to each fold.
                         group
-                        |> Array.mapi (fun index _ ->
+                        |> traverseArrayIndexed (fun index _ ->
                             Limits.checkQueryCancellation index
                             let ctx = contextAt index
                             args
@@ -14703,10 +14771,7 @@ and private runWindowedSelect
                                 | Star _ when equalsIgnoreCase name "COUNT" -> Ok VNull
                                 | expression -> evalExpr ctx expression)
                             |> Result.map Array.ofList)
-                        |> Array.toList
-                        |> traverse id
-                        |> Result.bind (fun inputRows ->
-                            let inputs = Array.ofList inputRows
+                        |> Result.bind (fun inputs ->
                             let evaluate index argument _ = Ok inputs.[index].[argument]
                             let prefix =
                                 match args with
@@ -14718,23 +14783,40 @@ and private runWindowedSelect
                                     Some(expression, NumericAggregateAccumulator(kind, divisionPrecisionIncrement ()))
                                 | _ -> None
                             let mutable consumed = 0
+                            let mutable previousFrame = None
                             group
-                            |> Array.mapi (fun pos (originalIndex, _) ->
-                                frameRange group pos
-                                |> Result.bind (fun (lo, hi) ->
-                                    match prefix with
-                                    | Some(expression, accumulator) ->
-                                        while consumed <= hi do
-                                            Limits.checkQueryCancellation consumed
-                                            enumNumericOperand (contextAt consumed) expression inputs.[consumed].[0]
-                                            |> Functions.numericAggregateValue
-                                            |> accumulator.Add
-                                            consumed <- consumed + 1
-                                        Ok accumulator.Value
-                                    | None -> evalAggregateUsing evaluate registry contextAt [ lo .. hi ] name args)
-                                |> Result.map (fun value -> originalIndex, value))
-                            |> Array.toList
-                            |> traverse id))
+                            |> traverseArrayIndexed (fun pos (originalIndex, _) ->
+                                let evaluated =
+                                    match frameRange group pos with
+                                    | Error failure ->
+                                        // Growing frames check their retained first row before adding new inputs.
+                                        let retainedFrameFailed =
+                                            prefix.IsSome
+                                            && (previousFrame |> Option.exists (fun (lo, _) -> List.contains lo failure.CandidateRows))
+                                        if not retainedFrameFailed then
+                                            let firstCandidate =
+                                                if prefix.IsSome then consumed
+                                                else previousFrame |> Option.map fst |> Option.defaultValue 0
+                                            failure.CandidateRows
+                                            |> List.tryFind (fun index -> index >= firstCandidate)
+                                            |> Option.iter (fun index ->
+                                                Diagnostics.afterError (fun () ->
+                                                    evalAggregateUsing evaluate registry contextAt [ index ] name args |> ignore))
+                                        Error failure.Cause
+                                    | Ok(lo, hi) ->
+                                        previousFrame <- Some(lo, hi)
+                                        match prefix with
+                                        | Some(expression, accumulator) ->
+                                            while consumed <= hi do
+                                                Limits.checkQueryCancellation consumed
+                                                enumNumericOperand (contextAt consumed) expression inputs.[consumed].[0]
+                                                |> Functions.numericAggregateValue
+                                                |> accumulator.Add
+                                                consumed <- consumed + 1
+                                            Ok accumulator.Value
+                                        | None -> evalAggregateUsing evaluate registry contextAt [ lo .. hi ] name args
+                                evaluated |> Result.map (fun value -> originalIndex, value))
+                            |> Result.map Array.toList))
                     |> Result.map (List.collect id >> Array.ofList)
 
                 match fn with

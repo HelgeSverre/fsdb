@@ -2760,10 +2760,12 @@ module ContractCatalog =
     let private offsetRangeAggregates =
         { Name = "offset-range-aggregates"
           Setup =
-            [| "CREATE TABLE range_inputs(id INT PRIMARY KEY,k INT,dt DATETIME,v VARCHAR(20))"
-               "INSERT INTO range_inputs VALUES(1,NULL,NULL,'1x'),(2,NULL,NULL,'2x'),(3,1,'2020-01-02','4x'),(4,3,'2020-01-04','8x'),(5,3,'2020-01-04','16x'),(6,7,'2020-01-08','32x')" |]
+            [| "CREATE TABLE range_inputs(id INT PRIMARY KEY,k INT,dt DATETIME,v VARCHAR(20),u BIGINT UNSIGNED,d DECIMAL(20,5),f DOUBLE,day DATE,tm TIME)"
+               "INSERT INTO range_inputs VALUES(1,NULL,NULL,'1x',NULL,NULL,NULL,NULL,NULL),(2,NULL,NULL,'2x',NULL,NULL,NULL,NULL,NULL),(3,1,'2020-01-02','4x',18446744073709551609,0.1,1,'2020-01-02','00:00:01'),(4,3,'2020-01-04','8x',18446744073709551611,0.3,3,'2020-01-04','00:00:03'),(5,3,'2020-01-04','16x',18446744073709551611,0.3,3,'2020-01-04','00:00:03'),(6,7,'2020-01-08','32x',18446744073709551615,0.7,7,'2020-01-08','00:00:07')" |]
           Steps =
-            [| for key, offset in [ "k", "1"; "dt", "INTERVAL 1 DAY" ] do
+            [| for key, offset in
+                   [ "k", "1"; "u", "1"; "d", "0.1"; "f", "1"
+                     "dt", "INTERVAL 1 DAY"; "day", "INTERVAL 1 DAY"; "tm", "INTERVAL 1 SECOND" ] do
                    for direction in [ "ASC"; "DESC" ] do
                        for index, frame in
                            [ "UNBOUNDED PRECEDING AND " + offset + " PRECEDING"
@@ -2774,9 +2776,15 @@ module ContractCatalog =
                            for filterName, filter in [ "nullable", ""; "non-null", " WHERE k IS NOT NULL"; "all-null", " WHERE k IS NULL" ] do
                                let name = sprintf "%s-%s-%d-%s" key direction index filterName
                                let sql = "SELECT id,SUM(v) OVER(ORDER BY " + key + " " + direction + " RANGE BETWEEN " + frame + ") AS value FROM range_inputs" + filter + " ORDER BY id"
-                               Contract.query (name + "-text") sql
+                               let expectation step =
+                                   let increasingOffset = if direction = "ASC" then " FOLLOWING" else " PRECEDING"
+                                   if key = "u" && filterName <> "all-null" && frame.Contains(offset + increasingOffset) then
+                                       step |> Contract.fails 1690 "22003"
+                                   else
+                                       step
+                               Contract.query (name + "-text") sql |> expectation
                                Contract.query (name + "-text-warnings") "SHOW WARNINGS"
-                               Contract.preparedQuery (name + "-binary") sql [||]
+                               Contract.preparedQuery (name + "-binary") sql [||] |> expectation
                                Contract.query (name + "-binary-warnings") "SHOW WARNINGS" |]
           Cleanup = [| "DROP TABLE IF EXISTS range_inputs" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
@@ -3396,6 +3404,12 @@ module CompatibilityRunner =
                 let mutable runResult = Error "compatibility run did not produce a result"
 
                 try
+                    use! subjectAdmin = Database.openConnection fsdbConnection
+                    let! created = Database.execute "fsdb" subjectAdmin options.TimeoutSeconds (sprintf "CREATE DATABASE %s" (Database.quoteIdentifier databaseName))
+                    if not (TargetOutcome.succeeded created) then failwith created.Message
+                    let subjectConnection = MySqlConnectionStringBuilder(fsdbConnection)
+                    subjectConnection.Database <- databaseName
+                    let fsdbConnection = subjectConnection.ConnectionString
                     use! versionConnection = Database.openConnection oracleConnection
                     let! mysqlVersion = Database.scalarString versionConnection options.TimeoutSeconds "SELECT VERSION()"
                     let records = ResizeArray<ContractCaseRecord>()

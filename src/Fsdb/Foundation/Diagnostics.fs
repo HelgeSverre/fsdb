@@ -24,6 +24,7 @@ exception EvaluationError of code: int * message: string
 exception RaisedCondition of SqlState.Error
 
 let private active = AsyncLocal<ResizeArray<Condition> option>()
+let private deferred = AsyncLocal<ResizeArray<Condition> option>()
 let private rowNumber = AsyncLocal<int option>()
 let private divisionByZeroPolicy = AsyncLocal<DivisionByZeroPolicy>()
 
@@ -101,10 +102,32 @@ let currentRowNumber () = rowNumber.Value |> Option.defaultValue 1
 let withRowNumber (row: int) (body: unit -> 'a) : 'a =
     DynamicScope.withValue rowNumber (Some row) body
 
-let capture (body: unit -> 'a) : 'a * Condition list =
+type CapturedConditions =
+    { BeforeError: Condition list
+      AfterError: Condition list }
+
+let conditions captured = captured.BeforeError @ captured.AfterError
+
+let complete error captured =
+    captured.BeforeError
+    @ (error |> Option.map (fromError >> List.singleton) |> Option.defaultValue [])
+    @ captured.AfterError
+
+let captureStatement (body: unit -> 'a) : 'a * CapturedConditions =
     let conditions = ResizeArray()
-    let result = DynamicScope.withValue active (Some conditions) body
-    result, List.ofSeq conditions
+    let afterError = ResizeArray()
+    let result =
+        DynamicScope.withValue deferred (Some afterError) (fun () ->
+            DynamicScope.withValue active (Some conditions) body)
+    result, { BeforeError = List.ofSeq conditions; AfterError = List.ofSeq afterError }
+
+let capture (body: unit -> 'a) : 'a * Condition list =
+    let result, captured = captureStatement body
+    result, conditions captured
+
+/// Captures conversions reached after a failure but before execution unwinds.
+let afterError (body: unit -> 'a) : 'a =
+    DynamicScope.withValue active deferred.Value body
 
 let suppress (body: unit -> 'a) : 'a =
-    DynamicScope.withValue active None body
+    DynamicScope.withValue deferred None (fun () -> DynamicScope.withValue active None body)
