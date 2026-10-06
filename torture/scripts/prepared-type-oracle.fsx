@@ -1147,6 +1147,23 @@ let runApproximateExpressionDescriptors () =
 runApproximateExpressionDescriptors ()
 
 
+let verifyNumericDescriptor protocol (connection: MySqlConnection) (expression, expected, family, width, scale) =
+    use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+    if protocol = Binary then command.Prepare()
+    use reader = command.ExecuteReader()
+    if reader.FieldCount <> 1 || not (reader.Read()) then
+        failwithf "%A %s: expected one column and one row" protocol expression
+    let metadata = reader.GetColumnSchema()[0]
+    let actual = renderValue(reader.GetValue 0)
+    if actual <> expected || reader.GetDataTypeName(0) <> family
+       || metadata.ColumnSize <> Nullable width || metadata.NumericScale <> Nullable scale then
+        failwithf "%A %s: expected %s width=%d scale=%d value=%s; got %s width=%O scale=%O value=%s"
+            protocol expression family width scale expected (reader.GetDataTypeName 0)
+            metadata.ColumnSize metadata.NumericScale actual
+    if reader.Read() then failwithf "%A %s: unexpected second row" protocol expression
+    printfn "Numeric descriptor | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
+
+
 let runScientificLiteralDescriptors () =
     for protocol in [ Sql; Binary ] do
         use connection = new MySqlConnection(connectionString)
@@ -1183,16 +1200,7 @@ let runScientificLiteralDescriptors () =
               "(SELECT d DIV 1 FROM scientific_source)", "1", "BIGINT", 21, 0
               "(SELECT d DIV 0.1 FROM scientific_source)", "12", "BIGINT", 22, 0
               "(SELECT 2 DIV d FROM scientific_source)", "1", "BIGINT", 4, 0 ] do
-            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
-            if protocol = Binary then command.Prepare()
-            use reader = command.ExecuteReader()
-            let metadata = reader.GetColumnSchema()[0]
-            if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
-               || reader.GetDataTypeName(0) <> family || metadata.ColumnSize <> Nullable width
-               || metadata.NumericScale <> Nullable scale then
-                failwithf "%A %s: expected %s width=%d scale=%d value=%s; got %s width=%O scale=%O"
-                    protocol expression family width scale expected (reader.GetDataTypeName 0) metadata.ColumnSize metadata.NumericScale
-            printfn "Scientific descriptor | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
+            verifyNumericDescriptor protocol connection (expression, expected, family, width, scale)
         for spelling in [ "1E+00"; "0001e000"; ".1e1" ] do
             use command = new MySqlCommand("SELECT " + spelling, connection)
             if protocol = Binary then command.Prepare()
@@ -1220,16 +1228,7 @@ let runIntegralRoundingDescriptors () =
               "FLOOR('1.25')", "1", "DOUBLE", 23, 31
               "FLOOR(1e20)", "1E+20", "DOUBLE", 23, 31
               "CEIL(-1e20)", "-1E+20", "DOUBLE", 23, 31 ] do
-            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
-            if protocol = Binary then command.Prepare()
-            use reader = command.ExecuteReader()
-            let metadata = reader.GetColumnSchema()[0]
-            if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
-               || reader.GetDataTypeName(0) <> family || metadata.ColumnSize <> Nullable width
-               || metadata.NumericScale <> Nullable scale then
-                failwithf "%A %s: expected %s width=%d scale=%d value=%s; got %s width=%O scale=%O"
-                    protocol expression family width scale expected (reader.GetDataTypeName 0) metadata.ColumnSize metadata.NumericScale
-            printfn "Integral rounding | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
+            verifyNumericDescriptor protocol connection (expression, expected, family, width, scale)
 
 runIntegralRoundingDescriptors ()
 
@@ -1257,15 +1256,6 @@ let runRoundingPrecisionDescriptors () =
               "ROUND(1.25,18446744073709551615)", "1.25", "DECIMAL", 5, 2
               "TRUNCATE(1.25,-9223372036854775808)", "0", "DECIMAL", 2, 0
               "ROUND(1.25,-9223372036854775808)", "0", "DECIMAL", 3, 0 ] do
-            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
-            if protocol = Binary then command.Prepare()
-            use reader = command.ExecuteReader()
-            let metadata = reader.GetColumnSchema()[0]
-            if not (reader.Read()) || renderValue(reader.GetValue 0) <> expected
-               || reader.GetDataTypeName(0) <> family || metadata.ColumnSize <> Nullable width
-               || metadata.NumericScale <> Nullable scale then
-                failwithf "%A %s: expected %s width=%d scale=%d value=%s; got %s width=%O scale=%O"
-                    protocol expression family width scale expected (reader.GetDataTypeName 0) metadata.ColumnSize metadata.NumericScale
-            printfn "Rounding precision | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
+            verifyNumericDescriptor protocol connection (expression, expected, family, width, scale)
 
 runRoundingPrecisionDescriptors ()

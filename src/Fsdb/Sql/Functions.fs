@@ -400,13 +400,13 @@ let private roundDoubleAt (d: float) (digits: int) : float =
         if Double.IsInfinity factor || factor = 0.0 then 0.0
         else Math.Round(d / factor, MidpointRounding.ToEven) * factor
 
-let private roundDecimalAt (d: decimal) (digits: int) : decimal =
+let private roundDecimalAt (mode: MidpointRounding) (d: decimal) (digits: int) : decimal =
     if digits >= 28 then d
-    elif digits >= 0 then Math.Round(d, digits, MidpointRounding.AwayFromZero)
+    elif digits >= 0 then Math.Round(d, digits, mode)
     elif digits <= -29 then 0M
     else
         let factor = pown 10M -digits
-        Math.Round(d / factor, MidpointRounding.AwayFromZero) * factor
+        Math.Round(d / factor, mode) * factor
 
 let private signedRoundingResult number =
     if number < decimal Int64.MinValue || number > decimal Int64.MaxValue then
@@ -416,9 +416,9 @@ let private signedRoundingResult number =
 /// Exact values round half away from zero; approximate values round to even.
 let private roundValueAt digits = function
     | VNull -> VNull
-    | VInt number -> roundDecimalAt (decimal number) digits |> signedRoundingResult
-    | VUInt number -> roundDecimalAt (decimal number) digits |> Value.narrowUnsigned
-    | VDecimal number -> roundDecimalAt number digits |> VDecimal
+    | VInt number -> roundDecimalAt MidpointRounding.AwayFromZero (decimal number) digits |> signedRoundingResult
+    | VUInt number -> roundDecimalAt MidpointRounding.AwayFromZero (decimal number) digits |> Value.narrowUnsigned
+    | VDecimal number -> roundDecimalAt MidpointRounding.AwayFromZero number digits |> VDecimal
     | value -> roundDoubleAt (toDouble value) digits |> VDouble
 
 let private roundFn: Scalar = function
@@ -4844,14 +4844,6 @@ let private signFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (sign (toDouble v)))
     | _ -> VNull
 
-let private truncateDecimalAt (number: decimal) digits =
-    if digits >= 28 then number
-    elif digits >= 0 then Math.Round(number, digits, MidpointRounding.ToZero)
-    elif digits <= -29 then 0M
-    else
-        let factor = pown 10M -digits
-        Math.Truncate(number / factor) * factor
-
 let private truncateDoubleAt number digits =
     let factor = Math.Pow(10.0, float (abs digits))
     if digits >= 0 then
@@ -4864,9 +4856,9 @@ let private truncateFn: Scalar = function
     | [ value; precision ] when value <> VNull && precision <> VNull ->
         let digits = roundingDigits precision
         match value with
-        | VInt number -> truncateDecimalAt (decimal number) digits |> signedRoundingResult
-        | VUInt number -> truncateDecimalAt (decimal number) digits |> Value.narrowUnsigned
-        | VDecimal number -> truncateDecimalAt number digits |> VDecimal
+        | VInt number -> roundDecimalAt MidpointRounding.ToZero (decimal number) digits |> signedRoundingResult
+        | VUInt number -> roundDecimalAt MidpointRounding.ToZero (decimal number) digits |> Value.narrowUnsigned
+        | VDecimal number -> roundDecimalAt MidpointRounding.ToZero number digits |> VDecimal
         | value -> truncateDoubleAt (toDouble value) digits |> VDouble
     | _ -> VNull
 
