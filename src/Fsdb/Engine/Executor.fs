@@ -2389,6 +2389,11 @@ let private scalarSubqueryMaterializes registry (select: SelectStmt) =
     || (select.Projections |> List.exists (fun (expression, _) ->
         containsAggregate registry expression || not (collectWindowFuncs expression).IsEmpty))
 
+let private isIntegerType typeId =
+    typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
+
+let private isIntegerMetadata (metadata: ColumnMetadata) = isIntegerType metadata.TypeId
+
 type private DecimalShape =
     { Precision: int
       Scale: int }
@@ -5040,9 +5045,6 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         if typeId = TypeLongLong then left || right else left && right
 
     let numeric unsignedResult combineShapes left right =
-        let isInteger typeId =
-            typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
-
         let leftMetadata = numericMetadata left
         let rightMetadata = numericMetadata right
 
@@ -5054,9 +5056,9 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             | _, Some rightType when rightType = TypeString || rightType = TypeVarString || rightType = TypeBlob -> simple TypeDouble
             | Some leftType, _ when leftType = TypeNewDecimal -> simple TypeNewDecimal
             | _, Some rightType when rightType = TypeNewDecimal -> simple TypeNewDecimal
-            | Some leftType, Some rightType when isInteger leftType && isInteger rightType -> simple TypeLongLong
-            | Some leftType, None when isInteger leftType -> simple TypeDouble
-            | None, Some rightType when isInteger rightType -> simple TypeDouble
+            | Some leftType, Some rightType when isIntegerType leftType && isIntegerType rightType -> simple TypeLongLong
+            | Some leftType, None when isIntegerType leftType -> simple TypeDouble
+            | None, Some rightType when isIntegerType rightType -> simple TypeDouble
             | _ -> None
 
         let inferred =
@@ -5082,11 +5084,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         metadataOfExpr ctx expression
         |> Option.bind (fun metadata ->
             if
-                metadata.TypeId = TypeTiny
-                || metadata.TypeId = TypeShort
-                || metadata.TypeId = TypeLong
-                || metadata.TypeId = TypeLongLong
-                || metadata.TypeId = TypeYear
+                isIntegerMetadata metadata
                 || metadata.TypeId = TypeFloat
                 || metadata.TypeId = TypeDouble
                 || metadata.TypeId = TypeNewDecimal
@@ -5105,13 +5103,6 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
 
         let isText item =
             item.TypeId = TypeString || item.TypeId = TypeVarString || item.TypeId = TypeBlob
-
-        let isInteger item =
-            item.TypeId = TypeTiny
-            || item.TypeId = TypeShort
-            || item.TypeId = TypeLong
-            || item.TypeId = TypeLongLong
-            || item.TypeId = TypeYear
 
         let withNullability item =
             { item with
@@ -5145,16 +5136,16 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         | _ when metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) ->
             simple TypeDouble |> Option.map withNullability
         | _ when metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal)
-                 || (metadata |> List.forall isInteger
+                 || (metadata |> List.forall isIntegerMetadata
                      && metadata |> List.exists (fun item -> item.TypeId = TypeLongLong && hasMetadataFlag UnsignedFlag item)
-                     && metadata |> List.exists (fun item -> isInteger item && not (hasMetadataFlag UnsignedFlag item))) ->
+                     && metadata |> List.exists (fun item -> isIntegerMetadata item && not (hasMetadataFlag UnsignedFlag item))) ->
             let shape =
                 inferred
                 |> List.map (fun (expression, metadata) -> decimalShape expression metadata)
                 |> List.reduce combinedDecimalShape
             let shape = { shape with Precision = min 65 shape.Precision }
             simple TypeNewDecimal |> Option.map (withDecimalShape shape >> withNullability)
-        | _ when not metadata.IsEmpty && metadata |> List.forall isInteger ->
+        | _ when not metadata.IsEmpty && metadata |> List.forall isIntegerMetadata ->
             let isUnsigned = metadata |> List.forall (hasMetadataFlag UnsignedFlag)
 
             simple TypeLongLong
@@ -5413,8 +5404,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         let isExactNumeric =
             Option.exists (fun metadata ->
                 let kind = numericContextType metadata
-                kind = TypeTiny || kind = TypeShort || kind = TypeLong || kind = TypeLongLong
-                || kind = TypeYear || kind = TypeBit || kind = TypeNewDecimal)
+                isIntegerType kind || kind = TypeBit || kind = TypeNewDecimal)
         let increment = divisionPrecisionIncrement ()
         if isExactNumeric leftNumeric && isExactNumeric rightNumeric then
             let dividend = decimalShape left leftNumeric
@@ -5441,7 +5431,8 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             simple TypeDouble |> Option.map (fun metadata -> { metadata with ColumnLength = width; Decimals = byte scale })
     | BinOp(IntDiv, left, right) ->
         let operandShape expression =
-            let metadata = numericMetadata expression |> Option.orElseWith (fun () -> divisionOperandMetadata expression)
+            let display = divisionOperandMetadata expression
+            let metadata = numericMetadata expression |> Option.orElse display
             let shape = decimalShape expression metadata
             let precision =
                 match expression, metadata with
@@ -5453,7 +5444,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                 | _, Some item when item.TypeId = TypeDouble || item.TypeId = TypeFloat
                                     || item.TypeId = TypeBlob || item.TypeId = TypeJson -> int (min 65u item.ColumnLength)
                 | _ -> shape.Precision
-            let scale = divisionOperandMetadata expression |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
+            let scale = display |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
             metadata, precision, scale
         let leftMetadata, precision, leftScale = operandShape left
         let rightMetadata, rightPrecision, rightScale = operandShape right
@@ -5548,8 +5539,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         | ("ROUND" | "TRUNCATE"), arg :: precision ->
             numericUnary arg
             |> Option.map (fun metadata ->
-                if metadata.TypeId = TypeTiny || metadata.TypeId = TypeShort || metadata.TypeId = TypeLong
-                   || metadata.TypeId = TypeLongLong || metadata.TypeId = TypeYear then
+                if isIntegerMetadata metadata then
                     { metadata with TypeId = TypeLongLong; ColumnLength = 21u }
                 elif metadata.TypeId <> TypeNewDecimal then metadata
                 else
