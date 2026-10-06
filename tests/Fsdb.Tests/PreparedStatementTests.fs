@@ -424,6 +424,47 @@ let tests =
               Expect.equal (columns |> List.map (fun column -> column.Metadata.ColumnLength, column.Metadata.Decimals)) expected
                   "preparation preserves the same wire bounds"
 
+          testCase "unsigned negation separates constant promotion from runtime overflow"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE unsigned_negation(u BIGINT UNSIGNED,s BIGINT)"
+              let session, _ = handle session "INSERT INTO unsigned_negation VALUES(1,1),(9223372036854775808,-9223372036854775808),(18446744073709551615,2)"
+              let session, small = handle session "SELECT -u AS value FROM unsigned_negation WHERE u=1"
+              Expect.equal small (ResultSet([ "value" ], [ [ Some "-1" ] ])) "unsigned unary minus has a signed result"
+              let session, boundary = handle session "SELECT -u AS value FROM unsigned_negation WHERE u=9223372036854775808"
+              Expect.equal boundary (ResultSet([ "value" ], [ [ Some "-9223372036854775808" ] ])) "the signed minimum is representable"
+              for sql in [ "SELECT -u FROM unsigned_negation WHERE u=18446744073709551615"; "SELECT -s FROM unsigned_negation WHERE s=-9223372036854775808" ] do
+                  match handle session sql |> snd with
+                  | Err(1690, _) -> ()
+                  | other -> failtestf "expected runtime BIGINT overflow: %A" other
+              let session, constants = handle session "SELECT -CAST(18446744073709551615 AS UNSIGNED) AS unsigned_value,-CAST(-9223372036854775808 AS SIGNED) AS signed_value"
+              Expect.equal constants (ResultSet([ "unsigned_value"; "signed_value" ], [ [ Some "-18446744073709551615"; Some "9223372036854775808" ] ])) "constants promote to decimal"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal; TypeNewDecimal ] "promoted constants advertise decimal"
+
+          testCase "prepared unsigned negation keeps runtime overflow checks after binding"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT -CAST(? AS UNSIGNED) AS value"
+              let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+              let statement = createPreparedStatement session sql ast count
+              let session = { session with Statements = Map.ofList [ 1, statement ] }
+              let steps =
+                  [ 1UL, Some "-1"
+                    9223372036854775808UL, Some "-9223372036854775808"
+                    UInt64.MaxValue, None
+                    2UL, Some "-2" ]
+              (session, steps)
+              ||> List.fold (fun session (value, expected) ->
+                  let session, result = executePreparedHandle session 1 [ VUInt value ]
+                  match expected, result with
+                  | None, Err(1690, _) -> ()
+                  | Some expected, ResultSet([ "value" ], [ [ Some actual ] ]) ->
+                      Expect.equal actual expected "runtime signed negation"
+                      Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLongLong ] "runtime operands retain BIGINT"
+                  | _ -> failtestf "unexpected negation result for %A: %A" value result
+                  session)
+              |> ignore
+
           testCase "decimal unary negation preserves precision independently of subtraction"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -258,7 +258,7 @@ let private inferParameters
 
         match expression with
         | Placeholder index -> expected |> Option.iter (setParameter index treatment)
-        | Neg operand -> inferExpression scope expected treatment (BinOp(Sub, Lit(VInt 0L), operand))
+        | Neg operand -> inferConverted (Some(ColumnWire.parameterMetadataOfType(TDouble false))) operand
         | BinOp(operator, left, right) ->
             let leftMetadata = inferred left
             let rightMetadata = inferred right

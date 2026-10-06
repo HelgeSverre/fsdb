@@ -4926,10 +4926,17 @@ let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Sta
         else
             None
 
-    Expression.rewriteStatementWithProjectionNames
+    let hasParameter = Expression.exists (function Placeholder _ -> true | _ -> false)
+    let rec retainRuntimeNegation = function
+        | Neg operand when hasParameter operand ->
+            Some(Neg(RuntimeExpression(Expression.rewriteTree retainRuntimeNegation operand)))
+        | _ -> None
+
+    stmt
+    |> Expression.rewriteStatement retainRuntimeNegation
+    |> Expression.rewriteStatementWithProjectionNames
         parameterName
         (function Placeholder index -> Some(List.item index values) | _ -> None)
-        stmt
 
 /// Binds literal values while preserving the original projection names.
 let bindPlaceholders statement values =

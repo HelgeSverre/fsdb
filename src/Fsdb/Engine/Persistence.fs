@@ -373,6 +373,7 @@ let private decodeDirection (r: #IReader) : Direction =
 let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     match expr with
     | Lit v -> w.WriteByte 0x01uy; encodeValue w v
+    | RuntimeExpression _
     | Placeholder _ -> failwith "Persistence: a prepared-statement placeholder can't reach the WAL/snapshot"
     | UserVariable _
     | SystemVariable _

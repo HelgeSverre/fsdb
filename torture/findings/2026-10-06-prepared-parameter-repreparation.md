@@ -373,9 +373,23 @@ treats named variables as bindings in binary prepared commands.
 Unary negation now has its own AST node, shared traversal support, and a
 persistent expression tag. `-@v` retains precision 65 while `0-@v` reserves the
 extra digit. WAL and snapshot regressions exercise generated expressions after
-recovery. Numeric evaluation still shares subtraction's coercion: large
-unsigned operands remain a separate gap (MySQL promotes their negative value
-to DECIMAL).
+recovery. Integer negation distinguishes constant promotion from runtime
+BIGINT checks. Negating an unsigned column or cast parameter accepts 2^63 as
+the signed minimum, but rejects larger values with 1690/22003. A signed
+minimum column also overflows under negation. Constant BIGINT casts instead
+promote to DECIMAL: unsigned 2^63 and UInt64.MaxValue report precision 21,
+and negated signed minimum reports precision 20. A bare negated parameter
+has a DOUBLE context. Bound expressions retain their runtime origin after
+parameter substitution so execution cannot accidentally enable promotion.
+
+The `unsigned-negation-boundaries` contract covers column boundaries,
+constant casts, a retained binary handle through overflow and recovery, and
+a bare unsigned parameter. The manifest at
+`artifacts/runs/20261006T151525810-19239/contracts/manifest.json` records no
+differences in values, type families, or error codes. It does not verify wire
+precision. Constant inference covers literals, BIGINT casts, basic arithmetic,
+and the original ABS builtin; broader constant functions and exact integer
+arithmetic descriptor widths remain open.
 
 Remaining descriptor limitations include source spellings lost during parsing.
 The direct expression-metadata path for binary PREPARE currently handles

@@ -2142,6 +2142,26 @@ module ContractCatalog =
           Cleanup = [| "SET div_precision_increment=DEFAULT"; "DROP TABLE IF EXISTS precision_source" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |]; "statement:set", [| "text-differential" |] |] }
 
+    let private unsignedNegation =
+        { Name = "unsigned-negation-boundaries"
+          Setup = [| "CREATE TABLE negation_values(u BIGINT UNSIGNED,s BIGINT)"
+                     "INSERT INTO negation_values VALUES(1,1),(9223372036854775808,-9223372036854775808),(18446744073709551615,2)" |]
+          Steps =
+            [| Contract.query "small" "SELECT -u AS value FROM negation_values WHERE u=1"
+               Contract.query "boundary" "SELECT -u AS value FROM negation_values WHERE u=9223372036854775808"
+               Contract.query "unsigned-overflow" "SELECT -u FROM negation_values WHERE u=18446744073709551615" |> Contract.fails 1690 "22003"
+               Contract.query "signed-overflow" "SELECT -s FROM negation_values WHERE s=-9223372036854775808" |> Contract.fails 1690 "22003"
+               Contract.query "constants" "SELECT -CAST(18446744073709551615 AS UNSIGNED) AS u,-CAST(-9223372036854775808 AS SIGNED) AS s"
+               Contract.prepare "prepare" "negation" Query "SELECT -CAST(? AS UNSIGNED) AS value" [| box 1UL |]
+               Contract.invoke "bound-small" "negation" OracleSuccess
+               Contract.invokeWith "bound-boundary" "negation" [| box 9223372036854775808UL |]
+               Contract.invokeWith "bound-overflow" "negation" [| box UInt64.MaxValue |] |> Contract.fails 1690 "22003"
+               Contract.invokeWith "bound-recovery" "negation" [| box 2UL |]
+               Contract.close "close" "negation"
+               Contract.preparedQuery "bare-parameter" "SELECT -? AS value" [| box UInt64.MaxValue |] |]
+          Cleanup = [| "DROP TABLE negation_values" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private preparedSchemaChanges =
         { Name = "prepared-schema-type-refresh"
           Setup = [| "CREATE TABLE schema_source(id INT)"; "INSERT INTO schema_source VALUES(1)"; "CREATE TABLE schema_other(id INT)" |]
@@ -2231,6 +2251,7 @@ module ContractCatalog =
            preparedMixedAssignments
            preparedDecimalDivision
            divisionPrecisionIncrement
+           unsignedNegation
            preparedSchemaChanges
            temporaryViewShadowing
            columnTypes

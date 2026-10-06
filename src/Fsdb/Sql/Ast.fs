@@ -141,6 +141,8 @@ type Expr =
     /// scalar result when a row-aware predicate consumes them.
     | Row of Expr list
     | BinOp of Op * Expr * Expr
+    /// A bound operand retains runtime semantics after its parameters become literals.
+    | RuntimeExpression of Expr
     | Neg of Expr
     | Not of Expr
     | IsNull of Expr

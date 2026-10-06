@@ -2021,6 +2021,24 @@ let private maxUInt64 = decimal UInt64.MaxValue
 exception UnsignedOutOfRange
 exception SignedOutOfRange
 
+let negate value =
+    match classify value with
+    | None -> VNull
+    | Some(KInt value) when value = Int64.MinValue -> raise SignedOutOfRange
+    | Some(KInt value) -> VInt(-value)
+    | Some(KUInt value) when value > uint64 Int64.MaxValue + 1UL -> raise SignedOutOfRange
+    | Some(KUInt value) when value = uint64 Int64.MaxValue + 1UL -> VInt Int64.MinValue
+    | Some(KUInt value) -> VInt(-(int64 value))
+    | Some(KDecimal value) -> VDecimal(-value)
+    | Some(KDouble value) -> VDouble(-value)
+
+/// Constant integer negation may choose DECIMAL before runtime BIGINT checks apply.
+let negateConstant value =
+    match classify value with
+    | Some(KInt value) when value = Int64.MinValue -> VDecimal(-(decimal value))
+    | Some(KUInt value) when value > uint64 Int64.MaxValue -> VDecimal(-(decimal value))
+    | _ -> negate value
+
 let narrowUnsigned (d: decimal) : Value =
     if d >= 0m && d <= maxUInt64 then
         if Decimal.Truncate d = d then VUInt(uint64 d) else VDecimal d

@@ -154,6 +154,7 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
         sprintf "%s.%s" qualifier (identifier column)
     | Row values -> sprintf "(%s)" (values |> List.map render |> String.concat ",")
     | BinOp(operator, left, right) -> sprintf "(%s %s %s)" (render left) (operatorText operator) (render right)
+    | RuntimeExpression value -> render value
     | Neg value -> sprintf "-(%s)" (render value)
     | Not value -> sprintf "(not(%s))" (render value)
     | IsNull value -> sprintf "(%s is null)" (render value)

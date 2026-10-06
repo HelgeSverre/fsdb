@@ -46,6 +46,7 @@ let children =
     | AssignUserVariable(_, value) -> [ value ]
     | Row values -> values
     | BinOp(_, left, right) -> [ left; right ]
+    | RuntimeExpression expression
     | Neg expression
     | Not expression
     | IsNull expression
@@ -196,6 +197,7 @@ let mapChildren (mapper: Expr -> Expr) =
     | AssignUserVariable(variable, value) -> AssignUserVariable(variable, mapper value)
     | Row values -> Row(List.map mapper values)
     | BinOp(operator, left, right) -> BinOp(operator, mapper left, mapper right)
+    | RuntimeExpression expression -> RuntimeExpression(mapper expression)
     | Neg expression -> Neg(mapper expression)
     | Not expression -> Not(mapper expression)
     | IsNull expression -> IsNull(mapper expression)

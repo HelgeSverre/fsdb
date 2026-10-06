@@ -954,6 +954,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     | BinOp(_, left, right)
                     | Like(left, right, _, _)
                     | Regexp(left, right) -> simplePredicate left && simplePredicate right
+                    | RuntimeExpression value
                     | Neg value
                     | Not value
                     | IsNull value
@@ -1851,6 +1852,7 @@ let rec internal exprLabel (expr: Expr) : string =
     | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToUpperInvariant()) (args |> List.map exprLabel |> String.concat ", ")
     | Row values -> sprintf "(%s)" (values |> List.map exprLabel |> String.concat ", ")
     | BinOp(op, a, b) -> sprintf "%s %s %s" (exprLabel a) (opSymbol op) (exprLabel b)
+    | RuntimeExpression e -> exprLabel e
     | Neg e -> sprintf "-(%s)" (exprLabel e)
     | Not e -> sprintf "not(%s)" (exprLabel e)
     | IsNull e -> sprintf "(%s is null)" (exprLabel e)
@@ -2281,6 +2283,7 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         |> Some
 
     match expr with
+    | RuntimeExpression inner -> fspOfExpr ctx inner
     | Cast(_, TDecimal(_, scale, _)) -> Some scale
     | Cast(_, TDouble _)
     | Cast(_, TFloat _) -> Some 6
@@ -2313,6 +2316,7 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
 
 let rec private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
     match expr with
+    | RuntimeExpression inner -> sourceCharset ctx inner
     | Collate(_, name) -> Collation.charsetOfCollation name
     | Cast(value, _) -> sourceCharset ctx value
     | NamedFunction "CONVERT" [ _; Lit(VString charset) ] ->
@@ -2337,6 +2341,74 @@ let private strToDateDateTokens =
 
 let private strToDateTimeTokens =
     [ "%H"; "%h"; "%I"; "%i"; "%s"; "%S"; "%f"; "%k"; "%l"; "%p"; "%r"; "%T" ]
+
+let private castUnsignedValue v =
+    let wrap (d: decimal) =
+        let n = System.Math.Round(d, System.MidpointRounding.AwayFromZero)
+
+        if n >= 0m then
+            VUInt(uint64 (min n (decimal System.UInt64.MaxValue)))
+        else
+            // Two's-complement wrap in exact arithmetic: `decimal`
+            // spans 2^64 with digits to spare, so this never rounds.
+            VUInt(uint64 (max 0m (n + decimal System.UInt64.MaxValue + 1m)))
+
+    match v with
+    | VNull -> VNull
+    | VUInt _ -> v
+    | VInt i -> VUInt(uint64 i)
+    | VDecimal d -> wrap d
+    | VDouble d ->
+        if System.Double.IsNaN d then
+            VUInt 0UL
+        elif d >= float System.Int64.MaxValue then
+            VUInt(uint64 System.Int64.MaxValue)
+        elif d < float System.Int64.MinValue then
+            raise Value.UnsignedOutOfRange
+        else
+            wrap (decimal d)
+    | VString s ->
+        // MySQL reads the leading numeric prefix and treats the rest
+        // as garbage (`CAST('12abc' AS UNSIGNED)` is 12).
+        match leadingNumericPrefix leadingFloatPrefixRegex s with
+        | Some prefix ->
+            match System.Decimal.TryParse(prefix, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
+            | true, d -> wrap d
+            | false, _ -> VUInt 0UL
+        | None -> VUInt 0UL
+    | other -> wrap (decimal (toDouble other))
+
+/// Only closed numeric syntax and the original ABS builtin participate in
+/// descriptor inference; user functions and runtime bindings are never invoked.
+let rec private tryClosedNumericValue registry expression =
+    let recurse = tryClosedNumericValue registry
+    try
+        match expression with
+        | Lit value -> Some value
+        | Collate(inner, _) -> recurse inner
+        | Cast(inner, TBigInt true) -> recurse inner |> Option.map castUnsignedValue
+        | Cast(inner, TBigInt false) ->
+            recurse inner |> Option.bind (function
+                | VInt _ as value -> Some value
+                | VUInt value -> Some(VInt(int64 value))
+                | VNull -> Some VNull
+                | _ -> None)
+        | Neg inner -> recurse inner |> Option.map Value.negateConstant
+        | BinOp((Add | Sub | SignedSub | Mul as operator), left, right) ->
+            match recurse left, recurse right with
+            | Some left, Some right ->
+                let operation = match operator with Add -> Value.add | Mul -> Value.mul | SignedSub -> Value.subSigned | _ -> Value.sub
+                Some(operation left right)
+            | _ -> None
+        | NamedFunction "ABS" [ inner ] when Functions.isUnmodifiedBuiltinScalar "ABS" registry ->
+            match recurse inner, Functions.lookup "ABS" registry with
+            | Some value, Some absolute -> Some(absolute [ value ])
+            | _ -> None
+        | _ -> None
+    with
+    | Value.UnsignedOutOfRange | Value.SignedOutOfRange -> None
+    | :? System.OverflowException -> None
+    | Functions.SqlError _ -> None
 
 type private DecimalShape =
     { Precision: int
@@ -2711,7 +2783,23 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | QuantifiedComparison _
     | Between _
     | Exists _ -> simple TypeLongLong
-    | Neg operand -> numeric (fun _ right -> right) (Lit(VInt 0L)) operand
+    | RuntimeExpression operand -> metadataOfExpr ctx operand
+    | Neg operand ->
+        let source = metadataOfExpr ctx operand
+        numeric (fun _ right -> right) (Lit(VInt 0L)) operand
+        |> Option.map (fun metadata ->
+            if metadata.TypeId <> TypeLongLong then metadata
+            else
+                let promoted =
+                    tryClosedNumericValue ctx.Registry operand
+                    |> Option.map Value.negateConstant
+                    |> Option.exists (function VDecimal _ -> true | _ -> false)
+                let length =
+                    source |> Option.map (fun item -> item.ColumnLength + (if hasMetadataFlag UnsignedFlag item then 1u else 0u))
+                    |> Option.defaultValue metadata.ColumnLength
+                { metadata with
+                    TypeId = if promoted then TypeNewDecimal else TypeLongLong
+                    ColumnLength = length })
     | BinOp((Add | Sub | SignedSub), left, right) ->
         numeric (fun left right ->
             let shape = combinedDecimalShape left right
@@ -2737,6 +2825,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | BinOp(IntDiv, _, _) -> simple TypeLongLong
     | Cast(value, ty) ->
         let metadata = ColumnWire.metadataOfType ty
+        let metadata = match ty with TBigInt _ -> { metadata with ColumnLength = 21u } | _ -> metadata
 
         metadataOfExpr ctx value
         |> Option.filter (hasMetadataFlag NotNullFlag)
@@ -3508,6 +3597,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
                     (Ok first))
 
     match expression with
+    | RuntimeExpression inner -> expressionCollation ctx inner
     | Collate(_, name) ->
         named name 0
     | Lit(VBytes _)
@@ -4611,6 +4701,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
         isStatementStableExpr store registry dbName scope value
         && isStatementStableSelect store registry dbName scope select
     | BinOp(_, left, right) -> every [ left; right ]
+    | RuntimeExpression value
     | Neg value
     | Not value
     | IsNull value
@@ -4803,7 +4894,14 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         Ok evaluated
                     else
                         Error(1105, "Too many user-defined variables"))
-    | Neg e -> eval (BinOp(Sub, Lit(VInt 0L), e))
+    | RuntimeExpression operand -> eval operand
+    | Neg operand ->
+        try
+            let negate =
+                if tryClosedNumericValue ctx.Registry operand |> Option.isSome then Value.negateConstant else Value.negate
+            eval operand |> Result.map (enumNumericOperand ctx operand >> negate)
+        with Value.SignedOutOfRange ->
+            Error(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql expr))
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
     | IsNull e -> eval e |> Result.map (function VNull -> VInt 1L | _ -> VInt 0L)
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)
@@ -5361,42 +5459,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // conversion through the approximate-number domain.
     | Cast(e, TBigInt true) ->
         eval e
-        |> Result.map (fun v -> enumOrdinalFor ctx e v |> Option.defaultValue v)
-        |> Result.map (fun v ->
-            let wrap (d: decimal) =
-                let n = System.Math.Round(d, System.MidpointRounding.AwayFromZero)
-
-                if n >= 0m then
-                    VUInt(uint64 (min n (decimal System.UInt64.MaxValue)))
-                else
-                    // Two's-complement wrap in exact arithmetic: `decimal`
-                    // spans 2^64 with digits to spare, so this never rounds.
-                    VUInt(uint64 (max 0m (n + decimal System.UInt64.MaxValue + 1m)))
-
-            match v with
-            | VNull -> VNull
-            | VUInt _ -> v
-            | VInt i -> VUInt(uint64 i)
-            | VDecimal d -> wrap d
-            | VDouble d ->
-                if System.Double.IsNaN d then
-                    VUInt 0UL
-                elif d >= float System.Int64.MaxValue then
-                    VUInt(uint64 System.Int64.MaxValue)
-                elif d < float System.Int64.MinValue then
-                    raise Value.UnsignedOutOfRange
-                else
-                    wrap (decimal d)
-            | VString s ->
-                // MySQL reads the leading numeric prefix and treats the rest
-                // as garbage (`CAST('12abc' AS UNSIGNED)` is 12).
-                match leadingNumericPrefix leadingFloatPrefixRegex s with
-                | Some prefix ->
-                    match System.Decimal.TryParse(prefix, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
-                    | true, d -> wrap d
-                    | false, _ -> VUInt 0UL
-                | None -> VUInt 0UL
-            | other -> wrap (decimal (toDouble other)))
+        |> Result.map (fun value -> enumOrdinalFor ctx e value |> Option.defaultValue value)
+        |> Result.map castUnsignedValue
     // `CAST(x AS JSON)` yields a JSON-*typed* value, not text that happens to
     // look like JSON — which is what makes `CAST('1' AS JSON) < CAST('"a"' AS
     // JSON)` follow MySQL's JSON type precedence (`Value.compare`'s JSON
@@ -8639,6 +8703,7 @@ and private tryMergeDirectView
         | BinOp(_, left, right)
         | Like(left, right, _, _)
         | Regexp(left, right) -> mergeablePredicate left && mergeablePredicate right
+        | RuntimeExpression value
         | Neg value
         | Not value
         | IsNull value
@@ -12384,6 +12449,7 @@ and private rewriteAggregates
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
+    | RuntimeExpression e -> sub e |> Result.map RuntimeExpression
     | Neg e -> sub e |> Result.map Neg
     | Not e -> sub e |> Result.map Not
     | IsNull e -> sub e |> Result.map IsNull
@@ -12459,6 +12525,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
+    | RuntimeExpression e -> sub e |> Result.map RuntimeExpression
     | Neg e -> sub e |> Result.map Neg
     | Not e -> sub e |> Result.map Not
     | IsNull e -> sub e |> Result.map IsNull
@@ -17726,6 +17793,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | BinOp(_, left, right)
         | Like(left, right, _, _)
         | Regexp(left, right) -> references left @ references right
+        | RuntimeExpression expression
         | Neg expression
         | Not expression
         | IsNull expression
