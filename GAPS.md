@@ -633,6 +633,11 @@ text-to-number aggregate scan costs. Its repeatability check passes, but
 between-run variation and the absence of a pre-change baseline limit it to
 profiling guidance rather than a regression claim.
 
+The [window snapshot](benchmarks/results/01e61930-windows.md) identifies offset
+RANGE boundary lookup and stored-function window inputs as profiling candidates.
+Smaller-size controls exceed the repeatability threshold under competing host
+load, so its raw timings do not establish a regression or speedup.
+
 Unless an artifact header says otherwise, the linked planner profiles compare
 native in-memory fsdb with native durable MySQL. They expose query-shape and
 scaling differences, not deployment-equivalent write cost. Durable write claims

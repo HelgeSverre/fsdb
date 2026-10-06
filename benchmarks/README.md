@@ -95,6 +95,31 @@ execution, and disposal on an open connection; it does not measure repeated
 execution of a retained prepared handle. Include `PointSelectByPk` via
 `FSDB_BENCH_METHODS` when collecting a loopback baseline alongside these cases.
 
+### Focused window snapshot
+
+`scripts/window-snapshot.fsx` measures grouped text SUM, prefix and sliding
+ROWS windows, offset RANGE windows, and a stored-function window input over
+100, 1,000, and 5,000 rows. It checks result counts and totals, including the
+function call count, before timing. It creates and drops a uniquely named
+database on each supplied server.
+
+Build fsdb in Release and the test project (for MySqlConnector), then provide
+connections to isolated native fsdb and MySQL 8.4.11 servers:
+
+```sh
+FSDB_PERF_CONNECTION='Server=127.0.0.1;Port=3307;User ID=root;Allow User Variables=true;Pooling=false' \
+FSDB_ORACLE_CONNECTION='Server=127.0.0.1;Port=3316;User ID=root;Allow User Variables=true;Pooling=false' \
+  dotnet fsi --nologo benchmarks/scripts/window-snapshot.fsx
+```
+
+This lightweight snapshot includes command creation, execution, and result
+consumption on an open connection. It uses at least two seconds and three
+batches of warmup, then seven samples. Point lookups average 100 queries per
+sample; aggregate samples execute one query. Counter resets occur outside
+timing. Keep the raw samples and reject regression conclusions if the control
+drifts by more than 20%. It does not replace BenchmarkDotNet or a matched
+before/after campaign.
+
 ## Methodology
 
 ### Process isolation
