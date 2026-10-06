@@ -555,3 +555,31 @@ The contract manifest at
 literal contexts, scalar/row subqueries and their limits, and explicit binary
 introducers in text and binary execution, variable materialization, and numeric
 storage boundaries without differences.
+
+Conditional scalar predicates are pinned separately by `just prepared-type-oracle`
+on MySQL 8.4.11. For `(SELECT b'01' WHERE predicate)+0`, text and binary
+execution expose these result types and values:
+
+| Predicate | Result type | Value |
+| --- | --- | --- |
+| `1`, `1=1`, `ABS(-1)=1`, `'a'='A'`, `COALESCE(NULL,1)` | BIGINT | 1 |
+| `0`, `NULL` | DOUBLE | NULL |
+| `RAND()>=0`, `EXISTS(SELECT 1)` | DOUBLE | 0 |
+
+A session-variable predicate stays DOUBLE when its binding changes through
+1, 0, 1: its values are 0, NULL, 0. Direct statements and a retained SQL
+PREPARE handle agree. A retained binary prepared statement with a bound
+parameter likewise stays DOUBLE through bindings 0, 1, 0, 1, returning NULL,
+0, NULL, 0. Binding a true value therefore does not make a predicate equivalent
+to a literal true condition. Conversely, `1 OR @scalar_condition` remains
+BIGINT 1 across those session-variable changes, including SQL PREPARE reuse.
+An eliminated runtime branch does not prevent reduction.
+
+MySQL's `Query_block::setup_conds` and `simplify_const_condition` in
+[sql_resolver.cc](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_resolver.cc)
+remove eligible constant-true conditions before scalar reduction checks whether
+WHERE is absent. This makes condition simplification part of the compatibility
+boundary. fsdb still needs shared condition normalization that respects runtime
+bindings, collation, and SQL null semantics; neither materializing every WHERE
+nor folding current bound values is sufficient. These oracle cases document
+an open gap and are not enrolled as passing fsdb differential contracts.

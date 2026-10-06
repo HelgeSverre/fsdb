@@ -499,6 +499,15 @@ let runBinaryLiteralContexts () =
           "SUM(X'01')", "DECIMAL", "1"
           "SUM(_binary X'01')", "DOUBLE", "0"
           "(SELECT b'01')+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE 1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE 0)+0", "DOUBLE", "NULL"
+          "(SELECT b'01' WHERE NULL)+0", "DOUBLE", "NULL"
+          "(SELECT b'01' WHERE 1=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE ABS(-1)=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE 'a'='A')+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE COALESCE(NULL,1))+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE RAND()>=0)+0", "DOUBLE", "0"
+          "(SELECT b'01' WHERE EXISTS(SELECT 1))+0", "DOUBLE", "0"
           "(SELECT b'01' LIMIT 0)+0", "BIGINT", "1"
           "(SELECT b'01' LIMIT 1 OFFSET 10)+0", "BIGINT", "1"
           "(SELECT b'01' GROUP BY 1 LIMIT 0)+0", "BIGINT", "1"
@@ -567,3 +576,46 @@ let runBinaryLiteralContexts () =
             close.ExecuteNonQuery() |> ignore
 
 runBinaryLiteralContexts ()
+
+let runConditionalScalarBindings () =
+    use connection = new MySqlConnection(connectionString)
+    connection.Open()
+    if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+        failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+    let execute sql =
+        use command = new MySqlCommand(sql, connection)
+        command.ExecuteNonQuery() |> ignore
+    let check label expectedType expectedValue (command: MySqlCommand) =
+        use reader = command.ExecuteReader()
+        if not (reader.Read()) then failwithf "%s returned no row" label
+        let actualType = reader.GetDataTypeName 0
+        let actualValue = renderValue(reader.GetValue 0)
+        if actualType <> expectedType || actualValue <> expectedValue then
+            failwithf "%s: expected %s:%s; got %s:%s" label expectedType expectedValue actualType actualValue
+        printfn "Conditional scalar | %s -> %s:%s" label actualType actualValue
+
+    execute "SET @scalar_condition=1"
+    execute "PREPARE scalar_condition FROM 'SELECT (SELECT b''01'' WHERE @scalar_condition)+0 AS value'"
+    execute "PREPARE scalar_disjunction FROM 'SELECT (SELECT b''01'' WHERE 1 OR @scalar_condition)+0 AS value'"
+    try
+        for value in [ 1; 0; 1 ] do
+            execute (sprintf "SET @scalar_condition=%d" value)
+            for sql, family, expected in
+                [ "SELECT (SELECT b'01' WHERE @scalar_condition)+0 AS value", "DOUBLE", (if value = 0 then "NULL" else "0")
+                  "EXECUTE scalar_condition", "DOUBLE", (if value = 0 then "NULL" else "0")
+                  "SELECT (SELECT b'01' WHERE 1 OR @scalar_condition)+0 AS value", "BIGINT", "1"
+                  "EXECUTE scalar_disjunction", "BIGINT", "1" ] do
+                use command = new MySqlCommand(sql, connection)
+                check (sprintf "%s [condition=%d]" sql value) family expected command
+    finally
+        execute "DEALLOCATE PREPARE scalar_condition"
+        execute "DEALLOCATE PREPARE scalar_disjunction"
+
+    use bound = new MySqlCommand("SELECT (SELECT b'01' WHERE @condition)+0 AS value", connection)
+    let parameter = bound.Parameters.AddWithValue("@condition", 0)
+    bound.Prepare()
+    for value in [ 0; 1; 0; 1 ] do
+        parameter.Value <- box value
+        check (sprintf "binary parameter=%d" value) "DOUBLE" (if value = 0 then "NULL" else "0") bound
+
+runConditionalScalarBindings ()
