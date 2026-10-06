@@ -2103,6 +2103,45 @@ module ContractCatalog =
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private divisionPrecisionIncrement =
+        { Name = "division-precision-increment"
+          Setup = [| "CREATE TABLE precision_source(n INT)"; "INSERT INTO precision_source VALUES (1),(2),(2)" |]
+          Steps =
+            [| Contract.execute "initial" "SET div_precision_increment=4"
+               Contract.execute "sql-prepare" "PREPARE precision_query FROM 'SELECT 1/3 AS quotient'"
+               Contract.prepare "binary-prepare" "precision" Query "SELECT 1/3 AS quotient /* binary */" [||]
+               for increment in [ 0; 1; 4; 9 ] do
+                   let name = string increment
+                   Contract.execute (name + "-set") ("SET div_precision_increment=" + name)
+                   Contract.query (name + "-ordinary") "SELECT 1/3 AS quotient,10.00/3 AS decimal_quotient,(1/3)*3 AS product"
+                   Contract.query (name + "-average") "SELECT AVG(n) AS average,AVG(DISTINCT n) AS distinct_average FROM precision_source"
+                   Contract.query (name + "-window") "SELECT AVG(n) OVER () AS average,(AVG(n) OVER ())*3 AS product FROM precision_source"
+                   Contract.query (name + "-sql") "EXECUTE precision_query"
+                   Contract.invoke (name + "-binary") "precision" OracleSuccess
+               Contract.close "binary-close" "precision"
+               Contract.execute "sql-close" "DEALLOCATE PREPARE precision_query"
+               Contract.execute "schema-initial" "SET div_precision_increment=4"
+               Contract.execute "schema-prepare" "PREPARE precision_schema FROM 'SELECT n/3 AS quotient FROM precision_source ORDER BY n'"
+               Contract.execute "schema-setting" "SET div_precision_increment=1"
+               Contract.query "schema-retained" "EXECUTE precision_schema"
+               Contract.execute "schema-alter" "ALTER TABLE precision_source ADD COLUMN extra INT"
+               Contract.query "schema-refreshed" "EXECUTE precision_schema"
+               Contract.execute "schema-close" "DEALLOCATE PREPARE precision_schema"
+               Contract.execute "parameter-initial" "SET div_precision_increment=4"
+               Contract.prepare "parameter-prepare" "precision-parameter" Query "SELECT ? AS parameter_value,1/3 AS quotient" [| box 1L |]
+               Contract.invoke "parameter-first" "precision-parameter" OracleSuccess
+               Contract.execute "parameter-setting" "SET div_precision_increment=1"
+               Contract.invokeWith "parameter-refresh" "precision-parameter" [| box 1.25M |]
+               Contract.close "parameter-close" "precision-parameter"
+               for value in [ "-1"; "31" ] do
+                   Contract.execute (value + "-clamp") ("SET div_precision_increment=" + value)
+                   Contract.query (value + "-warning") "SHOW WARNINGS"
+                   Contract.query (value + "-value") "SELECT @@div_precision_increment AS setting"
+               for value in [ "1.5"; "'2'"; "NULL" ] do
+                   Contract.execute (value + "-invalid") ("SET div_precision_increment=" + value) |> Contract.fails 1232 "42000" |]
+          Cleanup = [| "SET div_precision_increment=DEFAULT"; "DROP TABLE IF EXISTS precision_source" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |]; "statement:set", [| "text-differential" |] |] }
+
     let private preparedSchemaChanges =
         { Name = "prepared-schema-type-refresh"
           Setup = [| "CREATE TABLE schema_source(id INT)"; "INSERT INTO schema_source VALUES(1)"; "CREATE TABLE schema_other(id INT)" |]
@@ -2191,6 +2230,7 @@ module ContractCatalog =
            preparedUserAssignments
            preparedMixedAssignments
            preparedDecimalDivision
+           divisionPrecisionIncrement
            preparedSchemaChanges
            temporaryViewShadowing
            columnTypes

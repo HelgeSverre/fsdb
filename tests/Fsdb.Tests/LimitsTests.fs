@@ -929,7 +929,8 @@ let tests =
                             ParamCount = 0
                             LastParamTypes = None
                             ParameterTypes = None
-                            SchemaDependencies = Map.empty }
+                            SchemaDependencies = Map.empty
+                            DivisionPrecisionIncrement = 4 }
 
                       match executePrepared session prepared [] |> snd with
                       | Err(3134, _) -> ()

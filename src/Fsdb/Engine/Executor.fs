@@ -567,6 +567,22 @@ let internal withTriggerTextExecutor executor body =
 
 let private currentVariableContext () = variableContext.Value
 
+let private divisionPrecisionOverride = System.Threading.AsyncLocal<int option>()
+
+let withDivisionPrecisionIncrement increment body =
+    DynamicScope.withValue divisionPrecisionOverride (Some increment) body
+
+let private divisionPrecisionIncrement () =
+    divisionPrecisionOverride.Value
+    |> Option.orElseWith (fun () ->
+        currentVariableContext ()
+        |> Option.bind (fun variables ->
+            match variables.ReadSystemVariable "SESSION" "div_precision_increment" with
+            | Ok(Some(VInt value)) -> Some(int value)
+            | Ok(Some(VUInt value)) -> Some(int value)
+            | _ -> None))
+    |> Option.defaultValue 4
+
 let private tryRoutineVariable (name: string) =
     routineVariables.Value
     |> Option.bind (fun variables -> Map.tryFind (name.ToLowerInvariant()) variables.Value)
@@ -2669,7 +2685,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | Some _, _
         | _, Some _ ->
             let scale = metadataOfExpr ctx left |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
-            simple TypeNewDecimal |> Option.map (fun metadata -> { metadata with Decimals = byte (min 30 (scale + 4)) })
+            simple TypeNewDecimal |> Option.map (fun metadata -> { metadata with Decimals = byte (min 30 (scale + divisionPrecisionIncrement ())) })
         | _ -> None
     | BinOp(IntDiv, _, _) -> simple TypeLongLong
     | Cast(value, ty) ->
@@ -2717,7 +2733,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 simple TypeDouble
             | metadata ->
                 let scale = metadata |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
-                let scale = if name.Equals("AVG", System.StringComparison.OrdinalIgnoreCase) then min 30 (scale + 4) else scale
+                let scale = if name.Equals("AVG", System.StringComparison.OrdinalIgnoreCase) then min 30 (scale + divisionPrecisionIncrement ()) else scale
                 simple TypeNewDecimal |> Option.map (fun item -> { item with Decimals = byte scale })
         | ("STD" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"), _ -> simple TypeDouble
         | "GROUP_CONCAT", _ -> Some(ColumnWire.metadataOfType TText)
@@ -2907,6 +2923,7 @@ let private outputFormatOfExpr ctx expr =
         | NamedFunction "ROUND" _
         | NamedFunction "TRUNCATE" _
         | NamedFunction "COALESCE" _
+        | NamedFunction "AVG" _
         | NamedFunction "IFNULL" _ ->
             metadataOfExpr ctx expr
             |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
@@ -4795,7 +4812,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Sub -> Ok(arith Value.sub)
                     | SignedSub -> Ok(arith Value.subSigned)
                     | Mul -> Ok(arith Value.mul)
-                    | Div -> divide Value.divWithIntermediatePrecision
+                    | Div -> divide (Value.divWithIntermediatePrecision (divisionPrecisionIncrement ()))
                     | IntDiv -> divide Value.intDiv
                     | Eq -> compareWith Eq
                     | Neq -> compareWith Neq
@@ -6176,7 +6193,7 @@ and private describeQueryColumns
                             |> Option.bind (fun column ->
                                 decimalParts column.Type
                                 |> Option.map (fun (precision, scale) ->
-                                    computedColumn name (TDecimal(min 65 (precision + 4), min 30 (scale + 4), false)) true None None))
+                                    computedColumn name (TDecimal(min 65 (precision + divisionPrecisionIncrement ()), min 30 (scale + divisionPrecisionIncrement ()), false)) true None None))
                         | FuncCall(functionName, [ argument ])
                             when functionName.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
                                  || functionName.Equals("MAX", System.StringComparison.OrdinalIgnoreCase) ->
@@ -12153,7 +12170,7 @@ and private evalAggregate
         | None ->
             total
             |> Option.defaultValue (VDecimal exactTotal)
-            |> fun sum -> Ok(Value.div sum (VInt count))
+            |> fun sum -> Ok(Value.divWithIntermediatePrecision (divisionPrecisionIncrement ()) sum (VInt count))
     | arg :: rest when isGroupConcat ->
         // `GROUP_CONCAT` folds entirely here rather than through
         // `registry.Aggregates` — see `isAggregateCall`'s doc. `rest` holds
@@ -12289,6 +12306,8 @@ and private evalAggregate
                             if (if isMax then compared >= 0 else compared <= 0) then best else candidate
 
                         List.reduce choose deduped
+                    elif upper = "AVG" && Functions.isUnmodifiedBuiltinAggregate name registry then
+                        Functions.averageWithPrecision (divisionPrecisionIncrement ()) deduped
                     else
                         fold deduped
                 else
@@ -14315,7 +14334,21 @@ and private runWindowedSelect
                     elif args |> List.exists (function Distinct _ -> true | _ -> false) then
                         Error(1235, "This version of MySQL doesn't yet support '<window function>(DISTINCT ..)'")
                     else
-                        perRow (aggregateOver name args))
+                        let values = perRow (aggregateOver name args)
+                        if equalsIgnoreCase name "AVG" && Functions.isUnmodifiedBuiltinAggregate name registry then
+                            // MySQL materializes window averages at their declared scale before outer arithmetic.
+                            let scale =
+                                metadataOfExpr (ctxFor [||]) windowFunc
+                                |> Option.map (fun metadata -> int metadata.Decimals)
+                                |> Option.defaultValue 0
+                            let materialize (index, value) =
+                                let value =
+                                    match value with
+                                    | VDecimal number -> VDecimal(Value.withScale scale number)
+                                    | _ -> value
+                                index, value
+                            values |> Result.map (Array.map materialize)
+                        else values)
             // Back into `matched`'s own row order: every branch above
             // computes `(original index, value)` pairs partition by
             // partition.

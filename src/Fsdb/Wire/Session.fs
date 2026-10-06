@@ -83,6 +83,7 @@ let defaultVariables: Map<string, string option> =
           "license", "GPL"
           "group_concat_max_len", "1024"
           "max_sp_recursion_depth", "0"
+          "div_precision_increment", "4"
           "max_heap_table_size", "16777216"
           "tmp_table_size", "16777216"
           "performance_schema", "0"
@@ -204,7 +205,8 @@ type PreparedStmt =
       ParamCount: int
       LastParamTypes: (byte * bool) list option
       ParameterTypes: Fsdb.PreparedMetadata.ParameterTypes option
-      SchemaDependencies: Map<string * string, PreparedDependency option> }
+      SchemaDependencies: Map<string * string, PreparedDependency option>
+      DivisionPrecisionIncrement: int }
 
 /// A materialized read-only result retained between COM_STMT_FETCH calls.
 type PreparedCursor =

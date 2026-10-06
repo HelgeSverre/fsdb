@@ -31,6 +31,12 @@ type ParameterTypes =
         { Context: ColumnMetadata list
           Derived: ColumnMetadata list }
 
+type internal BoundParameters =
+    { Types: ParameterTypes
+      Statement: Statement
+      Expressions: Expr list
+      Reprepared: bool }
+
 type internal BindingSource =
     | ProtocolValues
     | UserVariables
@@ -741,4 +747,8 @@ let internal bindParameters source store registry schema schemaChanged refreshVa
         | _ -> Error(1210, "Incorrect arguments to EXECUTE")
 
     bindAll 0 analysis.Bindings analysis.Definitions types actual []
-    |> Result.map (fun expressions -> { Context = original; Derived = types }, statement, expressions)
+    |> Result.map (fun expressions ->
+        { Types = { Context = original; Derived = types }
+          Statement = statement
+          Expressions = expressions
+          Reprepared = reprepare })

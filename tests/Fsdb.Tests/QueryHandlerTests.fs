@@ -1903,7 +1903,8 @@ let tests =
                     ParamCount = 1
                     LastParamTypes = None
                     ParameterTypes = None
-                    SchemaDependencies = Map.empty }
+                    SchemaDependencies = Map.empty
+                    DivisionPrecisionIncrement = 4 }
 
               let literalSession, result = executePrepared literalSession textStatement [ VString "O'Brien\\" ]
               Expect.equal result (Affected 0UL) "text-prepared substitution should use mode-aware quoting"
@@ -2399,7 +2400,8 @@ let tests =
                         ParamCount = 2
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   let session, result =
                       executePrepared
@@ -4523,7 +4525,8 @@ let tests =
                         ParamCount = 1
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VInt 7L ] with
                   | preparedSession, ResultSet(_, [ [ Some "14" ] ]) ->

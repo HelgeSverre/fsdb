@@ -2096,7 +2096,7 @@ let private divPrecisionIncrement = 4
 /// it (`Math.Round(5m, 4)` is still `5m`, not `5.0000m`) — `decimal`
 /// remembers trailing zeros baked into its own scale, so round-tripping
 /// through a fixed-point format string is what actually forces it.
-let private withScale (scale: int) (d: decimal) : decimal =
+let internal withScale (scale: int) (d: decimal) : decimal =
     // `decimal` only carries 28-29 significant digits; a dividend with a
     // large scale plus `divPrecisionIncrement` can ask for more fractional
     // digits than fit alongside its integer part. Clamp to `decimal`'s max
@@ -2135,7 +2135,7 @@ let div (a: Value) (b: Value) : Value =
                     VNull
 
 /// Exact division retains whole nine-digit fractional groups before result formatting.
-let divWithIntermediatePrecision (a: Value) (b: Value) : Value =
+let divWithIntermediatePrecision increment (a: Value) (b: Value) : Value =
     match classify a, classify b with
     | Some ((KInt _ | KUInt _ | KDecimal _) as left), Some ((KInt _ | KUInt _ | KDecimal _) as right) ->
         let dividend, divisor = asDecimal left, asDecimal right
@@ -2150,7 +2150,7 @@ let divWithIntermediatePrecision (a: Value) (b: Value) : Value =
             let leftScale, rightScale = decimalScale dividend, decimalScale divisor
             let groupedLeft, groupedRight = groupedScale leftScale, groupedScale rightScale
             let padding = groupedLeft - leftScale + groupedRight - rightScale
-            let scale = min 28 (groupedScale (groupedLeft + groupedRight + max 0 (divPrecisionIncrement - padding)))
+            let scale = min 28 (groupedScale (groupedLeft + groupedRight + max 0 (increment - padding)))
             let power exponent = System.Numerics.BigInteger.Pow(10I, exponent)
             let numerator = coefficient dividend * power (rightScale + scale)
             let denominator = coefficient divisor * power leftScale

@@ -116,7 +116,8 @@ let tests =
                         ParamCount = 1
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VString "name" ] |> snd with
                   | ResultSet(_, [ [ Some "name"; Some "varchar(255)"; Some "NO"; Some ""; None; Some "" ] ]) -> ()
@@ -136,7 +137,7 @@ let tests =
                       match prepareStatement sql with
                       | Ok prepared -> prepared
                       | Error error -> failtestf "prepare failed: %A" error
-                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None; SchemaDependencies = Map.empty }
+                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None; SchemaDependencies = Map.empty; DivisionPrecisionIncrement = 4 }
                   for value in [ VInt -2L; VInt 7L; VNull ] do
                       match executePrepared session statement (List.replicate count value) |> snd with
                       | ResultSet(columns, _) -> Expect.equal columns names sql
@@ -299,6 +300,97 @@ let tests =
                   (session.LastResultColumnMetadata |> List.map _.TypeId)
                   [ TypeLongLong; TypeLongLong ]
                   "derived types survive the failed execution"
+
+          testCase "division precision follows session settings but prepared statements retain it until reprepare"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE division_source(n INT)"
+              let session, _ = handle session "INSERT INTO division_source VALUES (1)"
+              let session, _ = handle session "PREPARE division_setting FROM 'SELECT n/3 AS quotient FROM division_source'"
+              let session, assigned = handle session "SET div_precision_increment=1"
+              Expect.equal assigned (Affected 0UL) "the session precision is configurable"
+              let session, result = handle session "SELECT 1/3 AS quotient,(1/3)*3 AS product"
+              Expect.equal result (ResultSet([ "quotient"; "product" ], [ [ Some "0.3"; Some "1.0" ] ]))
+                  "ordinary expressions use the current increment"
+              let session, retained = handle session "EXECUTE division_setting"
+              Expect.equal retained (ResultSet([ "quotient" ], [ [ Some "0.3333" ] ])) "prepared expressions retain four"
+              let session, _ = handle session "ALTER TABLE division_source ADD COLUMN extra INT"
+              let session, refreshed = handle session "EXECUTE division_setting"
+              Expect.equal refreshed (ResultSet([ "quotient" ], [ [ Some "0.3" ] ])) "schema reprepare captures one"
+              let session, _ = handle session "SET div_precision_increment=0"
+              let _, average = handle session "SELECT AVG(n) AS average FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 2) t"
+              Expect.equal average (ResultSet([ "average" ], [ [ Some "1" ] ])) "zero increment truncates the integral quotient"
+
+          testCase "binary prepared division retains its increment without hiding the session variable"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET div_precision_increment=1"
+              let sql = "SELECT 1/3 AS quotient,@@div_precision_increment AS setting"
+              let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let statement = createPreparedStatement session sql ast count
+              let _, columns = preparedMetadata session statement.Ast count
+              Expect.equal columns.Head.Metadata.Decimals 1uy "prepare metadata uses the captured scale"
+              let session, _ = handle session "SET div_precision_increment=9"
+              let session, result = executePrepared session statement []
+              Expect.equal result (ResultSet([ "quotient"; "setting" ], [ [ Some "0.3"; Some "9" ] ]))
+                  "only expression precision is retained"
+              Expect.equal session.LastResultColumnMetadata.Head.Decimals 1uy "execute metadata retains the scale"
+              let _, ordinary = handle session "SELECT (1/3)*3 AS product"
+              Expect.equal ordinary (ResultSet([ "product" ], [ [ Some "0.999999999" ] ])) "the override is scoped to execution"
+
+          testCase "parameter repreparation refreshes the retained division increment"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ? AS parameter_value,1/3 AS quotient"
+              let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let statement = createPreparedStatement session sql ast count
+              let session = { session with Statements = Map.add 1 statement session.Statements }
+              let session, _ = executePreparedHandle session 1 [ VInt 1L ]
+              let session, _ = handle session "SET div_precision_increment=1"
+              let session, retained = executePreparedHandle session 1 [ VInt 2L ]
+              Expect.equal retained (ResultSet([ "parameter_value"; "quotient" ], [ [ Some "2"; Some "0.3333" ] ]))
+                  "a compatible parameter retains the increment"
+              let _, refreshed = executePreparedHandle session 1 [ VDecimal 1.25M ]
+              Expect.equal refreshed (ResultSet([ "parameter_value"; "quotient" ], [ [ Some "1.25"; Some "0.3" ] ]))
+                  "a changed parameter type captures the current increment"
+
+          testCase "window averages materialize their scale before outer arithmetic"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET div_precision_increment=1"
+              let session, ordinary = handle session "SELECT AVG(n)*3 AS product FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 2) t"
+              Expect.equal ordinary (ResultSet([ "product" ], [ [ Some "5.0" ] ])) "ordinary AVG retains guard digits"
+              let _, windowed = handle session "SELECT AVG(n) OVER () AS average,(AVG(n) OVER ())*3 AS product FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 2) t"
+              Expect.equal windowed (ResultSet([ "average"; "product" ], List.replicate 3 [ Some "1.7"; Some "5.1" ]))
+                  "window AVG materializes before its consumer"
+
+          testCase "division increment clamps with diagnostics and inherits global defaults"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              for value, expected in [ "-1", "0"; "31", "30" ] do
+                  let changed, result = handle session ("SET div_precision_increment=" + value)
+                  Expect.equal result (Affected 0UL) "out-of-range integer assignments clamp"
+                  Expect.equal (changed.Diagnostics |> List.map _.Code) [ 1292 ] "clamping records a warning"
+                  let _, actual = handle changed "SELECT @@div_precision_increment AS setting"
+                  Expect.equal actual (ResultSet([ "setting" ], [ [ Some expected ] ])) "the endpoint is stored"
+              for value in [ "1.5"; "'2'"; "NULL" ] do
+                  match handle session ("SET div_precision_increment=" + value) |> snd with
+                  | Err(1232, _) -> ()
+                  | other -> failtestf "expected integer-only assignment error for %s; got %A" value other
+              let session, _ = handle session "SET GLOBAL div_precision_increment=1"
+              let _, retained = handle session "SELECT 1/3 AS quotient"
+              Expect.equal retained (ResultSet([ "quotient" ], [ [ Some "0.3333" ] ])) "global assignment preserves existing sessions"
+              let inherited = create 2 store
+              let _, result = handle inherited "SELECT AVG(n) AS average,AVG(DISTINCT n) AS distinct_average FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 2) t"
+              Expect.equal result (ResultSet([ "average"; "distinct_average" ], [ [ Some "1.7"; Some "1.5" ] ]))
+                  "ordinary and DISTINCT averages inherit the increment"
+              let session, _ = handle session "SET div_precision_increment=DEFAULT"
+              let _, result = handle session "SELECT 1/3 AS quotient"
+              Expect.equal result (ResultSet([ "quotient" ], [ [ Some "0.3" ] ])) "session DEFAULT uses the global value"
+              let session, _ = handle session "SET GLOBAL div_precision_increment=DEFAULT"
+              let _, result = handle session "SELECT @@global.div_precision_increment AS setting"
+              Expect.equal result (ResultSet([ "setting" ], [ [ Some "4" ] ])) "global DEFAULT restores four"
 
           testCase "prepared decimal division retains declared scale and operand precision"
           <| fun _ ->
@@ -629,7 +721,8 @@ let tests =
                         ParamCount = 2
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   // The name carries a quote and a backslash — bound as a
                   // `Value` into the AST, never re-spliced SQL text, so there
@@ -661,7 +754,8 @@ let tests =
                         ParamCount = 5
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   let parameters =
                       [ VString "1.9"; VDouble 1.5; VDouble 1.5; VDouble 1.5; VString "255.5" ]
@@ -705,7 +799,8 @@ let tests =
                         ParamCount = 1
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VString "1.5" ] |> snd with
                   | ResultSet(_, []) -> ()
@@ -738,7 +833,8 @@ let tests =
                             ParamCount = 1
                             LastParamTypes = None
                             ParameterTypes = None
-                            SchemaDependencies = Map.empty }
+                            SchemaDependencies = Map.empty
+                            DivisionPrecisionIncrement = 4 }
                           [ value ]
                       |> snd
                   | other -> failtestf "expected one LIMIT parameter in %s, got %A" sql other
@@ -811,7 +907,8 @@ let tests =
                         ParamCount = 2
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   let session, result = executePrepared session statement [ VInt 2L; VInt 99L ]
                   Expect.equal result (Affected 1UL) "the selected row updates"
@@ -835,7 +932,8 @@ let tests =
                         ParamCount = 2
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VInt 3L; VInt 4L ] |> snd with
                   | ResultSet(_, [ [ Some "1" ] ]) -> ()
@@ -873,7 +971,8 @@ let tests =
                         ParamCount = 1
                         LastParamTypes = None
                         ParameterTypes = None
-                        SchemaDependencies = Map.empty }
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
 
                   let session, result = executePrepared session statement [ VInt 0L ]
 

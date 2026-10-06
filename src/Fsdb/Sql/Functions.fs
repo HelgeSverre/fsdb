@@ -5293,6 +5293,9 @@ let private sumAgg: Aggregate =
 /// `Value.add`: MySQL's AVG over exact inputs is a DECIMAL too, and summing
 /// `BIGINT UNSIGNED` rows through unsigned arithmetic would leave the
 /// unsigned domain (error 1690) on the way to a perfectly ordinary average.
+let internal averageWithPrecision increment: Aggregate =
+    fun values -> Value.divWithIntermediatePrecision increment (sumAgg values) (VInt(int64 values.Length))
+
 let private avgAgg: Aggregate = fun vs -> Value.div (sumAgg vs) (VInt(int64 (List.length vs)))
 let private minAgg: Aggregate = List.reduce (fun a b -> if Value.compare a b <= 0 then a else b)
 let private maxAgg: Aggregate = List.reduce (fun a b -> if Value.compare a b >= 0 then a else b)

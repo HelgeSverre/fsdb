@@ -322,9 +322,24 @@ fail with 1232/42000. The oracle checks these diagnostics separately from
 query evaluation. Its ordinary and binary prepared probes use distinct SQL
 texts because MySqlConnector caches preparation by SQL text on a connection.
 
-fsdb currently fixes the increment at four and does not expose the variable.
-Closing this gap requires a captured expression setting for prepared statements,
-refresh on repreparation, shared division/AVG semantics, and assignment
-validation with clamping warnings. The scale-30 cases also exceed the current
-System.Decimal representation; exposing a setting alone would not close the
-numeric precision gap.
+fsdb now exposes the GLOBAL and SESSION setting, including inherited defaults,
+integer-only assignments, and clamping diagnostics. Division and ordinary,
+DISTINCT, and windowed AVG use it. Prepared handles retain the increment
+independently of the live system-variable read; both schema and parameter-type
+repreparation refresh it. Binary preparation and execution report the retained
+scale.
+
+MySQL materializes a windowed AVG at its declared scale before surrounding
+arithmetic. At increment one, `AVG(n)*3` over 1, 2, 2 returns `5.0`, whereas
+`(AVG(n) OVER ())*3` returns `5.1` on each row. fsdb preserves guard digits for
+the ordinary aggregate and rounds the window result at materialization. Both
+forms have exact-text regressions and differential coverage.
+
+The scale-30 oracle cases still exceed the current System.Decimal
+representation. Configuring the increment does not close that numeric precision
+gap or the remaining exact expression precision descriptors.
+
+`artifacts/runs/20261006T143455022-11863/contracts/manifest.json` records
+matching division, ordinary/DISTINCT/window AVG, retained SQL and binary
+handles, schema and parameter-type refresh, and assignment diagnostics, with
+both targets restored after the run.

@@ -357,6 +357,7 @@ let private numericSystemVariables =
           "max_points_in_geometry"
           "max_prepared_stmt_count"
           "max_sp_recursion_depth"
+          "div_precision_increment"
           "net_read_timeout"
           "net_write_timeout"
           "password_history"
@@ -1154,7 +1155,7 @@ type private TransactionIsolationScope =
 type private SetAction =
     | SetNamesAction of charset: string * collation: string option
     | SetVarAction of name: string * value: string option * isGlobal: bool
-    | SetRoutineRecursionDepthAction of depth: int * isGlobal: bool * warning: string option
+    | SetBoundedIntegerAction of name: string * value: int * isGlobal: bool * warning: string option
     | SetTransactionIsolationAction of scope: TransactionIsolationScope * isolation: TransactionIsolation
     | SetUserVarAction of name: string * value: Value
 
@@ -1181,23 +1182,23 @@ let private captureRoutineVariableChanges body =
 let private connectionVariableNames =
     [ "character_set_client"; "character_set_connection"; "character_set_results"; "collation_connection" ]
 
-let private normalizeRoutineRecursionDepth =
+let private normalizeBoundedInteger name maximum =
     let bounded original value =
-        let depth = min value 255UL |> int
+        let boundedValue = min value (uint64 maximum) |> int
         let warning =
-            if uint64 depth = value then
+            if uint64 boundedValue = value then
                 None
             else
-                Some(sprintf "Truncated incorrect max_sp_recursion_depth value: '%s'" original)
+                Some(sprintf "Truncated incorrect %s value: '%s'" name original)
 
-        Ok(depth, warning)
+        Ok(boundedValue, warning)
 
     function
     | VInt value when value < 0L ->
-        Ok(0, Some(sprintf "Truncated incorrect max_sp_recursion_depth value: '%d'" value))
+        Ok(0, Some(sprintf "Truncated incorrect %s value: '%d'" name value))
     | VInt value -> bounded (string value) (uint64 value)
     | VUInt value -> bounded (string value) value
-    | _ -> Error(Err(1232, "Incorrect argument type to variable 'max_sp_recursion_depth'"))
+    | _ -> Error(Err(1232, sprintf "Incorrect argument type to variable '%s'" name))
 
 let private normalizeGeometryPointLimit =
     let bounded value =
@@ -1485,17 +1486,18 @@ let private systemSetAction
     | Error result -> Error result
     | Ok(value, sideEffects) when readOnlySystemVariables.Contains name ->
         Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
-    | Ok(_, sideEffects) when usesDefault && name = "max_sp_recursion_depth" ->
-        let depth =
+    | Ok(_, sideEffects) when usesDefault && (name = "max_sp_recursion_depth" || name = "div_precision_increment") ->
+        let defaultValue = if name = "div_precision_increment" then 4 else 0
+        let settingValue =
             if isGlobal then
-                0
+                defaultValue
             else
                 Session.tryGlobalVariable session.Store name
                 |> Option.flatten
                 |> Option.bind tryInt32
-                |> Option.defaultValue 0
+                |> Option.defaultValue defaultValue
 
-        Ok(SetRoutineRecursionDepthAction(depth, isGlobal, None), sideEffects)
+        Ok(SetBoundedIntegerAction(name, settingValue, isGlobal, None), sideEffects)
     | Ok(_, sideEffects) when usesDefault && name = "max_points_in_geometry" ->
         let limit =
             if isGlobal then
@@ -1544,10 +1546,10 @@ let private systemSetAction
                 |> Option.defaultValue Session.defaultVariables.[name]
 
         Ok(SetVarAction(name, value, isGlobal), sideEffects)
-    | Ok(value, sideEffects) when name = "max_sp_recursion_depth" ->
-        normalizeRoutineRecursionDepth value
-        |> Result.map (fun (depth, warning) ->
-            SetRoutineRecursionDepthAction(depth, isGlobal, warning), sideEffects)
+    | Ok(value, sideEffects) when name = "max_sp_recursion_depth" || name = "div_precision_increment" ->
+        normalizeBoundedInteger name (if name = "div_precision_increment" then 30 else 255) value
+        |> Result.map (fun (value, warning) ->
+            SetBoundedIntegerAction(name, value, isGlobal, warning), sideEffects)
     | Ok(value, sideEffects) when name = "max_points_in_geometry" ->
         normalizeGeometryPointLimit value
         |> Result.map (fun limit -> SetVarAction(name, Some(string limit), isGlobal), sideEffects)
@@ -1642,7 +1644,7 @@ let private parseSetFragment
                     let usesDefault = rhs.Trim().Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
 
                     let resolved =
-                        if name = "max_sp_recursion_depth" && not usesDefault then
+                        if (name = "max_sp_recursion_depth" || name = "div_precision_increment") && not usesDefault then
                             resolveUserSetRhs session userVariables sql rhs
                         elif name = "max_points_in_geometry" && not usesDefault then
                             match rhs.Trim().ToUpperInvariant() with
@@ -1690,16 +1692,16 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
         | _ -> Session.setGlobalVariable session.Store name value
 
         session
-    | SetRoutineRecursionDepthAction(depth, true, warning) ->
+    | SetBoundedIntegerAction(name, value, true, warning) ->
         warning |> Option.iter (Diagnostics.warning 1292)
-        Session.setGlobalVariable session.Store "max_sp_recursion_depth" (Some(string depth))
+        Session.setGlobalVariable session.Store name (Some(string value))
         session
-    | SetRoutineRecursionDepthAction(depth, false, warning) ->
+    | SetBoundedIntegerAction(name, value, false, warning) ->
         warning |> Option.iter (Diagnostics.warning 1292)
-        markRoutineVariables [ "max_sp_recursion_depth" ]
+        markRoutineVariables [ name ]
 
         { session with
-            Variables = Map.add "max_sp_recursion_depth" (Some(string depth)) session.Variables }
+            Variables = Map.add name (Some(string value)) session.Variables }
     | SetVarAction(name, value, false) ->
         markRoutineVariables [ name ]
 
@@ -1749,7 +1751,7 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
     | SetTransactionIsolationAction(_, (ReadUncommitted | ReadCommitted | RepeatableRead | Serializable)) -> Ok()
     | SetVarAction(_, _, true) when not (hasSessionGlobalPrivilege session "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
-    | SetRoutineRecursionDepthAction(_, true, _) when not (hasSessionGlobalPrivilege session "SUPER") ->
+    | SetBoundedIntegerAction(_, _, true, _) when not (hasSessionGlobalPrivilege session "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction("protocol_compression_algorithms", Some value, true)
         when Compression.ConnectionPolicy.tryParse value |> Option.isNone ->
@@ -1917,7 +1919,7 @@ let private tryParsePreparedVariableSet options sql =
                         elif rhs.Equals("NULL", StringComparison.OrdinalIgnoreCase) then Some "NULL"
                         elif name = "max_points_in_geometry" && rhs.Equals("TRUE", StringComparison.OrdinalIgnoreCase) then Some "1"
                         elif name = "max_points_in_geometry" && rhs.Equals("FALSE", StringComparison.OrdinalIgnoreCase) then Some "0"
-                        elif bareSetIdentifier.IsMatch rhs && name <> "max_sp_recursion_depth" then
+                        elif bareSetIdentifier.IsMatch rhs && name <> "max_sp_recursion_depth" && name <> "div_precision_increment" then
                             Some("'" + rhs + "'")
                         else Some rhs
                     variable (SystemVariableTarget(scope, name)) expression
@@ -4970,6 +4972,9 @@ let private preparedDependencies (session: Session) statement =
         key, definition)
     |> Map.ofList
 
+let private sessionDivisionPrecision (session: Session) =
+    sessionValue session "div_precision_increment" |> Option.bind tryInt32 |> Option.defaultValue 4
+
 let private bindPreparedPlaceholders source (session: Session) (prepared: PreparedStmt) statement (values: Value list) =
     if values.Length <> prepared.ParamCount then
         Error(1210, "Incorrect arguments to EXECUTE")
@@ -4982,11 +4987,15 @@ let private bindPreparedPlaceholders source (session: Session) (prepared: Prepar
         let schemaChanged = dependencies <> prepared.SchemaDependencies
         let refreshVariables = PreparedVariables.capture session.UserVariables
         PreparedMetadata.bindParameters source store registry schema schemaChanged refreshVariables statement prepared.ParameterTypes values
-        |> Result.map (fun (types, statement, expressions) ->
-            { prepared with
-                Ast = Some statement
-                ParameterTypes = Some types
-                SchemaDependencies = dependencies }, bindParameterExpressions statement expressions)
+        |> Result.map (fun bound ->
+            let updated =
+                { prepared with
+                    Ast = Some bound.Statement
+                    ParameterTypes = Some bound.Types
+                    SchemaDependencies = dependencies
+                    DivisionPrecisionIncrement =
+                        if bound.Reprepared then sessionDivisionPrecision session else prepared.DivisionPrecisionIncrement }
+            updated, bindParameterExpressions bound.Statement bound.Expressions)
 
 /// Renumbers surviving `Placeholder` nodes densely in traversal (= source)
 /// order, returning the statement and the true parameter count. FParsec's
@@ -5072,9 +5081,10 @@ let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
       ParamCount = count
       LastParamTypes = None
       ParameterTypes = types
-      SchemaDependencies = ast |> Option.map (preparedDependencies session) |> Option.defaultValue Map.empty }
+      SchemaDependencies = ast |> Option.map (preparedDependencies session) |> Option.defaultValue Map.empty
+      DivisionPrecisionIncrement = sessionDivisionPrecision session }
 
-let preparedMetadata
+let private preparedMetadataCore
     (session: Session)
     (statement: Statement option)
     (parameterCount: int)
@@ -5118,6 +5128,10 @@ let preparedMetadata
                     origins
 
             parameters, resultColumns
+
+let preparedMetadata session statement parameterCount =
+    Executor.withDivisionPrecisionIncrement (sessionDivisionPrecision session) (fun () ->
+        preparedMetadataCore session statement parameterCount)
 
 type private TextPreparedSource =
     | PreparedLiteral of string
@@ -6643,7 +6657,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             match bindPreparedPlaceholders PreparedMetadata.UserVariables current statement ast values with
                             | Ok(updated, bound) ->
                                 let current = { current with TextStatements = Map.add name updated current.TextStatements }
-                                executeParsed current bound
+                                Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
+                                    executeParsed current bound)
                             | Error(code, message) -> current, Err(code, message)))
                 | None ->
                     dispatch
@@ -7793,8 +7808,9 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                                 | Error(code, message) -> session, Err(code, message)
                                 | Ok() ->
                                     let executed, result =
-                                        withTriggerTextExecution session (fun () ->
-                                            withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
+                                        Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
+                                            withTriggerTextExecution session (fun () ->
+                                                withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement)))
 
                                     (if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                          { executed with PasswordExpired = false }
