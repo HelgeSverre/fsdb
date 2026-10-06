@@ -269,14 +269,29 @@ holding 1.25, MySQL returns:
 @v / 3 = 0.416666666000000000000000000000
 ```
 
-fsdb at `4f45e955` returns `2.25` and `0.416667`. Padding fsdb's quotient would
-preserve the wrong value. `Value.div` currently chooses scale from the stored
-System.Decimal plus four and rounds there, independently of expression metadata.
-`Executor.outputColumnFormats` has a special scale rule for ABS of a retained
-decimal variable; other expressions need shared declared-scale rules, with
-separate value-preserving behavior for direct reads and CASE.
+fsdb at `4f45e955` returned `2.25` and `0.416667`. Padding that quotient
+would preserve the wrong value. Scalar division now retains intermediate
+fractional precision in nine-digit groups, using the operand scales and MySQL's
+default precision increment. This follows the grouping in MySQL 8.4.11's
+[`do_div_mod`](https://raw.githubusercontent.com/mysql/mysql-server/mysql-8.4.11/mysys/decimal.cc).
 
-The corpus retains the division-by-three case alongside terminating division,
-so a display-only fix cannot satisfy it. Arithmetic precision and rounding remain
-open; these oracle assertions record the required behavior rather than claiming
-fsdb parity.
+Shared expression formatting applies declared scales to arithmetic, ABS, MOD,
+ROUND, TRUNCATE, COALESCE, and IFNULL. Direct variable reads and CASE retain the
+selected value's scale. Text conversion uses the same formatting, while numeric
+nesting keeps guard digits: `CONCAT(1/3)` returns `0.3333`, `(1/3)*3` returns
+`1.0000`, and `CAST(10.00/3 AS CHAR)` returns `3.333333`.
+
+Exact-text Expecto regressions cover division, result descriptors, integer and
+NULL reassignment, and nested conversions. The differential manifest at
+`artifacts/runs/20261006T141436113-7989/contracts/manifest.json` records parity
+for the expanded decimal history, including negative values and a nine-digit
+fraction. Differential numeric normalization does not prove trailing-zero
+formatting; the exact-text regressions cover that separately.
+
+The decimal gap remains open for exact expression precision metadata, including
+addition's precision 66 and ROUND/TRUNCATE's differing precision descriptors,
+and for scale propagation through other expression families. Runtime values
+still use System.Decimal: intermediate division is capped at scale 28 and its
+96-bit coefficient cannot retain all MySQL DECIMAL values or guard digits.
+The full oracle corpus therefore remains a specification, not a claim of
+complete fsdb decimal parity.

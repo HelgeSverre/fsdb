@@ -300,6 +300,49 @@ let tests =
                   [ TypeLongLong; TypeLongLong ]
                   "derived types survive the failed execution"
 
+          testCase "prepared decimal division retains declared scale and operand precision"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=1.25"
+              let session, _ = handle session "PREPARE division_types FROM 'SELECT @v/3 AS integral_divisor,@v/3.00 AS decimal_divisor'"
+              let session, result = handle session "EXECUTE division_types"
+              Expect.equal result
+                  (ResultSet([ "integral_divisor"; "decimal_divisor" ],
+                      [ [ Some "0.416666666000000000000000000000"; Some "0.416666666666666666000000000000" ] ]))
+                  "division retains MySQL's operand-dependent intermediate precision"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.Decimals) [ 30uy; 30uy ]
+                  "the result uses the captured decimal scale"
+
+          testCase "decimal guard digits survive arithmetic but follow declared scale in text"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let _, result = handle session "SELECT CONCAT(1/3) AS text_value, (1/3)*3 AS numeric_value, CAST(10.00/3 AS CHAR) AS cast_value"
+              Expect.equal result
+                  (ResultSet([ "text_value"; "numeric_value"; "cast_value" ],
+                      [ [ Some "0.3333"; Some "1.0000"; Some "3.333333" ] ]))
+                  "text conversion and further arithmetic use different decimal precision"
+
+          testCase "prepared decimal expressions distinguish fixed scale from value-preserving results"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=1.25"
+              let session, _ = handle session "PREPARE decimal_types FROM 'SELECT @v AS direct,@v+1 AS added,@v*2 AS multiplied,ROUND(@v,2) AS rounded,COALESCE(@v,0) AS coalesced,CASE WHEN 1 THEN @v ELSE 0 END AS conditional'"
+              let session, _ = handle session "SET @v=2"
+              let session, result = handle session "EXECUTE decimal_types"
+              Expect.equal result
+                  (ResultSet([ "direct"; "added"; "multiplied"; "rounded"; "coalesced"; "conditional" ],
+                      [ [ Some "2"; Some "3.000000000000000000000000000000"; Some "4.000000000000000000000000000000"
+                          Some "2.00"; Some "2.000000000000000000000000000000"; Some "2" ] ]))
+                  "direct and CASE reads preserve value scale while arithmetic uses declared scale"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.Decimals) [ 30uy; 30uy; 30uy; 2uy; 30uy; 30uy ]
+                  "the descriptor scales follow each expression"
+              let session, _ = handle session "SET @v=NULL"
+              let _, result = handle session "EXECUTE decimal_types"
+              Expect.equal result
+                  (ResultSet([ "direct"; "added"; "multiplied"; "rounded"; "coalesced"; "conditional" ],
+                      [ [ None; None; None; None; Some "0.000000000000000000000000000000"; None ] ]))
+                  "an integer fallback retains the decimal result scale"
+
           testCase "prepared variable types refresh for referenced DDL but not row writes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

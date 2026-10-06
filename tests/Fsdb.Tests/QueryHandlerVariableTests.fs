@@ -206,7 +206,7 @@ let tests =
               Expect.equal session.UserVariables.["payload"] (VJson "{\"id\": 7}") "expression assignment preserves JSON"
 
               match handle session "SELECT @literal + 1, @decimal + 1" with
-              | resultSession, ResultSet(_, [ [ Some "8"; Some "2.5" ] ]) ->
+              | resultSession, ResultSet(_, [ [ Some "8"; Some "2.500000000000000000000000000000" ] ]) ->
                   Expect.equal (resultSession.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLongLong; TypeNewDecimal ] "expression metadata follows the retained values"
               | _, other -> failtestf "expected typed user-variable arithmetic, got %A" other
 

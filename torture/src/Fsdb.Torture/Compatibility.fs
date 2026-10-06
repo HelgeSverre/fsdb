@@ -2086,6 +2086,23 @@ module ContractCatalog =
           Cleanup = [| "SET SESSION max_sp_recursion_depth=DEFAULT"; "SET character_set_results=DEFAULT" |]
           Coverage = [| "statement:set", [| "text-differential" |] |] }
 
+    let private preparedDecimalDivision =
+        { Name = "prepared-decimal-division"
+          Setup = [||]
+          Steps =
+            [| Contract.execute "initial" "SET @division_value=1.25"
+               Contract.execute "prepare" "PREPARE division_types FROM 'SELECT @division_value/3 AS integral_divisor,@division_value/3.00 AS decimal_divisor,@division_value/0.03 AS fractional_divisor,@division_value AS direct,@division_value+1 AS added,@division_value-1 AS subtracted,@division_value*2 AS multiplied,@division_value%1 AS modulo,ABS(@division_value) AS absolute_value,-@division_value AS negated,ROUND(@division_value,2) AS rounded,TRUNCATE(@division_value,2) AS truncated,COALESCE(@division_value,0) AS coalesced,CASE WHEN 1 THEN @division_value ELSE 0 END AS conditional'"
+               for name, value in
+                   [ "initial", "1.25"; "integer", "2"; "negative", "-1.25"
+                     "nine-digits", "1.234567891"; "null", "NULL" ] do
+                   Contract.execute (name + "-set") ("SET @division_value=" + value)
+                   Contract.query (name + "-execute") "EXECUTE division_types"
+               Contract.execute "close" "DEALLOCATE PREPARE division_types"
+               Contract.query "literal-scales" "SELECT 1/3 AS integer_division,10.00/3 AS decimal_division"
+               Contract.query "nested-scales" "SELECT CONCAT(1/3) AS text_value,(1/3)*3 AS numeric_value,CAST(10.00/3 AS CHAR) AS cast_value" |]
+          Cleanup = [||]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private preparedSchemaChanges =
         { Name = "prepared-schema-type-refresh"
           Setup = [| "CREATE TABLE schema_source(id INT)"; "INSERT INTO schema_source VALUES(1)"; "CREATE TABLE schema_other(id INT)" |]
@@ -2173,6 +2190,7 @@ module ContractCatalog =
            preparedUserVariables
            preparedUserAssignments
            preparedMixedAssignments
+           preparedDecimalDivision
            preparedSchemaChanges
            temporaryViewShadowing
            columnTypes

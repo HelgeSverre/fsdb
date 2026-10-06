@@ -2339,7 +2339,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         Some { Value.columnMetadata typeId with ColumnLength = columnLength }
     let typeIdOf expression = metadataOfExpr ctx expression |> Option.map _.TypeId
 
-    let numeric left right =
+    let numeric scaleOf left right =
         let isInteger typeId =
             typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
 
@@ -2358,6 +2358,14 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             | Some leftType, None when isInteger leftType.TypeId -> simple TypeDouble
             | None, Some rightType when isInteger rightType.TypeId -> simple TypeDouble
             | _ -> None
+
+        let inferred =
+            inferred
+            |> Option.map (fun metadata ->
+                if metadata.TypeId = TypeNewDecimal then
+                    let scale metadata = metadata |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
+                    { metadata with Decimals = byte (min 30 (scaleOf (scale leftMetadata) (scale rightMetadata))) }
+                else metadata)
 
         match inferred, leftMetadata, rightMetadata with
         | Some result, Some leftType, Some rightType
@@ -2594,7 +2602,9 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VBit(width, _)) ->
         Some { Value.columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag ||| NotNullFlag }
     | Lit(VDouble _) -> simple TypeDouble |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | Lit(VDecimal _) -> simple TypeNewDecimal |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VDecimal value) ->
+        simple TypeNewDecimal
+        |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag; Decimals = byte (Value.decimalScale value) })
     | Lit(VString text) ->
         Some
             { Value.columnMetadata TypeVarString with
@@ -2616,7 +2626,10 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         |> Option.orElseWith (fun () ->
             currentVariableContext ()
             |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
-            |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
+            |> Option.bind (fun value ->
+                match value with
+                | VDecimal _ -> Some(PreparedVariables.metadata UserVariableType.Decimal)
+                | _ -> metadataOfExpr ctx (Lit value))
             |> Option.orElse (simple TypeVarString))
     | SystemVariable(scope, variable) ->
         currentVariableContext ()
@@ -2647,13 +2660,16 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | QuantifiedComparison _
     | Between _
     | Exists _ -> simple TypeLongLong
-    | BinOp((Add | Sub | SignedSub | Mul), left, right) -> numeric left right
+    | BinOp((Add | Sub | SignedSub), left, right) -> numeric max left right
+    | BinOp(Mul, left, right) -> numeric (+) left right
     | BinOp(Div, left, right) ->
         match typeIdOf left, typeIdOf right with
         | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
         | _, Some rightType when rightType = TypeDouble || rightType = TypeFloat -> simple TypeDouble
         | Some _, _
-        | _, Some _ -> simple TypeNewDecimal
+        | _, Some _ ->
+            let scale = metadataOfExpr ctx left |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
+            simple TypeNewDecimal |> Option.map (fun metadata -> { metadata with Decimals = byte (min 30 (scale + 4)) })
         | _ -> None
     | BinOp(IntDiv, _, _) -> simple TypeLongLong
     | Cast(value, ty) ->
@@ -2699,7 +2715,10 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 || hasMetadataFlag (EnumFlag ||| SetFlag) metadata
                 ->
                 simple TypeDouble
-            | _ -> simple TypeNewDecimal
+            | metadata ->
+                let scale = metadata |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
+                let scale = if name.Equals("AVG", System.StringComparison.OrdinalIgnoreCase) then min 30 (scale + 4) else scale
+                simple TypeNewDecimal |> Option.map (fun item -> { item with Decimals = byte scale })
         | ("STD" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"), _ -> simple TypeDouble
         | "GROUP_CONCAT", _ -> Some(ColumnWire.metadataOfType TText)
         | ("JSON_ARRAYAGG" | "JSON_OBJECTAGG"), _ -> json
@@ -2719,9 +2738,20 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "NULLIF", first :: fallback :: _ ->
             metadataOfExpr ctx first |> Option.orElseWith (fun () -> metadataOfExpr ctx fallback)
         | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]
-        | ("ROUND" | "TRUNCATE" | "FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ ->
+        | ("ROUND" | "TRUNCATE"), arg :: precision ->
             numericUnary arg
-        | "MOD", [ left; right ] -> numeric left right
+            |> Option.map (fun metadata ->
+                if metadata.TypeId <> TypeNewDecimal then metadata
+                else
+                    let scale =
+                        match precision with
+                        | [] -> 0
+                        | [ Lit(VInt digits) ] -> int (max 0L (min (int64 metadata.Decimals) digits))
+                        | _ -> int metadata.Decimals
+                    { metadata with Decimals = byte scale })
+        | ("FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ ->
+            numericUnary arg
+        | "MOD", [ left; right ] -> numeric max left right
         | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
         | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
@@ -2868,20 +2898,31 @@ let private displayColumnForExpr ctx =
         tryColumnDefForExpr ctx argument
     | expression -> tryColumnDefForExpr ctx expression
 
+let private outputFormatOfExpr ctx expr =
+    let decimalScale =
+        match expr with
+        | BinOp((Add | Sub | SignedSub | Mul | Div), _, _)
+        | NamedFunction "MOD" _
+        | NamedFunction "ABS" _
+        | NamedFunction "ROUND" _
+        | NamedFunction "TRUNCATE" _
+        | NamedFunction "COALESCE" _
+        | NamedFunction "IFNULL" _ ->
+            metadataOfExpr ctx expr
+            |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
+            |> Option.map (fun metadata -> int metadata.Decimals)
+        | _ -> None
+    { Fsp = fspOfExpr ctx expr
+      DecimalScale = decimalScale
+      Column = displayColumnForExpr ctx expr }
+
 let private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : OutputColumnFormat list =
     projections
     |> List.collect (fun proj ->
         match proj with
         | Star None, _ -> columns |> List.map outputFormatOfColumn
         | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map outputFormatOfColumn
-        | expr, _ ->
-            let decimalScale =
-                match expr with
-                | NamedFunction "ABS" [ UserVariable { PreparedType = Some UserVariableType.Decimal } ] -> Some 30
-                | _ -> None
-            [ { Fsp = fspOfExpr ctx expr
-                DecimalScale = decimalScale
-                Column = displayColumnForExpr ctx expr } ])
+        | expr, _ -> [ outputFormatOfExpr ctx expr ])
 
 /// The declared fsp list must mirror projection expansion because `VDateTime`
 /// alone does not retain its declared display precision.
@@ -3240,6 +3281,10 @@ let private renderOutputValue format value =
             match format.Column |> Option.map _.Type with
             | Some(TDecimal(_, scale, _)) -> Some(number.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
             | _ -> Value.toText value
+        | _, VInt number when format.DecimalScale.IsSome ->
+            format.DecimalScale |> Option.map (fun scale -> (decimal number).ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
+        | _, VUInt number when format.DecimalScale.IsSome ->
+            format.DecimalScale |> Option.map (fun scale -> (decimal number).ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
         | _, VDecimal number ->
             match format.DecimalScale with
             | Some scale -> Some(number.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
@@ -3274,7 +3319,11 @@ let private displayValueForText (ctx: EvalContext) expression value =
         renderOutputValue (outputFormatOfColumn column) value
         |> Option.map VString
         |> Option.defaultValue VNull
-    | _ -> value
+    | _ ->
+        let format = outputFormatOfExpr ctx expression
+        if format.DecimalScale.IsSome then
+            renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
+        else value
 
 let private collationOfColumn (ctx: EvalContext) (column: ColumnDef) : Collation.Collation option =
     match column.Type with
@@ -4746,7 +4795,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Sub -> Ok(arith Value.sub)
                     | SignedSub -> Ok(arith Value.subSigned)
                     | Mul -> Ok(arith Value.mul)
-                    | Div -> divide Value.div
+                    | Div -> divide Value.divWithIntermediatePrecision
                     | IntDiv -> divide Value.intDiv
                     | Eq -> compareWith Eq
                     | Neq -> compareWith Neq
@@ -5215,7 +5264,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // only steers which collation comparisons resolve under.
     | Collate(e, _) -> eval e
     | Cast(e, ((TChar _ | TVarchar _ | TBinary _ | TVarBinary _) as ty))
-        when tryColumnDefForExpr ctx e |> Option.bind _.NumericDisplay |> Option.exists _.ZeroFill ->
+        when (tryColumnDefForExpr ctx e |> Option.bind _.NumericDisplay |> Option.exists _.ZeroFill)
+             || (outputFormatOfExpr ctx e).DecimalScale.IsSome ->
         eval e
         |> Result.bind (fun value -> eval (Cast(Lit(displayValueForText ctx e value), ty)))
     // MySQL doesn't support CAST-ing to VECTOR (STRING_TO_VECTOR is the

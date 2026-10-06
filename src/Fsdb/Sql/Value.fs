@@ -2087,13 +2087,9 @@ let subSigned (a: Value) (b: Value) : Value =
 /// `10.00m` reports 2, `5m` reports 0 — read straight out of its bit
 /// representation the way `System.Decimal` stores it (bits 16-23 of the
 /// fourth `int32`), since the BCL exposes no `.Scale` property.
-let private scaleOf (d: decimal) : int = (Decimal.GetBits d).[3] >>> 16 &&& 0xFF
+let decimalScale (d: decimal) : int = (Decimal.GetBits d).[3] >>> 16 &&& 0xFF
 
-/// `/`'s `div_precision_increment`, MySQL's fixed default (`SELECT
-/// @@div_precision_increment` is 4 on a stock install, and MySQL doesn't
-/// let a plain expression see a session override reflected in its own
-/// scale math the way this constant does) — the extra fractional digits
-/// `/` adds on top of the dividend's own scale.
+/// Exact division uses MySQL's default four additional fractional digits.
 let private divPrecisionIncrement = 4
 
 /// Rounds to `scale` fractional digits *and* pads short results back out to
@@ -2133,10 +2129,38 @@ let div (a: Value) (b: Value) : Value =
                 VNull
             else
                 try
-                    let dividendScale = match ka with KDecimal d -> scaleOf d | _ -> 0
+                    let dividendScale = match ka with KDecimal d -> decimalScale d | _ -> 0
                     VDecimal(withScale (dividendScale + divPrecisionIncrement) (asDecimal ka / y))
                 with :? OverflowException ->
                     VNull
+
+/// Exact division retains whole nine-digit fractional groups before result formatting.
+let divWithIntermediatePrecision (a: Value) (b: Value) : Value =
+    match classify a, classify b with
+    | Some ((KInt _ | KUInt _ | KDecimal _) as left), Some ((KInt _ | KUInt _ | KDecimal _) as right) ->
+        let dividend, divisor = asDecimal left, asDecimal right
+        if divisor = 0M then VNull
+        elif dividend = 0M then VDecimal 0M
+        else
+            let coefficient (value: decimal) =
+                let bits = Decimal.GetBits value
+                let magnitude = bigint (uint32 bits[0]) + (bigint (uint32 bits[1]) <<< 32) + (bigint (uint32 bits[2]) <<< 64)
+                if bits[3] < 0 then -magnitude else magnitude
+            let groupedScale scale = ((scale + 8) / 9) * 9
+            let leftScale, rightScale = decimalScale dividend, decimalScale divisor
+            let groupedLeft, groupedRight = groupedScale leftScale, groupedScale rightScale
+            let padding = groupedLeft - leftScale + groupedRight - rightScale
+            let scale = min 28 (groupedScale (groupedLeft + groupedRight + max 0 (divPrecisionIncrement - padding)))
+            let power exponent = System.Numerics.BigInteger.Pow(10I, exponent)
+            let numerator = coefficient dividend * power (rightScale + scale)
+            let denominator = coefficient divisor * power leftScale
+            let quotient = numerator / denominator
+            let text = quotient.ToString(CultureInfo.InvariantCulture) + "e-" + string scale
+            match Decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, 0M -> VDecimal 0M
+            | true, value -> VDecimal value
+            | _ -> VNull
+    | _ -> div a b
 
 /// `MOD`/`%`: ordinary MySQL numeric promotion, same as `+`/`-`/`*` (int
 /// op int stays int; a `DECIMAL` operand with no `DOUBLE` promotes to
