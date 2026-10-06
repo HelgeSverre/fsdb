@@ -93,7 +93,7 @@ The manual's string exception alone is insufficient to implement these cases.
 
 ## Direct user-variable references
 
-This remaining case has no explicit parameter marker:
+This case has no explicit parameter marker:
 
 ```sql
 SET @v=-2;
@@ -110,12 +110,33 @@ EXECUTE p;
 ```
 
 MySQL 8.4.11 returns BIGINT/BIGINT throughout, with rows (-2, 2), (1, 1),
-(1, 1), (0, 0), and (NULL, NULL). fsdb follows each current variable value:
-TINYINT/TINYINT, DECIMAL/DECIMAL, DOUBLE/DOUBLE, VARCHAR/DOUBLE, and
-VARCHAR/DOUBLE. The decimal and double rows retain 1.25 and 1.5, respectively;
-the string row retains 'hello' in its first column.
+(1, 1), (0, 0), and (NULL, NULL). fsdb now retains these types on the
+parsed variable references while reading their current values. Decimal-to-integer
+reads round away from zero at midpoints; double and string reads truncate.
+Assignments earlier in the same statement remain visible without changing the
+stored variable's actual type.
 
-Direct variable references require a separate prepare-time variable-type
-snapshot and conversion policy. They must remain distinguishable from the
-explicit markers in `EXECUTE ... USING`, whose value changes follow the
-repreparation rules above.
+The differential contract covers signed integer, unsigned integer, decimal,
+double, text, and initially NULL/binary types. Decimal direct reads preserve
+their value scale; ABS reports the declared decimal scale. An explicit parameter
+that triggers statement reprepare also refreshes the direct references' types.
+Compatible parameter changes and NULL values retain the captured types.
+
+These histories use SQL PREPARE/EXECUTE because MySqlConnector 2.6.2 rejects
+direct user variables during binary prepared execution with "Parameter '@v'
+must be defined", even with AllowUserVariables enabled. A raw-wire integration
+regression separately checks COM_STMT_PREPARE metadata and COM_STMT_EXECUTE
+integer conversion after a decimal assignment.
+
+Remaining boundaries:
+
+- Text-probed prepared statements have no retained expression AST. MySQL retains
+  BIGINT for `SET @x=@v` prepared while @v is -2: assigning 1.75 to @v and
+  executing stores BIGINT 2 in @x. fsdb still stores the current DECIMAL value.
+- Schema changes that leave explicit parameter contexts unchanged do not trigger
+  a fresh variable-type capture.
+- Decimal result-scale propagation beyond the covered ABS expression still
+  needs a broader expression-family oracle corpus.
+- MySQL's direct decimal variable read after assigning 'abc' produces decimal
+  wire text that MySqlConnector cannot parse; fsdb returns error 1292. This
+  malformed-result edge is not included in the successful-history contract.

@@ -4768,9 +4768,10 @@ let private bindPreparedPlaceholders source (session: Session) (prepared: Prepar
         let registry = registryFor session
         let schema = session.Database |> Option.defaultValue defaultDatabase
 
-        PreparedMetadata.bindParameters source store registry schema statement prepared.ParameterTypes values
-        |> Result.map (fun (types, expressions) ->
-            { prepared with ParameterTypes = Some types }, bindParameterExpressions statement expressions)
+        let refreshVariables = PreparedVariables.capture session.UserVariables
+        PreparedMetadata.bindParameters source store registry schema refreshVariables statement prepared.ParameterTypes values
+        |> Result.map (fun (types, statement, expressions) ->
+            { prepared with Ast = Some statement; ParameterTypes = Some types }, bindParameterExpressions statement expressions)
 
 /// Renumbers surviving `Placeholder` nodes densely in traversal (= source)
 /// order, returning the statement and the true parameter count. FParsec's
@@ -4832,6 +4833,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
     prepareStatementWithOptions (parserOptionsForSession session) sql
 
 let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
+    let ast = ast |> Option.map (PreparedVariables.capture session.UserVariables)
     let types =
         ast |> Option.map (fun statement ->
             PreparedMetadata.initialTypes

@@ -2179,9 +2179,8 @@ let private handleConnection
                                     return! loop session
                                 | Result.Ok(ast, paramCount) ->
                                     let stmtId = session.NextStmtId
-                                    let parameterMetadata, resultColumns = QueryHandler.preparedMetadata session ast paramCount
-
                                     let stmt = QueryHandler.createPreparedStatement session sql ast paramCount
+                                    let parameterMetadata, resultColumns = QueryHandler.preparedMetadata session stmt.Ast paramCount
 
                                     let session =
                                         { session with

@@ -1973,6 +1973,54 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE typed_history"; "DEALLOCATE PREPARE null_history" |]
           Coverage = [| "statement:select", [| "prepared-protocol"; "text-differential" |] |] }
 
+    let private preparedUserVariables =
+        let histories =
+            [| "integer", "-2"
+               "unsigned", "CAST(18446744073709551615 AS UNSIGNED)"
+               "decimal", "1.25"
+               "double", "1.5e0"
+               "text", "'abc'"
+               "binary", "NULL" |]
+        let changes =
+            [| "integer", "-2"
+               "decimal", "1.75"
+               "double", "2.75e0"
+               "string", "'1.75'"
+               "null", "NULL" |]
+        let mixed =
+            [| "initial", "-2", "NULL"
+               "retained-integer", "1.25", "NULL"
+               "reprepare-decimal", "1.25", "1"
+               "retained-decimal", "1.5e0", "2"
+               "reprepare-double", "1.5e0", "2.5"
+               "retained-double", "'abc'", "NULL" |]
+        { Name = "prepared-user-variable-types"
+          Setup = [||]
+          Steps =
+            [| for family, initial in histories do
+                   let variable = "@direct_" + family
+                   Contract.execute (family + "-initial") ("SET " + variable + "=" + initial)
+                   Contract.execute (family + "-prepare")
+                       ("PREPARE direct_" + family + " FROM 'SELECT " + variable + " AS value,ABS(" + variable + ") AS magnitude'")
+                   for name, value in changes do
+                       Contract.execute (family + "-set-" + name) ("SET " + variable + "=" + value)
+                       Contract.query (family + "-read-" + name) ("EXECUTE direct_" + family)
+                   Contract.execute (family + "-close") ("DEALLOCATE PREPARE direct_" + family)
+               Contract.execute "mixed-initial" "SET @direct_mixed=-2"
+               Contract.execute "mixed-prepare"
+                   "PREPARE direct_mixed FROM 'SELECT ? AS parameter,@direct_mixed AS value,ABS(@direct_mixed) AS magnitude'"
+               for name, value, parameter in mixed do
+                   Contract.execute ("mixed-set-" + name) ("SET @direct_mixed=" + value + ",@direct_parameter=" + parameter)
+                   Contract.query ("mixed-read-" + name) "EXECUTE direct_mixed USING @direct_parameter"
+               Contract.execute "mixed-close" "DEALLOCATE PREPARE direct_mixed"
+               Contract.execute "assignment-initial" "SET @direct_assignment=-2"
+               Contract.execute "assignment-prepare"
+                   "PREPARE assigned_variable FROM 'SELECT @direct_assignment:=1.75 AS assigned,@direct_assignment AS value'"
+               Contract.query "assignment-read" "EXECUTE assigned_variable"
+               Contract.query "assignment-stored-value" "SELECT @direct_assignment AS value" |]
+          Cleanup = [| "DEALLOCATE PREPARE assigned_variable" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let all =
         [| comments
            exactErrors
@@ -1982,6 +2030,7 @@ module ContractCatalog =
            preparedDml
            preparedProjectionNames
            preparedTypeHistory
+           preparedUserVariables
            columnTypes
            generatedFunctionFamilies
            functionFamilies

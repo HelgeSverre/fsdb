@@ -200,6 +200,7 @@ let private inferParameters
             function
             | Placeholder _ -> None
             | Lit value -> Some(metadataOfValue value)
+            | UserVariable variable -> variable.PreparedType |> Option.map PreparedVariables.metadata
             | (Col _ | QualifiedCol _) as expression ->
                 tryColumn scope expression
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
@@ -618,7 +619,7 @@ let private parameterType metadata =
         | _ -> TVarchar 16383)
 
 /// Converts supplied values before deciding whether the entire statement must be reprepared.
-let internal bindParameters source store registry schema statement retained (values: Value list) =
+let internal bindParameters source store registry schema refreshVariables statement retained (values: Value list) =
     let analysis = inferParameters store registry schema statement values.Length
     let original = analysis.Definitions |> List.map (Option.defaultValue generic)
     let retained = retained |> Option.defaultValue { Context = original; Derived = original }
@@ -665,6 +666,14 @@ let internal bindParameters source store registry schema statement retained (val
         retained.Context <> original
         || (List.zip3 analysis.Bindings expected actual
             |> List.exists (fun (binding, expected, value) -> not (inherited binding) && not (accepts expected value)))
+
+    let statement, analysis =
+        if reprepare then
+            let statement = refreshVariables statement
+            statement, inferParameters store registry schema statement values.Length
+        else
+            statement, analysis
+    let original = analysis.Definitions |> List.map (Option.defaultValue generic)
 
     let types =
         if reprepare then
@@ -730,4 +739,4 @@ let internal bindParameters source store registry schema statement retained (val
         | _ -> Error(1210, "Incorrect arguments to EXECUTE")
 
     bindAll 0 analysis.Bindings analysis.Definitions types actual []
-    |> Result.map (fun expressions -> { Context = original; Derived = types }, expressions)
+    |> Result.map (fun expressions -> { Context = original; Derived = types }, statement, expressions)

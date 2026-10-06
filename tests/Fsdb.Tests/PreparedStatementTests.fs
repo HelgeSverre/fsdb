@@ -299,6 +299,81 @@ let tests =
                   [ TypeLongLong; TypeLongLong ]
                   "derived types survive the failed execution"
 
+          testCase "direct prepared user variables retain their type while reading current values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=-2"
+              let session, _ = handle session "PREPARE direct_variables FROM 'SELECT @v,ABS(@v)'"
+              let steps =
+                  [ "-2", Some "-2", Some "2"
+                    "1.75", Some "2", Some "2"
+                    "2.75e0", Some "2", Some "2"
+                    "'1.75'", Some "1", Some "1"
+                    "'abc'", Some "0", Some "0"
+                    "NULL", None, None ]
+              (session, steps)
+              ||> List.fold (fun session (value, first, second) ->
+                  let session, _ = handle session ("SET @v=" + value)
+                  let session, result = handle session "EXECUTE direct_variables"
+                  Expect.equal result (ResultSet([ "@v"; "ABS(@v)" ], [ [ first; second ] ])) value
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLongLong; TypeLongLong ] "prepare-time types"
+                  session)
+              |> ignore
+
+          testCase "prepared decimal variables preserve value scale and declared ABS scale"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=1.25"
+              let session, _ = handle session "PREPARE decimal_variable FROM 'SELECT @v,ABS(@v)'"
+              let session, _ = handle session "SET @v=-2"
+              let _, result = handle session "EXECUTE decimal_variable"
+              Expect.equal result
+                  (ResultSet([ "@v"; "ABS(@v)" ], [ [ Some "-2"; Some "2.000000000000000000000000000000" ] ]))
+                  "the direct read keeps its value scale while ABS uses its derived scale"
+
+          testCase "prepared user-variable reads observe assignments within the same statement"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=-2"
+              let session, _ = handle session "PREPARE assigned_variable FROM 'SELECT @v:=1.75,@v'"
+              let session, result = handle session "EXECUTE assigned_variable"
+              match result with
+              | ResultSet(_, [ [ Some "1.75"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected a live read with the retained integer type, got %A" other
+              Expect.equal session.UserVariables["v"] (VDecimal 1.75M) "the stored value retains its actual decimal type"
+
+          testCase "parameter-driven repreparation refreshes direct user-variable types"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=-2"
+              let session, _ = handle session "PREPARE mixed_variables FROM 'SELECT ?,@v,ABS(@v)'"
+              let steps =
+                  [ "NULL", "1.25", [ TypeVarString; TypeLongLong; TypeLongLong ]
+                    "1", "1.25", [ TypeLongLong; TypeNewDecimal; TypeNewDecimal ]
+                    "2", "1.5e0", [ TypeLongLong; TypeNewDecimal; TypeNewDecimal ]
+                    "2.5", "1.5e0", [ TypeNewDecimal; TypeDouble; TypeDouble ]
+                    "NULL", "'abc'", [ TypeNewDecimal; TypeDouble; TypeDouble ] ]
+              (session, steps)
+              ||> List.fold (fun session (parameter, value, expected) ->
+                  let session, _ = handle session ("SET @p=" + parameter + ",@v=" + value)
+                  let session, result = handle session "EXECUTE mixed_variables USING @p"
+                  match result with
+                  | ResultSet(_, [ _ ]) -> ()
+                  | other -> failtestf "expected a row, got %A" other
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) expected "reprepare refreshes variable types"
+                  session)
+              |> ignore
+
+          testCase "initially NULL prepared user variables retain a binary string type"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "PREPARE absent_variable FROM 'SELECT @missing'"
+              let session, _ = handle session "SET @missing=1.75"
+              let session, result = handle session "EXECUTE absent_variable"
+              Expect.equal result (ResultSet([ "@missing" ], [ [ Some "1.75" ] ])) "current value rendered as bytes"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeBlob ] "retained binary type"
+              Expect.equal session.UserVariables["missing"] (VDecimal 1.75M) "reading never changes the variable"
+
           testCase "a prepared INSERT/SELECT binds values into the parsed AST and executes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -2605,10 +2605,13 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VJson _) -> Some { ColumnWire.metadataOfType TJson with Flags = BinaryFlag ||| NotNullFlag }
     | UserVariable variable when variable.Sql = "@" -> simple TypeVarString
     | UserVariable variable ->
-        currentVariableContext ()
-        |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
-        |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
-        |> Option.orElse (simple TypeVarString)
+        variable.PreparedType
+        |> Option.map PreparedVariables.metadata
+        |> Option.orElseWith (fun () ->
+            currentVariableContext ()
+            |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
+            |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
+            |> Option.orElse (simple TypeVarString))
     | SystemVariable(scope, variable) ->
         currentVariableContext ()
         |> Option.bind (fun bindings ->
@@ -2845,10 +2848,12 @@ let rec private columnsForQualifier (ctx: EvalContext) (qualifier: string) : Col
 
 type private OutputColumnFormat =
     { Fsp: int option
+      DecimalScale: int option
       Column: ColumnDef option }
 
 let private outputFormatOfColumn column =
     { Fsp = fspOfType column.Type
+      DecimalScale = None
       Column = Some column }
 
 let private displayColumnForExpr ctx =
@@ -2864,7 +2869,12 @@ let private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (pr
         | Star None, _ -> columns |> List.map outputFormatOfColumn
         | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map outputFormatOfColumn
         | expr, _ ->
+            let decimalScale =
+                match expr with
+                | NamedFunction "ABS" [ UserVariable { PreparedType = Some UserVariableType.Decimal } ] -> Some 30
+                | _ -> None
             [ { Fsp = fspOfExpr ctx expr
+                DecimalScale = decimalScale
                 Column = displayColumnForExpr ctx expr } ])
 
 /// The declared fsp list must mirror projection expansion because `VDateTime`
@@ -3224,6 +3234,10 @@ let private renderOutputValue format value =
             match format.Column |> Option.map _.Type with
             | Some(TDecimal(_, scale, _)) -> Some(number.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
             | _ -> Value.toText value
+        | _, VDecimal number ->
+            match format.DecimalScale with
+            | Some scale -> Some(number.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
+            | None -> Value.toText value
         | _ ->
             match format.Fsp with
             | Some fsp -> Value.toTextFsp fsp value
@@ -4630,10 +4644,13 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         match UserVariableRef.validationError variable with
         | Some message -> Error(3061, message)
         | None ->
-            currentVariableContext ()
-            |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
-            |> Option.defaultValue VNull
-            |> Ok
+            let value =
+                currentVariableContext ()
+                |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
+                |> Option.defaultValue VNull
+            match variable.PreparedType with
+            | Some variableType -> PreparedVariables.convert variableType value
+            | None -> Ok value
     | SystemVariable(scope, variable) ->
         match currentVariableContext () with
         | Some bindings -> bindings.ReadSystemVariable (scope |> Option.defaultValue "") variable |> Result.map (Option.defaultValue VNull)

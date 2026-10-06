@@ -1563,6 +1563,15 @@ let coerceLeadingDouble (s: string) : float * bool =
     else
         0.0, not (String.IsNullOrWhiteSpace s)
 
+let tryLeadingDecimal (text: string) =
+    let matched = leadingNumeric.Match text
+    if matched.Success then
+        match Decimal.TryParse(matched.Value, NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, value -> Some value
+        | _ -> None
+    else
+        None
+
 let private parseLeadingNumeric s = coerceLeadingDouble s |> fst
 
 let private compareDecimalString (value: decimal) (text: string) =

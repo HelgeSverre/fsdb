@@ -1936,7 +1936,8 @@ let private userVariableTarget: Parser<UserVariableRef, unit> =
                 notFollowedBy (pchar '@') >>% "" ])
      |> withSkippedString (fun sql name ->
          { Name = name.ToLowerInvariant()
-           Sql = sql }))
+           Sql = sql
+           PreparedType = None }))
     .>> ws
 
 let private variableAtom: Parser<Expr, unit> =

@@ -92,10 +92,20 @@ type ColumnType =
     /// DDL time in `Storage`, where the column name is in scope to report.
     | TVector of dim: int
 
-/// A user-variable reference's case-folded lookup key and exact SQL token.
+[<RequireQualifiedAccess>]
+type UserVariableType =
+    | SignedInteger
+    | UnsignedInteger
+    | Decimal
+    | Double
+    | Text
+    | Binary
+
+/// A user-variable reference with an optional prepare-time type.
 type UserVariableRef =
     { Name: string
-      Sql: string }
+      Sql: string
+      PreparedType: UserVariableType option }
 
 type MatchColumn =
     { Qualifier: string option

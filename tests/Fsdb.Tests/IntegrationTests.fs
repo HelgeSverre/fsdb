@@ -4221,6 +4221,49 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "binary prepared user variables retain their prepare-time type"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+                  use stream = stream
+
+                  let setVariable (sql: string) =
+                      async {
+                          let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          let! response = readPacketAsync stream
+                          Expect.equal response.Value.Payload.[0] 0x00uy "assignment succeeds"
+                      }
+
+                  do! setVariable "SET @v=-2"
+                  let prepare = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT @v")
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = prepare } |> Async.Ignore
+                  let! statementId, parameters, columns = readPreparedReply stream
+                  Expect.isEmpty parameters "a direct variable is not a parameter marker"
+                  Expect.hasLength columns 1 "one result column"
+                  Expect.equal (readWireDefinition columns.[0]).Metadata.TypeId TypeLongLong "prepare captures BIGINT"
+
+                  do! setVariable "SET @v=1.75"
+                  let writer = Writer()
+                  writer.WriteByte 0x17uy
+                  writer.WriteInt32LE statementId
+                  writer.WriteByte 0uy
+                  writer.WriteInt32LE 1
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = writer.ToArray() } |> Async.Ignore
+                  let! count = readPacketAsync stream
+                  Expect.equal count.Value.Payload.[0] 1uy "one execution column"
+                  let! definition = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! row = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  Expect.equal (readWireDefinition definition.Value).Metadata.TypeId TypeLongLong "execution retains BIGINT"
+                  Expect.equal row.Value.Payload [| 0uy; 0uy; 2uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy |]
+                      "the live decimal value rounds into the retained integer type"
+              }
+              |> Async.RunSynchronously
+
           // A DATETIME(6) value round-tripped through COM_STMT_PREPARE +
           // COM_STMT_EXECUTE must use the binary protocol's 11-byte datetime
           // form (microseconds present) and advertise `decimals = 6` on the

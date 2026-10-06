@@ -36,6 +36,7 @@
     <Compile Include="Sql/FunctionalIndex.fs" />
     <Compile Include="Sql/Deprecation.fs" />
     <Compile Include="Sql/ColumnWire.fs" />
+    <Compile Include="Sql/PreparedVariables.fs" />
     <Compile Include="Sql/Parser.fs" />
     <Compile Include="Sql/LoadData.fs" />
     <Compile Include="Sql/Xa.fs" />

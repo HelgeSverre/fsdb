@@ -3031,7 +3031,7 @@ let tests =
 
                 testCase "user and system variables parse as ordinary expressions"
                 <| fun _ ->
-                    let variable name = { Name = name; Sql = "@" + name }
+                    let variable name = { Name = name; Sql = "@" + name; PreparedType = None }
 
                     let expected =
                         [ BinOp(Add, UserVariable(variable "x"), Lit(VInt 1L)), None
@@ -3048,8 +3048,8 @@ let tests =
                     | Ok(Select { IntoVariables = targets }) ->
                         Expect.equal
                             targets
-                            [ { Name = "chosen_id"; Sql = "@chosen_id" }
-                              { Name = "chosen name"; Sql = "@`chosen name`" } ]
+                            [ { Name = "chosen_id"; Sql = "@chosen_id"; PreparedType = None }
+                              { Name = "chosen name"; Sql = "@`chosen name`"; PreparedType = None } ]
                             "assignment targets"
                     | other -> failtestf "expected SELECT INTO targets, got %A" other
 
@@ -3102,17 +3102,17 @@ let tests =
                 <| fun _ ->
                     match parse "SELECT @, @ + 1" with
                     | Ok(Select { Projections = [ (UserVariable first, None); (BinOp(Add, UserVariable second, Lit(VInt 1L)), None) ] }) ->
-                        Expect.equal first { Name = ""; Sql = "@" } "bare reference"
+                        Expect.equal first { Name = ""; Sql = "@"; PreparedType = None } "bare reference"
                         Expect.equal second first "nested bare reference"
                     | other -> failtestf "expected bare user-variable references, got %A" other
 
                 testCase "quoted user-variable names parse with their MySQL escapes"
                 <| fun _ ->
                     let expected =
-                        [ UserVariable { Name = "has space"; Sql = "@`has space`" }, None
-                          UserVariable { Name = "single'quote"; Sql = "@'single''quote'" }, None
-                          UserVariable { Name = "double\"quote"; Sql = "@\"double\"\"quote\"" }, None
-                          UserVariable { Name = "back`tick"; Sql = "@`back``tick`" }, None ]
+                        [ UserVariable { Name = "has space"; Sql = "@`has space`"; PreparedType = None }, None
+                          UserVariable { Name = "single'quote"; Sql = "@'single''quote'"; PreparedType = None }, None
+                          UserVariable { Name = "double\"quote"; Sql = "@\"double\"\"quote\""; PreparedType = None }, None
+                          UserVariable { Name = "back`tick"; Sql = "@`back``tick`"; PreparedType = None }, None ]
 
                     match parse "SELECT @`has space`, @'single''quote', @\"double\"\"quote\", @`back``tick`" with
                     | Ok(Select { Projections = projections }) -> Expect.equal projections expected "quoted variables"
@@ -4172,7 +4172,7 @@ let tests =
               | Ok load ->
                   Expect.sequenceEqual
                       load.Fields
-                      [ LoadUserVariable { Name = "raw_id"; Sql = "@raw_id" }; LoadColumn "name" ]
+                      [ LoadUserVariable { Name = "raw_id"; Sql = "@raw_id"; PreparedType = None }; LoadColumn "name" ]
                       "input fields"
 
                   Expect.equal load.Assignments.Length 2 "SET assignment count"
