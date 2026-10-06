@@ -5115,21 +5115,21 @@ let private preparedMetadataCore
                 |> Option.filter (fun values -> sameLength values columns)
                 |> Option.defaultValue (List.replicate columns.Length None)
 
-            let decimals =
-                Executor.statementDecimalMetadata store registry schema statement
+            let numericDescriptors =
+                Executor.statementNumericMetadata store registry schema statement
                 |> Option.filter (fun metadata -> sameLength metadata columns)
                 |> Option.defaultValue (List.replicate columns.Length None)
 
             let resultColumns =
                 List.map3
-                    (fun (column: ColumnDef) origin decimalMetadata ->
+                    (fun (column: ColumnDef) origin numericMetadata ->
                         let metadata =
                             origin
                             |> Option.bind (fun source ->
                                 Storage.tableSnapshot store source.Schema source.OriginalTable
                                 |> Result.toOption
                                 |> Option.map (fun table -> ColumnWire.metadataOfTableColumn table.Indexes column))
-                            |> Option.orElse decimalMetadata
+                            |> Option.orElse numericMetadata
                             |> Option.defaultWith (fun () -> ColumnWire.metadataOfColumn column)
 
                         { Name = column.Name
@@ -5139,7 +5139,7 @@ let private preparedMetadataCore
                         : Fsdb.Protocol.ColumnDef)
                     columns
                     origins
-                    decimals
+                    numericDescriptors
 
             parameters, resultColumns
 

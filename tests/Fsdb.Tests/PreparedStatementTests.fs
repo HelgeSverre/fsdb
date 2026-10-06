@@ -392,6 +392,31 @@ let tests =
               let _, result = handle session "SELECT @@global.div_precision_increment AS setting"
               Expect.equal result (ResultSet([ "setting" ], [ [ Some "4" ] ])) "global DEFAULT restores four"
 
+          testCase "aggregate descriptors distinguish untyped null text and exact numeric inputs"
+          <| fun _ ->
+              for increment in [ 0; 4; 10 ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session (sprintf "SET div_precision_increment=%d" increment)
+                  let sql = "SELECT SUM(NULL),AVG(NULL),SUM(DISTINCT NULL),AVG(DISTINCT NULL),SUM(NULL+NULL),AVG(NULL+NULL),SUM('1.25'),AVG('1.25'),SUM(1.25e0),AVG(1.25e0),SUM(CAST(NULL AS DECIMAL(10,2))),AVG(CAST(NULL AS DECIMAL(10,2)))"
+                  let expected =
+                      [ TypeDouble,17u,0uy; TypeDouble,uint32 (17+increment),byte increment
+                        TypeDouble,17u,0uy; TypeDouble,uint32 (17+increment),byte increment
+                        TypeDouble,17u,0uy; TypeDouble,uint32 (17+increment),byte increment
+                        TypeDouble,23u,31uy; TypeDouble,23u,31uy
+                        TypeDouble,23u,31uy; TypeDouble,23u,31uy
+                        TypeNewDecimal,34u,2uy; TypeNewDecimal,uint32 (12+increment),byte (2+increment) ]
+                  let session, result = handle session sql
+                  match result with
+                  | ResultSet(_, [ row ]) ->
+                      Expect.equal row ([ None; None; None; None; None; None ] @ List.replicate 4 (Some "1.25") @ [ None; None ]) "aggregate values"
+                  | other -> failtestf "unexpected aggregate result: %A" other
+                  let shape metadata = metadata.TypeId, metadata.ColumnLength, metadata.Decimals
+                  Expect.equal (session.LastResultColumnMetadata |> List.map shape) expected "execution descriptors"
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let statement = createPreparedStatement session sql ast count
+                  let _, columns = preparedMetadata session statement.Ast count
+                  Expect.equal (columns |> List.map (fun column -> shape column.Metadata)) expected "prepare descriptors"
+
           testCase "decimal expression descriptors derive precision from their operands"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

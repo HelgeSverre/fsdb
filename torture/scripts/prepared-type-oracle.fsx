@@ -422,3 +422,35 @@ let runDecimalDescriptors () =
         if reader.Read() then failwith "Unexpected second descriptor row"
 
 runDecimalDescriptors ()
+
+let runApproximateAggregateDescriptors () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        for increment in [ 0; 4; 10 ] do
+            use setup = new MySqlCommand(sprintf "SET div_precision_increment=%d" increment, connection)
+            setup.ExecuteNonQuery() |> ignore
+            for argument in [ "NULL"; "DISTINCT NULL"; "NULL+NULL"; "'1.25'"; "DISTINCT '1.25'"; "1.25e0"; "CAST(NULL AS CHAR(10))" ] do
+                for aggregate in [ "SUM"; "AVG" ] do
+                    let expression = sprintf "%s(%s)" aggregate argument
+                    let untypedNull = argument = "NULL" || argument = "DISTINCT NULL" || argument = "NULL+NULL"
+                    let scale = if untypedNull then (if aggregate = "AVG" then increment else 0) else 31
+                    let length = if untypedNull then 17 + scale else 23
+                    use command = new MySqlCommand(sprintf "SELECT %s AS value /* increment=%d */" expression increment, connection)
+                    if protocol = Binary then command.Prepare()
+                    use reader = command.ExecuteReader()
+                    let schema = reader.GetColumnSchema()[0]
+                    if not (reader.Read())
+                       || reader.GetDataTypeName(0) <> "DOUBLE"
+                       || schema.ColumnSize <> Nullable length
+                       || schema.NumericScale <> Nullable scale then
+                        failwithf "%A %s increment=%d: expected DOUBLE length=%d scale=%d; got %s length=%O scale=%O"
+                            protocol expression increment length scale (reader.GetDataTypeName 0) schema.ColumnSize schema.NumericScale
+                    let expected = if argument.Contains("NULL") then "NULL" else "1.25"
+                    if renderValue(reader.GetValue 0) <> expected then
+                        failwithf "%s: expected %s; got %O" expression expected (reader.GetValue 0)
+                    printfn "Approximate aggregate | %A | %s | increment=%d -> length=%d scale=%d" protocol expression increment length scale
+
+runApproximateAggregateDescriptors ()

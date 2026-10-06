@@ -2457,7 +2457,10 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             elif typeId = TypeYear then 4u
             else 0u
 
-        Some { Value.columnMetadata typeId with ColumnLength = columnLength }
+        Some
+            { Value.columnMetadata typeId with
+                ColumnLength = columnLength
+                Decimals = if typeId = TypeDouble || typeId = TypeFloat then 31uy else 0uy }
     let typeIdOf expression = metadataOfExpr ctx expression |> Option.map _.TypeId
 
     let numeric combineShapes left right =
@@ -2860,16 +2863,25 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         match name.ToUpperInvariant(), args with
         | "COUNT", _ -> simple TypeLongLong
         | ("SUM" | "AVG"), [ arg ] ->
+            let isAverage = equalsIgnoreCase name "AVG"
+            let approximate length scale =
+                simple TypeDouble
+                |> Option.map (fun metadata -> { metadata with ColumnLength = length; Decimals = scale })
             match metadataOfExpr ctx arg with
+            | metadata when metadata |> Option.forall (fun item -> item.TypeId = TypeNull) ->
+                let scale = if isAverage then divisionPrecisionIncrement () else 0
+                approximate (uint32 (17 + scale)) (byte scale)
             | Some metadata when
                 metadata.TypeId = TypeDouble
                 || metadata.TypeId = TypeFloat
+                || metadata.TypeId = TypeString
+                || metadata.TypeId = TypeVarString
+                || metadata.TypeId = TypeBlob
                 || hasMetadataFlag (EnumFlag ||| SetFlag) metadata
                 ->
-                simple TypeDouble
+                approximate 23u 31uy
             | metadata ->
                 let argument = decimalShape arg metadata
-                let isAverage = equalsIgnoreCase name "AVG"
                 let increment = if isAverage then divisionPrecisionIncrement () else 22
                 let shape =
                     { Precision = min 65 (argument.Precision + increment)
@@ -16984,7 +16996,7 @@ let private statementSources store schema (select: SelectStmt) =
 
 /// Expression descriptors can exceed stored-column precision, so PREPARE must
 /// retain their wire shape independently of its ColumnDef fallback.
-let statementDecimalMetadata store registry schema statement =
+let statementNumericMetadata store registry schema statement =
     match statement with
     | Select select when not (SelectStmt.hasDestination select) && select.Ctes.IsEmpty ->
         let sources = statementSources store schema select
@@ -16993,7 +17005,7 @@ let statementDecimalMetadata store registry schema statement =
             let columns = sources |> List.collect snd
             let context = contextFactory store registry schema (columnIndexOf columns) (qualifierRanges sources) None (probeRow columns)
             outputColumnWireOverrides context columns select
-            |> List.map (Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal))
+            |> List.map (Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble))
             |> Some
     | _ -> None
 

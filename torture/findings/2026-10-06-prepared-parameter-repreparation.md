@@ -401,6 +401,25 @@ The metadata oracle passes in both text and binary modes, and the Expecto
 regressions assert exact wire lengths and scales. The differential manifest at
 `artifacts/runs/20261006T145627015-16934/contracts/manifest.json` records
 matching values and type families after these changes; that lane does not
-compare precision descriptors. An additional probe leaves NULL aggregates as
-a concrete remaining case: MySQL reports DOUBLE for SUM(NULL) and AVG(NULL),
-with lengths/scales 17/0 and 21/4 respectively.
+compare precision descriptors.
+
+### Approximate aggregate descriptors
+
+MySQL 8.4.11 reports DOUBLE for SUM/AVG over untyped NULL, text, and approximate
+numeric inputs. Typed exact numeric NULL remains DECIMAL. At division precision
+increments 0, 4, and 10, SUM(NULL) retains wire length/scale 17/0; AVG(NULL)
+uses length 17 plus the increment and scale equal to the increment. DISTINCT
+NULL and NULL+NULL follow the same rule. Text and DOUBLE arguments report
+length/scale 23/31, where 31 means unspecified fractional precision.
+
+`runApproximateAggregateDescriptors` in the maintained oracle verifies values,
+type families, lengths, and scales in text and binary modes. Each precision
+setting uses a distinct SQL comment to prevent connector statement caching
+from retaining the descriptor captured under a previous setting. The Expecto
+regression asserts execution and PREPARE descriptors, including typed DECIMAL
+NULL. Both paths retain the derived approximate numeric descriptors instead of
+replacing them with generic stored-column metadata.
+
+The differential manifest at
+`artifacts/runs/20261006T152124423-20024/contracts/manifest.json` verifies
+matching aggregate values and type families in text and binary execution.

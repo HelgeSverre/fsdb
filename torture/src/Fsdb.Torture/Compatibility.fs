@@ -2103,6 +2103,18 @@ module ContractCatalog =
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private approximateAggregateDescriptors =
+        { Name = "approximate-aggregate-descriptors"
+          Setup = [||]
+          Steps =
+            [| for increment in [ 0; 4; 10 ] do
+                   Contract.execute (sprintf "increment-%d" increment) (sprintf "SET div_precision_increment=%d" increment)
+                   let sql = sprintf "SELECT SUM(NULL) AS null_sum,AVG(NULL) AS null_average,SUM(DISTINCT NULL) AS distinct_sum,AVG(DISTINCT NULL) AS distinct_average,SUM('1.25') AS text_sum,AVG('1.25') AS text_average,SUM(1.25e0) AS double_sum,AVG(1.25e0) AS double_average,SUM(CAST(NULL AS DECIMAL(10,2))) AS exact_sum,AVG(CAST(NULL AS DECIMAL(10,2))) AS exact_average /* increment=%d */" increment
+                   Contract.query (sprintf "text-%d" increment) sql
+                   Contract.preparedQuery (sprintf "binary-%d" increment) sql [||] |]
+          Cleanup = [| "SET div_precision_increment=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private divisionPrecisionIncrement =
         { Name = "division-precision-increment"
           Setup = [| "CREATE TABLE precision_source(n INT)"; "INSERT INTO precision_source VALUES (1),(2),(2)" |]
@@ -2251,6 +2263,7 @@ module ContractCatalog =
            preparedMixedAssignments
            preparedDecimalDivision
            divisionPrecisionIncrement
+           approximateAggregateDescriptors
            unsignedNegation
            preparedSchemaChanges
            temporaryViewShadowing
