@@ -1803,8 +1803,7 @@ module private MySqlTemporal =
 /// has to be validated where it's written. Only a string literal follows the
 /// type word, so `DATE(x)`/`TIME(x)` calls are untouched.
 ///
-/// A DATETIME literal's declared fraction width is lost because `VDateTime`
-/// carries no fsp. TIME retains it through an explicit typed expression.
+/// Typed expressions retain the written fractional precision of temporal literals.
 let private temporalLit: Parser<Expr, unit> =
     let asText v = match v with VString s -> s | _ -> ""
 
@@ -1832,11 +1831,12 @@ let private temporalLit: Parser<Expr, unit> =
             | InvalidDateTimeOffset
             | ZeroDateTimeOffset -> refuse "DATETIME"
             | NoDateTimeOffset ->
+                let typed value = Cast(Lit value, TDateTime(dateTimeFractionalPrecision text))
                 match MySqlTemporal.tryDateTime text with
-                | Some dt -> preturn (Lit(VDateTime dt))
+                | Some dt -> preturn (typed (VDateTime dt))
                 | None ->
                     tryParseZeroDateTime text |> Option.orElseWith (fun () -> tryParseInvalidDateTime text)
-                    |> Option.map (VZeroDateTime >> Lit >> preturn)
+                    |> Option.map (VZeroDateTime >> typed >> preturn)
                     |> Option.defaultWith (fun () -> refuse "DATETIME")
         | _ ->
             match MySqlTemporal.tryTime text with

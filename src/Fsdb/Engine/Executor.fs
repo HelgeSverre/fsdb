@@ -2299,7 +2299,9 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         fspOfExpr ctx arg |> Option.defaultValue 0 |> Some
     | NamedFunction "MAKETIME" [ _; _; seconds ] ->
         fspOfExpr ctx seconds |> Option.defaultValue 0 |> Some
-    | NamedFunction "TIMEDIFF" [ left; right ] ->
+    | NamedFunction "TIMEDIFF" [ left; right ]
+    | NamedFunction "ADDTIME" [ left; right ]
+    | NamedFunction "SUBTIME" [ left; right ] ->
         greatestFsp [ left; right ]
     | NamedFunction "CURTIME" args
     | NamedFunction "CURRENT_TIME" args
@@ -4993,6 +4995,20 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             Some { Value.columnMetadata TypeLongLong with ColumnLength = uint32 precision; Flags = UnsignedFlag ||| NotNullFlag }
         | None -> metadataOfExpr ctx expression
 
+    let isTemporalMetadata (metadata: ColumnMetadata) =
+        metadata.TypeId = TypeDate || metadata.TypeId = TypeDateTime
+        || metadata.TypeId = TypeTimestamp || metadata.TypeId = TypeTime
+
+    let temporalUnaryMetadata metadata =
+        if isTemporalMetadata metadata then
+            simple TypeDouble
+            |> Option.map (fun result ->
+                { result with
+                    ColumnLength = 17u + uint32 metadata.Decimals
+                    Decimals = metadata.Decimals
+                    Flags = metadata.Flags &&& NotNullFlag })
+        else None
+
     let numeric combineShapes left right =
         let isInteger typeId =
             typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
@@ -5000,23 +5016,31 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         let leftMetadata = numericMetadata left
         let rightMetadata = numericMetadata right
 
+        let contextType metadata =
+            if isTemporalMetadata metadata then
+                if metadata.Decimals > 0uy then TypeNewDecimal else TypeLongLong
+            else metadata.TypeId
+
         let inferred =
-            match leftMetadata, rightMetadata with
-            | Some leftType, _ when leftType.TypeId = TypeDouble || leftType.TypeId = TypeFloat -> simple TypeDouble
-            | _, Some rightType when rightType.TypeId = TypeDouble || rightType.TypeId = TypeFloat -> simple TypeDouble
-            | Some leftType, _ when leftType.TypeId = TypeString || leftType.TypeId = TypeVarString || leftType.TypeId = TypeBlob -> simple TypeDouble
-            | _, Some rightType when rightType.TypeId = TypeString || rightType.TypeId = TypeVarString || rightType.TypeId = TypeBlob -> simple TypeDouble
-            | Some leftType, _ when leftType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
-            | _, Some rightType when rightType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
-            | Some leftType, Some rightType when isInteger leftType.TypeId && isInteger rightType.TypeId -> simple TypeLongLong
-            | Some leftType, None when isInteger leftType.TypeId -> simple TypeDouble
-            | None, Some rightType when isInteger rightType.TypeId -> simple TypeDouble
+            match Option.map contextType leftMetadata, Option.map contextType rightMetadata with
+            | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
+            | _, Some rightType when rightType = TypeDouble || rightType = TypeFloat -> simple TypeDouble
+            | Some leftType, _ when leftType = TypeString || leftType = TypeVarString || leftType = TypeBlob -> simple TypeDouble
+            | _, Some rightType when rightType = TypeString || rightType = TypeVarString || rightType = TypeBlob -> simple TypeDouble
+            | Some leftType, _ when leftType = TypeNewDecimal -> simple TypeNewDecimal
+            | _, Some rightType when rightType = TypeNewDecimal -> simple TypeNewDecimal
+            | Some leftType, Some rightType when isInteger leftType && isInteger rightType -> simple TypeLongLong
+            | Some leftType, None when isInteger leftType -> simple TypeDouble
+            | None, Some rightType when isInteger rightType -> simple TypeDouble
             | _ -> None
 
         let inferred =
             inferred
             |> Option.map (fun metadata ->
-                if metadata.TypeId = TypeNewDecimal then
+                let temporalInteger =
+                    metadata.TypeId = TypeLongLong
+                    && (Option.exists isTemporalMetadata leftMetadata || Option.exists isTemporalMetadata rightMetadata)
+                if metadata.TypeId = TypeNewDecimal || temporalInteger then
                     let shape = combineShapes (decimalShape left leftMetadata) (decimalShape right rightMetadata)
                     withDecimalShape shape metadata
                 else metadata)
@@ -5322,20 +5346,23 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     | Neg(Lit(VBinaryLiteral _)) -> simple TypeDouble
     | Neg operand ->
         let source = metadataOfExpr ctx operand
-        numeric (fun _ right -> right) (Lit(VInt 0L)) operand
-        |> Option.map (fun metadata ->
-            if metadata.TypeId <> TypeLongLong then metadata
-            else
-                let promoted =
-                    tryClosedNumericValue ctx.Registry operand
-                    |> Option.map Value.negateConstant
-                    |> Option.exists (function VDecimal _ -> true | _ -> false)
-                let length =
-                    source |> Option.map (fun item -> item.ColumnLength + (if hasMetadataFlag UnsignedFlag item then 1u else 0u))
-                    |> Option.defaultValue metadata.ColumnLength
-                { metadata with
-                    TypeId = if promoted then TypeNewDecimal else TypeLongLong
-                    ColumnLength = length })
+        match source |> Option.bind temporalUnaryMetadata with
+        | Some metadata -> Some metadata
+        | None ->
+            numeric (fun _ right -> right) (Lit(VInt 0L)) operand
+            |> Option.map (fun metadata ->
+                if metadata.TypeId <> TypeLongLong then metadata
+                else
+                    let promoted =
+                        tryClosedNumericValue ctx.Registry operand
+                        |> Option.map Value.negateConstant
+                        |> Option.exists (function VDecimal _ -> true | _ -> false)
+                    let length =
+                        source |> Option.map (fun item -> item.ColumnLength + (if hasMetadataFlag UnsignedFlag item then 1u else 0u))
+                        |> Option.defaultValue metadata.ColumnLength
+                    { metadata with
+                        TypeId = if promoted then TypeNewDecimal else TypeLongLong
+                        ColumnLength = length })
     | BinOp((Add | Sub | SignedSub), left, right) ->
         numeric (fun left right ->
             let shape = combinedDecimalShape left right
@@ -5453,7 +5480,11 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                     let carry = if equalsIgnoreCase name "ROUND" && scale < argument.Scale then 1 else 0
                     let shape = { Precision = min 65 (argument.Precision - argument.Scale + scale + carry); Scale = scale }
                     withDecimalShape shape metadata)
-        | ("FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ ->
+        | "ABS", arg :: _ ->
+            metadataOfExpr ctx arg
+            |> Option.bind temporalUnaryMetadata
+            |> Option.orElseWith (fun () -> numericUnary arg)
+        | ("FLOOR" | "CEILING" | "CEIL"), arg :: _ ->
             numericUnary arg
         | "MOD", [ left; right ] ->
             numeric (fun left right ->
@@ -5479,8 +5510,8 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         | "UTC_TIMESTAMP", _ -> Some(ColumnWire.metadataOfType(TDateTime 0))
         | "UTC_DATE", _ -> Some(ColumnWire.metadataOfType TDate)
         | ("UTC_TIME" | "CURRENT_TIME" | "CURTIME"), _ -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
-        | ("ADDTIME" | "SUBTIME"), first :: second :: _ ->
-            let fsp = [ first; second ] |> List.choose (fspOfExpr ctx) |> List.fold max 0
+        | ("ADDTIME" | "SUBTIME"), first :: _ :: _ ->
+            let fsp = fspOfExpr ctx expr |> Option.defaultValue 0
 
             match metadataOfExpr ctx first with
             | Some metadata when metadata.TypeId = TypeTime -> Some(ColumnWire.metadataOfType(TTime fsp))
@@ -5613,7 +5644,16 @@ and private outputFormatOfExpr ctx expr =
             |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
             |> Option.map (fun metadata -> int metadata.Decimals)
         | _ -> None
-    { Fsp = fspOfExpr ctx expr
+    let fsp =
+        match expr with
+        | NamedFunction "ADDTIME" _ | NamedFunction "SUBTIME" _ ->
+            metadataOfExpr ctx expr
+            |> Option.bind (fun metadata ->
+                if metadata.TypeId = TypeTime || metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp then
+                    Some(int metadata.Decimals)
+                else None)
+        | _ -> fspOfExpr ctx expr
+    { Fsp = fsp
       DecimalScale = decimalScale
       Column = displayColumnForExpr ctx expr }
 

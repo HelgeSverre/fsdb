@@ -11806,7 +11806,7 @@ let tests =
                         Expect.equal
                             rows
                             [ [ Some "-01:02:03.46"; Some "1"; Some "-10203.46" ]
-                              [ Some "00:00:00.00"; Some "0"; Some "0" ]
+                              [ Some "00:00:00.00"; Some "0"; Some "0.00" ]
                               [ Some "25:02:03.46"; Some "0"; Some "250203.46" ] ]
                             "typed time values"
                     | other -> failtestf "expected time result set, got %A" other

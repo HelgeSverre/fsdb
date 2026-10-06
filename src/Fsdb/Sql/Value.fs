@@ -1658,7 +1658,9 @@ let toDouble (v: Value) : float =
     | VDouble d -> d
     | VDecimal d -> float d
     | VString s -> parseLeadingNumeric s
-    | TemporalNumber number -> float number
+    | TemporalNumber number ->
+        // Decimal-to-double conversion can round twice for fourteen-digit temporal fields.
+        Double.Parse(number.ToString("G29", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)
     | other -> other |> toText |> Option.map parseLeadingNumeric |> Option.defaultValue 0.0
 
 /// String comparison under the server's default MySQL collation. Collation
@@ -2066,7 +2068,8 @@ exception UnsignedOutOfRange
 exception SignedOutOfRange
 
 let private negationOperand = function
-    | VBinaryLiteral _ as value -> VDouble(toDouble value)
+    | (VBinaryLiteral _ | VDate _ | VDateTime _ | VTimestamp _ | VTime _ | VZeroDate _ | VZeroDateTime _) as value ->
+        VDouble(toDouble value)
     | value -> value
 
 let negate value =

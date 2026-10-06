@@ -704,9 +704,8 @@ zeroes and zero-component DATETIME values. SHA2 hashes the declared precision:
 text ending in `.500`, rather than `.500000`. Stored TIMESTAMP text retains
 fractional precision after conversion to the session time zone.
 
-Adding zero to a
-DATETIME(6) with zero microseconds also reports BIGINT on fsdb versus DECIMAL
-on MySQL; division retains the declared scale.
+Temporal arithmetic retains declared fractional precision even when the current
+value has zero microseconds; its numeric-context rules are described below.
 
 Component DATETIME coercion quantizes fractional fields before storage and CAST.
 It rounds half-up, or truncates under `TIME_TRUNCATE_FRACTIONAL`. A carry into
@@ -747,3 +746,36 @@ The year-zero calendar-validation contract manifest is
 `artifacts/runs/20261006T181404831-55015/contracts/manifest.json`. It adds
 February 29 and 31 across zero-date modes, literal validation, fractional
 rounding/carry, and strict/permissive storage.
+
+### Temporal arithmetic contexts
+
+Addition, subtraction, multiplication, and MOD classify temporal operands by
+their declared fractional precision. DATE and whole-second DATETIME operands
+use integer arithmetic; fractional DATETIME/TIME/TIMESTAMP operands use DECIMAL.
+The original temporal descriptors supply numeric digit counts, so an exact-second
+DATETIME(6) plus zero still has DECIMAL precision 21 and scale 6 (display width
+23), while DATE plus zero has BIGINT width 10.
+
+Unary negation and ABS use DOUBLE for temporal operands, with width 17 plus
+declared fractional precision and that same scale. This approximate boundary
+is observable: negating DATETIME(6) `2020-01-01 03:04:05.123456` produces the
+DOUBLE value `-20200101030405.125`, while adding zero retains the exact decimal
+fraction `.123456`.
+
+TIMESTAMP literals preserve their written precision through a typed expression,
+as TIME literals do. Binary temporal parameters retain their derived temporal
+type during binding; DATETIME parameters therefore keep six fractional digits,
+including when the supplied value has no microseconds. Stored-column and reused
+prepared-parameter contracts cover the same arithmetic paths. A temporal wrapper
+is retained only when the converted value belongs to the expected temporal
+family, so inherited DATETIME context does not reinterpret a TIME argument to
+ADDTIME/SUBTIME. Approximate temporal conversion parses the exact numeric fields
+to avoid the double rounding exposed by a `.123` fraction on a fourteen-digit
+DATETIME number. ADDTIME/SUBTIME share fractional-precision inference for typed
+temporal results; their string results retain string formatting and omit a
+zero fractional part.
+
+The temporal arithmetic descriptor contract manifest is
+`artifacts/runs/20261006T184034246-60870/contracts/manifest.json`. It covers
+integer and fractional temporal operands, binary arithmetic, negation, ABS,
+MOD, written literal precision, stored columns, and a reused DATETIME parameter.

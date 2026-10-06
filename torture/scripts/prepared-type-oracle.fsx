@@ -842,3 +842,48 @@ let runComponentDateTimeFractions () =
                 printfn "Component datetime fractions | %A | mode=%s | %s -> %A" protocol mode sql actual
 
 runComponentDateTimeFractions ()
+
+let runTemporalArithmeticDescriptors () =
+    let binaryCases =
+        [ "CAST('2020-01-01' AS DATE)", "BIGINT", 10, 0, "20200101"
+          "CAST('2020-01-01' AS DATETIME)", "BIGINT", 16, 0, "20200101000000"
+          "CAST('2020-01-01' AS DATETIME(6))", "DECIMAL", 23, 6, "20200101000000"
+          "CAST('2020-01-01 03:04:05.123456' AS DATETIME(6))", "DECIMAL", 23, 6, "20200101030405.123456"
+          "CAST('-12:34:56' AS TIME(3))", "DECIMAL", 13, 3, "-123456"
+          "TIMESTAMP '2020-01-01 00:00:00.000'", "DECIMAL", 20, 3, "20200101000000"
+          "TIMESTAMP '2020-01-01 00:00:00.123'", "DECIMAL", 20, 3, "20200101000000.123" ]
+    let cases =
+        [ for operand, family, width, scale, expected in binaryCases do
+              for suffix in [ "+0"; "-0"; "*1" ] do
+                  yield operand + suffix, family, width, scale, expected
+          yield "-TIMESTAMP '2020-01-01 00:00:00.123'", "DOUBLE", 20, 3, "-20200101000000.12"
+          yield "-CAST('2020-01-01' AS DATE)", "DOUBLE", 17, 0, "-20200101"
+          yield "-CAST('2020-01-01 03:04:05.123456' AS DATETIME(6))", "DOUBLE", 23, 6, "-20200101030405.125"
+          yield "ABS(CAST('2020-01-01 03:04:05.123456' AS DATETIME(6)))", "DOUBLE", 23, 6, "20200101030405.125" ]
+    let check label family width scale expected (command: MySqlCommand) =
+        use reader = command.ExecuteReader()
+        if not (reader.Read()) then failwithf "%s returned no row" label
+        let schema = reader.GetColumnSchema()[0]
+        let actual = renderValue (reader.GetValue 0)
+        if reader.GetDataTypeName(0) <> family || schema.ColumnSize <> Nullable width
+           || schema.NumericScale <> Nullable scale || actual <> expected then
+            failwithf "%s: expected %s/%d/%d/%s; got %s/%O/%O/%s"
+                label family width scale expected (reader.GetDataTypeName 0) schema.ColumnSize schema.NumericScale actual
+        printfn "Temporal arithmetic | %s -> %s width=%d scale=%d value=%s" label family width scale actual
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        for expression, family, width, scale, expected in cases do
+            use command = new MySqlCommand("SELECT " + expression + " AS value", connection)
+            if protocol = Binary then command.Prepare()
+            check (sprintf "%A %s" protocol expression) family width scale expected command
+        use bound = new MySqlCommand("SELECT @value+0 AS value", connection)
+        let parameter = bound.Parameters.AddWithValue("@value", DateTime(2020,1,1))
+        bound.Prepare()
+        for value, expected in
+            [ DateTime(2020,1,1), "20200101000000"
+              DateTime(2020,1,1).AddMilliseconds(123.0), "20200101000000.123" ] do
+            parameter.Value <- box value
+            check "binary DATETIME parameter" "DECIMAL" 23 6 expected bound
+
+runTemporalArithmeticDescriptors ()

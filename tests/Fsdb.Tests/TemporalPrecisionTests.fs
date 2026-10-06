@@ -129,10 +129,8 @@ let tests =
 
                     Expect.equal row [ Some "2024-01-01 00:00:00"; Some "2024-01-01 00:00:00.000"; Some "2024-01-01 00:00:00.000000" ] "per-column fsp"
 
-                testCase "a NOW()-less expression column (no declared type) keeps toText's actual-digit rendering"
+                testCase "DATETIME without fractional precision renders whole seconds"
                 <| fun _ ->
-                    // A literal cast into DATETIME(6) is a declared cast type, but a
-                    // bare datetime literal has none — it must not gain a fraction.
                     let row = oneRow [ "SELECT CAST('2024-01-01 00:00:00' AS DATETIME) AS x" ]
                     Expect.equal row [ Some "2024-01-01 00:00:00" ] "no spurious fraction" ]
 

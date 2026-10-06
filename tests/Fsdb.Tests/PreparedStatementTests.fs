@@ -257,9 +257,9 @@ let tests =
               let session = { session with Statements = Map.ofList [ 1, statement ] }
               let steps =
                   [ VDate(DateOnly(2024, 1, 2)), TypeDate, Some "2024-01-02"
-                    VDateTime(DateTime(2024, 1, 3, 12, 30, 0)), TypeDateTime, Some "2024-01-03 12:30:00"
-                    VDate(DateOnly(2024, 1, 4)), TypeDateTime, Some "2024-01-04 00:00:00"
-                    VInt 20240105L, TypeDateTime, Some "2024-01-05 00:00:00"
+                    VDateTime(DateTime(2024, 1, 3, 12, 30, 0)), TypeDateTime, Some "2024-01-03 12:30:00.000000"
+                    VDate(DateOnly(2024, 1, 4)), TypeDateTime, Some "2024-01-04 00:00:00.000000"
+                    VInt 20240105L, TypeDateTime, Some "2024-01-05 00:00:00.000000"
                     VNull, TypeDateTime, None ]
               (session, steps)
               ||> List.fold (fun session (value, expectedType, expectedValue) ->
@@ -551,6 +551,47 @@ let tests =
               Expect.equal result (ResultSet([ "d"; "dt" ], [ [ Some "10100000.5000"; Some "10100000515202.5617280000" ] ])) "stored zero-component fields"
               Expect.equal (current.LastResultColumnMetadata |> List.map (fun value -> value.TypeId, value.ColumnLength, value.Decimals))
                   [ TypeNewDecimal, 14u, 4uy; TypeNewDecimal, 26u, 10uy ] "stored zero-component shapes"
+
+          testCase "temporal arithmetic descriptors retain declared numeric precision"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, expected, typeId, width, scale in
+                  [ "TIMESTAMP '2020-01-01 00:00:00.000'+0", "20200101000000.000", TypeNewDecimal, 20u, 3uy
+                    "TIMESTAMP '2020-01-01 00:00:00.123'+0", "20200101000000.123", TypeNewDecimal, 20u, 3uy
+                    "-TIMESTAMP '2020-01-01 00:00:00.123'", "-20200101000000.12", TypeDouble, 20u, 3uy
+                    "CAST('2020-01-01' AS DATE)+0", "20200101", TypeLongLong, 10u, 0uy
+                    "CAST('2020-01-01' AS DATETIME)*1", "20200101000000", TypeLongLong, 16u, 0uy
+                    "CAST('2020-01-01' AS DATETIME(6))+0", "20200101000000.000000", TypeNewDecimal, 23u, 6uy
+                    "CAST('2020-01-01' AS DATETIME(6))-0", "20200101000000.000000", TypeNewDecimal, 23u, 6uy
+                    "CAST('2020-01-01' AS DATETIME(6))*1", "20200101000000.000000", TypeNewDecimal, 23u, 6uy
+                    "CAST('-12:34:56' AS TIME(3))+0", "-123456.000", TypeNewDecimal, 13u, 3uy
+                    "-CAST('2020-01-01 03:04:05.123456' AS DATETIME(6))", "-20200101030405.125", TypeDouble, 23u, 6uy
+                    "ABS(CAST('2020-01-01 03:04:05.123456' AS DATETIME(6)))", "20200101030405.125", TypeDouble, 23u, 6uy ] do
+                  let current, result = handle session ("SELECT " + expression + " AS value")
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) expression
+                  Expect.equal (current.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength, item.Decimals))
+                      [ typeId, width, scale ] (expression + " descriptor")
+
+          testCase "binary temporal arithmetic parameters retain six fractional digits"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ?+0 AS value"
+              let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+              let statement = createPreparedStatement session sql ast count
+              for value, expected in
+                  [ DateTime(2020,1,1), "20200101000000.000000"
+                    DateTime(2020,1,1).AddMilliseconds(123.0), "20200101000000.123000" ] do
+                  let current, result = executePrepared session statement [ VDateTime value ]
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) "bound value"
+                  Expect.equal (current.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength, item.Decimals))
+                      [ TypeNewDecimal, 23u, 6uy ] "bound descriptor"
+              let sql = "SELECT ADDTIME(CAST(? AS TIME(6)), ?) AS value"
+              let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+              let statement = createPreparedStatement session sql ast count
+              let values = [ "10:00:00"; "01:02:03" ] |> List.map (Fsdb.Temporal.tryParseTimeValue >> Option.get >> VTime)
+              let _, result = executePrepared session statement values
+              Expect.equal result (ResultSet([ "value" ], [ [ Some "11:02:03.000000" ] ])) "TIME values survive an inherited DATETIME context"
+
 
           testCase "year zero invalid calendar days obey ALLOW_INVALID_DATES"
           <| fun _ ->

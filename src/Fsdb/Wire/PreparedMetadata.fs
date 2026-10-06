@@ -742,6 +742,9 @@ let internal bindParameters source store registry schema schemaChanged refreshVa
                 let expression =
                     match binding, value, family expected with
                     | Some(UnsignedIntegerOnly | ColumnAssignment), _, _ -> Lit value
+                    | _, _, (CalendarDate | ClockTime | CalendarTime)
+                        when value = VNull || family (metadataOfValue value) = family expected ->
+                        Cast(Lit value, parameterType expected)
                     | _, VNull, _ | _, _, Integral _ when Set.contains parameterIndex analysis.ProjectedParameters ->
                         Cast(Lit value, parameterType expected)
                     | _ -> Lit value

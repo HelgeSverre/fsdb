@@ -2187,6 +2187,38 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private temporalArithmeticDescriptors =
+        { Name = "temporal-arithmetic-descriptors"
+          Setup = [| "SET sql_mode=''"; "SET time_zone='+00:00'"
+                     "CREATE TABLE temporal_arithmetic(id INT,d DATE,dt DATETIME(6),tm TIME(3),ts TIMESTAMP(6))"
+                     "INSERT INTO temporal_arithmetic VALUES(1,'2020-01-01','2020-01-01','-12:34:56','2020-01-01'),(2,'2020-01-02','2020-01-02 03:04:05.123456','12:34:56.123','2020-01-02 03:04:05.123456')" |]
+          Steps =
+            [| for index, operand in
+                   [ "CAST('2020-01-01' AS DATE)"; "CAST('2020-01-01' AS DATETIME)"
+                     "CAST('2020-01-01' AS DATETIME(6))"; "CAST('2020-01-01 03:04:05.123456' AS DATETIME(6))"
+                     "CAST('-12:34:56' AS TIME(3))"; "TIMESTAMP '2020-01-01 00:00:00.000'"; "TIMESTAMP '2020-01-01 00:00:00.123'" ] |> List.indexed do
+                   for operation, expression in
+                       [ "add", operand + "+0"; "subtract", operand + "-0"; "multiply", operand + "*1"
+                         "negate", "-" + operand; "absolute", "ABS(" + operand + ")"; "modulo", "MOD(" + operand + ",2)" ] do
+                       let name = sprintf "%d-%s" index operation
+                       let sql = "SELECT " + expression + " AS value"
+                       Contract.query (name + "-text") sql
+                       Contract.preparedQuery (name + "-binary") sql [||]
+               for operation, format in
+                   [ "add", "%s+0"; "multiply", "%s*1"; "negate", "-%s"; "absolute", "ABS(%s)" ] do
+                   let columns = [ "d"; "dt"; "tm"; "ts" ] |> List.map (fun column -> format.Replace("%s",column) + " AS " + column) |> String.concat ","
+                   let sql = "SELECT " + columns + " FROM temporal_arithmetic ORDER BY id"
+                   Contract.query (operation + "-columns-text") sql
+                   Contract.preparedQuery (operation + "-columns-binary") sql [||]
+               Contract.query "string-time-result" "SELECT SUBTIME('2008-01-01 01:01:01.000002','1:1:1.000002') AS value"
+               Contract.query "typed-time-result" "SELECT CAST(SUBTIME(CAST('2008-01-01 01:01:01.000002' AS DATETIME(6)),'1:1:1.000002') AS CHAR) AS value"
+               Contract.prepare "prepare-datetime" "datetime-arithmetic" Query "SELECT ?+0 AS value" [| box (DateTime(2020,1,1)) |]
+               Contract.invoke "whole-datetime" "datetime-arithmetic" OracleSuccess
+               Contract.invokeWith "fractional-datetime" "datetime-arithmetic" [| box (DateTime(2020,1,1).AddMilliseconds(123.0)) |]
+               Contract.close "close-datetime" "datetime-arithmetic" |]
+          Cleanup = [| "DROP TABLE IF EXISTS temporal_arithmetic"; "SET sql_mode=DEFAULT"; "SET time_zone=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private temporalNumericConversion =
         { Name = "temporal-numeric-conversion"
           Setup = [| "SET sql_mode=''"; "SET time_zone='+00:00'"
@@ -2479,6 +2511,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            temporalNumericConversion
+           temporalArithmeticDescriptors
            calendarCasts
            componentDateTimeFractions
            binaryLiteralContexts
