@@ -405,6 +405,20 @@ let tests =
               let _, columns = preparedMetadata session statement.Ast count
               Expect.equal (columns |> List.map (fun column -> shape column.Metadata)) expected "prepare byte widths"
 
+          testCase "unfiltered scalar subqueries retain projected numeric metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT (SELECT b'01')+0 AS n,SUM((SELECT b'01')) AS s,AVG((SELECT b'01')) AS a,(SELECT 1.25)+0 AS d,(SELECT (SELECT b'01'))+0 AS nested"
+              let session, result = handle session sql
+              Expect.equal result (ResultSet([ "n"; "s"; "a"; "d"; "nested" ], [ [ Some "1"; Some "1"; Some "1.0000"; Some "1.25"; Some "1" ] ])) "scalar values and decimal display"
+              let families = List.map (fun metadata -> metadata.TypeId)
+              let expected = [ TypeLongLong; TypeNewDecimal; TypeNewDecimal; TypeNewDecimal; TypeLongLong ]
+              Expect.equal (families session.LastResultColumnMetadata) expected "execution families"
+              let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let statement = createPreparedStatement session sql ast count
+              let _, columns = preparedMetadata session statement.Ast count
+              Expect.equal (columns |> List.map (fun column -> column.Metadata) |> families) expected "prepared families"
+
           testCase "binary literal variables discard numeric origin before binding"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

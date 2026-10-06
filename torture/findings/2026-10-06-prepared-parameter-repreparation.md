@@ -515,10 +515,21 @@ for AVG(b'100000001'), and 31/0 for SUM(X'010001'). Empty literals contribute
 one precision digit. The maintained decimal-descriptor oracle verifies these
 shapes in text and binary execution.
 
+Unfiltered source-free scalar subqueries retain their projection descriptors:
+`(SELECT b'01')+0` is BIGINT 1, SUM of that subquery is DECIMAL 1, and AVG
+is DECIMAL 1.0000. Nested scalar projections retain the same interpretation.
+A scalar subquery with a row source or HAVING materializes its bytes instead:
+`(SELECT b'01' FROM t)+0` and `(SELECT b'01' HAVING 1)+0` return DOUBLE zero.
+A scalar comparison likewise sees zero, while IN and ANY compare against the
+literal's numeric interpretation and return true for numeric one. Scalar
+materialization therefore belongs outside the shared membership result cache.
+
 Remaining descriptors are observable: `b'01'+0` has MySQL wire length 5 and
-fsdb length 20; `b'01'/2` has MySQL length 9 and fsdb length 7. A scalar
-`(SELECT b'01')+0` retains value 1 in both engines, but fsdb reports DOUBLE
-where MySQL reports BIGINT. These remaining differences stay in GAPS.md.
+fsdb length 20; `b'01'/2` has MySQL length 9 and fsdb length 7. Conditional,
+grouped, and limited source-free scalar reduction remains incomplete. MySQL
+reduces a constant-true WHERE, materializes a user-variable WHERE, and removes
+LIMIT 0 on a reducible source-free scalar query. These optimizer-dependent
+boundaries remain in GAPS.md along with the remaining expression descriptors.
 
 Explicit `_binary` accepts quoted bit/hex literals and the lowercase `0b`/`0x`
 prefixes. The parser shares their existing byte decoders and removes numeric
@@ -529,6 +540,7 @@ Whitespace or a comment separates the introducer from a letter/digit prefix;
 remain intact.
 
 The contract manifest at
-`artifacts/runs/20261006T161206447-27814/contracts/manifest.json` verifies the
-literal contexts and explicit binary introducers in text and binary execution,
-variable materialization, and numeric storage boundaries without differences.
+`artifacts/runs/20261006T162508326-31210/contracts/manifest.json` verifies the
+literal contexts, scalar subqueries, and explicit binary introducers in text and
+binary execution, variable materialization, and numeric storage boundaries
+without differences.

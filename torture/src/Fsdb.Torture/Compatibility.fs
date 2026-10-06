@@ -2117,6 +2117,10 @@ module ContractCatalog =
                      "widths", "SELECT SUM(b'') AS empty_value,SUM(b'100000001') AS sum_value,AVG(b'100000001') AS average_value,SUM(X'010001') AS hex_value"
                      "casts", "SELECT CAST(b'01' AS UNSIGNED) AS u,CAST(b'01' AS DECIMAL) AS d,b'01'=1 AS numeric_equal,b'01'='1' AS string_equal"
                      "conditional", "SELECT IF(1,b'01',b'10')+0 AS branch_value,CASE WHEN 1 THEN b'01' ELSE b'10' END+0 AS case_value,COALESCE(b'01',b'10')+0 AS coalesced,IFNULL(b'01',b'10')+0 AS nonnull,CONCAT(b'01')+0 AS concatenated"
+                     "scalar-reduced", "SELECT (SELECT b'01')+0 AS n,SUM((SELECT b'01')) AS s,AVG((SELECT b'01')) AS a,(SELECT 1.25)+0 AS d,(SELECT (SELECT b'01'))+0 AS nested"
+                     "scalar-materialized", "SELECT (SELECT b'01' FROM (SELECT 1) t)+0 AS sourced,(SELECT b'01' HAVING 1)+0 AS filtered"
+                     "scalar-aggregate-window", "SELECT (SELECT MIN(b'01'))+0 AS minimum,(SELECT FIRST_VALUE(b'01') OVER ())+0 AS first_result"
+                     "scalar-comparison", "SELECT (SELECT b'01' FROM (SELECT 1)t)=1 AS scalar_value,1 IN (SELECT b'01' FROM (SELECT 1)t) AS membership,1=ANY(SELECT b'01' FROM (SELECT 1)t) AS quantified"
                      "derived", "SELECT SUM(v) AS s,AVG(v) AS a FROM (SELECT b'01' AS v) t"
                      "bytes", "SELECT HEX(b'000000001') AS leading_zero,HEX(b'') AS empty_value,HEX(CONCAT(b'01')) AS concatenated"
                      "wide", "SELECT SUM(b'1111111111111111111111111111111111111111111111111111111111111111') AS s,b'1111111111111111111111111111111111111111111111111111111111111111'+0 AS arithmetic" ] do

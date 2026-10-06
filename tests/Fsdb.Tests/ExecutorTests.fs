@@ -3727,6 +3727,21 @@ let tests =
                         | ResultSet(_, [ row ]) -> Expect.equal row (List.map Some expected) sql
                         | other -> failtestf "unexpected literal result: %A" other
 
+                testCase "scalar subquery row sources materialize binary literal origin"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE scalar_origin(n INT)" |> ignore
+                    runDefault store "INSERT INTO scalar_origin VALUES(1)" |> ignore
+                    for sql in
+                        [ "SELECT (SELECT b'01' FROM scalar_origin)+0,SUM((SELECT b'01' FROM scalar_origin))"
+                          "SELECT (SELECT b'01' FROM (SELECT 1) t)+0,(SELECT b'01' HAVING 1)+0"
+                          "SELECT (SELECT MIN(b'01'))+0,(SELECT FIRST_VALUE(b'01') OVER ())+0" ] do
+                        match runDefault store sql with
+                        | ResultSet(_, rows) -> Expect.equal rows [ [ Some "0"; Some "0" ] ] sql
+                        | result -> failtestf "unexpected scalar result: %A" result
+                    let compared = runDefault store "SELECT (SELECT b'01' FROM scalar_origin)=1 AS scalar_value,1 IN (SELECT b'01' FROM scalar_origin) AS membership,1=ANY(SELECT b'01' FROM scalar_origin) AS quantified"
+                    Expect.equal compared (ResultSet([ "scalar_value"; "membership"; "quantified" ], [ [ Some "0"; Some "1"; Some "1" ] ])) "scalar materialization does not change membership coercion"
+
                 testCase "numeric aggregates convert text before folding and DISTINCT"
                 <| fun _ ->
                     let store = newStore ()

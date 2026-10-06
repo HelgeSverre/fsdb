@@ -2411,6 +2411,24 @@ let rec private tryClosedNumericValue registry expression =
     | :? System.OverflowException -> None
     | Functions.SqlError _ -> None
 
+let private scalarSubqueryMaterializes registry (select: SelectStmt) =
+    select.From.IsSome
+    || not select.Joins.IsEmpty
+    || select.Having.IsSome
+    || (select.Projections |> List.exists (fun (expression, _) ->
+        containsAggregate registry expression || not (collectWindowFuncs expression).IsEmpty))
+
+/// An unfiltered, source-free scalar projection has its expression's descriptor.
+let private tryUnfilteredScalarProjection registry (select: SelectStmt) =
+    match select.Projections with
+    | [ expression, _ ] when
+        not (scalarSubqueryMaterializes registry select)
+        && select.Where.IsNone
+        && select.GroupBy.IsEmpty
+        && select.Limit.IsNone
+        && select.Offset.IsNone -> Some expression
+    | _ -> None
+
 type private DecimalShape =
     { Precision: int
       Scale: int }
@@ -2467,6 +2485,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         let rec literalBytes = function
             | Lit(VBinaryLiteral bytes) -> Some bytes
             | Distinct inner -> literalBytes inner
+            | Subquery select -> tryUnfilteredScalarProjection ctx.Registry select |> Option.bind literalBytes
             | _ -> None
         match literalBytes expression with
         | Some bytes ->
@@ -3072,7 +3091,9 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | WinAggregate(name, args) -> metadataOfExpr ctx (FuncCall(name, args))
     | Case(_, whens, elseBranch) ->
         (whens |> List.map snd) @ [ elseBranch |> Option.defaultValue (Lit VNull) ] |> choose
-    | Subquery _
+    | Subquery select ->
+        tryUnfilteredScalarProjection ctx.Registry select
+        |> Option.bind (metadataOfExpr ctx)
     | Placeholder _
     | Star _ -> None
 
@@ -5625,7 +5646,12 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | MultipleResults _, _ -> Error nestedSubqueryResultsError
             | ResultSet(cols, _), _ when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, []), _ -> Ok VNull
-            | ResultSet(_, [ _ ]), [ row ] -> Ok(row |> Array.tryHead |> Option.defaultValue VNull)
+            | ResultSet(_, [ _ ]), [ row ] ->
+                let value = row |> Array.tryHead |> Option.defaultValue VNull
+                if scalarSubqueryMaterializes ctx.Registry select then
+                    Ok(Value.materialize value)
+                else
+                    Ok value
             | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
 
 and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, EvalError> =
