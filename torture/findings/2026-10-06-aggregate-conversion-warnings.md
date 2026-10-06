@@ -20,12 +20,13 @@ input values and sliding frames. Partition key order is also observable in
 the warning rows, so partition evaluation follows collation-aware key order.
 
 The executor shares its numeric accumulator between grouped aggregates and
-stable SUM/AVG inputs in growing ROWS frames and default RANGE prefixes.
+stable SUM/AVG inputs in growing ROWS and RANGE frames.
 Exact inputs retain DECIMAL accumulation; approximate inputs retain DOUBLE
 accumulation. DISTINCT suppresses diagnostics only around numeric conversion,
 leaving expression evaluation outside that suppression. Unclassified custom
 functions and volatile expressions retain their existing evaluation strategy.
-Offset RANGE frames remain outside this optimization.
+Offset RANGE frames preserve NULL peers at unbounded edges; see
+[the RANGE boundary evidence](2026-10-06-offset-range-null-boundaries.md).
 
 Reproduction: `torture/scripts/aggregate-warning-oracle.fsx` checks values and
 warning rows against native MySQL 8.4.11 over text and prepared protocols.

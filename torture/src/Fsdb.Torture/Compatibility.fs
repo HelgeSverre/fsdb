@@ -2659,6 +2659,30 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS aggregate_warning_input" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private offsetRangeAggregates =
+        { Name = "offset-range-aggregates"
+          Setup =
+            [| "CREATE TABLE range_inputs(id INT PRIMARY KEY,k INT,dt DATETIME,v VARCHAR(20))"
+               "INSERT INTO range_inputs VALUES(1,NULL,NULL,'1x'),(2,NULL,NULL,'2x'),(3,1,'2020-01-02','4x'),(4,3,'2020-01-04','8x'),(5,3,'2020-01-04','16x'),(6,7,'2020-01-08','32x')" |]
+          Steps =
+            [| for key, offset in [ "k", "1"; "dt", "INTERVAL 1 DAY" ] do
+                   for direction in [ "ASC"; "DESC" ] do
+                       for index, frame in
+                           [ "UNBOUNDED PRECEDING AND " + offset + " PRECEDING"
+                             "UNBOUNDED PRECEDING AND " + offset + " FOLLOWING"
+                             offset + " PRECEDING AND UNBOUNDED FOLLOWING"
+                             offset + " FOLLOWING AND UNBOUNDED FOLLOWING"
+                             offset + " PRECEDING AND " + offset + " FOLLOWING" ] |> List.indexed do
+                           for filterName, filter in [ "nullable", ""; "non-null", " WHERE k IS NOT NULL"; "all-null", " WHERE k IS NULL" ] do
+                               let name = sprintf "%s-%s-%d-%s" key direction index filterName
+                               let sql = "SELECT id,SUM(v) OVER(ORDER BY " + key + " " + direction + " RANGE BETWEEN " + frame + ") AS value FROM range_inputs" + filter + " ORDER BY id"
+                               Contract.query (name + "-text") sql
+                               Contract.query (name + "-text-warnings") "SHOW WARNINGS"
+                               Contract.preparedQuery (name + "-binary") sql [||]
+                               Contract.query (name + "-binary-warnings") "SHOW WARNINGS" |]
+          Cleanup = [| "DROP TABLE IF EXISTS range_inputs" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private approximateAggregateDescriptors =
         { Name = "approximate-aggregate-descriptors"
           Setup = [||]
@@ -2845,6 +2869,7 @@ module ContractCatalog =
            divisionPrecisionIncrement
            approximateAggregateDescriptors
            numericAggregateConversion
+           offsetRangeAggregates
            temporalNumericConversion
            roundingPrecisionDescriptors
            integralRoundingDescriptors

@@ -57,6 +57,24 @@ let tests =
                   let expectedWarnings = warnings |> List.map (fun text -> [ Some "Warning"; Some "1292"; Some("Truncated incorrect DOUBLE value: '" + text + "'") ])
                   Expect.equal actualWarnings (ResultSet([ "Level"; "Code"; "Message" ], expectedWarnings)) (expression + " warnings")
 
+          testCase "offset RANGE frames retain NULL peers at unbounded edges"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE range_inputs(id INT PRIMARY KEY,k INT,v VARCHAR(20))"
+              let session, _ = handle session "INSERT INTO range_inputs VALUES(1,NULL,'1x'),(2,NULL,'2x'),(3,1,'4x'),(4,3,'8x'),(5,3,'16x'),(6,7,'32x')"
+              let all = [ "1x"; "2x"; "4x"; "8x"; "16x"; "32x" ]
+              for order, frame, values, warnings in
+                  [ "ASC", "UNBOUNDED PRECEDING AND 1 PRECEDING", [ Some "3"; Some "3"; Some "3"; Some "7"; Some "7"; Some "31" ], List.take 5 all
+                    "DESC", "UNBOUNDED PRECEDING AND 1 PRECEDING", [ Some "63"; Some "63"; Some "56"; Some "32"; Some "32"; None ], [ "32x"; "8x"; "16x"; "4x"; "1x"; "2x" ]
+                    "ASC", "1 PRECEDING AND UNBOUNDED FOLLOWING", [ Some "63"; Some "63"; Some "60"; Some "56"; Some "56"; Some "32" ],
+                        all @ all @ List.skip 2 all @ List.skip 3 all @ List.skip 3 all @ [ "32x" ] ] do
+                  let sql = "SELECT SUM(v) OVER(ORDER BY k " + order + " RANGE BETWEEN " + frame + ") AS value FROM range_inputs ORDER BY id"
+                  let current, actual = handle session sql
+                  Expect.equal actual (ResultSet([ "value" ], List.map List.singleton values)) sql
+                  let _, actualWarnings = handle current "SHOW WARNINGS"
+                  let expectedWarnings = warnings |> List.map (fun text -> [ Some "Warning"; Some "1292"; Some("Truncated incorrect DOUBLE value: '" + text + "'") ])
+                  Expect.equal actualWarnings (ResultSet([ "Level"; "Code"; "Message" ], expectedWarnings)) (sql + " warnings")
+
           testCase "block_encryption_mode selects AES mode per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

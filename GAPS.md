@@ -219,11 +219,11 @@ MySQL's UCA weight-table bytes.
 SUM and AVG convert text before accumulation, including single-row windows;
 their DISTINCT forms compare converted numbers while COUNT retains text
 collation equality. Text and binary-string conversions emit numeric-prefix
-warnings; DISTINCT suppresses those conversion warnings. Growing ROWS frames
-and default RANGE prefixes consume stable SUM/AVG inputs once per partition;
-bounded sliding frames retain repeated conversion warnings. Offset RANGE frames
-and volatile window arguments still use per-frame evaluation, so their warning
-multiplicity remains part of the diagnostics gap.
+warnings; DISTINCT suppresses those conversion warnings. Growing ROWS and RANGE
+frames consume stable SUM/AVG inputs once per partition; bounded sliding frames
+retain repeated conversion warnings. Offset RANGE frames preserve NULL peers
+at unbounded edges. Volatile window arguments still use per-frame evaluation,
+so their warning multiplicity remains part of the diagnostics gap.
 
 MySQL Enterprise Encryption is not a Community Server compatibility gap. Its
 asymmetric key-management functions belong to the separately installed

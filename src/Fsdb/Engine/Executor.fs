@@ -14532,8 +14532,12 @@ and private runWindowedSelect
                     let selfKey = ordKeyAt group pos |> List.tryHead |> Option.map fst
 
                     match selfKey with
-                    | None -> Ok(peerLow group pos, peerHigh group pos)
-                    | Some VNull -> Ok(peerLow group pos, peerHigh group pos)
+                    | None
+                    | Some VNull ->
+                        // Offsets from NULL stay at its peer group; unbounded edges still reach the partition edge.
+                        let lo = if startBound = UnboundedPreceding then 0 else peerLow group pos
+                        let hi = if endBound = UnboundedFollowing then Array.length group - 1 else peerHigh group pos
+                        Ok(lo, hi)
                     | Some current ->
                         let descending = dirs |> List.tryHead |> Option.map ((=) Desc) |> Option.defaultValue false
 
@@ -14619,10 +14623,15 @@ and private runWindowedSelect
                                         key
                                         |> List.tryHead
                                         |> Option.map fst
-                                        |> Option.exists (function VNull -> false | value -> within value))
+                                        |> Option.exists (function
+                                            | VNull ->
+                                                (startBound = UnboundedPreceding && not descending)
+                                                || (endBound = UnboundedFollowing && descending)
+                                            | value -> within value))
 
                                 match inFrame |> Array.tryFindIndex id, inFrame |> Array.tryFindIndexBack id with
                                 | Some low, Some high -> low, high
+                                | _ when startBound = UnboundedPreceding -> 0, -1
                                 | _ -> pos, pos - 1))
 
                 // [lo, hi] row indexes (inclusive; `hi < lo` means an empty
@@ -14853,9 +14862,7 @@ and private runWindowedSelect
                                         |> Option.forall (fun extension -> not extension.Deterministic)
                                     | _ -> false)
                             not unclassifiedFunction && isStatementStableExpr store registry dbName scope expression
-                        let growingFrame =
-                            frame.Start = UnboundedPreceding
-                            && (frame.Unit = FrameRows || frame.End = CurrentRow || frame.End = UnboundedFollowing)
+                        let growingFrame = frame.Start = UnboundedPreceding
                         let values =
                             match args with
                             | [ expression ]
