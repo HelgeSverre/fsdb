@@ -1137,18 +1137,7 @@ let private resolveSystemSetRhs
 /// (`sql_mode`'s comma-separated mode list) nor a function call's argument
 /// list (`SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')`) gets
 /// split apart.
-let private splitSetAssignments (options: Parser.ParserOptions) (sql: string) : Result<string list, string> =
-    Parser.splitNonEmptyTopLevelCommaSeparatedWithOptions options sql
-    |> Result.bind (function
-        | first :: rest ->
-            let prefix = Regex.Match(first, @"^SET\s+", RegexOptions.IgnoreCase)
-
-            if prefix.Success then
-                let assignment = first.Substring(prefix.Length).Trim()
-                if assignment = "" then Error "SET requires an assignment" else Ok(assignment :: rest)
-            else
-                Error "SET requires an assignment"
-        | [] -> Error "SET requires an assignment")
+let private splitSetAssignments = Parser.splitSetAssignmentsWithOptions
 
 /// Outer SET effects are published after all assignments have been validated.
 type private TransactionIsolationScope =
@@ -1880,23 +1869,8 @@ let private executeUserVariableSet session assignments =
     |> List.map (fun (target, expression) -> AssignVariable { Target = UserVariableTarget target; Expression = Some expression })
     |> executeVariableSet session
 
-/// Parses assignment expressions together so parameter positions span the whole SET.
-let private parseSetExpressions options (expressions: string list) =
-    match Parser.parseWithOptions options ("DO " + String.concat "\n," expressions) with
-    | Ok(Do parsed) when expressions.Length = parsed.Length -> Some parsed
-    | _ -> None
-
-let private tryParseUserVariableSet options sql =
-    splitSetAssignments options sql
-    |> Result.toOption
-    |> Option.bind (fun fragments ->
-        fragments
-        |> traverse Parser.parseUserVariableSetAssignment
-        |> Result.toOption)
-    |> Option.bind (fun assignments ->
-        let targets, expressions = List.unzip assignments
-        parseSetExpressions options expressions
-        |> Option.map (List.zip targets))
+let private parseSetExpressions = Parser.parseSetExpressionsWithOptions
+let private tryParseUserVariableSet = Parser.tryParseUserVariableSetWithOptions
 
 /// Retains SET expressions while DEFAULT and assignment targets stay outside evaluation.
 let private tryParsePreparedVariableSet options sql =

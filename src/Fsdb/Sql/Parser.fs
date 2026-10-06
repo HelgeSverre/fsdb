@@ -5450,6 +5450,41 @@ let parseUserVariableSetAssignment (sql: string) : Result<UserVariableRef * stri
     | Success(result, _, _) -> Result.Ok result
     | Failure(message, _, _) -> Result.Error message
 
+let splitSetAssignmentsWithOptions (options: ParserOptions) (sql: string) : Result<string list, string> =
+    splitNonEmptyTopLevelCommaSeparatedWithOptions options sql
+    |> Result.bind (function
+        | first :: rest ->
+            let prefix = System.Text.RegularExpressions.Regex.Match(first, @"^SET\s+", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+
+            if prefix.Success then
+                let assignment = first.Substring(prefix.Length).Trim()
+                if assignment = "" then Result.Error "SET requires an assignment" else Result.Ok(assignment :: rest)
+            else
+                Result.Error "SET requires an assignment"
+        | [] -> Result.Error "SET requires an assignment")
+
+/// Parses assignment expressions together so parameter positions span the whole SET.
+let parseSetExpressionsWithOptions options (expressions: string list) =
+    match parseWithOptions options ("DO " + String.concat "\n," expressions) with
+    | Result.Ok(Do parsed) when expressions.Length = parsed.Length -> Some parsed
+    | _ -> None
+
+let tryParseUserVariableSetWithOptions options sql =
+    splitSetAssignmentsWithOptions options sql
+    |> Result.toOption
+    |> Option.bind (fun fragments ->
+        fragments
+        |> List.fold (fun state fragment ->
+            state |> Option.bind (fun parsed ->
+                parseUserVariableSetAssignment fragment
+                |> Result.toOption
+                |> Option.map (fun assignment -> assignment :: parsed))) (Some [])
+        |> Option.map List.rev)
+    |> Option.bind (fun assignments ->
+        let targets, expressions = List.unzip assignments
+        parseSetExpressionsWithOptions options expressions
+        |> Option.map (List.zip targets))
+
 let parseUserVariableTarget (sql: string) : Result<UserVariableRef, string> =
     match run (ws >>. userVariableTarget .>> eof) sql with
     | Success(result, _, _) -> Result.Ok result
