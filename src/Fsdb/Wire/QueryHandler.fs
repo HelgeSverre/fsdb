@@ -1596,6 +1596,12 @@ let private systemSetAction
     | Ok(VNull, _) -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
     | Ok(value, sideEffects) -> Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
 
+let private namesSetAction charset collation =
+    match collation with
+    | Some name when Collation.tryFind name |> Option.isNone ->
+        Error(Err(1273, sprintf "Unknown collation: '%s'" name))
+    | _ -> Ok(SetNamesAction(charset, collation))
+
 /// Parses one SET fragment without mutating the session. Nested assignments
 /// remain visible to subsequent right-hand sides in the same statement.
 let private parseSetFragment
@@ -1613,11 +1619,8 @@ let private parseSetFragment
             else
                 None
 
-        // MySQL rejects a `SET NAMES x COLLATE unknown` outright (1273),
-        // same as the collation_connection assignment path below.
-        match explicitCollation |> Option.map Collation.tryFind with
-        | Some None -> Error(Err(1273, sprintf "Unknown collation: '%s'" namesMatch.Groups.[2].Value))
-        | _ -> Ok(SetNamesAction(namesMatch.Groups.[1].Value, explicitCollation), userVariables)
+        namesSetAction namesMatch.Groups.[1].Value explicitCollation
+        |> Result.map (fun action -> action, userVariables)
     else
         match Parser.parseUserVariableSetAssignment fragment with
         | Ok(variable, rhs) ->
@@ -1816,10 +1819,10 @@ let private applySetActions (session: Session) parsed : Session * QueryResult =
 
                 Session.trackSystemVariableAssignments changesSession changedSystemVariables updated, Affected 0UL
 
-let private executeVariableSet (session: Session) (assignments: VariableAssignment list) =
+let private executeVariableSet (session: Session) (clauses: SetClause list) =
     let variables = expressionVariables session
-    let validateTarget assignment =
-        match assignment.Target with
+    let validateTarget target =
+        match target with
         | UserVariableTarget target ->
             match UserVariableRef.validationError target with
             | Some message -> Error(Err(3061, message))
@@ -1851,10 +1854,16 @@ let private executeVariableSet (session: Session) (assignments: VariableAssignme
                     (Ok(value, variables.UserVariables.Value))
                 |> Result.map fst)
 
+    let validateClause = function
+        | AssignVariable assignment -> validateTarget assignment.Target
+        | SetNames(charset, collation) -> namesSetAction charset collation |> Result.map ignore
+    let evaluateClause = function
+        | AssignVariable assignment -> evaluate assignment
+        | SetNames(charset, collation) -> namesSetAction charset collation
     let evaluated =
-        assignments
-        |> traverse validateTarget
-        |> Result.bind (fun _ -> assignments |> traverse evaluate)
+        clauses
+        |> traverse validateClause
+        |> Result.bind (fun _ -> clauses |> traverse evaluateClause)
     // Nested := effects occur during evaluation; outer SET assignments wait for success.
     let session = { session with UserVariables = variables.UserVariables.Value }
     let parsed = evaluated |> Result.map (fun actions -> List.rev actions, session.UserVariables)
@@ -1862,7 +1871,7 @@ let private executeVariableSet (session: Session) (assignments: VariableAssignme
 
 let private executeUserVariableSet session assignments =
     assignments
-    |> List.map (fun (target, expression) -> { Target = UserVariableTarget target; Expression = Some expression })
+    |> List.map (fun (target, expression) -> AssignVariable { Target = UserVariableTarget target; Expression = Some expression })
     |> executeVariableSet session
 
 /// Parses assignment expressions together so parameter positions span the whole SET.
@@ -1885,39 +1894,50 @@ let private tryParseUserVariableSet options sql =
 
 /// Retains SET expressions while DEFAULT and assignment targets stay outside evaluation.
 let private tryParsePreparedVariableSet options sql =
-    let parseTarget fragment =
-        match Parser.parseUserVariableSetAssignment fragment with
-        | Ok(target, expression) -> Some(UserVariableTarget target, Some expression)
-        | Error _ ->
-            let matched = setVar.Match fragment
-            if not matched.Success then None
-            else
-                let scope = matched.Groups.[1].Value
-                let name = stripIdentifierQuotes matched.Groups.[2].Value |> _.ToLowerInvariant()
-                let rhs = matched.Groups.[3].Value.Trim()
-                let expression =
-                    if rhs.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase) then None
-                    elif rhs.Equals("NULL", StringComparison.OrdinalIgnoreCase) then Some "NULL"
-                    elif name = "max_points_in_geometry" && rhs.Equals("TRUE", StringComparison.OrdinalIgnoreCase) then Some "1"
-                    elif name = "max_points_in_geometry" && rhs.Equals("FALSE", StringComparison.OrdinalIgnoreCase) then Some "0"
-                    elif bareSetIdentifier.IsMatch rhs && name <> "max_sp_recursion_depth" then
-                        Some("'" + rhs + "'")
-                    else Some rhs
-                Some(SystemVariableTarget(scope, name), expression)
+    let variable target expression =
+        Some(AssignVariable { Target = target; Expression = None }, expression)
+
+    let parseClause fragment =
+        let names = setNames.Match fragment
+        if names.Success then
+            let collation = if names.Groups.[2].Success then Some names.Groups.[2].Value else None
+            Some(SetNames(names.Groups.[1].Value, collation), None)
+        else
+            match Parser.parseUserVariableSetAssignment fragment with
+            | Ok(target, expression) -> variable (UserVariableTarget target) (Some expression)
+            | Error _ ->
+                let matched = setVar.Match fragment
+                if not matched.Success then None
+                else
+                    let scope = matched.Groups.[1].Value
+                    let name = stripIdentifierQuotes matched.Groups.[2].Value |> _.ToLowerInvariant()
+                    let rhs = matched.Groups.[3].Value.Trim()
+                    let expression =
+                        if rhs.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase) then None
+                        elif rhs.Equals("NULL", StringComparison.OrdinalIgnoreCase) then Some "NULL"
+                        elif name = "max_points_in_geometry" && rhs.Equals("TRUE", StringComparison.OrdinalIgnoreCase) then Some "1"
+                        elif name = "max_points_in_geometry" && rhs.Equals("FALSE", StringComparison.OrdinalIgnoreCase) then Some "0"
+                        elif bareSetIdentifier.IsMatch rhs && name <> "max_sp_recursion_depth" then
+                            Some("'" + rhs + "'")
+                        else Some rhs
+                    variable (SystemVariableTarget(scope, name)) expression
 
     splitSetAssignments options sql
     |> Result.toOption
     |> Option.bind (fun fragments ->
-        let targets = fragments |> List.map parseTarget
-        if targets |> List.exists Option.isNone then None
+        let clauses = fragments |> List.map parseClause
+        if clauses |> List.exists Option.isNone then None
         else
-            let targets = targets |> List.choose id
-            let expressions = targets |> List.map (snd >> Option.defaultValue "NULL")
+            let clauses = clauses |> List.choose id
+            let expressions = clauses |> List.map (snd >> Option.defaultValue "NULL")
             parseSetExpressions options expressions
             |> Option.map (fun expressions ->
-                List.zip targets expressions
-                |> List.map (fun ((target, source), expression) ->
-                    { Target = target; Expression = source |> Option.map (fun _ -> expression) })))
+                List.zip clauses expressions
+                |> List.map (fun ((clause, source), expression) ->
+                    match clause with
+                    | AssignVariable assignment ->
+                        AssignVariable { assignment with Expression = source |> Option.map (fun _ -> expression) }
+                    | SetNames _ -> clause)))
 
 let private handleMixedSet (session: Session) (sql: string) : Session * QueryResult =
     let options = parserOptionsForSession session

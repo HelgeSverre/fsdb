@@ -378,6 +378,21 @@ let tests =
               Expect.equal session.UserVariables["x"] (VInt -2L) "outer assignments are applied after evaluation"
               Expect.equal session.UserVariables["v"] (VDecimal 1.75M) "the assignment keeps its own type"
 
+          testCase "prepared SET NAMES combinations retain direct variable types"
+          <| fun _ ->
+              for sql in
+                  [ "SET NAMES utf8mb4 COLLATE utf8mb4_bin,@x=@v"
+                    "SET @x=@v,NAMES utf8mb4 COLLATE utf8mb4_bin" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "SET @v=2"
+                  let session, result = handle session ("PREPARE names_assignment FROM '" + sql + "'")
+                  Expect.equal result (Affected 0UL) "the combined SET prepares"
+                  let session, _ = handle session "SET @v=1.75"
+                  let session, result = handle session "EXECUTE names_assignment"
+                  Expect.equal result (Affected 0UL) "the combined SET executes"
+                  Expect.equal session.UserVariables["x"] (VInt 2L) "the captured integer type is retained"
+                  Expect.equal session.Variables["collation_connection"] (Some "utf8mb4_bin") "the NAMES clause is applied"
+
           testCase "prepared mixed SET retains direct variable types"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -429,11 +444,11 @@ let tests =
               Expect.equal result (Affected 0UL) "NULL remains a value rather than a bare keyword"
               Expect.equal session.Variables["character_set_results"] None "the nullable setting is cleared"
 
-          testCase "binary mixed SET retains types and resolves DEFAULT at execution"
+          testCase "binary SET NAMES with mixed assignments retains types and resolves DEFAULT at execution"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "SET @v=2"
-              let sql = "SET @x=?, SESSION max_sp_recursion_depth=DEFAULT, @y=@v"
+              let sql = "SET NAMES utf8mb4 COLLATE utf8mb4_bin, @x=?, SESSION max_sp_recursion_depth=DEFAULT, @y=@v"
               let ast, count = prepareStatement sql |> Result.defaultWith (failtestf "%A")
               let statement = createPreparedStatement session sql ast count
               let session = { session with Statements = Map.ofList [ 1, statement ] }
@@ -441,6 +456,7 @@ let tests =
               let session, _ = handle session "SET @v=1.75"
               let session, result = executePreparedHandle session 1 [ VNull ]
               Expect.equal result (Affected 0UL) "binary mixed assignment succeeds"
+              Expect.equal session.Variables["collation_connection"] (Some "utf8mb4_bin") "the charset clause applies"
               Expect.equal session.UserVariables["y"] (VInt 2L) "NULL binding retains the captured type"
               Expect.equal (handle session "SELECT @@session.max_sp_recursion_depth" |> snd)
                   (ResultSet([ "@@session.max_sp_recursion_depth" ], [ [ Some "9" ] ])) "DEFAULT reads the current global value"

@@ -326,7 +326,7 @@ let rec private rewriteStatementWith rules =
     | Select select -> Select(rewriteSelect rules select)
     | Do expressions -> Do(List.map rewriteExpression expressions)
     | SetVariables assignments ->
-        SetVariables(assignments |> List.map (fun assignment -> { assignment with Expression = Option.map rewriteExpression assignment.Expression }))
+        SetVariables(assignments |> List.map (SetClause.mapExpression rewriteExpression))
     | Union(first, rest, orderBy, limit, offset) ->
         Union(
             rewriteSelect rules first,

@@ -2975,7 +2975,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         @ onTables "SELECT" (load.Assignments |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct)
     | Do expressions -> onTables "SELECT" (expressions |> List.collect (exprReadTables defaultDb) |> List.distinct)
     | SetVariables assignments ->
-        onTables "SELECT" (assignments |> List.choose _.Expression |> List.collect (exprReadTables defaultDb) |> List.distinct)
+        onTables "SELECT" (assignments |> List.choose SetClause.expression |> List.collect (exprReadTables defaultDb) |> List.distinct)
     | Update u ->
         let cteTables, boundCtes = cteReadTablesIn Set.empty defaultDb u.Ctes
 

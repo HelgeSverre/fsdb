@@ -130,8 +130,6 @@ integer conversion after a decimal assignment.
 
 Remaining boundaries:
 
-- SET combinations containing non-assignment clauses such as NAMES still
-  follow the text-probed path without a retained expression AST.
 - Decimal result-scale propagation beyond the covered ABS expression still
   needs a broader expression-family oracle corpus.
 - MySQL's direct decimal variable read after assigning 'abc' produces decimal
@@ -200,6 +198,26 @@ cover mixed assignment metadata and type refresh after parameter repreparation.
 The contract manifest at
 `artifacts/runs/20261006T134501838-3301/contracts/manifest.json` records parity
 for these histories, literal NULL, and parameter error codes and SQLSTATEs.
+
+## Prepared charset clauses
+
+MySQL 8.4.11 retains the captured integer type in both
+`SET NAMES utf8mb4 COLLATE utf8mb4_bin,@x=@v` and
+`SET @x=@v,NAMES utf8mb4 COLLATE utf8mb4_bin`. Preparing with @v=2 and then
+assigning decimal 1.75 stores BIGINT 2 in @x while applying the charset clause.
+The differential history also covers invalid numeric text, NULL, and a later
+integer assignment, with charset and collation inspected after execution.
+
+Charset clauses are explicit `SetClause` cases alongside variable assignments.
+Their validation is shared with ordinary SET NAMES, while expression traversal
+retains parameter binding, user-variable typing, and schema dependencies.
+Binary coverage combines NAMES with a parameter, DEFAULT, and a captured direct
+reference. A compatible NULL parameter preserves the old type; an integer
+parameter that forces repreparation refreshes it to the current decimal type,
+as independently verified through SQL PREPARE on MySQL.
+
+`artifacts/runs/20261006T135131109-4349/contracts/manifest.json` records the
+expanded charset-clause differential history with no differences.
 
 ## Schema-triggered repreparation
 

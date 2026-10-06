@@ -2061,7 +2061,9 @@ module ContractCatalog =
             [| for name, statement in
                    [ "mixed", "SET @mixed_x=@mixed_v, SESSION max_sp_recursion_depth=100"
                      "system", "SET SESSION max_sp_recursion_depth=@mixed_v"
-                     "both", "SET SESSION max_sp_recursion_depth=@mixed_v,@mixed_x=@mixed_v" ] do
+                     "both", "SET SESSION max_sp_recursion_depth=@mixed_v,@mixed_x=@mixed_v"
+                     "names-first", "SET NAMES utf8mb4 COLLATE utf8mb4_bin,@mixed_x=@mixed_v"
+                     "names-last", "SET @mixed_x=@mixed_v,NAMES utf8mb4 COLLATE utf8mb4_bin" ] do
                    Contract.execute (name + "-initial") "SET @mixed_v=2,@mixed_x=9"
                    Contract.execute (name + "-prepare") ("PREPARE mixed_types FROM '" + statement + "'")
                    for valueName, value in [ "decimal", "1.75"; "text", "'abc'"; "null", "NULL"; "integer", "3" ] do
@@ -2069,6 +2071,8 @@ module ContractCatalog =
                        Contract.execute (step + "-set") ("SET @mixed_v=" + value)
                        Contract.execute (step + "-execute") "EXECUTE mixed_types"
                        Contract.query (step + "-read") "SELECT @mixed_x AS assigned,@@session.max_sp_recursion_depth AS depth"
+                   if name.StartsWith("names-", StringComparison.Ordinal) then
+                       Contract.query (name + "-charset") "SELECT @@character_set_client AS charset,@@collation_connection AS collation"
                    Contract.execute (name + "-close") "DEALLOCATE PREPARE mixed_types"
                Contract.execute "parameter-prepare" "PREPARE numeric_target FROM 'SET SESSION max_sp_recursion_depth=?'"
                for name, value in [ "decimal", "1.75"; "null", "NULL"; "text", "'abc'" ] do

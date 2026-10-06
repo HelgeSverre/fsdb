@@ -961,6 +961,21 @@ type VariableAssignment =
     { Target: VariableTarget
       Expression: Expr option }
 
+type SetClause =
+    | AssignVariable of VariableAssignment
+    | SetNames of charset: string * collation: string option
+
+[<RequireQualifiedAccess>]
+module SetClause =
+    let expression = function
+        | AssignVariable assignment -> assignment.Expression
+        | SetNames _ -> None
+
+    let mapExpression rewrite = function
+        | AssignVariable assignment ->
+            AssignVariable { assignment with Expression = Option.map rewrite assignment.Expression }
+        | SetNames _ as clause -> clause
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool * deprecations: SyntaxDeprecation list
     | DropDatabase of name: string * ifExists: bool
@@ -998,7 +1013,7 @@ type Statement =
     | LoadData of LoadDataCommand
     | Select of SelectStmt
     | Do of expressions: Expr list
-    | SetVariables of assignments: VariableAssignment list
+    | SetVariables of clauses: SetClause list
     /// A set operation over two or more `SELECT` branches — `UNION`,
     /// `INTERSECT` or `EXCEPT`, each `[ALL|DISTINCT]`, in any mix. `first`
     /// plus each `rest` member's own `SetOp` records which operator joined
