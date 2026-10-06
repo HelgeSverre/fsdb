@@ -552,6 +552,20 @@ let tests =
               Expect.equal (current.LastResultColumnMetadata |> List.map (fun value -> value.TypeId, value.ColumnLength, value.Decimals))
                   [ TypeNewDecimal, 14u, 4uy; TypeNewDecimal, 26u, 10uy ] "stored zero-component shapes"
 
+          testCase "year zero invalid calendar days obey ALLOW_INVALID_DATES"
+          <| fun _ ->
+              for mode, allowInvalid in [ "", false; "ALLOW_INVALID_DATES", true ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session ("SET sql_mode='" + mode + "'")
+                  for input in [ "0000-02-29"; "0000-02-31" ] do
+                      let current, result = handle session ("SELECT CAST('" + input + "' AS DATE) AS value")
+                      Expect.equal result (ResultSet([ "value" ], [ [ if allowInvalid then Some input else None ] ])) input
+                      let _, warnings = handle current "SHOW WARNINGS"
+                      let expected = if allowInvalid then [] else [ [ Some "Warning"; Some "1292"; Some(sprintf "Incorrect datetime value: '%s'" input) ] ]
+                      Expect.equal warnings (ResultSet([ "Level"; "Code"; "Message" ], expected)) "calendar validation warnings"
+                  let _, result = handle session "SELECT CAST('0000-02-29 03:04:05.999' AS DATETIME(2)) AS value"
+                  Expect.equal result (ResultSet([ "value" ], [ [ None ] ])) "invalid date cannot carry"
+
           testCase "component datetime fractions round truncate and reject calendar carries"
           <| fun _ ->
               for mode, truncate in [ "ALLOW_INVALID_DATES", false; "ALLOW_INVALID_DATES,TIME_TRUNCATE_FRACTIONAL", true ] do

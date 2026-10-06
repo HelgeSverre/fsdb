@@ -2226,6 +2226,7 @@ module ContractCatalog =
                            Contract.preparedQuery (name + "-binary") sql [||]
                    for dateIndex, (date, rejectsCarry) in
                        [ "2020-00-01", true; "0000-00-00", true; "2023-02-31", true
+                         "0000-02-29", true; "0000-02-31", true
                          "0000-01-01", false; "0000-03-01", false; "0000-12-31", false ] |> List.indexed do
                        for clockIndex, (clock, carries) in
                            [ "03:04:05.129", false; "03:04:05.999", true; "23:59:59.999", true ] |> List.indexed do
@@ -2270,6 +2271,7 @@ module ContractCatalog =
                    Contract.execute (sprintf "mode-%d" index) ("SET sql_mode='" + mode + "'")
                    for inputIndex, source in
                        [ "'2020-00-01'"; "'0000-00-00'"; "'0000-01-01'"; "'2023-02-31'"
+                         "'0000-02-29'"; "'0000-02-31'"
                          "'2020-13-01'"; "'nonsense'"; "'0'"; "0"; "20200101"
                          "'2020-00-01 03:04:05.123456'" ] |> List.indexed do
                        for target in [ "DATE"; "DATETIME(6)" ] do
@@ -2289,6 +2291,10 @@ module ContractCatalog =
                    let sql = "SELECT " + expression + " AS value"
                    Contract.query (sprintf "text-precision-%d" index) sql
                    Contract.preparedQuery (sprintf "binary-text-precision-%d" index) sql [||]
+               Contract.execute "allow-year-zero-invalid" "SET sql_mode='ALLOW_INVALID_DATES'"
+               Contract.query "year-zero-invalid-literals" "SELECT CAST(DATE '0000-02-29' AS CHAR) AS d,CAST(TIMESTAMP '0000-02-31 03:04:05' AS CHAR) AS dt"
+               Contract.execute "reject-year-zero-invalid" "SET sql_mode=''"
+               Contract.query "year-zero-invalid-literal-error" "SELECT DATE '0000-02-29' AS d" |> Contract.fails 1525 "HY000"
                Contract.execute "strict-zero-modes" "SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE'"
                Contract.query "year-zero-literals" "SELECT DATE '0000-01-01'/1 AS d,TIMESTAMP '0000-01-01 03:04:05'/1 AS dt"
                Contract.execute "year-zero-table" "CREATE TABLE calendar_year(d DATE,dt DATETIME(6))"

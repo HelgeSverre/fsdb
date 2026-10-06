@@ -307,7 +307,8 @@ let private dateComponentsInRange year month day =
     year >= 0 && year <= 9999 && month >= 0 && month <= 12 && day >= 0 && day <= 31
 
 let private calendarDayIsValid year month day =
-    let calendarYear = if year = 0 then 2000 else year
+    // MySQL treats year zero as a non-leap year; DateTime requires a positive year.
+    let calendarYear = max 1 year
     month = 0 || day = 0 || day <= DateTime.DaysInMonth(calendarYear, month)
 
 let tryDateComponents (year: int) (month: int) (day: int) : ZeroDate option =
@@ -315,8 +316,7 @@ let tryDateComponents (year: int) (month: int) (day: int) : ZeroDate option =
 
     if
         dateComponentsInRange year month day
-        && ((hasZeroPart && calendarDayIsValid year month day)
-            || (not hasZeroPart && not (calendarDayIsValid year month day)))
+        && (hasZeroPart || not (calendarDayIsValid year month day))
     then
         Some(ZeroDate(year, month, day))
     else
@@ -324,11 +324,11 @@ let tryDateComponents (year: int) (month: int) (day: int) : ZeroDate option =
 
 let tryZeroDate (year: int) (month: int) (day: int) : ZeroDate option =
     tryDateComponents year month day
-    |> Option.filter (fun _ -> year = 0 || month = 0 || day = 0)
+    |> Option.filter (fun _ -> (year = 0 || month = 0 || day = 0) && calendarDayIsValid year month day)
 
 let tryInvalidDate (year: int) (month: int) (day: int) : ZeroDate option =
     tryDateComponents year month day
-    |> Option.filter (fun _ -> year <> 0 && month <> 0 && day <> 0)
+    |> Option.filter (fun _ -> not (calendarDayIsValid year month day))
 
 let zeroDateParts (ZeroDate(year, month, day)) = year, month, day
 
@@ -342,7 +342,7 @@ let hasZeroMonthOrDay date =
 
 let isInvalidDate date =
     let year, month, day = zeroDateParts date
-    not (hasZeroDatePart date) && not (calendarDayIsValid year month day)
+    not (calendarDayIsValid year month day)
 
 let tryNormalizeInvalidDate date =
     if isInvalidDate date then
