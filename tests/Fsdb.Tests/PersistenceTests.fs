@@ -2129,6 +2129,27 @@ let tests =
                   | other -> failtestf "expected the generated expression to survive the restart intact, got %A" other
               | Error e -> failtestf "expected table 'g' to reload, got %A" e
 
+          testCase "generated unary negation survives WAL and snapshot recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let session = Fsdb.Session.create 1 store
+                  let _, created = handle session "CREATE TABLE unary_generated(source DECIMAL(5,2),negative DECIMAL(5,2) GENERATED ALWAYS AS (-source) STORED)"
+                  Expect.equal created (Affected 0UL) "the unary expression is persisted"
+                  if checkpoint then snapshotNow dir store
+                  let reloaded = load dir
+                  let session = Fsdb.Session.create 2 reloaded
+                  let session, inserted = handle session "INSERT INTO unary_generated(source) VALUES(2.50)"
+                  Expect.equal inserted (Affected 1UL) "the recovered expression remains executable"
+                  let _, result = handle session "SELECT negative FROM unary_generated"
+                  Expect.equal result (ResultSet([ "negative" ], [ [ Some "-2.50" ] ])) "recovery preserves negation"
+                  match scan reloaded defaultDatabase "unary_generated" with
+                  | Ok(columns, _) ->
+                      Expect.equal (columns |> List.last |> _.Generated) (Some(Neg(Col "source"), Stored)) "the unary node survives recovery"
+                  | Error error -> failtestf "expected recovered generated column: %A" error
+
           testCase "a generated signed-subtraction expression survives a restart"
           <| fun _ ->
               let dir = tempDataDir ()

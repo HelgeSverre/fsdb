@@ -381,6 +381,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     | QualifiedCol(t, c) -> w.WriteByte 0x03uy; writeStr w t; writeStr w c
     | Row values -> w.WriteByte 0x17uy; w.WriteInt32LE(List.length values); List.iter (encodeExpr w) values
     | BinOp(op, a, b) -> w.WriteByte 0x04uy; encodeOp w op; encodeExpr w a; encodeExpr w b
+    | Neg e -> w.WriteByte 0x18uy; encodeExpr w e
     | Not e -> w.WriteByte 0x05uy; encodeExpr w e
     | IsNull e -> w.WriteByte 0x06uy; encodeExpr w e
     | IsNotNull e -> w.WriteByte 0x07uy; encodeExpr w e
@@ -462,6 +463,7 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
     | 0x03uy -> QualifiedCol(readStr r, readStr r)
     | 0x17uy -> Row(exprList ())
     | 0x04uy -> BinOp(decodeOp r, nested (), nested ())
+    | 0x18uy -> Neg(nested ())
     | 0x05uy -> Not(nested ())
     | 0x06uy -> IsNull(nested ())
     | 0x07uy -> IsNotNull(nested ())

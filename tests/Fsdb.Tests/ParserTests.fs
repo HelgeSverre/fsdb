@@ -608,7 +608,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT -a - 1")
                         (mkSelect(
-                            [ BinOp(Sub, BinOp(Sub, Lit(VInt 0L), col "a"), Lit(VInt 1L)), None ],
+                            [ BinOp(Sub, Neg(col "a"), Lit(VInt 1L)), None ],
                             None,
                             None,
                             [],

@@ -954,6 +954,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     | BinOp(_, left, right)
                     | Like(left, right, _, _)
                     | Regexp(left, right) -> simplePredicate left && simplePredicate right
+                    | Neg value
                     | Not value
                     | IsNull value
                     | IsNotNull value
@@ -1850,6 +1851,7 @@ let rec internal exprLabel (expr: Expr) : string =
     | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToUpperInvariant()) (args |> List.map exprLabel |> String.concat ", ")
     | Row values -> sprintf "(%s)" (values |> List.map exprLabel |> String.concat ", ")
     | BinOp(op, a, b) -> sprintf "%s %s %s" (exprLabel a) (opSymbol op) (exprLabel b)
+    | Neg e -> sprintf "-(%s)" (exprLabel e)
     | Not e -> sprintf "not(%s)" (exprLabel e)
     | IsNull e -> sprintf "(%s is null)" (exprLabel e)
     | IsNotNull e -> sprintf "(%s is not null)" (exprLabel e)
@@ -2336,6 +2338,37 @@ let private strToDateDateTokens =
 let private strToDateTimeTokens =
     [ "%H"; "%h"; "%I"; "%i"; "%s"; "%S"; "%f"; "%k"; "%l"; "%p"; "%r"; "%T" ]
 
+type private DecimalShape =
+    { Precision: int
+      Scale: int }
+
+let private declaredDecimalShape (metadata: ColumnMetadata) =
+    let scale = if metadata.TypeId = TypeNewDecimal then int metadata.Decimals else 0
+    let sign = if hasMetadataFlag UnsignedFlag metadata then 0 else 1
+    { Precision = min 65 (max 1 (int metadata.ColumnLength - sign - (if scale > 0 then 1 else 0)))
+      Scale = scale }
+
+let rec private decimalShape expression (metadata: ColumnMetadata option) =
+    match expression, metadata with
+    | (Distinct inner | OrderBy(inner, _)), _ -> decimalShape inner metadata
+    | Lit((VInt _ | VUInt _ | VDecimal _) as value), _ ->
+        let text = Value.toText value |> Option.defaultValue "0"
+        let scale = match value with VDecimal number -> Value.decimalScale number | _ -> 0
+        { Precision = text.TrimStart('-').Replace(".", "").Length; Scale = scale }
+    | _, Some metadata -> declaredDecimalShape metadata
+    | _, None -> { Precision = 0; Scale = 0 }
+
+let private withDecimalShape shape (metadata: ColumnMetadata) =
+    let sign = if hasMetadataFlag UnsignedFlag metadata then 0 else 1
+    { metadata with
+        ColumnLength = uint32 (shape.Precision + sign + (if shape.Scale > 0 then 1 else 0))
+        Decimals = byte shape.Scale }
+
+let private combinedDecimalShape left right =
+    let scale = max left.Scale right.Scale
+    { Precision = max (left.Precision - left.Scale) (right.Precision - right.Scale) + scale
+      Scale = scale }
+
 let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
     let simple typeId =
         let columnLength =
@@ -2355,7 +2388,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         Some { Value.columnMetadata typeId with ColumnLength = columnLength }
     let typeIdOf expression = metadataOfExpr ctx expression |> Option.map _.TypeId
 
-    let numeric scaleOf left right =
+    let numeric combineShapes left right =
         let isInteger typeId =
             typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
 
@@ -2379,8 +2412,8 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             inferred
             |> Option.map (fun metadata ->
                 if metadata.TypeId = TypeNewDecimal then
-                    let scale metadata = metadata |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
-                    { metadata with Decimals = byte (min 30 (scaleOf (scale leftMetadata) (scale rightMetadata))) }
+                    let shape = combineShapes (decimalShape left leftMetadata) (decimalShape right rightMetadata)
+                    withDecimalShape shape metadata
                 else metadata)
 
         match inferred, leftMetadata, rightMetadata with
@@ -2456,11 +2489,12 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | _ when metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) ->
             simple TypeDouble |> Option.map withNullability
         | _ when metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal) ->
-            metadata
-            |> List.filter (fun item -> item.TypeId = TypeNewDecimal)
-            |> List.maxBy (fun item -> item.Decimals, item.ColumnLength)
-            |> withNullability
-            |> Some
+            let shape =
+                inferred
+                |> List.map (fun (expression, metadata) -> decimalShape expression metadata)
+                |> List.reduce combinedDecimalShape
+            let shape = { shape with Precision = min 65 shape.Precision }
+            simple TypeNewDecimal |> Option.map (withDecimalShape shape >> withNullability)
         | _ when not metadata.IsEmpty && metadata |> List.forall isInteger ->
             let isUnsigned = metadata |> List.forall (hasMetadataFlag UnsignedFlag)
 
@@ -2620,7 +2654,8 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VDouble _) -> simple TypeDouble |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VDecimal value) ->
         simple TypeNewDecimal
-        |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag; Decimals = byte (Value.decimalScale value) })
+        |> Option.map (fun metadata ->
+            withDecimalShape (decimalShape expr None) { metadata with Flags = NotNullFlag })
     | Lit(VString text) ->
         Some
             { Value.columnMetadata TypeVarString with
@@ -2676,16 +2711,28 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | QuantifiedComparison _
     | Between _
     | Exists _ -> simple TypeLongLong
-    | BinOp((Add | Sub | SignedSub), left, right) -> numeric max left right
-    | BinOp(Mul, left, right) -> numeric (+) left right
+    | Neg operand -> numeric (fun _ right -> right) (Lit(VInt 0L)) operand
+    | BinOp((Add | Sub | SignedSub), left, right) ->
+        numeric (fun left right ->
+            let shape = combinedDecimalShape left right
+            { shape with Precision = shape.Precision + 1 }) left right
+    | BinOp(Mul, left, right) ->
+        numeric (fun left right ->
+            { Precision = min 65 (left.Precision + right.Precision)
+              Scale = min 30 (left.Scale + right.Scale) }) left right
     | BinOp(Div, left, right) ->
         match typeIdOf left, typeIdOf right with
         | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
         | _, Some rightType when rightType = TypeDouble || rightType = TypeFloat -> simple TypeDouble
         | Some _, _
         | _, Some _ ->
-            let scale = metadataOfExpr ctx left |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
-            simple TypeNewDecimal |> Option.map (fun metadata -> { metadata with Decimals = byte (min 30 (scale + divisionPrecisionIncrement ())) })
+            let dividend = decimalShape left (metadataOfExpr ctx left)
+            let divisor = decimalShape right (metadataOfExpr ctx right)
+            let increment = divisionPrecisionIncrement ()
+            let shape =
+                { Precision = min 65 (dividend.Precision + divisor.Scale + increment)
+                  Scale = min 30 (dividend.Scale + increment) }
+            simple TypeNewDecimal |> Option.map (withDecimalShape shape)
         | _ -> None
     | BinOp(IntDiv, _, _) -> simple TypeLongLong
     | Cast(value, ty) ->
@@ -2732,9 +2779,13 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 ->
                 simple TypeDouble
             | metadata ->
-                let scale = metadata |> Option.map (fun item -> int item.Decimals) |> Option.defaultValue 0
-                let scale = if name.Equals("AVG", System.StringComparison.OrdinalIgnoreCase) then min 30 (scale + divisionPrecisionIncrement ()) else scale
-                simple TypeNewDecimal |> Option.map (fun item -> { item with Decimals = byte scale })
+                let argument = decimalShape arg metadata
+                let isAverage = equalsIgnoreCase name "AVG"
+                let increment = if isAverage then divisionPrecisionIncrement () else 22
+                let shape =
+                    { Precision = min 65 (argument.Precision + increment)
+                      Scale = if isAverage then min 30 (argument.Scale + increment) else argument.Scale }
+                simple TypeNewDecimal |> Option.map (withDecimalShape shape)
         | ("STD" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"), _ -> simple TypeDouble
         | "GROUP_CONCAT", _ -> Some(ColumnWire.metadataOfType TText)
         | ("JSON_ARRAYAGG" | "JSON_OBJECTAGG"), _ -> json
@@ -2764,10 +2815,16 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                         | [] -> 0
                         | [ Lit(VInt digits) ] -> int (max 0L (min (int64 metadata.Decimals) digits))
                         | _ -> int metadata.Decimals
-                    { metadata with Decimals = byte scale })
+                    let argument = decimalShape arg (Some metadata)
+                    let carry = if equalsIgnoreCase name "ROUND" && scale < argument.Scale then 1 else 0
+                    let shape = { Precision = min 65 (argument.Precision - argument.Scale + scale + carry); Scale = scale }
+                    withDecimalShape shape metadata)
         | ("FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ ->
             numericUnary arg
-        | "MOD", [ left; right ] -> numeric max left right
+        | "MOD", [ left; right ] ->
+            numeric (fun left right ->
+                { Precision = max left.Precision right.Precision
+                  Scale = max left.Scale right.Scale }) left right
         | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
         | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
@@ -2917,6 +2974,7 @@ let private displayColumnForExpr ctx =
 let private outputFormatOfExpr ctx expr =
     let decimalScale =
         match expr with
+        | Neg _
         | BinOp((Add | Sub | SignedSub | Mul | Div), _, _)
         | NamedFunction "MOD" _
         | NamedFunction "ABS" _
@@ -4553,6 +4611,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
         isStatementStableExpr store registry dbName scope value
         && isStatementStableSelect store registry dbName scope select
     | BinOp(_, left, right) -> every [ left; right ]
+    | Neg value
     | Not value
     | IsNull value
     | IsNotNull value
@@ -4744,6 +4803,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         Ok evaluated
                     else
                         Error(1105, "Too many user-defined variables"))
+    | Neg e -> eval (BinOp(Sub, Lit(VInt 0L), e))
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
     | IsNull e -> eval e |> Result.map (function VNull -> VInt 1L | _ -> VInt 0L)
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)
@@ -6109,14 +6169,6 @@ and private describeQueryColumns
                             |> fun length -> Some(computedColumn name (TVarchar length) true None collation)
                         | _ -> None
 
-                    let parts expression =
-                        tryColumnDefForExpr context expression
-                        |> Option.bind (fun column -> decimalParts column.Type)
-                        |> Option.orElseWith (fun () ->
-                            match expression with
-                            | Lit value -> literalDecimalParts value
-                            | _ -> None)
-
                     let decimalDefault scale =
                         if scale = 0 then DConst(VString "0") else DConst(VString("0." + String.replicate scale "0"))
 
@@ -6147,53 +6199,26 @@ and private describeQueryColumns
                         | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None |> describeColumn)
                         | _ -> None
 
+                    let decimalExpressionColumn () =
+                        metadataOfExpr context expression
+                        |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
+                        |> Option.map (fun metadata ->
+                            let shape = declaredDecimalShape metadata
+                            computedColumn name (TDecimal(min 65 shape.Precision, shape.Scale, false))
+                                (not (hasMetadataFlag NotNullFlag metadata)) None None)
+
                     let arithmeticColumn =
                         match expression with
-                        | BinOp((Add | Sub | SignedSub | Mul | Div), left, right) ->
-                            let isDecimal expression =
-                                match tryColumnDefForExpr context expression with
-                                | Some { Type = TDecimal _ } -> true
-                                | _ ->
-                                    match expression with
-                                    | Lit(VDecimal _) -> true
-                                    | _ -> false
-
-                            match isDecimal left || isDecimal right, parts left, parts right with
-                            | true, Some(leftPrecision, leftScale), Some(rightPrecision, rightScale) ->
-                                let precision, scale =
-                                    match expression with
-                                    | BinOp((Add | Sub | SignedSub), _, _) ->
-                                        let scale = max leftScale rightScale
-                                        min 65 (max (leftPrecision - leftScale) (rightPrecision - rightScale) + scale + 1), scale
-                                    | BinOp(Mul, _, _) -> min 65 (leftPrecision + rightPrecision), min 30 (leftScale + rightScale)
-                                    | BinOp(Div, _, _) ->
-                                        let scale = max 6 (leftScale + rightPrecision + 1)
-                                        min 65 (leftPrecision - leftScale + rightScale + scale), scale
-                                    | _ -> 65, 30
-
-                                let nullable expression = tryColumnDefForExpr context expression |> Option.map isNullable |> Option.defaultValue false
-                                Some(computedColumn name (TDecimal(precision, scale, false)) (nullable left || nullable right) None None)
-                            | _ -> None
+                        | BinOp((Add | Sub | SignedSub | Mul | Div), _, _) -> decimalExpressionColumn ()
                         | _ -> None
 
                     let aggregateColumn =
                         match expression with
                         | FuncCall(functionName, _) when functionName.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) ->
                             Some(computedColumn name (TBigInt false) false (Some(DConst(VInt 0L))) None)
-                        | FuncCall(functionName, [ argument ])
-                            when functionName.Equals("SUM", System.StringComparison.OrdinalIgnoreCase) ->
-                            tryColumnDefForExpr context argument
-                            |> Option.bind (fun column ->
-                                decimalParts column.Type
-                                |> Option.map (fun (precision, scale) ->
-                                    computedColumn name (TDecimal(min 65 (precision + 22), scale, false)) true None None))
-                        | FuncCall(functionName, [ argument ])
-                            when functionName.Equals("AVG", System.StringComparison.OrdinalIgnoreCase) ->
-                            tryColumnDefForExpr context argument
-                            |> Option.bind (fun column ->
-                                decimalParts column.Type
-                                |> Option.map (fun (precision, scale) ->
-                                    computedColumn name (TDecimal(min 65 (precision + divisionPrecisionIncrement ()), min 30 (scale + divisionPrecisionIncrement ()), false)) true None None))
+                        | FuncCall(functionName, [ _ ])
+                            when equalsIgnoreCase functionName "SUM" || equalsIgnoreCase functionName "AVG" ->
+                            decimalExpressionColumn ()
                         | FuncCall(functionName, [ argument ])
                             when functionName.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
                                  || functionName.Equals("MAX", System.StringComparison.OrdinalIgnoreCase) ->
@@ -6352,7 +6377,9 @@ and private deriveColumns
         elif column.TypeId = TypeLongLong then TBigInt unsigned
         elif column.TypeId = TypeFloat then TFloat false
         elif column.TypeId = TypeDouble then TDouble false
-        elif column.TypeId = TypeNewDecimal then TDecimal(65, int column.Decimals, hasMetadataFlag UnsignedFlag column)
+        elif column.TypeId = TypeNewDecimal then
+            let shape = declaredDecimalShape column
+            TDecimal(min 65 shape.Precision, shape.Scale, unsigned)
         elif column.TypeId = TypeBit then TBit(int column.ColumnLength)
         elif column.TypeId = TypeDate then TDate
         elif column.TypeId = TypeDateTime then TDateTime(int column.Decimals)
@@ -8612,6 +8639,7 @@ and private tryMergeDirectView
         | BinOp(_, left, right)
         | Like(left, right, _, _)
         | Regexp(left, right) -> mergeablePredicate left && mergeablePredicate right
+        | Neg value
         | Not value
         | IsNull value
         | IsNotNull value
@@ -12356,6 +12384,7 @@ and private rewriteAggregates
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
+    | Neg e -> sub e |> Result.map Neg
     | Not e -> sub e |> Result.map Not
     | IsNull e -> sub e |> Result.map IsNull
     | IsNotNull e -> sub e |> Result.map IsNotNull
@@ -12430,6 +12459,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
+    | Neg e -> sub e |> Result.map Neg
     | Not e -> sub e |> Result.map Not
     | IsNull e -> sub e |> Result.map IsNull
     | IsNotNull e -> sub e |> Result.map IsNotNull
@@ -16879,17 +16909,33 @@ let statementColumns (store: Store) (registry: Registry) (schema: string) (state
         describeQueryColumns store registry schema (QueryBody(UnionSelect(first, rest, orderBy, limit, offset)))
     | _ -> None
 
+let private statementSources store schema (select: SelectStmt) =
+    (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+    |> List.map (fun source ->
+        fromItemQualifier source,
+        selectSourceColumns store schema source |> List.choose id)
+
+/// Expression descriptors can exceed stored-column precision, so PREPARE must
+/// retain their wire shape independently of its ColumnDef fallback.
+let statementDecimalMetadata store registry schema statement =
+    match statement with
+    | Select select when not (SelectStmt.hasDestination select) && select.Ctes.IsEmpty ->
+        let sources = statementSources store schema select
+        if sources |> List.exists (snd >> List.isEmpty) then None
+        else
+            let columns = sources |> List.collect snd
+            let context = contextFactory store registry schema (columnIndexOf columns) (qualifierRanges sources) None (probeRow columns)
+            outputColumnWireOverrides context columns select
+            |> List.map (Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal))
+            |> Some
+    | _ -> None
+
 /// PREPARE must expose the same physical source fields as later execution
 /// without evaluating the statement to recover them.
 let statementColumnOrigins (store: Store) (schema: string) (statement: Statement) : ColumnOrigin option list option =
     match statement with
     | Select select when not (SelectStmt.hasDestination select) ->
-        let sources =
-            (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
-            |> List.map (fun source ->
-                fromItemQualifier source,
-                selectSourceColumns store schema source |> List.choose id)
-
+        let sources = statementSources store schema select
         Some(outputColumnOrigins store schema (qualifierRanges sources) select)
     | _ -> None
 
@@ -17680,6 +17726,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | BinOp(_, left, right)
         | Like(left, right, _, _)
         | Regexp(left, right) -> references left @ references right
+        | Neg expression
         | Not expression
         | IsNull expression
         | IsNotNull expression

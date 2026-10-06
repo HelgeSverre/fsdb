@@ -392,6 +392,52 @@ let tests =
               let _, result = handle session "SELECT @@global.div_precision_increment AS setting"
               Expect.equal result (ResultSet([ "setting" ], [ [ Some "4" ] ])) "global DEFAULT restores four"
 
+          testCase "decimal expression descriptors derive precision from their operands"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=1.25"
+              let session, _ = handle session "SELECT 1.25,0.00,1.25+1,1.25*2,1.25/3.00,@v+1,@v*2,ROUND(@v,2),TRUNCATE(@v,2),123.45%6.7,COALESCE(1.25,123),(@v+@v)+1,SUM(1.25),AVG(1.25),AVG(DISTINCT 1),SUM(DISTINCT 1)"
+              let descriptors = session.LastResultColumnMetadata |> List.map (fun metadata -> metadata.ColumnLength, metadata.Decimals)
+              Expect.equal descriptors
+                  [ 5u,2uy; 5u,2uy; 6u,2uy; 6u,2uy; 11u,6uy; 68u,30uy; 67u,30uy
+                    40u,2uy; 39u,2uy; 7u,2uy; 7u,2uy; 68u,30uy; 27u,2uy; 9u,6uy; 7u,4uy; 24u,0uy ]
+                  "wire lengths include precision, sign, and the decimal point"
+              let sql = "SELECT 1.25 AS literal,1.25/3.00 AS quotient,@v+1 AS addition,ROUND(@v,2) AS rounded,TRUNCATE(@v,2) AS truncated"
+              let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let statement = createPreparedStatement session sql ast count
+              let _, columns = preparedMetadata session statement.Ast count
+              Expect.equal (columns |> List.map (fun column -> column.Metadata.ColumnLength, column.Metadata.Decimals))
+                  [ 5u,2uy; 11u,6uy; 68u,30uy; 40u,2uy; 39u,2uy ]
+                  "binary PREPARE retains expression descriptors beyond stored-column bounds"
+
+          testCase "decimal precision bounds distinguish addition coalescing and modulo"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT CAST(1 AS DECIMAL(65,0))+CAST(1 AS DECIMAL(65,30)) AS addition,COALESCE(CAST(1 AS DECIMAL(40,0)),CAST(1 AS DECIMAL(40,30))) AS coalesced,MOD(CAST(1 AS DECIMAL(40,0)),CAST(1 AS DECIMAL(40,30))) AS modulo"
+              let session, _ = handle session sql
+              let expected = [ 98u,30uy; 67u,30uy; 42u,30uy ]
+              Expect.equal (session.LastResultColumnMetadata |> List.map (fun metadata -> metadata.ColumnLength, metadata.Decimals)) expected
+                  "addition combines widths without truncating while coalescing and modulo use different bounds"
+              let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let statement = createPreparedStatement session sql ast count
+              let _, columns = preparedMetadata session statement.Ast count
+              Expect.equal (columns |> List.map (fun column -> column.Metadata.ColumnLength, column.Metadata.Decimals)) expected
+                  "preparation preserves the same wire bounds"
+
+          testCase "decimal unary negation preserves precision independently of subtraction"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=1.25"
+              let session, result = handle session "SELECT -@v AS negated,0-@v AS subtracted"
+              let negative = Some "-1.250000000000000000000000000000"
+              Expect.equal result (ResultSet([ "negated"; "subtracted" ], [ [ negative; negative ] ])) "both operations return the same value"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.ColumnLength) [ 67u; 68u ] "only subtraction reserves a carry digit"
+              let session, _ = handle session "PREPARE negation FROM 'SELECT -@v AS negated'"
+              let session, _ = handle session "SET @v=2"
+              let session, result = handle session "EXECUTE negation"
+              Expect.equal result (ResultSet([ "negated" ], [ [ Some "-2.000000000000000000000000000000" ] ])) "capture and binding traverse unary negation"
+              Expect.equal session.LastResultColumnMetadata.Head.ColumnLength 67u "the captured decimal precision survives binding"
+
           testCase "prepared decimal division retains declared scale and operand precision"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

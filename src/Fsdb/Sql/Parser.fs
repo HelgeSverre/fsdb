@@ -2124,9 +2124,8 @@ addKeywordOperator "MOD" (fun left right -> FuncCall("MOD", [ left; right ]))
 /// `0 - x` desugaring would subtract from the `BIGINT UNSIGNED` those digits
 /// parse as and leave the unsigned domain (error 1690).
 ///
-/// `-(<unsigned expression>)` still desugars, so it raises 1690
-/// where MySQL negates into DECIMAL. Give `Ast.Expr` a real `Neg` case if
-/// that shape shows up outside literals.
+/// Other operands retain a unary node because negation and subtraction
+/// derive different decimal result precision.
 let private negateExpr (e: Expr) : Expr =
     match e with
     | Lit(VInt i) -> Lit(VInt(-i))
@@ -2135,7 +2134,7 @@ let private negateExpr (e: Expr) : Expr =
     | Lit(VUInt u) -> Lit(VDecimal(-(decimal u)))
     | Lit(VDecimal d) -> Lit(VDecimal(-d))
     | Lit(VDouble d) -> Lit(VDouble(-d))
-    | _ -> BinOp(Sub, Lit(VInt 0L), e)
+    | _ -> Neg e
 
 opp.AddOperator(PrefixOperator("-", ws, 7, true, negateExpr))
 opp.AddOperator(PrefixOperator("~", ws, 7, true, (fun value -> FuncCall("BITWISE_NOT", [ value ]))))

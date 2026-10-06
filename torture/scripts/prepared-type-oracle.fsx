@@ -377,3 +377,48 @@ let runDivisionIncrement () =
         execute ("DROP DATABASE " + database)
 
 runDivisionIncrement ()
+
+let runDecimalDescriptors () =
+    let columns =
+        [ "1.25", 5, 2; "0.00", 5, 2; "1.25+1", 6, 2; "1.25*2", 6, 2
+          "1.25/3.00", 11, 6; "@v+1", 68, 30; "@v*2", 67, 30
+          "-@v", 67, 30; "0-@v", 68, 30
+          "ROUND(@v,2)", 40, 2; "TRUNCATE(@v,2)", 39, 2; "123.45%6.7", 7, 2
+          "COALESCE(1.25,123)", 7, 2; "(@v+@v)+1", 68, 30
+          "ROUND(123.45,-1)", 5, 0; "TRUNCATE(123.45,-1)", 4, 0
+          "SUM(1.25)", 27, 2; "AVG(1.25)", 9, 6
+          "AVG(DISTINCT 1)", 7, 4; "SUM(DISTINCT 1)", 24, 0
+          "CAST(1 AS DECIMAL(65,0))+CAST(1 AS DECIMAL(65,30))", 98, 30
+          "COALESCE(CAST(1 AS DECIMAL(40,0)),CAST(1 AS DECIMAL(40,30)))", 67, 30
+          "MOD(CAST(1 AS DECIMAL(40,0)),CAST(1 AS DECIMAL(40,30)))", 42, 30 ]
+    for protocol in [ Sql; Binary ] do
+        // The connector treats @names as binary bindings; CAST supplies the same DECIMAL(65,30) input shape.
+        let columns =
+            if protocol = Binary then
+                columns |> List.map (fun (expression, length, scale) -> expression.Replace("@v", "CAST(1.25 AS DECIMAL(65,30))"), length, scale)
+            else columns
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        use setup = new MySqlCommand("SET @v=1.25", connection)
+        setup.ExecuteNonQuery() |> ignore
+        let sql = columns |> List.mapi (fun index (expression, _, _) -> sprintf "%s AS d%d" expression index) |> String.concat ", " |> (+) "SELECT "
+        use command = new MySqlCommand(sql, connection)
+        if protocol = Binary then command.Prepare()
+        use reader = command.ExecuteReader()
+        let schema = reader.GetColumnSchema()
+        if reader.FieldCount <> columns.Length || not (reader.Read()) then
+            failwith "Unexpected decimal descriptor result shape"
+        columns |> List.iteri (fun index (expression, length, scale) ->
+            let precision = length - 1 - (if scale > 0 then 1 else 0)
+            if reader.GetDataTypeName(index) <> "DECIMAL"
+               || schema[index].NumericPrecision <> Nullable precision
+               || schema[index].NumericScale <> Nullable scale then
+                failwithf "%A %s: expected DECIMAL(%d,%d), got %s(%O,%O)"
+                    protocol expression precision scale (reader.GetDataTypeName index)
+                    schema[index].NumericPrecision schema[index].NumericScale
+            printfn "Decimal descriptor | %A | %s -> DECIMAL(%d,%d)" protocol expression precision scale)
+        if reader.Read() then failwith "Unexpected second descriptor row"
+
+runDecimalDescriptors ()

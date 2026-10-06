@@ -141,6 +141,7 @@ type Expr =
     /// scalar result when a row-aware predicate consumes them.
     | Row of Expr list
     | BinOp of Op * Expr * Expr
+    | Neg of Expr
     | Not of Expr
     | IsNull of Expr
     | IsNotNull of Expr

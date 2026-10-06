@@ -288,9 +288,10 @@ for the expanded decimal history, including negative values and a nine-digit
 fraction. Differential numeric normalization does not prove trailing-zero
 formatting; the exact-text regressions cover that separately.
 
-The decimal gap remains open for exact expression precision metadata, including
-addition's precision 66 and ROUND/TRUNCATE's differing precision descriptors,
-and for scale propagation through other expression families. Runtime values
+Common expression precision metadata now includes addition's precision 66 and
+ROUND/TRUNCATE's differing descriptors, as detailed below. The decimal gap
+remains open for broader prepared query shapes and scale
+propagation through other expression families. Runtime values
 still use System.Decimal: intermediate division is capped at scale 28 and its
 96-bit coefficient cannot retain all MySQL DECIMAL values or guard digits.
 The full oracle corpus therefore remains a specification, not a claim of
@@ -337,9 +338,55 @@ forms have exact-text regressions and differential coverage.
 
 The scale-30 oracle cases still exceed the current System.Decimal
 representation. Configuring the increment does not close that numeric precision
-gap or the remaining exact expression precision descriptors.
+gap or all remaining expression precision descriptors.
 
 `artifacts/runs/20261006T143455022-11863/contracts/manifest.json` records
 matching division, ordinary/DISTINCT/window AVG, retained SQL and binary
 handles, schema and parameter-type refresh, and assignment diagnostics, with
 both targets restored after the run.
+
+
+## Decimal precision descriptors
+
+Expression metadata derives precision and scale together from its operands.
+Addition reserves a carry digit, multiplication and division bound their
+precision, coalescing combines integer and fractional widths, and SUM/AVG
+apply their distinct precision increments. ROUND reserves a carry digit when
+reducing the scale; TRUNCATE does not. DISTINCT preserves the argument shape.
+
+MySQL can report precision 66 for decimal addition while capping that result's
+precision at 65 when it becomes an operand. Thus both `@v+1` and `(@v+@v)+1`
+report a wire length of 68 for DECIMAL user variables. Combining
+DECIMAL(65,0) with DECIMAL(65,30) reports precision 96 for addition, whereas
+COALESCE caps its combined precision at 65 and MOD takes the larger operand
+precision. Stored decimal columns
+retain the 65-digit ceiling. Binary PREPARE reads expression descriptors
+separately from stored-column definitions, preserving the wider wire result.
+
+The shared shape calculation also replaces duplicate arithmetic and aggregate
+rules used to describe stored query results. The checked oracle covers literal
+and user-variable expressions, nested arithmetic, negative rounding scales,
+and ordinary/DISTINCT aggregates. Binary oracle probes use explicit
+DECIMAL(65,30) casts for the user-variable input shape because MySqlConnector
+treats named variables as bindings in binary prepared commands.
+
+Unary negation now has its own AST node, shared traversal support, and a
+persistent expression tag. `-@v` retains precision 65 while `0-@v` reserves the
+extra digit. WAL and snapshot regressions exercise generated expressions after
+recovery. Numeric evaluation still shares subtraction's coercion: large
+unsigned operands remain a separate gap (MySQL promotes their negative value
+to DECIMAL).
+
+Remaining descriptor limitations include source spellings lost during parsing.
+The direct expression-metadata path for binary PREPARE currently handles
+SELECT without CTEs; other prepared query shapes retain the stored-column
+fallback. System.Decimal's value precision remains a separate limit.
+
+
+The metadata oracle passes in both text and binary modes, and the Expecto
+regressions assert exact wire lengths and scales. The differential manifest at
+`artifacts/runs/20261006T145627015-16934/contracts/manifest.json` records
+matching values and type families after these changes; that lane does not
+compare precision descriptors. An additional probe leaves NULL aggregates as
+a concrete remaining case: MySQL reports DOUBLE for SUM(NULL) and AVG(NULL),
+with lengths/scales 17/0 and 21/4 respectively.
