@@ -488,6 +488,49 @@ let tests =
                   session) session
               |> ignore
 
+          testCase "conditional scalar reduction respects logical nesting boundaries"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let shapes =
+                  [ "NOT (0 AND @condition)", "1", TypeLongLong
+                    "NOT NOT (1 OR @condition)", "1", TypeLongLong
+                    "IF(1 OR @condition,1,0)", "1", TypeLongLong
+                    "IF(0 AND @condition,0,1)", "1", TypeLongLong
+                    "IF(NULL AND @condition,0,1)", "1", TypeLongLong
+                    "IF(1,1,@condition)", "0", TypeDouble
+                    "(1 OR @condition)=1", "0", TypeDouble
+                    "(1 OR @condition) IS TRUE", "0", TypeDouble
+                    "CAST(1 OR @condition AS SIGNED)", "0", TypeDouble
+                    "COALESCE(1 OR @condition,0)", "0", TypeDouble
+                    "CASE WHEN 1 OR @condition THEN 1 ELSE 0 END", "0", TypeDouble
+                    "(1 OR @condition)+0", "0", TypeDouble ]
+              for predicate, expected, family in shapes do
+                  let sql = "SELECT (SELECT b'01' WHERE " + predicate + ")+0 AS value"
+                  let parameterized = sql.Replace("@condition", "?").Replace("'", "''")
+                  let session, _ = handle session ("PREPARE nested_condition FROM '" + parameterized + "'")
+                  [ 0; 1; 0 ]
+                  |> List.fold (fun session value ->
+                      let session, _ = handle session (sprintf "SET @condition=%d" value)
+                      [ sql; "EXECUTE nested_condition USING @condition" ]
+                      |> List.fold (fun session query ->
+                          let current, result = handle session query
+                          Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) (predicate + " value")
+                          Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ family ] (predicate + " type")
+                          current) session) session
+                  |> ignore
+
+          testCase "conditional scalar reduction evaluates original numeric and text builtins"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for predicate in
+                  [ "CEIL(0.1)=1"; "FLOOR(1.9)=1"; "SQRT(4)=2"; "POWER(2,3)=8"; "SIGN(-2)=-1"
+                    "GREATEST(1,2)=2"; "LEAST(1,2)=1"; "NULLIF(1,2)=1"; "SIN(0)=0"; "COS(0)=1"
+                    "PI()>3"; "EXP(0)=1"; "LN(1)=0"; "LOG10(100)=2"; "BIT_COUNT(3)=2"
+                    "CRC32('a')>0"; "HEX('a')='61'"; "REVERSE('ab')='ba'"; "TRIM(' a ')='a'" ] do
+                  let current, result = handle session ("SELECT (SELECT b'01' WHERE " + predicate + ")+0 AS value")
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some "1" ] ])) predicate
+                  Expect.equal (current.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLongLong ] (predicate + " type")
+
           testCase "binary literal variables discard numeric origin before binding"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

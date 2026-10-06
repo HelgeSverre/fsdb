@@ -4091,6 +4091,17 @@ let private evalLogicalOr left evaluateRight =
             evaluateRight ()
             |> Result.map (fun right -> if truthy right = Some true then VInt 1L else VNull))
 
+let private allConditionTruths = Set.ofList [ Some false; Some true; None ]
+
+let private combineConditionTruths evaluate left right =
+    let valueOf truth = truth |> Option.map boolToValue |> Option.defaultValue VNull
+    [ for leftTruth in left do
+          for rightTruth in right do
+              yield evaluate (Ok(valueOf leftTruth)) (fun () -> Ok(valueOf rightTruth)) ]
+    |> traverse id
+    |> Result.map (List.map truthy >> Set.ofList)
+    |> Result.defaultValue allConditionTruths
+
 let private substringSearchHaystack (name: string) (arguments: Expr list) =
     match name.ToUpperInvariant(), arguments with
     | ("LOCATE" | "POSITION"), _ :: haystack :: _ -> Some haystack
@@ -4893,7 +4904,11 @@ and private isLiteralConstantExpression registry expression =
         let audited =
             match name.ToUpperInvariant() with
             | "ABS" | "COALESCE" | "IFNULL" | "IF"
-            | "ROUND" | "TRUNCATE" | "MOD"
+            | "ROUND" | "TRUNCATE" | "MOD" | "CEIL" | "CEILING" | "FLOOR"
+            | "POW" | "POWER" | "SQRT" | "LOG" | "LN" | "LOG2" | "LOG10" | "EXP"
+            | "PI" | "SIN" | "COS" | "TAN" | "COT" | "ASIN" | "ACOS" | "ATAN" | "ATAN2"
+            | "DEGREES" | "RADIANS" | "SIGN" | "GREATEST" | "LEAST" | "NULLIF"
+            | "BIT_COUNT" | "CRC32" | "HEX" | "REVERSE" | "TRIM"
             | "LOWER" | "LCASE" | "UPPER" | "UCASE"
             | "LENGTH" | "OCTET_LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH"
             | "CONCAT" | "CONCAT_WS" -> true
@@ -4901,25 +4916,28 @@ and private isLiteralConstantExpression registry expression =
         audited && Functions.isUnmodifiedBuiltinScalar name registry && List.forall closed arguments
     | _ -> false
 
-and private tryConstantCondition ctx expression =
-    let constant expression =
-        if isLiteralConstantExpression ctx.Registry expression then
-            Diagnostics.suppress (fun () -> evalExpr ctx expression) |> Result.toOption
-        else None
+/// A condition may be false or NULL without ever being true. IF treats both
+/// alike, while NOT must preserve the distinction. Other expression contexts
+/// retain MySQL's boundary instead of recursively simplifying their operands.
+and private possibleConditionTruths ctx expression =
+    let evaluate expression =
+        Diagnostics.suppress (fun () -> evalExpr ctx expression)
+        |> Result.map (truthy >> Set.singleton)
+        |> Result.defaultValue allConditionTruths
     match expression with
     | BinOp((And | Or as operator), left, right) ->
-        let left = tryConstantCondition ctx left
-        let right = tryConstantCondition ctx right
-        let decisive = if operator = And then false else true
-        if [ left; right ] |> List.exists (Option.exists (fun value -> truthy value = Some decisive)) then
-            Some(boolToValue decisive)
-        else
-            match left, right with
-            | Some left, Some right ->
-                (if operator = And then evalLogicalAnd else evalLogicalOr) (Ok left) (fun () -> Ok right)
-                |> Result.toOption
-            | _ -> None
-    | _ -> constant expression
+        let combine = if operator = And then evalLogicalAnd else evalLogicalOr
+        combineConditionTruths combine (possibleConditionTruths ctx left) (possibleConditionTruths ctx right)
+    | Not operand -> possibleConditionTruths ctx operand |> Set.map (Option.map not)
+    | NamedFunction "IF" [ condition; whenTrue; whenFalse ]
+        when Functions.isUnmodifiedBuiltinScalar "IF" ctx.Registry
+             && List.forall (isLiteralConstantExpression ctx.Registry) [ whenTrue; whenFalse ] ->
+        let choices = possibleConditionTruths ctx condition |> Set.map ((=) (Some true))
+        match Set.toList choices with
+        | [ choice ] -> evaluate (FuncCall("IF", [ Lit(boolToValue choice); whenTrue; whenFalse ]))
+        | _ -> allConditionTruths
+    | _ when isLiteralConstantExpression ctx.Registry expression -> evaluate expression
+    | _ -> allConditionTruths
 
 /// MySQL removes constant-true conditions before scalar reduction and LIMIT.
 and private tryReducedScalarProjection ctx (select: SelectStmt) =
@@ -4927,7 +4945,7 @@ and private tryReducedScalarProjection ctx (select: SelectStmt) =
     | [ expression, _ ] when not (scalarSubqueryMaterializes ctx.Registry select) ->
         let conditionReduces =
             select.Where
-            |> Option.map (fun condition -> tryConstantCondition ctx condition |> Option.bind truthy = Some true)
+            |> Option.map (fun condition -> possibleConditionTruths ctx condition = Set.singleton (Some true))
             |> Option.defaultValue true
         if conditionReduces then Some expression else None
     | _ -> None

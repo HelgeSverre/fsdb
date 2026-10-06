@@ -586,14 +586,35 @@ Bound parameters retain runtime origin inside scalar WHERE conditions, and
 non-reduced scalar results materialize their bytes. The original query still
 passes through ordinary validation and execution, preserving error reporting.
 
-The audited function set includes ABS, COALESCE, IF/IFNULL, ROUND, TRUNCATE,
-MOD, case conversion, string lengths, and concatenation. Overridden functions,
+The audited function set includes numeric arithmetic and trigonometry, extrema,
+NULLIF, ABS, COALESCE, IF/IFNULL, case conversion, string lengths, concatenation,
+HEX, CRC32, REVERSE, and TRIM. Overridden functions,
 other functions, variables, and subqueries cannot execute during inference.
-Broader constant functions and logical simplification beneath other operators
-remain open. The conditional cases now participate in text/binary differential
+Broader constant functions remain open. The conditional cases now participate in text/binary differential
 contracts, including retained SQL PREPARE bindings. The maintained MySQL oracle
 also checks a retained binary prepared handle across changing bindings.
 
 The conditional contract manifest is
 `artifacts/runs/20261006T170623905-43982/contracts/manifest.json`; it also checks
 constant versus runtime LIMIT 0, binary collation, and NULL logical operands.
+
+Nested conditions retain context-specific reduction boundaries. MySQL 8.4.11
+returns BIGINT 1 for `(SELECT b'01' WHERE predicate)+0` with
+`NOT (0 AND @flag)`, `NOT NOT (1 OR @flag)`, or
+`IF(1 OR @flag,1,0)`. `IF(NULL AND @flag,0,1)` also reduces: its condition
+cannot be true, although its exact truth value can be false or NULL. In
+contrast, `NOT (NULL AND @flag)` remains runtime-dependent. The executor
+tracks possible SQL truth values using its existing logical operations;
+it does not collapse false and NULL before applying NOT.
+
+Reduction does not propagate through every parent expression. The same
+`1 OR @flag` inside `=1`, `IS TRUE`, CAST, COALESCE, CASE, or arithmetic
+returns DOUBLE zero. `IF(1,1,@flag)` also retains its runtime boundary even
+though its selected branch is constant. Both IF result branches must qualify
+as literal expressions before its simplified condition can enable reduction.
+The maintained oracle checks these distinctions with changing session variables
+and a reused binary prepared parameter. Differential contracts also cover
+LIMIT 0 and the NULL-sensitive NOT case.
+
+The nested-condition and numeric-function contract manifest is
+`artifacts/runs/20261006T171738627-45712/contracts/manifest.json`.

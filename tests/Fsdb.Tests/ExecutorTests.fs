@@ -3744,22 +3744,24 @@ let tests =
 
                 testCase "conditional scalar inference does not invoke overridden builtins"
                 <| fun _ ->
-                    let mutable calls = 0
-                    let registry =
-                        builtins
-                        |> registerScalar "ABS" (fun _ ->
-                            calls <- calls + 1
-                            VInt 1L)
-                    let store = newStore ()
-                    let statement =
-                        Fsdb.Parser.parse "SELECT (SELECT b'01' WHERE ABS(-1)=1)+0 AS value"
-                        |> Result.defaultWith (fun error -> failtestf "%A" error)
-                    Fsdb.Executor.statementColumns store registry "test" statement |> ignore
-                    Fsdb.Executor.statementNumericMetadata store registry "test" statement |> ignore
-                    Expect.equal calls 0 "metadata cannot invoke an extension callback"
-                    let result = run store registry "SELECT (SELECT b'01' WHERE ABS(-1)=1)+0 AS value"
-                    Expect.equal result (ResultSet([ "value" ], [ [ Some "0" ] ])) "runtime predicates materialize the result"
-                    Expect.isGreaterThan calls 0 "execution evaluates the runtime predicate"
+                    for name, predicate in [ "ABS", "ABS(-1)=1"; "IF", "IF(1,1,0)" ] do
+                        let mutable calls = 0
+                        let registry =
+                            builtins
+                            |> registerScalar name (fun _ ->
+                                calls <- calls + 1
+                                VInt 1L)
+                        let store = newStore ()
+                        let sql = "SELECT (SELECT b'01' WHERE " + predicate + ")+0 AS value"
+                        let statement =
+                            Fsdb.Parser.parse sql
+                            |> Result.defaultWith (fun error -> failtestf "%A" error)
+                        Fsdb.Executor.statementColumns store registry "test" statement |> ignore
+                        Fsdb.Executor.statementNumericMetadata store registry "test" statement |> ignore
+                        Expect.equal calls 0 "metadata cannot invoke an extension callback"
+                        let result = run store registry sql
+                        Expect.equal result (ResultSet([ "value" ], [ [ Some "0" ] ])) "runtime predicates materialize the result"
+                        Expect.isGreaterThan calls 0 "execution evaluates the runtime predicate"
 
                 testCase "row subqueries materialize literal bytes and retain limits"
                 <| fun _ ->

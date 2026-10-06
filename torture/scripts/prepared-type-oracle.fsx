@@ -506,6 +506,37 @@ let runBinaryLiteralContexts () =
           "(SELECT b'01' WHERE ABS(-1)=1)+0", "BIGINT", "1"
           "(SELECT b'01' WHERE 'a'='A')+0", "BIGINT", "1"
           "(SELECT b'01' WHERE COALESCE(NULL,1))+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE CEIL(0.1)=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE CEILING(0.1)=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE FLOOR(1.9)=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE SQRT(4)=2)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE POWER(2,3)=8)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE POW(2,3)=8)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE SIGN(-2)=-1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE GREATEST(1,2)=2)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE LEAST(1,2)=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE NULLIF(1,2)=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE SIN(0)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE COS(0)=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE TAN(0)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE COT(1)>0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE ASIN(0)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE ACOS(1)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE ATAN(0)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE ATAN2(0,1)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE PI()>3)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE EXP(0)=1)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE LN(1)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE LOG(1)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE LOG2(8)=3)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE LOG10(100)=2)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE DEGREES(0)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE RADIANS(0)=0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE BIT_COUNT(3)=2)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE CRC32('a')>0)+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE HEX('a')='61')+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE REVERSE('ab')='ba')+0", "BIGINT", "1"
+          "(SELECT b'01' WHERE TRIM(' a ')='a')+0", "BIGINT", "1"
           "(SELECT b'01' WHERE RAND()>=0)+0", "DOUBLE", "0"
           "(SELECT b'01' WHERE EXISTS(SELECT 1))+0", "DOUBLE", "0"
           "(SELECT b'01' LIMIT 0)+0", "BIGINT", "1"
@@ -617,5 +648,29 @@ let runConditionalScalarBindings () =
     for value in [ 0; 1; 0; 1 ] do
         parameter.Value <- box value
         check (sprintf "binary parameter=%d" value) "DOUBLE" (if value = 0 then "NULL" else "0") bound
+
+    let shapes =
+        [ "NOT (0 AND @condition)", "BIGINT", "1"
+          "NOT NOT (1 OR @condition)", "BIGINT", "1"
+          "IF(1 OR @condition,1,0)", "BIGINT", "1"
+          "IF(0 AND @condition,0,1)", "BIGINT", "1"
+          "IF(NULL AND @condition,0,1)", "BIGINT", "1"
+          "IF(1,1,@condition)", "DOUBLE", "0"
+          "(1 OR @condition)=1", "DOUBLE", "0"
+          "(1 OR @condition) IS TRUE", "DOUBLE", "0"
+          "CAST(1 OR @condition AS SIGNED)", "DOUBLE", "0"
+          "COALESCE(1 OR @condition,0)", "DOUBLE", "0"
+          "CASE WHEN 1 OR @condition THEN 1 ELSE 0 END", "DOUBLE", "0"
+          "(1 OR @condition)+0", "DOUBLE", "0" ]
+    for predicate, family, expected in shapes do
+        use parameterized = new MySqlCommand("SELECT (SELECT b'01' WHERE " + predicate + ")+0 AS value", connection)
+        let parameter = parameterized.Parameters.AddWithValue("@condition", 0)
+        parameterized.Prepare()
+        for value in [ 0; 1; 0 ] do
+            parameter.Value <- box value
+            check (sprintf "%s [binary=%d]" predicate value) family expected parameterized
+            execute (sprintf "SET @scalar_condition=%d" value)
+            use direct = new MySqlCommand("SELECT (SELECT b'01' WHERE " + predicate.Replace("@condition", "@scalar_condition") + ")+0 AS value", connection)
+            check (sprintf "%s [variable=%d]" predicate value) family expected direct
 
 runConditionalScalarBindings ()

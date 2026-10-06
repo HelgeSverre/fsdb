@@ -2134,6 +2134,15 @@ module ContractCatalog =
                      "wide", "SELECT SUM(b'1111111111111111111111111111111111111111111111111111111111111111') AS s,b'1111111111111111111111111111111111111111111111111111111111111111'+0 AS arithmetic" ] do
                    Contract.query (name + "-text") sql
                    Contract.preparedQuery (name + "-binary") sql [||]
+               for index, predicate in
+                   [ "CEIL(0.1)=1"; "CEILING(0.1)=1"; "FLOOR(1.9)=1"; "SQRT(4)=2"; "POWER(2,3)=8"; "POW(2,3)=8"
+                     "SIGN(-2)=-1"; "GREATEST(1,2)=2"; "LEAST(1,2)=1"; "NULLIF(1,2)=1"
+                     "SIN(0)=0"; "COS(0)=1"; "TAN(0)=0"; "COT(1)>0"; "ASIN(0)=0"; "ACOS(1)=0"; "ATAN(0)=0"; "ATAN2(0,1)=0"
+                     "PI()>3"; "EXP(0)=1"; "LN(1)=0"; "LOG(1)=0"; "LOG2(8)=3"; "LOG10(100)=2"; "DEGREES(0)=0"; "RADIANS(0)=0"
+                     "BIT_COUNT(3)=2"; "CRC32('a')>0"; "HEX('a')='61'"; "REVERSE('ab')='ba'"; "TRIM(' a ')='a'" ] |> List.indexed do
+                   let sql = "SELECT (SELECT b'01' WHERE " + predicate + ")+0 AS value"
+                   Contract.query (sprintf "scalar-function-text-%d" index) sql
+                   Contract.preparedQuery (sprintf "scalar-function-binary-%d" index) sql [||]
                for limit in [ 0; 3 ] do
                    Contract.preparedQuery (sprintf "scalar-limit-parameter-%d" limit) "SELECT (SELECT b'01' LIMIT ? OFFSET ?)+0 AS value" [| box limit; box 10 |]
                Contract.execute "scalar-condition-binding" "SET @scalar_condition=1"
@@ -2145,6 +2154,19 @@ module ContractCatalog =
                    Contract.query (sprintf "scalar-condition-reuse-%d" index) "EXECUTE scalar_condition"
                    Contract.query (sprintf "scalar-disjunction-reuse-%d" index) "EXECUTE scalar_disjunction"
                    Contract.preparedQuery (sprintf "scalar-condition-binary-%d" index) "SELECT (SELECT b'01' WHERE ?)+0 AS value" [| box value |]
+               for index, predicate in
+                   [ "NOT (0 AND @scalar_condition)"; "NOT NOT (1 OR @scalar_condition)"
+                     "IF(1 OR @scalar_condition,1,0)"; "IF(0 AND @scalar_condition,0,1)"; "IF(NULL AND @scalar_condition,0,1)"
+                     "IF(1,1,@scalar_condition)"; "(1 OR @scalar_condition)=1"; "(1 OR @scalar_condition) IS TRUE"
+                     "CAST(1 OR @scalar_condition AS SIGNED)"; "COALESCE(1 OR @scalar_condition,0)"
+                     "CASE WHEN 1 OR @scalar_condition THEN 1 ELSE 0 END"; "(1 OR @scalar_condition)+0"
+                     "NOT (NULL AND @scalar_condition)"; "NOT (0 AND @scalar_condition) LIMIT 0"; "(1 OR @scalar_condition)=1 LIMIT 0" ] |> List.indexed do
+                   for value in [ 0; 1 ] do
+                       let name = sprintf "scalar-nesting-%d-%d" index value
+                       let sql = "SELECT (SELECT b'01' WHERE " + predicate + ")+0 AS value"
+                       Contract.execute (name + "-set") (sprintf "SET @scalar_condition=%d" value)
+                       Contract.query (name + "-text") sql
+                       Contract.preparedQuery (name + "-binary") (sql.Replace("@scalar_condition", "?")) [| box value |]
                Contract.execute "close-scalar-condition" "DEALLOCATE PREPARE scalar_condition"
                Contract.execute "close-scalar-disjunction" "DEALLOCATE PREPARE scalar_disjunction"
                Contract.query "adjacent-introducer-identifier" "SELECT _binaryX'00ff'" |> Contract.fails 1054 "42S22"
