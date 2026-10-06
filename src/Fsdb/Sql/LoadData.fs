@@ -80,6 +80,7 @@ let private textBytes characterSet value =
 let private stringLike =
     function
     | VString _
+    | VBinaryLiteral _
     | VBytes _
     | VBit _
     | VJson _

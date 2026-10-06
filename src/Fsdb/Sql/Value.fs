@@ -1109,6 +1109,8 @@ type Value =
     | VDecimal of decimal
     | VString of string
     | VBytes of byte[]
+    /// Bare bit/hex bytes retain a numeric interpretation until materialized.
+    | VBinaryLiteral of byte[]
     | VDate of DateOnly
     | VDateTime of DateTime
     /// A TIMESTAMP column's UTC storage instant. Executor converts it to the
@@ -1219,9 +1221,19 @@ let bitValue (bytes: byte[]) : uint64 option =
         |> Array.fold (fun value next -> (value <<< 8) ||| uint64 next) 0UL
         |> Some
 
+/// Numeric literal conversion retains the low 64 bits, including wider literals.
+let binaryLiteralNumber (bytes: byte[]) =
+    bytes |> Array.fold (fun value next -> (value <<< 8) ||| uint64 next) 0UL
+
+/// Materialized bytes no longer carry a literal's numeric interpretation.
+let materialize = function
+    | VBinaryLiteral bytes -> VBytes bytes
+    | value -> value
+
 let tryRawBytes =
     function
     | VBit(width, value) -> Some(bitBytes width value)
+    | VBinaryLiteral bytes
     | VBytes bytes -> Some bytes
     | _ -> None
 
@@ -1264,6 +1276,7 @@ let toText (v: Value) : string option =
     | VDouble d -> Some(formatDouble d)
     | VDecimal d -> Some(d.ToString(CultureInfo.InvariantCulture))
     | VString s -> Some s
+    | VBinaryLiteral b
     | VBytes b -> Some(Text.Encoding.Latin1.GetString b)
     | VDate d -> Some(d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
     | VDateTime dt
@@ -1326,6 +1339,7 @@ let toWire (v: Value) : string =
     | VDouble d -> "D" + d.ToString("R", CultureInfo.InvariantCulture)
     | VDecimal d -> "M" + d.ToString(CultureInfo.InvariantCulture)
     | VString s -> "S" + b64 s
+    | VBinaryLiteral b -> "L" + Convert.ToBase64String b
     | VBytes b -> "B" + Convert.ToBase64String b
     | VDate d -> "T" + d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
     // "O" (round-trip) format, not `toText`'s display format — keeps
@@ -1363,6 +1377,7 @@ let ofWire (s: string) : Value =
                 | None -> failwithf "Value.ofWire: invalid bit payload %s" payload
             | _ -> failwithf "Value.ofWire: invalid bit payload %s" payload
         | 'S' -> VString(unb64 payload)
+        | 'L' -> VBinaryLiteral(Convert.FromBase64String payload)
         | 'B' -> VBytes(Convert.FromBase64String payload)
         | 'T' -> VDate(DateOnly.Parse(payload, CultureInfo.InvariantCulture))
         | 'V' -> VDateTime(DateTime.Parse(payload, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind))
@@ -1417,6 +1432,9 @@ let encodeValue (w: Writer) (v: Value) : unit =
     | VString s ->
         w.WriteByte 0x04uy
         w.WriteLenEncString s
+    | VBinaryLiteral b ->
+        w.WriteByte 0x10uy
+        w.WriteLenEncBytes b
     | VBytes b ->
         w.WriteByte 0x05uy
         w.WriteLenEncBytes b
@@ -1475,6 +1493,11 @@ let decodeValue (r: #IReader) : Value =
         |> Option.map (fun n -> r.ReadBytes(int n))
         |> Option.defaultValue [||]
         |> VBytes
+    | 0x10uy ->
+        r.ReadLenEncInt()
+        |> Option.map (fun n -> r.ReadBytes(int n))
+        |> Option.defaultValue [||]
+        |> VBinaryLiteral
     | 0x06uy -> VDate(DateOnly.FromDayNumber(r.ReadInt32LE()))
     | 0x07uy ->
         let ticks = r.ReadInt64LE()
@@ -1533,6 +1556,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VString _ -> columnMetadata TypeVarString
     | VJson _ -> { columnMetadata TypeJson with Flags = BinaryFlag }
     | VGeometry _ -> { columnMetadata TypeGeometry with Flags = BlobFlag ||| BinaryFlag }
+    | VBinaryLiteral _
     | VBytes _ -> { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
     | VDate _ -> columnMetadata TypeDate
     | VDateTime _ -> columnMetadata TypeDateTime
@@ -1607,6 +1631,7 @@ let toDouble (v: Value) : float =
     | VInt i -> float i
     | VUInt u -> float u
     | VBit(_, value) -> float value
+    | VBinaryLiteral bytes -> float (binaryLiteralNumber bytes)
     | VDouble d -> d
     | VDecimal d -> float d
     | VString s -> parseLeadingNumeric s
@@ -1709,6 +1734,7 @@ let private asJsonOperand (v: Value) : int * JsonNode =
     | VDateTime _ -> 8, null
     | VTimestamp _ -> 8, null
     | VZeroDateTime _ -> 8, null
+    | VBinaryLiteral _
     | VBytes _ -> 11, null
     | VGeometry _ -> 11, null
     | VNull -> 0, null
@@ -1818,6 +1844,13 @@ let rec compare (a: Value) (b: Value) : int =
     | VBit(_, value), VBytes bytes -> compareBitBytes value bytes
     | VBytes bytes, VBit(_, value) -> -(compareBitBytes value bytes)
     | VString x, VString y -> compareStrings x y
+    | VBit(_, value), VBinaryLiteral bytes -> compareBitBytes value bytes
+    | VBinaryLiteral bytes, VBit(_, value) -> -(compareBitBytes value bytes)
+    | VBinaryLiteral x, VBinaryLiteral y -> compareBytesLex x y
+    | VBinaryLiteral x, (VBytes _ | VString _) -> compare (VBytes x) b
+    | (VBytes _ | VString _), VBinaryLiteral y -> compare a (VBytes y)
+    | VBinaryLiteral x, _ -> compare (VUInt(binaryLiteralNumber x)) b
+    | _, VBinaryLiteral y -> compare a (VUInt(binaryLiteralNumber y))
     | VBytes x, VBytes y -> compareBytesLex x y
     // A binary string against a character string compares byte-for-byte
     // (MySQL: `CONVERT('abc' USING binary) = 'ABC'` is false), not via the
@@ -1965,6 +1998,7 @@ let private classify (v: Value) : NumKind option =
     | VInt i -> Some(KInt i)
     | VUInt u -> Some(KUInt u)
     | VBit(_, value) -> Some(KUInt value)
+    | VBinaryLiteral bytes -> Some(KInt(int64 (binaryLiteralNumber bytes)))
     | VDecimal d -> Some(KDecimal d)
     | VDouble d -> Some(KDouble d)
     | VString _
@@ -2021,8 +2055,12 @@ let private maxUInt64 = decimal UInt64.MaxValue
 exception UnsignedOutOfRange
 exception SignedOutOfRange
 
+let private negationOperand = function
+    | VBinaryLiteral _ as value -> VDouble(toDouble value)
+    | value -> value
+
 let negate value =
-    match classify value with
+    match classify (negationOperand value) with
     | None -> VNull
     | Some(KInt value) when value = Int64.MinValue -> raise SignedOutOfRange
     | Some(KInt value) -> VInt(-value)
@@ -2034,7 +2072,7 @@ let negate value =
 
 /// Constant integer negation may choose DECIMAL before runtime BIGINT checks apply.
 let negateConstant value =
-    match classify value with
+    match classify (negationOperand value) with
     | Some(KInt value) when value = Int64.MinValue -> VDecimal(-(decimal value))
     | Some(KUInt value) when value > uint64 Int64.MaxValue -> VDecimal(-(decimal value))
     | _ -> negate value

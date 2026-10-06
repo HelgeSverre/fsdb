@@ -364,12 +364,12 @@ let private roundNumeric (v: Value) : Value =
     | _ -> v
 
 let private coalesceFn (args: Value list) : Value =
-    args |> List.tryFind (function VNull -> false | _ -> true) |> Option.defaultValue VNull
+    args |> List.tryFind (function VNull -> false | _ -> true) |> Option.defaultValue VNull |> Value.materialize
 
 let private ifNullFn: Scalar =
     function
-    | [ VNull; b ] -> b
-    | [ a; _ ] -> a
+    | [ VNull; b ] -> Value.materialize b
+    | [ a; _ ] -> Value.materialize a
     | _ -> VNull
 
 let private ifFn: Scalar =
@@ -5261,6 +5261,7 @@ let private isIpv4MappedFn =
 let private countAgg: Aggregate = fun vs -> VInt(int64 (List.length vs))
 
 let internal numericAggregateValue = function
+    | VBinaryLiteral bytes -> VUInt(Value.binaryLiteralNumber bytes)
     | VBit(_, value) -> VUInt value
     | (VNull | VInt _ | VUInt _ | VDecimal _ | VDouble _) as value -> value
     | value -> VDouble(toDouble value)
@@ -5370,7 +5371,7 @@ let private bytesOfVector (fs: float32[]) : byte[] =
 let private stringToVectorFn: Scalar =
     function
     | [ VNull ] -> VNull
-    | [ VBytes b ] -> VBytes b // already a vector — MySQL passes it through
+    | [ (VBytes b | VBinaryLiteral b) ] -> VBytes b // already a vector — MySQL passes it through
     | [ v ] ->
         let s = (toText v |> Option.defaultValue "").Trim()
 
@@ -5406,7 +5407,7 @@ let private stringToVectorFn: Scalar =
 let private vectorToStringFn: Scalar =
     function
     | [ VNull ] -> VNull
-    | [ VBytes b ] ->
+    | [ (VBytes b | VBinaryLiteral b) ] ->
         vectorOfBytes b
         |> Array.map (fun f -> f.ToString("0.00000e+00", CultureInfo.InvariantCulture))
         |> String.concat ","
@@ -5418,7 +5419,7 @@ let private vectorToStringFn: Scalar =
 let private vectorDimFn: Scalar =
     function
     | [ VNull ] -> VNull
-    | [ VBytes b ] -> VInt(int64 (vectorOfBytes b).Length)
+    | [ (VBytes b | VBinaryLiteral b) ] -> VInt(int64 (vectorOfBytes b).Length)
     | [ v ] -> vectorError (sprintf "'%s'" (toText v |> Option.defaultValue ""))
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'vector_dim'"))
 
@@ -5431,7 +5432,7 @@ let private vectorDimFn: Scalar =
 let private distanceFn: Scalar =
     function
     | args when anyNull args -> VNull
-    | [ VBytes b1; VBytes b2; metric ] ->
+    | [ (VBytes b1 | VBinaryLiteral b1); (VBytes b2 | VBinaryLiteral b2); metric ] ->
         let v1 = vectorOfBytes b1
         let v2 = vectorOfBytes b2
 
@@ -5668,9 +5669,9 @@ let private geometryFromWkbFn requiredKind functionName: Scalar =
     | [ VNull; _; _ ]
     | [ _; VNull; _ ]
     | [ _; _; VNull ] -> VNull
-    | [ VBytes bytes ] -> construct bytes (VInt 0L) None
-    | [ VBytes bytes; sridValue ] -> construct bytes sridValue None
-    | [ VBytes bytes; sridValue; axisOrder ] -> construct bytes sridValue (Some axisOrder)
+    | [ (VBytes bytes | VBinaryLiteral bytes) ] -> construct bytes (VInt 0L) None
+    | [ (VBytes bytes | VBinaryLiteral bytes); sridValue ] -> construct bytes sridValue None
+    | [ (VBytes bytes | VBinaryLiteral bytes); sridValue; axisOrder ] -> construct bytes sridValue (Some axisOrder)
     | [ _ ]
     | [ _; _ ]
     | [ _; _; _ ] -> geometryError functionName "a binary WKB argument is required"
@@ -6124,7 +6125,7 @@ let private geometryBufferFn: Scalar =
                 let strategies =
                     strategyValues
                     |> List.map (function
-                        | VBytes bytes ->
+                        | (VBytes bytes | VBinaryLiteral bytes) ->
                             match GeometryOperations.tryDecodeBufferStrategy bytes with
                             | Some strategy -> strategy
                             | None -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))

@@ -2129,6 +2129,23 @@ let tests =
                   | other -> failtestf "expected the generated expression to survive the restart intact, got %A" other
               | Error e -> failtestf "expected table 'g' to reload, got %A" e
 
+          testCase "binary literal numeric origin survives WAL and snapshot recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let session = Fsdb.Session.create 1 store
+                  let _, created = handle session "CREATE TABLE literal_generated(source INT,calculated INT GENERATED ALWAYS AS (source+b'01') STORED)"
+                  Expect.equal created (Affected 0UL) "the binary literal is persisted"
+                  if checkpoint then snapshotNow dir store
+                  let reloaded = load dir
+                  let session = Fsdb.Session.create 2 reloaded
+                  let session, inserted = handle session "INSERT INTO literal_generated(source) VALUES(2)"
+                  Expect.equal inserted (Affected 1UL) "the recovered expression remains executable"
+                  let _, result = handle session "SELECT calculated FROM literal_generated"
+                  Expect.equal result (ResultSet([ "calculated" ], [ [ Some "3" ] ])) "literal origin survives recovery"
+
           testCase "generated unary negation survives WAL and snapshot recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do

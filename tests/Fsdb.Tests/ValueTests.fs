@@ -138,6 +138,7 @@ let tests =
                           VDecimal 12.50M
                           VString "hi | there\nwith \"quotes\""
                           VBytes [| 0uy; 255uy; 1uy |]
+                          VBinaryLiteral [| 0uy; 255uy; 1uy |]
                           VDate(DateOnly(2024, 3, 5))
                           VDateTime(DateTime(2024, 3, 5, 13, 45, 9, 123))
                           VTimestamp(DateTime(2024, 3, 5, 13, 45, 9, 123, DateTimeKind.Utc))

@@ -2356,6 +2356,7 @@ let private castUnsignedValue v =
     match v with
     | VNull -> VNull
     | VUInt _ -> v
+    | VBinaryLiteral bytes -> VUInt(Value.binaryLiteralNumber bytes)
     | VInt i -> VUInt(uint64 i)
     | VDecimal d -> wrap d
     | VDouble d ->
@@ -2462,13 +2463,23 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 ColumnLength = columnLength
                 Decimals = if typeId = TypeDouble || typeId = TypeFloat then 31uy else 0uy }
     let typeIdOf expression = metadataOfExpr ctx expression |> Option.map _.TypeId
+    let numericMetadata expression =
+        let rec literalBytes = function
+            | Lit(VBinaryLiteral bytes) -> Some bytes
+            | Distinct inner -> literalBytes inner
+            | _ -> None
+        match literalBytes expression with
+        | Some bytes ->
+            let precision = max 1 (int (System.Math.Ceiling(float (min 8 bytes.Length) * 8.0 * System.Math.Log10 2.0)))
+            Some { Value.columnMetadata TypeLongLong with ColumnLength = uint32 precision; Flags = UnsignedFlag ||| NotNullFlag }
+        | None -> metadataOfExpr ctx expression
 
     let numeric combineShapes left right =
         let isInteger typeId =
             typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
 
-        let leftMetadata = metadataOfExpr ctx left
-        let rightMetadata = metadataOfExpr ctx right
+        let leftMetadata = numericMetadata left
+        let rightMetadata = numericMetadata right
 
         let inferred =
             match leftMetadata, rightMetadata with
@@ -2669,6 +2680,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         match expression with
         | Collate(value, _) -> characterBound value
         | Lit(VString text) -> text.EnumerateRunes() |> Seq.length
+        | Lit(VBinaryLiteral bytes)
         | Lit(VBytes bytes) -> bytes.Length
         | Lit(VBit(width, _)) -> (width + 7) / 8
         | Col _
@@ -2737,6 +2749,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text)
                 Flags = NotNullFlag
                 CollationId = metadataCollationId ctx.Store.ExecutionSettings.ConnectionCollation.Name }
+    | Lit(VBinaryLiteral bytes)
     | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
     | Lit(VDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
@@ -2787,6 +2800,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Between _
     | Exists _ -> simple TypeLongLong
     | RuntimeExpression operand -> metadataOfExpr ctx operand
+    | Neg(Lit(VBinaryLiteral _)) -> simple TypeDouble
     | Neg operand ->
         let source = metadataOfExpr ctx operand
         numeric (fun _ right -> right) (Lit(VInt 0L)) operand
@@ -2867,7 +2881,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             let approximate length scale =
                 simple TypeDouble
                 |> Option.map (fun metadata -> { metadata with ColumnLength = length; Decimals = scale })
-            match metadataOfExpr ctx arg with
+            match numericMetadata arg with
             | metadata when metadata |> Option.forall (fun item -> item.TypeId = TypeNull) ->
                 let scale = if isAverage then divisionPrecisionIncrement () else 0
                 approximate (uint32 (17 + scale)) (byte scale)
@@ -3015,6 +3029,17 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | ("AES_ENCRYPT" | "AES_DECRYPT" | "COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
             Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
         | ("CHAR" | "UNHEX" | "FROM_BASE64" | "UUID_TO_BIN" | "STRING_TO_VECTOR" | "TO_VECTOR"), _ -> binary 16383
+        | "CONCAT", arguments when
+            arguments |> List.choose (metadataOfExpr ctx)
+            |> List.exists (fun metadata ->
+                hasMetadataFlag BinaryFlag metadata
+                && (metadata.TypeId = TypeBlob || metadata.TypeId = TypeString || metadata.TypeId = TypeVarString)) ->
+            let length =
+                arguments |> List.choose (metadataOfExpr ctx)
+                |> List.sumBy (fun metadata -> uint64 metadata.ColumnLength)
+                |> min (uint64 System.UInt32.MaxValue)
+                |> uint32
+            Some { Value.columnMetadata TypeBlob with ColumnLength = length; Flags = BlobFlag ||| BinaryFlag; Decimals = 31uy }
         | ("CONCAT" | "CONCAT_WS" | "UPPER" | "UCASE" | "LOWER" | "LCASE" | "SUBSTRING" | "SUBSTR" | "MID" | "REPLACE" | "INSERT" | "TRIM"
           | "TRIM_BOTH" | "TRIM_LEADING" | "TRIM_TRAILING" | "LTRIM" | "RTRIM" | "LPAD" | "RPAD" | "LEFT" | "RIGHT" | "REVERSE" | "REPEAT"
           | "SPACE" | "HEX" | "MD5" | "SHA" | "SHA1" | "SHA2" | "FORMAT" | "SUBSTRING_INDEX" | "ELT" | "EXPORT_SET" | "MAKE_SET" | "QUOTE"
@@ -3612,6 +3637,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | RuntimeExpression inner -> expressionCollation ctx inner
     | Collate(_, name) ->
         named name 0
+    | Lit(VBinaryLiteral _)
     | Lit(VBytes _)
     | Lit(VBit _) ->
         named "binary" 4
@@ -3704,7 +3730,7 @@ let private coercibilityOfExpr ctx expr =
 let private normalizeCompoundString descriptor value =
     match descriptor.Charset, value with
     | "binary", _ -> value
-    | charset, VBytes bytes -> VString(Charset.decodeBytes charset bytes)
+    | charset, (VBytes bytes | VBinaryLiteral bytes) -> VString(Charset.decodeBytes charset bytes)
     | _ -> value
 
 /// The collation an equality-classified key resolves under: an explicit
@@ -3743,6 +3769,7 @@ let private regexCollation (ctx: EvalContext) (functionName: string) (subjectExp
 let private collationKeyOf (ctx: EvalContext) (expr: Expr) (value: Value) : Value =
     match value with
     | VString text -> VString((keyCollation ctx expr).KeyOf text)
+    | VBinaryLiteral bytes -> VBytes bytes
     | _ -> value
 
 /// Converts a displayed ENUM label into its 1-based declaration ordinal for
@@ -4895,6 +4922,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | None ->
             eval value
             |> Result.bind (fun evaluated ->
+                let evaluated = Value.materialize evaluated
                 match currentVariableContext () with
                 | None -> Error(1105, "User-defined variables require a session")
                 | Some _ when suppressVariableAssignments.Value -> Ok evaluated
@@ -5548,6 +5576,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
             let v =
                 match v, ty with
+                | VBinaryLiteral bytes, TBigInt false -> VInt(int64 (Value.binaryLiteralNumber bytes))
                 | VUInt u, TBigInt false -> VInt(int64 u)
                 | VString s, (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
                     VString(leadingNumericPrefix leadingIntegerPrefixRegex s |> Option.defaultValue "")
@@ -6857,7 +6886,7 @@ and private resolveFromSubquery
                 else
                     derivedColumns
 
-            Ok(columns, typedRows)
+            Ok(columns, typedRows |> List.map (Array.map Value.materialize))
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
         | MultipleResults _ -> Error(nestedResultsError "a derived table")
@@ -12636,7 +12665,7 @@ and private equalityPinsOneStoredKey (table: Table) (name: string) (literal: Val
         | TDecimal _, (VInt _ | VUInt _ | VBit _ | VDecimal _)
         | (TDouble _ | TFloat _), (VInt _ | VUInt _ | VBit _ | VDecimal _ | VDouble _) -> true
         | (TVarchar _ | TTinyText | TText | TMediumText | TLongText), VString _ -> equalityIsOrderEquivalence ()
-        | (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob), VBytes _ -> true
+        | (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob), (VBytes _ | VBinaryLiteral _) -> true
         | _ -> false)
 
 /// A pinned prefix must identify one stored index key, not merely values

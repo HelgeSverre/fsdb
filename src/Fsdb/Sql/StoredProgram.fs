@@ -433,6 +433,7 @@ let tryDiagnosticsConditionNumber value =
     | VDouble number when Double.IsFinite number && number = Math.Truncate number ->
         if number >= 1.0 && number <= float Int32.MaxValue then Some(int number) else None
     | VBit(_, number) when number <= uint64 Int32.MaxValue -> Some(int number)
+    | VBinaryLiteral bytes
     | VBytes bytes -> fromBinary bytes
     | VString text ->
         match

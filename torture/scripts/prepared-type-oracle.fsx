@@ -388,6 +388,8 @@ let runDecimalDescriptors () =
           "ROUND(123.45,-1)", 5, 0; "TRUNCATE(123.45,-1)", 4, 0
           "SUM(1.25)", 27, 2; "AVG(1.25)", 9, 6
           "AVG(DISTINCT 1)", 7, 4; "SUM(DISTINCT 1)", 24, 0
+          "SUM(b'')", 24, 0; "SUM(b'100000001')", 28, 0
+          "AVG(b'100000001')", 11, 4; "SUM(X'010001')", 31, 0
           "CAST(1 AS DECIMAL(65,0))+CAST(1 AS DECIMAL(65,30))", 98, 30
           "COALESCE(CAST(1 AS DECIMAL(40,0)),CAST(1 AS DECIMAL(40,30)))", 67, 30
           "MOD(CAST(1 AS DECIMAL(40,0)),CAST(1 AS DECIMAL(40,30)))", 42, 30 ]

@@ -429,6 +429,7 @@ let defaultText (c: ColumnDef) : string option =
             Some(uint64 (Math.Round(value, 0, MidpointRounding.AwayFromZero)))
         | VDouble value when value >= 0.0 && value < 1.8446744073709552e19 ->
             Some(uint64 (Math.Round(value, 0, MidpointRounding.AwayFromZero)))
+        | VBinaryLiteral bytes
         | VBytes bytes -> Value.bitValue bytes
         | _ -> None
 

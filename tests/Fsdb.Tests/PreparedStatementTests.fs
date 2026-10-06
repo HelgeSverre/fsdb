@@ -64,7 +64,7 @@ let tests =
           testCase "valueToSqlLiteral renders raw bytes as a hexadecimal literal"
           <| fun _ ->
               let literal = valueToSqlLiteral (VBytes [| 0x00uy; 0xffuy; 0x80uy |])
-              Expect.equal literal "X'00FF80'" "lossless binary literal"
+              Expect.equal literal "_binary X'00FF80'" "lossless binary literal"
 
               match Fsdb.Parser.parse ("SELECT " + literal) with
               | Result.Ok(Select { Projections = [ Lit(VBytes bytes), _ ] }) ->
@@ -391,6 +391,30 @@ let tests =
               let session, _ = handle session "SET GLOBAL div_precision_increment=DEFAULT"
               let _, result = handle session "SELECT @@global.div_precision_increment AS setting"
               Expect.equal result (ResultSet([ "setting" ], [ [ Some "4" ] ])) "global DEFAULT restores four"
+
+          testCase "binary literal aggregates derive precision from byte width"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT SUM(b''),SUM(b'100000001'),AVG(b'100000001'),SUM(X'010001')"
+              let session, _ = handle session sql
+              let shape metadata = metadata.TypeId, metadata.ColumnLength, metadata.Decimals
+              let expected = [ TypeNewDecimal,24u,0uy; TypeNewDecimal,28u,0uy; TypeNewDecimal,11u,4uy; TypeNewDecimal,31u,0uy ]
+              Expect.equal (session.LastResultColumnMetadata |> List.map shape) expected "execution byte widths"
+              let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let statement = createPreparedStatement session sql ast count
+              let _, columns = preparedMetadata session statement.Ast count
+              Expect.equal (columns |> List.map (fun column -> shape column.Metadata)) expected "prepare byte widths"
+
+          testCase "binary literal variables discard numeric origin before binding"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @literal_bytes=b'01'"
+              Expect.equal session.UserVariables["literal_bytes"] (VBytes [| 1uy |]) "SET stores ordinary bytes"
+              let session, assigned = handle session "SELECT (@assigned:=b'01')+0 AS value"
+              Expect.equal assigned (ResultSet([ "value" ], [ [ Some "0" ] ])) "assignment results materialize too"
+              let session, _ = handle session "PREPARE literal_context FROM 'SELECT ?+0 AS value,SUM(?) AS total'"
+              let _, result = handle session "EXECUTE literal_context USING @literal_bytes,@literal_bytes"
+              Expect.equal result (ResultSet([ "value"; "total" ], [ [ Some "0"; Some "0" ] ])) "bindings do not regain literal origin"
 
           testCase "aggregate descriptors distinguish untyped null text and exact numeric inputs"
           <| fun _ ->

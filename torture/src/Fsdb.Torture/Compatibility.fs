@@ -2103,6 +2103,40 @@ module ContractCatalog =
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private binaryLiteralContexts =
+        { Name = "binary-literal-contexts"
+          Setup = [||]
+          Steps =
+            [| for name, sql in
+                   [ "arithmetic", "SELECT b'01'+0 AS bit_value,X'01'+0 AS hex_value,_binary X'01'+0 AS bytes_value,-b'01' AS negative,ABS(b'01') AS absolute"
+                     "aggregates", "SELECT SUM(b'01') AS s,AVG(b'01') AS a,SUM(DISTINCT b'01') AS d"
+                     "raw", "SELECT b'01' AS bit_value,X'01' AS hex_value,b'000000001' AS leading_zero,CONCAT(b'01') AS concatenated"
+                     "negative-boundary", "SELECT -b'1000000000000000000000000000000000000000000000000000000000000000' AS negative"
+                     "widths", "SELECT SUM(b'') AS empty_value,SUM(b'100000001') AS sum_value,AVG(b'100000001') AS average_value,SUM(X'010001') AS hex_value"
+                     "casts", "SELECT CAST(b'01' AS UNSIGNED) AS u,CAST(b'01' AS DECIMAL) AS d,b'01'=1 AS numeric_equal,b'01'='1' AS string_equal"
+                     "conditional", "SELECT IF(1,b'01',b'10')+0 AS branch_value,CASE WHEN 1 THEN b'01' ELSE b'10' END+0 AS case_value,COALESCE(b'01',b'10')+0 AS coalesced,IFNULL(b'01',b'10')+0 AS nonnull,CONCAT(b'01')+0 AS concatenated"
+                     "derived", "SELECT SUM(v) AS s,AVG(v) AS a FROM (SELECT b'01' AS v) t"
+                     "bytes", "SELECT HEX(b'000000001') AS leading_zero,HEX(b'') AS empty_value,HEX(CONCAT(b'01')) AS concatenated"
+                     "wide", "SELECT SUM(b'1111111111111111111111111111111111111111111111111111111111111111') AS s,b'1111111111111111111111111111111111111111111111111111111111111111'+0 AS arithmetic" ] do
+                   Contract.query (name + "-text") sql
+                   Contract.preparedQuery (name + "-binary") sql [||]
+               Contract.execute "storage-table" "CREATE TABLE literal_storage(b BIT(64),u BIGINT UNSIGNED,d DECIMAL(30),f DOUBLE,n TINYINT)"
+               for name, literal in [ "wide", "X'010000000000000000'"; "padded", "X'000000000000000001'" ] do
+                   for column in [ "b"; "u"; "d"; "f"; "n" ] do
+                       Contract.execute (name + "-strict-" + column) (sprintf "INSERT INTO literal_storage(%s) VALUES(%s)" column literal)
+                       |> Contract.fails 1264 "22003"
+               Contract.execute "permissive-mode" "SET sql_mode=''"
+               Contract.execute "permissive-storage" "INSERT INTO literal_storage VALUES(X'010000000000000000',X'010000000000000000',X'010000000000000000',X'010000000000000000',X'010000000000000000')"
+               Contract.query "storage-warnings" "SHOW WARNINGS"
+               Contract.query "stored-values" "SELECT HEX(b) AS b,u,d,f,n FROM literal_storage"
+               Contract.execute "restore-mode" "SET sql_mode=DEFAULT"
+               Contract.execute "bind-variable" "SET @literal_bytes=b'01'"
+               Contract.query "variable-materialized" "SELECT @literal_bytes+0 AS value,SUM(@literal_bytes) AS total"
+               Contract.execute "prepare-variable" "PREPARE literal_context FROM 'SELECT ?+0 AS value,SUM(?) AS total'"
+               Contract.query "execute-variable" "EXECUTE literal_context USING @literal_bytes,@literal_bytes" |]
+          Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private numericAggregateConversion =
         { Name = "numeric-aggregate-conversion"
           Setup = [||]
@@ -2278,6 +2312,7 @@ module ContractCatalog =
            divisionPrecisionIncrement
            approximateAggregateDescriptors
            numericAggregateConversion
+           binaryLiteralContexts
            unsignedNegation
            preparedSchemaChanges
            temporaryViewShadowing

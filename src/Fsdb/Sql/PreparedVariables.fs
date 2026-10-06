@@ -13,7 +13,7 @@ let private typeOf = function
     | VUInt _ -> UserVariableType.UnsignedInteger
     | VDecimal _ -> UserVariableType.Decimal
     | VDouble _ -> UserVariableType.Double
-    | VNull | VBytes _ | VBit _ | VGeometry _ -> UserVariableType.Binary
+    | VNull | VBinaryLiteral _ | VBytes _ | VBit _ | VGeometry _ -> UserVariableType.Binary
     | _ -> UserVariableType.Text
 
 let metadata = function

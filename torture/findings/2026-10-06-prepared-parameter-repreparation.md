@@ -441,9 +441,9 @@ The contract manifest at
 `artifacts/runs/20261006T152601781-20910/contracts/manifest.json` verifies text
 and binary execution for single-row, DISTINCT, and window cases.
 
-A separate oracle probe finds a remaining literal-origin gap:
-`SUM(b'01'), AVG(b'01')` return DECIMAL 1 and 1.0000 in MySQL, while fsdb's
-parser represents the literal as bytes without its numeric interpretation.
+Bit literals require a distinct numeric interpretation:
+`SUM(b'01'), AVG(b'01')` return DECIMAL 1 and 1.0000 in MySQL. The binary
+literal context rules below preserve that interpretation until materialization.
 A BIT(4) column containing 1 and 2 returns DECIMAL 3 and 1.5000 in MySQL;
 column values retain their numeric representation. Numeric conversion warning
 coverage remains a separate diagnostics limitation.
@@ -486,8 +486,43 @@ literal consisting of one followed by 64 zeros yields zero under both `+0`
 and SUM. The oracle checks observed values and type families in both wire
 modes; it does not assert diagnostic warnings for these boundaries.
 
-The parser currently emits `Lit(VBytes ...)` for bare bit/hex literals and
-explicit `_binary` values. This representation cannot carry their distinct
-numeric behavior. Stored BIT values already have a separate `VBit` case, but
-that case describes a column value and cannot by itself express the literal's
-binary descriptors or where its numeric interpretation is erased.
+The parser preserves bare bit/hex literals as `VBinaryLiteral`, distinct from
+ordinary `VBytes` and stored `VBit` column values. Arithmetic reads their
+numeric interpretation, while string consumers retain their bytes. COALESCE,
+IFNULL, variable assignment, stored-column coercion, and derived-column
+materialization remove literal origin. Scalar conditional selection preserves
+it. Ordinary byte values render with an explicit `_binary` introducer when
+substituted into SQL so they cannot accidentally regain literal semantics.
+
+Numeric storage has a separate overflow boundary: a literal wider than eight
+bytes raises 1264/22003 in strict mode, including a nine-byte literal with
+leading zeros and numeric value one. With an empty SQL mode, MySQL saturates
+at the signed or unsigned BIGINT limit before applying the destination column's
+range. BIT(64) and BIGINT UNSIGNED receive 18446744073709551615; DECIMAL(30)
+receives 9223372036854775807; DOUBLE receives its floating-point conversion;
+TINYINT receives 127. Each column emits one 1264 warning. The differential
+contract checks strict rejection, permissive values, and warning rows.
+
+WAL and snapshot encoding preserve literal origin inside generated expressions.
+Regression tests recover a generated `source+b'01'` expression through both
+paths and execute it after reopening the store. Binary index probes compare
+materialized byte keys, and binary function inputs retain their existing
+behavior. CONCAT exposes a binary result descriptor for binary arguments.
+
+Aggregate precision derives from byte capacity, capped at 64 bits. The checked
+MySQL lengths/scales are 24/0 for SUM(b''), 28/0 for SUM(b'100000001'), 11/4
+for AVG(b'100000001'), and 31/0 for SUM(X'010001'). Empty literals contribute
+one precision digit. The maintained decimal-descriptor oracle verifies these
+shapes in text and binary execution.
+
+Remaining descriptors are observable: `b'01'+0` has MySQL wire length 5 and
+fsdb length 20; `b'01'/2` has MySQL length 9 and fsdb length 7. A scalar
+`(SELECT b'01')+0` retains value 1 in both engines, but fsdb reports DOUBLE
+where MySQL reports BIGINT. Explicit `_binary b'01'` is still rejected by
+fsdb's parser; MySQL accepts it as ordinary bytes whose numeric value is zero.
+These remaining differences stay in GAPS.md.
+
+The contract manifest at
+`artifacts/runs/20261006T160526327-26477/contracts/manifest.json` verifies the
+literal contexts in text and binary execution, variable materialization, and
+numeric storage boundaries without differences.

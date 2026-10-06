@@ -600,7 +600,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 0x41")
-                        (mkSelect([ Lit(VBytes [| 0x41uy |]), None ], None, None, [], None, None))
+                        (mkSelect([ Lit(VBinaryLiteral [| 0x41uy |]), None ], None, None, [], None, None))
                         "hex literal"
 
                 testCase "unary minus binds tighter than binary minus"
@@ -829,8 +829,8 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT X'00ffA5', x''")
                         (mkSelect(
-                            [ Lit(VBytes [| 0x00uy; 0xffuy; 0xa5uy |]), None
-                              Lit(VBytes [||]), None ],
+                            [ Lit(VBinaryLiteral [| 0x00uy; 0xffuy; 0xa5uy |]), None
+                              Lit(VBinaryLiteral [||]), None ],
                             None,
                             None,
                             [],
@@ -861,10 +861,10 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT b'0101', B'111111111', 0b0101, b'', N'héllo'")
                         (mkSelect(
-                            [ Lit(VBytes [| 0x05uy |]), None
-                              Lit(VBytes [| 0x01uy; 0xffuy |]), None
-                              Lit(VBytes [| 0x05uy |]), None
-                              Lit(VBytes [||]), None
+                            [ Lit(VBinaryLiteral [| 0x05uy |]), None
+                              Lit(VBinaryLiteral [| 0x01uy; 0xffuy |]), None
+                              Lit(VBinaryLiteral [| 0x05uy |]), None
+                              Lit(VBinaryLiteral [||]), None
                               Lit(VString "héllo"), None ],
                             None,
                             None,

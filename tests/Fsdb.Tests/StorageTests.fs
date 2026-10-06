@@ -564,6 +564,19 @@ let tests =
                     Expect.equal (coerceValue true signed (VString "4.5")) (Ok(VInt 5L)) "numeric string"
                     Expect.equal (coerceValue true unsigned (VDecimal 6.5m)) (Ok(VUInt 7UL)) "unsigned decimal"
 
+                testCase "oversized binary literals overflow numeric storage even with leading zeros"
+                <| fun _ ->
+                    let targets =
+                        [ TBit 64, VBit(64, System.UInt64.MaxValue)
+                          TBigInt true, VUInt System.UInt64.MaxValue
+                          TDecimal(30, 0, false), VDecimal(decimal System.Int64.MaxValue)
+                          TDouble false, VDouble(float System.Int64.MaxValue) ]
+                    for bytes in [ Array.append [| 1uy |] (Array.zeroCreate 8); Array.append (Array.zeroCreate 8) [| 1uy |] ] do
+                        for typ, expected in targets do
+                            let column = col "n" typ true
+                            Expect.equal (coerceValue true column (VBinaryLiteral bytes)) (Error(OutOfRangeForColumn "n")) "strict storage rejects more than eight bytes"
+                            Expect.equal (coerceValue false column (VBinaryLiteral bytes)) (Ok expected) "permissive storage saturates before column conversion"
+
                 testCase "a non-numeric string into an INT column returns error 1366"
                 <| fun _ ->
                     let store = withUsersTable ()

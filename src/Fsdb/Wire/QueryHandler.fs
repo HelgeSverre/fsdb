@@ -236,7 +236,8 @@ let private valueToSqlLiteralWithOptions (options: Parser.ParserOptions) (v: Val
     | VBit(width, value) -> "X'" + Convert.ToHexString(bitBytes width value) + "'"
     | VDouble d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
     | VDecimal d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
-    | VBytes bytes -> "X'" + Convert.ToHexString(bytes) + "'"
+    | VBinaryLiteral bytes -> "X'" + Convert.ToHexString(bytes) + "'"
+    | VBytes bytes -> "_binary X'" + Convert.ToHexString(bytes) + "'"
     | VDate _
     | VDateTime _
     | VTimestamp _
@@ -1740,7 +1741,7 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
         | GlobalIsolation ->
             Session.setGlobalVariable session.Store "transaction_isolation" (Some(transactionIsolationValue isolation))
             session
-    | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }
+    | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name (Value.materialize value) session.UserVariables }
 
 let private validateSetAction (session: Session) (action: SetAction) : Result<unit, QueryResult> =
     match action with
@@ -1783,7 +1784,7 @@ let private applySetActions (session: Session) parsed : Session * QueryResult =
 
         let userVariables =
             actions
-            |> List.fold (fun variables action -> match action with SetUserVarAction(name, value) -> Map.add name value variables | _ -> variables) sideEffects
+            |> List.fold (fun variables action -> match action with SetUserVarAction(name, value) -> Map.add name (Value.materialize value) variables | _ -> variables) sideEffects
 
         if userVariables.Count > maxUserVariables then
             session, Err(1105, "Too many user-defined variables")
@@ -6160,7 +6161,7 @@ let private runRoutineStatements
                 | None ->
                     let current =
                         { current with
-                            UserVariables = Map.add variable.Name value current.UserVariables }
+                            UserVariables = Map.add variable.Name (Value.materialize value) current.UserVariables }
 
                     apply current locals rest
 

@@ -3711,6 +3711,22 @@ let tests =
                     | ResultSet([ "c"; "cn"; "s"; "a" ], [ [ Some "3"; Some "2"; Some "30"; Some "15.0000" ] ]) -> ()
                     | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other
 
+                testCase "binary literals retain numeric origin until materialization"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "SELECT b'01'+0,X'01'+0,_binary X'01'+0,-b'01',ABS(b'01')", [ "1"; "1"; "0"; "-1"; "1" ]
+                          "SELECT SUM(b'01'),AVG(b'01'),SUM(DISTINCT b'01')", [ "1"; "1.0000"; "1" ]
+                          "SELECT CAST(b'01' AS UNSIGNED),CAST(b'01' AS DECIMAL),b'01'=1,b'01'='1'", [ "1"; "1"; "1"; "0" ]
+                          "SELECT IF(1,b'01',b'10')+0,CASE WHEN 1 THEN b'01' ELSE b'10' END+0,COALESCE(b'01',b'10')+0,CONCAT(b'01')+0", [ "1"; "1"; "0"; "0" ]
+                          "SELECT SUM(v),AVG(v) FROM (SELECT b'01' AS v) t", [ "0"; "0" ]
+                          "WITH c AS (SELECT b'01' AS v) SELECT v+0 FROM c", [ "0" ]
+                          "SELECT -b'1000000000000000000000000000000000000000000000000000000000000000'", [ "-9.223372036854776e18" ] ]
+                    for sql, expected in cases do
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) -> Expect.equal row (List.map Some expected) sql
+                        | other -> failtestf "unexpected literal result: %A" other
+
                 testCase "numeric aggregates convert text before folding and DISTINCT"
                 <| fun _ ->
                     let store = newStore ()

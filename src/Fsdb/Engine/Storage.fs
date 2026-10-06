@@ -1544,7 +1544,18 @@ let private escapedUtf8Suffix (text: string) (converted: string) =
 
     builder.ToString()
 
+let private isNumericColumnType =
+    function
+    | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _
+    | TBit _ | TDecimal _ | TDouble _ | TFloat _ | TYear -> true
+    | _ -> false
+
 let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+    let v =
+        match v, col.Type with
+        | VBinaryLiteral bytes, typ when isNumericColumnType typ ->
+            VUInt(Value.binaryLiteralNumber bytes)
+        | _ -> Value.materialize v
     let strict = mode.Strict
     let roundInteger (value: decimal) = Math.Round(value, 0, MidpointRounding.AwayFromZero)
     let fail () =
@@ -2315,7 +2326,21 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
     coerceValueWithModeAndLengths false mode col v
 
 let private coerceStoredValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
-    coerceValueWithModeAndLengths true mode col v
+    // Stored numeric values reject excess bytes even when those bytes are zero.
+    // Expression casts instead retain the literal's low 64 bits.
+    match v with
+    | VBinaryLiteral bytes when bytes.Length > 8 && isNumericColumnType col.Type ->
+        if mode.Strict then
+            Error(OutOfRangeForColumn col.Name)
+        else
+            Diagnostics.warning 1264 (sprintf "Out of range value for column '%s' at row %d" col.Name (Diagnostics.currentRowNumber ()))
+            let limit =
+                if (ColumnWire.metadataOfType col.Type).Flags &&& UnsignedFlag <> 0us then
+                    VUInt UInt64.MaxValue
+                else
+                    VInt Int64.MaxValue
+            Diagnostics.suppress (fun () -> coerceValueWithModeAndLengths true mode col limit)
+    | _ -> coerceValueWithModeAndLengths true mode col v
 
 let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     coerceStoredValueWithMode
@@ -2355,6 +2380,7 @@ let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Res
             | (TBinary length | TVarBinary length), _ ->
                 let bytes =
                     match value with
+                    | VBinaryLiteral bytes
                     | VBytes bytes -> bytes
                     | VString text -> Text.Encoding.UTF8.GetBytes text
                     | _ -> text |> Text.Encoding.UTF8.GetBytes
@@ -2626,6 +2652,7 @@ let private encodeEqualityValues (columns: ColumnDef list) (indices: int list) (
         // collation trims). Same rules as WHERE equality, so the index and
         // the comparison can never disagree.
         | VString value -> "S" + (collationOf index).KeyOf value
+        | VBinaryLiteral value
         | VBytes value -> "B" + Convert.ToHexString value
         | VDate value -> "T" + string value.DayNumber
         | VDateTime value -> "V" + string value.Ticks
@@ -4534,7 +4561,7 @@ let tryEqualityIndex (table: Table) (columnName: string) : EqualityIndex option 
 
 let private exactProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     match Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value) with
-    | Ok coerced when coerced = value -> Some value
+    | Ok coerced when coerced = Value.materialize value -> Some coerced
     | _ -> None
 
 let private acceptsExactSingleColumnProbe (store: Store) (table: Table) (literal: Value) (index: EqualityIndex) =

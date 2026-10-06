@@ -686,12 +686,9 @@ let private numberFormat =
 /// literal beyond `decimal`'s range falls back to `VDouble` instead of
 /// throwing an unguarded overflow exception out of the parser.
 ///
-/// `0x..` hex literals become `VBytes` — MySQL treats them as binary strings
-/// by default (only numeric *context*, e.g. `0x41 + 1`, coerces to a number,
-/// which fsdb doesn't model), so `0x41 = 'A'` compares equal the same way it
-/// does against a real server. `AllowHexadecimal` above is what makes
-/// `0x41` a single token here rather than the number `0` followed by a
-/// bare identifier `x41`.
+/// Hexadecimal literals retain their binary bytes and numeric origin.
+/// `AllowHexadecimal` keeps `0x41` together rather than parsing `0` followed
+/// by the bare identifier `x41`.
 let private numberLit: Parser<Value, unit> =
     (numberLiteral numberFormat "number" .>> ws)
     |>> fun nl ->
@@ -700,7 +697,7 @@ let private numberLit: Parser<Value, unit> =
             let digits = if digits.Length % 2 = 1 then "0" + digits else digits
 
             Array.init (digits.Length / 2) (fun i -> Convert.ToByte(digits.Substring(i * 2, 2), 16))
-            |> VBytes
+            |> VBinaryLiteral
         elif nl.IsInteger then
             match Int64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
             | true, i -> VInt i
@@ -806,7 +803,7 @@ let private hexBytesLit: Parser<Value, unit> =
         if digits.Length % 2 <> 0 then
             fail "a hexadecimal binary literal must contain an even number of digits"
         else
-            preturn (VBytes(Convert.FromHexString digits))
+            preturn (VBinaryLiteral(Convert.FromHexString digits))
 
 let private introducedBinaryHexLit: Parser<Value, unit> =
     attempt (pstringCI "_binary" .>> ws .>> pstringCI "X" .>> pchar '\'')
@@ -843,7 +840,7 @@ let private bitBytesLit: Parser<Value, unit> =
 
     let unquoted = attempt (pstringCI "0b") >>. many1Chars (anyOf "01")
 
-    (quoted <|> unquoted) .>> ws |>> (bytesOfBits >> VBytes)
+    (quoted <|> unquoted) .>> ws |>> (bytesOfBits >> VBinaryLiteral)
 
 let private nationalStringLit: Parser<Value, unit> =
     attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>. stringLit

@@ -66,6 +66,8 @@ let private operatorText =
 let private literal =
     function
     | VNull -> "NULL"
+    | VBinaryLiteral bytes -> "X'" + Convert.ToHexString bytes + "'"
+    | VBytes bytes -> "_binary X'" + Convert.ToHexString bytes + "'"
     | VString value -> "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
     | value ->
         let text = value |> toText |> Option.defaultValue "NULL"
