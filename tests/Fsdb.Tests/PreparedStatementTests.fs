@@ -99,7 +99,7 @@ let tests =
                     "ROLLBACK AND CHAIN NO RELEASE"
                     "SHOW TABLES" ] do
                   match prepareStatement sql with
-                  | Result.Ok(None, 0) -> ()
+                  | Result.Ok(_, 0) -> ()
                   | other -> failtestf "expected %s to prepare with 0 placeholders, got %A" sql other
 
           testCase "a prepared SHOW COLUMNS filters by its bound Field value"
@@ -378,6 +378,29 @@ let tests =
               Expect.equal session.UserVariables["x"] (VInt -2L) "outer assignments are applied after evaluation"
               Expect.equal session.UserVariables["v"] (VDecimal 1.75M) "the assignment keeps its own type"
 
+          testCase "prepared mixed SET retains direct variable types"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=2"
+              let session, result = handle session "PREPARE mixed FROM 'SET @x=@v, SESSION max_sp_recursion_depth=100'"
+              Expect.equal result (Affected 0UL) "mixed SET prepares"
+              let session, _ = handle session "SET @v=1.75"
+              let session, result = handle session "EXECUTE mixed"
+              Expect.equal result (Affected 0UL) "mixed SET executes"
+              Expect.equal session.UserVariables["x"] (VInt 2L) "captured BIGINT rounds the current decimal"
+
+          testCase "prepared system SET converts retained integer NULL without changing user assignments"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=2"
+              let session, _ = handle session "PREPARE mixed FROM 'SET SESSION max_sp_recursion_depth=@v,@x=@v'"
+              let session, _ = handle session "SET @v=NULL"
+              let session, result = handle session "EXECUTE mixed"
+              Expect.equal result (Affected 0UL) "a retained integer NULL is valid for the numeric system variable"
+              Expect.equal session.UserVariables["x"] VNull "the user assignment keeps NULL"
+              Expect.equal (handle session "SELECT @@session.max_sp_recursion_depth" |> snd)
+                  (ResultSet([ "@@session.max_sp_recursion_depth" ], [ [ Some "0" ] ])) "the system assignment reads integer zero"
+
           testCase "binary prepared SET binds parameters without advertising result columns"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -397,6 +420,34 @@ let tests =
               Expect.equal result (Affected 0UL) "reprepare returns OK"
               Expect.equal session.UserVariables["y"] (VDecimal 1.75M) "binary reprepare refreshes variable types"
               Expect.isEmpty session.LastResultColumnMetadata "no stale result metadata"
+
+          testCase "prepared nullable system assignment preserves literal NULL"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "PREPARE nullable_setting FROM 'SET character_set_results=NULL'"
+              let session, result = handle session "EXECUTE nullable_setting"
+              Expect.equal result (Affected 0UL) "NULL remains a value rather than a bare keyword"
+              Expect.equal session.Variables["character_set_results"] None "the nullable setting is cleared"
+
+          testCase "binary mixed SET retains types and resolves DEFAULT at execution"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=2"
+              let sql = "SET @x=?, SESSION max_sp_recursion_depth=DEFAULT, @y=@v"
+              let ast, count = prepareStatement sql |> Result.defaultWith (failtestf "%A")
+              let statement = createPreparedStatement session sql ast count
+              let session = { session with Statements = Map.ofList [ 1, statement ] }
+              let session, _ = handle session "SET GLOBAL max_sp_recursion_depth=9"
+              let session, _ = handle session "SET @v=1.75"
+              let session, result = executePreparedHandle session 1 [ VNull ]
+              Expect.equal result (Affected 0UL) "binary mixed assignment succeeds"
+              Expect.equal session.UserVariables["y"] (VInt 2L) "NULL binding retains the captured type"
+              Expect.equal (handle session "SELECT @@session.max_sp_recursion_depth" |> snd)
+                  (ResultSet([ "@@session.max_sp_recursion_depth" ], [ [ Some "9" ] ])) "DEFAULT reads the current global value"
+              let session, result = executePreparedHandle session 1 [ VInt 1L ]
+              Expect.equal result (Affected 0UL) "parameter reprepare succeeds"
+              Expect.equal session.UserVariables["y"] (VDecimal 1.75M) "reprepare refreshes the captured type"
+              Expect.isEmpty session.LastResultColumnMetadata "SET returns no columns"
 
           testCase "SET preserves nested assignments when a later expression fails"
           <| fun _ ->

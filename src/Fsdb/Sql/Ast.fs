@@ -952,6 +952,15 @@ type LoadDataCommand =
       Replace: bool
       Ignore: bool }
 
+type VariableTarget =
+    | UserVariableTarget of UserVariableRef
+    | SystemVariableTarget of scope: string * name: string
+
+/// An absent expression denotes the system variable's DEFAULT value.
+type VariableAssignment =
+    { Target: VariableTarget
+      Expression: Expr option }
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool * deprecations: SyntaxDeprecation list
     | DropDatabase of name: string * ifExists: bool
@@ -989,7 +998,7 @@ type Statement =
     | LoadData of LoadDataCommand
     | Select of SelectStmt
     | Do of expressions: Expr list
-    | SetUserVariables of assignments: (UserVariableRef * Expr) list
+    | SetVariables of assignments: VariableAssignment list
     /// A set operation over two or more `SELECT` branches — `UNION`,
     /// `INTERSECT` or `EXCEPT`, each `[ALL|DISTINCT]`, in any mix. `first`
     /// plus each `rest` member's own `SetOp` records which operator joined

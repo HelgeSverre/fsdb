@@ -130,8 +130,8 @@ integer conversion after a decimal assignment.
 
 Remaining boundaries:
 
-- Prepared system-variable and mixed user/system SET forms still follow the
-  text-probed path without a retained expression AST.
+- SET combinations containing non-assignment clauses such as NAMES still
+  follow the text-probed path without a retained expression AST.
 - Decimal result-scale propagation beyond the covered ABS expression still
   needs a broader expression-family oracle corpus.
 - MySQL's direct decimal variable read after assigning 'abc' produces decimal
@@ -181,10 +181,25 @@ than remaining NULL. A fresh ordinary assignment of NULL or decimal 1.75 to
 `sql_select_limit` instead returns 1232/42000. The inspection query explicitly
 uses `LIMIT 1` so a zero session limit does not hide its result.
 
-These forms remain an open compatibility gap. `systemSetAction` separates
-assignment normalization from expression evaluation so retained prepared
-expressions can use the same system-variable validation and defaults as
-ordinary SET.
+The `prepared-mixed-variable-assignments` differential contract verifies the
+same histories using the supported `max_sp_recursion_depth` variable.
+`sql_select_limit` remains absent from fsdb's system-variable catalog.
+
+User/system assignment lists retain expressions in `SetVariables`; shared AST
+traversal applies parameter binding, captured user-variable types, and schema
+repreparation. Assignment targets and DEFAULT remain outside expression
+evaluation. `systemSetAction` supplies the ordinary system-variable validation
+and default resolution. A prepared DEFAULT observes the global value at
+execution, including changes made after preparation.
+
+Parameter markers retain their separate argument-validation rules: decimal,
+NULL, and text bindings for `SET max_sp_recursion_depth=?` return 1232/42000,
+unlike a retained integer user-variable read. Binary prepared regressions also
+cover mixed assignment metadata and type refresh after parameter repreparation.
+
+The contract manifest at
+`artifacts/runs/20261006T134501838-3301/contracts/manifest.json` records parity
+for these histories, literal NULL, and parameter error codes and SQLSTATEs.
 
 ## Schema-triggered repreparation
 

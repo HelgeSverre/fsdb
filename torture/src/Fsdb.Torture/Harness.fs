@@ -39,7 +39,7 @@ module AstKind =
         | LoadData _ -> "load_data"
         | Select _ -> "select"
         | Do _ -> "do"
-        | SetUserVariables _ -> "set"
+        | SetVariables _ -> "set"
         | Union _ -> "union"
         | Update _ -> "update"
         | Delete _ -> "delete"

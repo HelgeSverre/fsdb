@@ -2054,6 +2054,34 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE user_assignment"; "DEALLOCATE PREPARE delayed_assignment"; "DEALLOCATE PREPARE mixed_assignment"; "DEALLOCATE PREPARE failing_assignment" |]
           Coverage = [| "statement:set", [| "text-differential" |] |] }
 
+    let private preparedMixedAssignments =
+        { Name = "prepared-mixed-variable-assignments"
+          Setup = [||]
+          Steps =
+            [| for name, statement in
+                   [ "mixed", "SET @mixed_x=@mixed_v, SESSION max_sp_recursion_depth=100"
+                     "system", "SET SESSION max_sp_recursion_depth=@mixed_v"
+                     "both", "SET SESSION max_sp_recursion_depth=@mixed_v,@mixed_x=@mixed_v" ] do
+                   Contract.execute (name + "-initial") "SET @mixed_v=2,@mixed_x=9"
+                   Contract.execute (name + "-prepare") ("PREPARE mixed_types FROM '" + statement + "'")
+                   for valueName, value in [ "decimal", "1.75"; "text", "'abc'"; "null", "NULL"; "integer", "3" ] do
+                       let step = name + "-" + valueName
+                       Contract.execute (step + "-set") ("SET @mixed_v=" + value)
+                       Contract.execute (step + "-execute") "EXECUTE mixed_types"
+                       Contract.query (step + "-read") "SELECT @mixed_x AS assigned,@@session.max_sp_recursion_depth AS depth"
+                   Contract.execute (name + "-close") "DEALLOCATE PREPARE mixed_types"
+               Contract.execute "parameter-prepare" "PREPARE numeric_target FROM 'SET SESSION max_sp_recursion_depth=?'"
+               for name, value in [ "decimal", "1.75"; "null", "NULL"; "text", "'abc'" ] do
+                   Contract.execute (name + "-parameter") ("SET @mixed_p=" + value)
+                   Contract.execute (name + "-parameter-execute") "EXECUTE numeric_target USING @mixed_p" |> Contract.fails 1232 "42000"
+               Contract.execute "parameter-close" "DEALLOCATE PREPARE numeric_target"
+               Contract.execute "nullable-prepare" "PREPARE nullable_target FROM 'SET character_set_results=NULL'"
+               Contract.execute "nullable-execute" "EXECUTE nullable_target"
+               Contract.query "nullable-read" "SELECT @@session.character_set_results AS charset"
+               Contract.execute "nullable-close" "DEALLOCATE PREPARE nullable_target" |]
+          Cleanup = [| "SET SESSION max_sp_recursion_depth=DEFAULT"; "SET character_set_results=DEFAULT" |]
+          Coverage = [| "statement:set", [| "text-differential" |] |] }
+
     let private preparedSchemaChanges =
         { Name = "prepared-schema-type-refresh"
           Setup = [| "CREATE TABLE schema_source(id INT)"; "INSERT INTO schema_source VALUES(1)"; "CREATE TABLE schema_other(id INT)" |]
@@ -2140,6 +2168,7 @@ module ContractCatalog =
            preparedTypeHistory
            preparedUserVariables
            preparedUserAssignments
+           preparedMixedAssignments
            preparedSchemaChanges
            temporaryViewShadowing
            columnTypes

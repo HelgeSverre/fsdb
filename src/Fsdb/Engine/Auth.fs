@@ -2974,8 +2974,8 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         @ (if load.Replace then onTables "DELETE" [ split load.Table ] else [])
         @ onTables "SELECT" (load.Assignments |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct)
     | Do expressions -> onTables "SELECT" (expressions |> List.collect (exprReadTables defaultDb) |> List.distinct)
-    | SetUserVariables assignments ->
-        onTables "SELECT" (assignments |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct)
+    | SetVariables assignments ->
+        onTables "SELECT" (assignments |> List.choose _.Expression |> List.collect (exprReadTables defaultDb) |> List.distinct)
     | Update u ->
         let cteTables, boundCtes = cteReadTablesIn Set.empty defaultDb u.Ctes
 

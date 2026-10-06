@@ -325,8 +325,8 @@ let rec private rewriteStatementWith rules =
         CreateTableAs(name, rewriteStatementWith rules query, ifNotExists, requestedEngine)
     | Select select -> Select(rewriteSelect rules select)
     | Do expressions -> Do(List.map rewriteExpression expressions)
-    | SetUserVariables assignments ->
-        SetUserVariables(assignments |> List.map (fun (target, expression) -> target, rewriteExpression expression))
+    | SetVariables assignments ->
+        SetVariables(assignments |> List.map (fun assignment -> { assignment with Expression = Option.map rewriteExpression assignment.Expression }))
     | Union(first, rest, orderBy, limit, offset) ->
         Union(
             rewriteSelect rules first,

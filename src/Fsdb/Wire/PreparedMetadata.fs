@@ -446,7 +446,7 @@ let private inferParameters
     | Select select -> inferSelect [] select
     | Union(first, rest, orderBy, limit, offset) -> inferBody [] (UnionSelect(first, rest, orderBy, limit, offset))
     | Do expressions -> expressions |> List.iter (inferExpression [] None DescribeOnly)
-    | SetUserVariables assignments -> assignments |> List.iter (snd >> inferExpression [] None DescribeOnly)
+    | SetVariables assignments -> assignments |> List.choose _.Expression |> List.iter (inferExpression [] None DescribeOnly)
     | Insert(table, columns, rows, onDuplicate, _) ->
         inferRows table columns rows
         inferAssignments table onDuplicate

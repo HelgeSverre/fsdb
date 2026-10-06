@@ -1816,26 +1816,61 @@ let private applySetActions (session: Session) parsed : Session * QueryResult =
 
                 Session.trackSystemVariableAssignments changesSession changedSystemVariables updated, Affected 0UL
 
-let private executeUserVariableSet (session: Session) assignments =
+let private executeVariableSet (session: Session) (assignments: VariableAssignment list) =
     let variables = expressionVariables session
-    let validateTarget (target, _) =
-        match UserVariableRef.validationError target with
-        | Some message -> Error(Err(3061, message))
-        | None -> Ok()
+    let validateTarget assignment =
+        match assignment.Target with
+        | UserVariableTarget target ->
+            match UserVariableRef.validationError target with
+            | Some message -> Error(Err(3061, message))
+            | None -> Ok()
+        | SystemVariableTarget(_, name) ->
+            if Session.tryGlobalVariable session.Store name |> Option.isSome then Ok()
+            else Error(Err(1193, sprintf "Unknown system variable '%s'" name))
+
+    let evaluate assignment =
+        let value =
+            match assignment.Expression with
+            | Some expression -> evaluateSessionExpression session variables expression
+            | None -> Ok(VString "DEFAULT")
+        value
+        |> Result.bind (fun value ->
+            match assignment.Target with
+            | UserVariableTarget target -> Ok(SetUserVarAction(target.Name, value))
+            | SystemVariableTarget(scope, name) ->
+                // Numeric system assignments read a retained integer NULL as zero.
+                let value =
+                    match value, assignment.Expression with
+                    | VNull, Some(UserVariable variable) when numericSystemVariables.Contains name ->
+                        match variable.PreparedType with
+                        | Some UserVariableType.SignedInteger
+                        | Some UserVariableType.UnsignedInteger -> VInt 0L
+                        | _ -> value
+                    | _ -> value
+                systemSetAction session scope name assignment.Expression.IsNone
+                    (Ok(value, variables.UserVariables.Value))
+                |> Result.map fst)
+
     let evaluated =
         assignments
         |> traverse validateTarget
-        |> Result.bind (fun _ ->
-            assignments
-            |> traverse (fun (target, expression) ->
-                evaluateSessionExpression session variables expression
-                |> Result.map (fun value -> SetUserVarAction(target.Name, value))))
+        |> Result.bind (fun _ -> assignments |> traverse evaluate)
     // Nested := effects occur during evaluation; outer SET assignments wait for success.
     let session = { session with UserVariables = variables.UserVariables.Value }
     let parsed = evaluated |> Result.map (fun actions -> List.rev actions, session.UserVariables)
     applySetActions session parsed
 
+let private executeUserVariableSet session assignments =
+    assignments
+    |> List.map (fun (target, expression) -> { Target = UserVariableTarget target; Expression = Some expression })
+    |> executeVariableSet session
+
 /// Parses assignment expressions together so parameter positions span the whole SET.
+let private parseSetExpressions options (expressions: string list) =
+    match Parser.parseWithOptions options ("DO " + String.concat "\n," expressions) with
+    | Ok(Do parsed) when expressions.Length = parsed.Length -> Some parsed
+    | _ -> None
+
 let private tryParseUserVariableSet options sql =
     splitSetAssignments options sql
     |> Result.toOption
@@ -1845,10 +1880,44 @@ let private tryParseUserVariableSet options sql =
         |> Result.toOption)
     |> Option.bind (fun assignments ->
         let targets, expressions = List.unzip assignments
-        match Parser.parseWithOptions options ("DO " + String.concat "\n," expressions) with
-        | Ok(Do expressions) when targets.Length = expressions.Length ->
-            Some(List.zip targets expressions)
-        | _ -> None)
+        parseSetExpressions options expressions
+        |> Option.map (List.zip targets))
+
+/// Retains SET expressions while DEFAULT and assignment targets stay outside evaluation.
+let private tryParsePreparedVariableSet options sql =
+    let parseTarget fragment =
+        match Parser.parseUserVariableSetAssignment fragment with
+        | Ok(target, expression) -> Some(UserVariableTarget target, Some expression)
+        | Error _ ->
+            let matched = setVar.Match fragment
+            if not matched.Success then None
+            else
+                let scope = matched.Groups.[1].Value
+                let name = stripIdentifierQuotes matched.Groups.[2].Value |> _.ToLowerInvariant()
+                let rhs = matched.Groups.[3].Value.Trim()
+                let expression =
+                    if rhs.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase) then None
+                    elif rhs.Equals("NULL", StringComparison.OrdinalIgnoreCase) then Some "NULL"
+                    elif name = "max_points_in_geometry" && rhs.Equals("TRUE", StringComparison.OrdinalIgnoreCase) then Some "1"
+                    elif name = "max_points_in_geometry" && rhs.Equals("FALSE", StringComparison.OrdinalIgnoreCase) then Some "0"
+                    elif bareSetIdentifier.IsMatch rhs && name <> "max_sp_recursion_depth" then
+                        Some("'" + rhs + "'")
+                    else Some rhs
+                Some(SystemVariableTarget(scope, name), expression)
+
+    splitSetAssignments options sql
+    |> Result.toOption
+    |> Option.bind (fun fragments ->
+        let targets = fragments |> List.map parseTarget
+        if targets |> List.exists Option.isNone then None
+        else
+            let targets = targets |> List.choose id
+            let expressions = targets |> List.map (snd >> Option.defaultValue "NULL")
+            parseSetExpressions options expressions
+            |> Option.map (fun expressions ->
+                List.zip targets expressions
+                |> List.map (fun ((target, source), expression) ->
+                    { Target = target; Expression = source |> Option.map (fun _ -> expression) })))
 
 let private handleMixedSet (session: Session) (sql: string) : Session * QueryResult =
     let options = parserOptionsForSession session
@@ -2801,7 +2870,7 @@ let rec private statementStatusCommand = function
     | Select _
     | Union _ -> Some InformationSchema.StatusCommand.select
     | Do _ -> Some InformationSchema.StatusCommand.doStatement
-    | SetUserVariables _ -> Some InformationSchema.StatusCommand.setOption
+    | SetVariables _ -> Some InformationSchema.StatusCommand.setOption
     | Update statement when statement.Joins.IsEmpty -> Some InformationSchema.StatusCommand.update
     | Update _ -> Some InformationSchema.StatusCommand.updateMulti
     | Delete { Joins = []; Targets = [ _ ] } ->
@@ -3570,9 +3639,9 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
 
 let private executeParsed session stmt =
     match stmt with
-    | SetUserVariables assignments ->
+    | SetVariables assignments ->
         InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.setOption
-        let session, result = executeUserVariableSet session assignments
+        let session, result = executeVariableSet session assignments
         { session with LastResultColumnMetadata = [] }, result
     | _ -> executeParsedWithTemporaryAction None session stmt
 
@@ -4933,9 +5002,9 @@ let private prepareStatementWithOptions
     elif probe.IsSome then
         match probe with
         | Some SetVar ->
-            match tryParseUserVariableSet options command with
+            match tryParsePreparedVariableSet options command with
             | Some assignments ->
-                let statement, count = renumberPlaceholders (SetUserVariables assignments)
+                let statement, count = renumberPlaceholders (SetVariables assignments)
                 Result.Ok(Some statement, count)
             | None -> Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
         | _ -> Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
@@ -7373,7 +7442,7 @@ let private countsAsAccountUpdate = function
     | Select _
     | SetRole _
     | Do _
-    | SetUserVariables _
+    | SetVariables _
     | Union _
     | ChecksumTables _
     | Explain _ -> false
