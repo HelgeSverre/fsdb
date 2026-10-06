@@ -1036,3 +1036,112 @@ let runIntegerExpressionDescriptors () =
                     printfn "Integer variable | %s | %s -> width=%d unsigned=%b" assignment expression width resultUnsigned
 
 runIntegerExpressionDescriptors ()
+
+let runApproximateExpressionDescriptors () =
+    for protocol in [ Sql; Binary ] do
+        use connection = new MySqlConnection(connectionString)
+        connection.Open()
+        if connection.ServerVersion.Split('-')[0] <> "8.4.11" then
+            failwithf "Expected MySQL 8.4.11; got %s" connection.ServerVersion
+        for sql in [ "CREATE DATABASE IF NOT EXISTS fsdb_type_oracle"; "USE fsdb_type_oracle"
+                     "CREATE TEMPORARY TABLE approximate_numbers(d DOUBLE,f FLOAT,df DOUBLE(10,2))"
+                     "INSERT INTO approximate_numbers VALUES(1.25,1.25,1.25)"
+                     "CREATE TEMPORARY TABLE approximate_other LIKE approximate_numbers"
+                     "INSERT INTO approximate_other SELECT * FROM approximate_numbers" ] do
+            use setup = new MySqlCommand(sql, connection)
+            setup.ExecuteNonQuery() |> ignore
+        for expression, family, width, scale, expected in
+            [ "-1e0", "DOUBLE", 23, 31, Some -1.0
+              "1e0+1", "DOUBLE", 23, 31, Some 2.0
+              "'1'+1", "DOUBLE", 23, 31, Some 2.0
+              "ABS(1e0)", "DOUBLE", 23, 31, Some 1.0
+              "SQRT(4)", "DOUBLE", 23, 31, Some 2.0
+              "ROUND(1e0,2)", "DOUBLE", 23, 31, Some 1.0
+              "COALESCE(1e0,0)", "DOUBLE", 23, 31, Some 1.0
+              "COALESCE(1e0,NULL)", "DOUBLE", 23, 31, Some 1.0
+              "CAST(1 AS DOUBLE)", "DOUBLE", 23, 31, Some 1.0
+              "d", "DOUBLE", 22, 31, Some 1.25
+              "f", "FLOAT", 12, 31, Some 1.25
+              "df", "DOUBLE", 10, 2, Some 1.25
+              "d+0", "DOUBLE", 23, 31, Some 1.25
+              "f+0", "DOUBLE", 23, 31, Some 1.25
+              "df+0", "DOUBLE", 10, 2, Some 1.25
+              "-df", "DOUBLE", 19, 2, Some -1.25
+              "ABS(df)", "DOUBLE", 19, 2, Some 1.25
+              "ROUND(df,1)", "DOUBLE", 23, 31, Some 1.2
+              "TRUNCATE(df,1)", "DOUBLE", 23, 31, Some 1.2
+              "FLOOR(df)", "DOUBLE", 23, 31, Some 1.0
+              "CEIL(df)", "DOUBLE", 23, 31, Some 2.0
+              "ABS(f)", "DOUBLE", 23, 31, Some 1.25
+              "-f", "DOUBLE", 23, 31, Some -1.25
+              "df+df", "DOUBLE", 10, 2, Some 2.5
+              "df*df", "DOUBLE", 10, 2, Some 1.56
+              "df+NULL", "DOUBLE", 10, 2, None
+              "COALESCE(NULLIF(df,df),2)", "DOUBLE", 10, 2, Some 2.0
+              "COALESCE(NULLIF(df,df),2)+0.5", "DOUBLE", 10, 2, Some 2.5
+              "COALESCE(df,0)", "DOUBLE", 10, 2, Some 1.25
+              "IF(1,df,0)", "DOUBLE", 10, 2, Some 1.25
+              "COALESCE(f,0)", "FLOAT", 23, 31, Some 1.25
+              "COALESCE(f,1.25)", "DOUBLE", 23, 31, Some 1.25
+              "IFNULL(f,1.25)", "DOUBLE", 23, 31, Some 1.25
+              "IF(0,df,2)", "DOUBLE", 10, 2, Some 2.0
+              "CASE WHEN 0 THEN df ELSE 2 END", "DOUBLE", 10, 2, Some 2.0
+              "df*1.2345", "DOUBLE", 12, 4, Some 1.5431
+              "df+1.2345", "DOUBLE", 12, 4, Some 2.4845
+              "CAST(1 AS FLOAT)", "FLOAT", 23, 31, Some 1.0
+              "-b'01'", "DOUBLE", 17, 0, Some -1.0
+              "ABS(b'01')", "DOUBLE", 17, 0, Some 1.0 ] do
+            use command = new MySqlCommand("SELECT " + expression + " AS value FROM approximate_numbers", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if not (reader.Read()) then failwithf "%s: missing row" expression
+            let expected =
+                match protocol, expression with
+                | Binary, "df*df" -> Some 1.5625
+                | Binary, "df*1.2345" -> Some 1.5431249999999999
+                | Binary, "df+1.2345" -> Some 2.4844999999999997
+                | _ -> expected
+            let actual = if reader.IsDBNull 0 then None else Some(Convert.ToDouble(reader.GetValue 0, invariant))
+            if actual <> expected || reader.GetDataTypeName(0) <> family
+               || metadata.ColumnSize <> Nullable width || metadata.NumericScale <> Nullable scale then
+                failwithf "%A %s: expected %s width=%d scale=%d value=%A; got %s width=%O scale=%O value=%A"
+                    protocol expression family width scale expected (reader.GetDataTypeName 0)
+                    metadata.ColumnSize metadata.NumericScale actual
+            printfn "Approximate descriptor | %A | %s -> %s width=%d scale=%d" protocol expression family width scale
+
+
+        for expression, width, expected in
+            [ "df*df", 10, 1.56; "df*0.1", 10, 0.12; "-df*0.1", 19, -0.12 ] do
+            let branch = "SELECT " + expression + " AS value FROM approximate_numbers"
+            // MySQL cannot reopen the same temporary table in two UNION branches.
+            let otherBranch = branch.Replace("approximate_numbers", "approximate_other")
+            use command = new MySqlCommand(branch + " UNION ALL " + otherBranch, connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            let metadata = reader.GetColumnSchema()[0]
+            if metadata.ColumnSize <> Nullable width || metadata.NumericScale <> Nullable 2 then
+                failwithf "%A UNION %s: unexpected descriptor" protocol expression
+            let mutable rows = 0
+            while reader.Read() do
+                rows <- rows + 1
+                if reader.GetDouble(0) <> expected then failwithf "%A UNION %s: expected %g" protocol expression expected
+            if rows <> 2 then failwithf "%A UNION %s: expected two rows" protocol expression
+            printfn "Approximate UNION | %A | %s -> %g" protocol expression expected
+
+        for expression, expected in
+            [ "CAST(df*df AS CHAR)", "1.56"
+              "CONCAT(df+df)", "2.50"
+              "CAST(COALESCE(NULLIF(df,df),2) AS CHAR)", "2.00"
+              "CAST(-TIMESTAMP '2020-01-01 00:00:00.123' AS CHAR)", "-20200101000000.120"
+              "CAST(ABS(CAST('2020-01-01 03:04:05.123456' AS DATETIME(6))) AS CHAR)", "20200101030405.125000"
+              "CAST(-b'1000000000000000000000000000000000000000000000000000000000000000' AS CHAR)", "-9223372036854776000"
+              "CAST((SELECT b'01' FROM (SELECT 1)t)/2 AS CHAR)", "0.0000" ] do
+            use command = new MySqlCommand("SELECT " + expression + " AS value FROM approximate_numbers", connection)
+            if protocol = Binary then command.Prepare()
+            use reader = command.ExecuteReader()
+            if not (reader.Read()) || reader.GetString(0) <> expected then
+                failwithf "%A %s: expected %s" protocol expression expected
+            printfn "Approximate text | %A | %s -> %s" protocol expression expected
+
+runApproximateExpressionDescriptors ()

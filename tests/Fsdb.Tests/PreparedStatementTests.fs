@@ -555,7 +555,7 @@ let tests =
                     "NULL/b'01'", None, TypeDouble, 4u, 4uy
                     "(SELECT b'01')/2", Some "0.5000", TypeNewDecimal, 9u, 4uy
                     "(SELECT b'01' WHERE 1)/2", Some "0.5000", TypeNewDecimal, 9u, 4uy
-                    "(SELECT b'01' FROM (SELECT 1)t)/2", Some "0", TypeDouble, 5u, 4uy
+                    "(SELECT b'01' FROM (SELECT 1)t)/2", Some "0.0000", TypeDouble, 5u, 4uy
                     "CAST('2020-01-01' AS DATE)/2", Some "10100050.5000", TypeNewDecimal, 14u, 4uy
                     "CAST('2020-01-02 03:04:05' AS DATETIME)/2", Some "10100051015202.5000", TypeNewDecimal, 20u, 4uy
                     "CAST('2020-01-02 03:04:05.123456' AS DATETIME(6))/2", Some "10100051015202.5617280000", TypeNewDecimal, 26u, 10uy
@@ -628,15 +628,15 @@ let tests =
               for expression, expected, typeId, width, scale in
                   [ "TIMESTAMP '2020-01-01 00:00:00.000'+0", "20200101000000.000", TypeNewDecimal, 20u, 3uy
                     "TIMESTAMP '2020-01-01 00:00:00.123'+0", "20200101000000.123", TypeNewDecimal, 20u, 3uy
-                    "-TIMESTAMP '2020-01-01 00:00:00.123'", "-20200101000000.12", TypeDouble, 20u, 3uy
+                    "-TIMESTAMP '2020-01-01 00:00:00.123'", "-20200101000000.120", TypeDouble, 20u, 3uy
                     "CAST('2020-01-01' AS DATE)+0", "20200101", TypeLongLong, 10u, 0uy
                     "CAST('2020-01-01' AS DATETIME)*1", "20200101000000", TypeLongLong, 16u, 0uy
                     "CAST('2020-01-01' AS DATETIME(6))+0", "20200101000000.000000", TypeNewDecimal, 23u, 6uy
                     "CAST('2020-01-01' AS DATETIME(6))-0", "20200101000000.000000", TypeNewDecimal, 23u, 6uy
                     "CAST('2020-01-01' AS DATETIME(6))*1", "20200101000000.000000", TypeNewDecimal, 23u, 6uy
                     "CAST('-12:34:56' AS TIME(3))+0", "-123456.000", TypeNewDecimal, 13u, 3uy
-                    "-CAST('2020-01-01 03:04:05.123456' AS DATETIME(6))", "-20200101030405.125", TypeDouble, 23u, 6uy
-                    "ABS(CAST('2020-01-01 03:04:05.123456' AS DATETIME(6)))", "20200101030405.125", TypeDouble, 23u, 6uy ] do
+                    "-CAST('2020-01-01 03:04:05.123456' AS DATETIME(6))", "-20200101030405.125000", TypeDouble, 23u, 6uy
+                    "ABS(CAST('2020-01-01 03:04:05.123456' AS DATETIME(6)))", "20200101030405.125000", TypeDouble, 23u, 6uy ] do
                   let current, result = handle session ("SELECT " + expression + " AS value")
                   Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) expression
                   Expect.equal (current.LastResultColumnMetadata |> List.map (fun item -> item.TypeId, item.ColumnLength, item.Decimals))
@@ -882,6 +882,84 @@ let tests =
               let session, constants = handle session "SELECT -CAST(18446744073709551615 AS UNSIGNED) AS unsigned_value,-CAST(-9223372036854775808 AS SIGNED) AS signed_value"
               Expect.equal constants (ResultSet([ "unsigned_value"; "signed_value" ], [ [ Some "-18446744073709551615"; Some "9223372036854775808" ] ])) "constants promote to decimal"
               Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal; TypeNewDecimal ] "promoted constants advertise decimal"
+
+          testCase "binary prepared results retain unrounded approximate values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE approximate_products(d DOUBLE(10,2))"
+              let session, _ = handle session "INSERT INTO approximate_products VALUES(1.25)"
+              for sql, binaryValue, textValue, copies in
+                  [ "SELECT d*d AS product,CAST(d*d AS CHAR) AS text FROM approximate_products", "1.5625", "1.56", 1
+                    "SELECT d*d AS product,CAST(d*d AS CHAR) AS text FROM approximate_products UNION ALL SELECT d*d,CAST(d*d AS CHAR) FROM approximate_products", "1.56", "1.56", 2
+                    "SELECT d*0.1 AS product,CAST(d*0.1 AS CHAR) AS text FROM approximate_products UNION ALL SELECT d*0.1,CAST(d*0.1 AS CHAR) FROM approximate_products", "0.12", "0.12", 2 ] do
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let statement = createPreparedStatement session sql ast count
+                  let prepared = { session with Statements = Map.add 1 statement session.Statements }
+                  let afterBinary, binary = executePreparedHandle prepared 1 []
+                  Expect.equal binary
+                      (ResultSet([ "product"; "text" ], List.replicate copies [ Some binaryValue; Some textValue ]))
+                      "SELECT retains precision while UNION materialization and text conversion round"
+                  let _, text = handle afterBinary sql
+                  Expect.equal text
+                      (ResultSet([ "product"; "text" ], List.replicate copies [ Some textValue; Some textValue ]))
+                      "the following text query retains display scale"
+
+          testCase "approximate expression descriptors distinguish stored fields and numeric results"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE approximate_numbers(d DOUBLE,f FLOAT,df DOUBLE(10,2))"
+              let session, _ = handle session "INSERT INTO approximate_numbers VALUES(1.25,1.25,1.25)"
+              for expression, expected, family, width, scale in
+                  [ "-1e0", Some "-1", TypeDouble, 23u, 31uy
+                    "1e0+1", Some "2", TypeDouble, 23u, 31uy
+                    "'1'+1", Some "2", TypeDouble, 23u, 31uy
+                    "ABS(1e0)", Some "1", TypeDouble, 23u, 31uy
+                    "SQRT(4)", Some "2", TypeDouble, 23u, 31uy
+                    "ROUND(1e0,2)", Some "1", TypeDouble, 23u, 31uy
+                    "COALESCE(1e0,0)", Some "1", TypeDouble, 23u, 31uy
+                    "COALESCE(1e0,NULL)", Some "1", TypeDouble, 23u, 31uy
+                    "CAST(1 AS DOUBLE)", Some "1", TypeDouble, 23u, 31uy
+                    "d", Some "1.25", TypeDouble, 22u, 31uy
+                    "f", Some "1.25", TypeFloat, 12u, 31uy
+                    "df", Some "1.25", TypeDouble, 10u, 2uy
+                    "d+0", Some "1.25", TypeDouble, 23u, 31uy
+                    "f+0", Some "1.25", TypeDouble, 23u, 31uy
+                    "df+0", Some "1.25", TypeDouble, 10u, 2uy
+                    "-df", Some "-1.25", TypeDouble, 19u, 2uy
+                    "ABS(df)", Some "1.25", TypeDouble, 19u, 2uy
+                    "ROUND(df,1)", Some "1.2", TypeDouble, 23u, 31uy
+                    "TRUNCATE(df,1)", Some "1.2", TypeDouble, 23u, 31uy
+                    "FLOOR(df)", Some "1", TypeDouble, 23u, 31uy
+                    "CEIL(df)", Some "2", TypeDouble, 23u, 31uy
+                    "ABS(f)", Some "1.25", TypeDouble, 23u, 31uy
+                    "-f", Some "-1.25", TypeDouble, 23u, 31uy
+                    "df+df", Some "2.50", TypeDouble, 10u, 2uy
+                    "df*df", Some "1.56", TypeDouble, 10u, 2uy
+                    "df+NULL", None, TypeDouble, 10u, 2uy
+                    "COALESCE(NULLIF(df,df),2)", Some "2.00", TypeDouble, 10u, 2uy
+                    "COALESCE(NULLIF(df,df),2)+0.5", Some "2.50", TypeDouble, 10u, 2uy
+                    "COALESCE(df,0)", Some "1.25", TypeDouble, 10u, 2uy
+                    "IF(1,df,0)", Some "1.25", TypeDouble, 10u, 2uy
+                    "COALESCE(f,0)", Some "1.25", TypeFloat, 23u, 31uy
+                    "COALESCE(f,1.25)", Some "1.25", TypeDouble, 23u, 31uy
+                    "IFNULL(f,1.25)", Some "1.25", TypeDouble, 23u, 31uy
+                    "IF(0,df,2)", Some "2.00", TypeDouble, 10u, 2uy
+                    "CASE WHEN 0 THEN df ELSE 2 END", Some "2.00", TypeDouble, 10u, 2uy
+                    "df*1.2345", Some "1.5431", TypeDouble, 12u, 4uy
+                    "df+1.2345", Some "2.4845", TypeDouble, 12u, 4uy
+                    "CAST(1 AS FLOAT)", Some "1", TypeFloat, 23u, 31uy
+                    "-b'01'", Some "-1", TypeDouble, 17u, 0uy
+                    "ABS(b'01')", Some "1", TypeDouble, 17u, 0uy ] do
+                  let sql = "SELECT " + expression + " AS value FROM approximate_numbers"
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ expected ] ])) expression
+                  let shape (metadata: ColumnMetadata) = metadata.TypeId, metadata.ColumnLength, metadata.Decimals
+                  Expect.equal (current.LastResultColumnMetadata |> List.map shape)
+                      [ family, width, scale ] (expression + " descriptor")
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map (fun column -> shape column.Metadata))
+                      [ family, width, scale ] (expression + " prepared descriptor")
 
           testCase "integer literal and arithmetic descriptors retain operand precision"
           <| fun _ ->

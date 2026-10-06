@@ -3721,7 +3721,7 @@ let tests =
                           "SELECT IF(1,b'01',b'10')+0,CASE WHEN 1 THEN b'01' ELSE b'10' END+0,COALESCE(b'01',b'10')+0,CONCAT(b'01')+0", [ "1"; "1"; "0"; "0" ]
                           "SELECT SUM(v),AVG(v) FROM (SELECT b'01' AS v) t", [ "0"; "0" ]
                           "WITH c AS (SELECT b'01' AS v) SELECT v+0 FROM c", [ "0" ]
-                          "SELECT -b'1000000000000000000000000000000000000000000000000000000000000000'", [ "-9.223372036854776e18" ] ]
+                          "SELECT -b'1000000000000000000000000000000000000000000000000000000000000000'", [ "-9223372036854776000" ] ]
                     for sql, expected in cases do
                         match runDefault store sql with
                         | ResultSet(_, [ row ]) -> Expect.equal row (List.map Some expected) sql

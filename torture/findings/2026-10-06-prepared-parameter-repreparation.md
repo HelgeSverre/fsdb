@@ -869,3 +869,68 @@ The root gate passes with `DOTNET_PROCESSOR_COUNT=4`; a scheduler timing test
 that exceeded its five-second admission window with two workers also passes
 in isolation with four. Native MySQL supplied the oracle while OrbStack's API
 was unresponsive, and the disposable server and data directory were cleaned up.
+
+
+## Approximate expression descriptors
+
+MySQL 8.4.11 distinguishes stored floating-point columns from numeric expressions.
+For a row with `d DOUBLE`, `f FLOAT`, and `df DOUBLE(10,2)`, all containing 1.25:
+
+| Expression | Family | Width | Scale |
+|---|---|---:|---:|
+| `d` | DOUBLE | 22 | 31 |
+| `f` | FLOAT | 12 | 31 |
+| `df` | DOUBLE | 10 | 2 |
+| `d+0`, `f+0`, `SQRT(4)` | DOUBLE | 23 | 31 |
+| `df+df`, `df*df`, `COALESCE(df,0)` | DOUBLE | 10 | 2 |
+| `df+1.2345`, `df*1.2345` | DOUBLE | 12 | 4 |
+| `-df`, `ABS(df)` | DOUBLE | 19 | 2 |
+| `ROUND(df,1)`, `TRUNCATE(df,1)`, `FLOOR(df)` | DOUBLE | 23 | 31 |
+| `COALESCE(f,0)` | FLOAT | 23 | 31 |
+| `COALESCE(f,1.25)` | DOUBLE | 23 | 31 |
+| `CAST(1 AS FLOAT)` | FLOAT | 23 | 31 |
+| `-b'01'`, `ABS(b'01')` | DOUBLE | 17 | 0 |
+
+Scale 31 denotes unspecified fractional precision. Finite-scale arithmetic and
+conditional expressions combine the largest whole-part display width with the
+largest scale. Unary approximate operations use their own width rule; rounding
+functions return unspecified scale. FLOAT combined with DECIMAL promotes to
+DOUBLE, while FLOAT combined with integer branches can remain FLOAT.
+
+Text output and binary values intentionally differ for finite-scale doubles.
+`df*df` renders as `1.56` in text but yields 1.5625 through the binary protocol.
+Binary prepared execution takes approximate values from retained typed SELECT
+and UNION rows before wire serialization. UNION materialization first rounds
+values to its combined scale: `df*df UNION ALL df*df` yields 1.56 through both
+protocols. Midpoint values round to even (`df*0.1` materializes as 0.12).
+SQL EXECUTE and subsequent text queries retain text display formatting.
+Character casts and text-function arguments use the same display rule. A selected
+integer fallback in `COALESCE(NULLIF(df,df),2)` becomes an approximate value and
+renders as `2.00`; its arithmetic retains the declared approximate result type.
+
+MySQL's fixed-point formatter preserves the shortest meaningful digits before
+padding, avoiding extra binary approximation digits. For example, negating
+`TIMESTAMP '2020-01-01 00:00:00.123'` renders `-20200101000000.120`, and negating
+the binary literal for 2^63 renders `-9223372036854776000`.
+The implementation uses a shared formatter for stored columns, expressions,
+character casts, and text-function arguments. Its rules are grounded in the
+native oracle and MySQL's
+[`aggregate_float_properties`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item.cc)
+and [`my_fcvt_internal`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/dtoa.cc)
+implementations.
+
+The maintained oracle checks text and binary values, families, widths, and scales.
+Expecto checks text output and both execution and PREPARE descriptors. The
+`approximate-expression-descriptors` contract also covers text conversion and
+user variables.
+
+Scientific-notation literal widths remain incomplete: MySQL retains the original
+lexical width (`1e0` has width 3), while the current literal AST retains only the
+double value. Broader scalar/function descriptor families remain outside this
+matrix; these results do not establish complete numeric descriptor parity.
+
+Validation: `DOTNET_PROCESSOR_COUNT=4 just check` passes all 2,824 tests.
+The maintained native MySQL 8.4.11 oracle passes. The compatibility contract
+run passes 3,299 steps across 37 cases with no differences; its manifest is
+`artifacts/runs/20261006T202152662-79151/contracts/manifest.json`.
+The disposable native oracle server and data directory are cleaned up.

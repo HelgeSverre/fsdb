@@ -23,6 +23,8 @@ type QueryResult = Fsdb.Executor.QueryResult
 
 open Fsdb.Executor
 
+let private binaryResultProtocol = System.Threading.AsyncLocal<bool>()
+
 let private storedProgramProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
 let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
 let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
@@ -2944,6 +2946,20 @@ let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store
         true
     | _ -> false
 
+/// Binary rows encode the computed floating-point value, not its rounded
+/// text display. Explicit string expressions retain their formatted values.
+let private formatResultForProtocol metadata (typedRows: Value[] list) result =
+    match result with
+    | ResultSet(columns, rows) when binaryResultProtocol.Value ->
+        let render metadata text value =
+            match value with
+            | VDouble _ when metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat -> Value.toText value
+            | _ -> text
+        let rows =
+            List.map2 (fun text values -> List.map3 render metadata text (Array.toList values)) rows typedRows
+        ResultSetWithRawColumns(columns, rows, rawResultColumns result)
+    | _ -> result
+
 let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
     stmt
     |> statementStatusCommand
@@ -3080,6 +3096,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                         withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
 
                     let result, types = consumeSelectDestination select result types rows
+                    let result = formatResultForProtocol types rows result
 
                     session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
                 | Union(first, rest, orderBy, limit, offset) ->
@@ -3087,6 +3104,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                         withExecutionLimits (fun () -> Executor.runTopLevelUnion store registry dbName first rest orderBy limit offset)
 
                     let result, types = consumeSelectDestination first result types rows
+                    let result = formatResultForProtocol types rows result
                     session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
                 | _ ->
                     let foundRows = Fsdb.Protocol.hasCapability Fsdb.Protocol.ClientFoundRows session.Capabilities
@@ -7856,6 +7874,7 @@ let executePreparedHandle (session: Session) statementId values =
     match Map.tryFind statementId session.Statements with
     | None -> session, Err(1243, "Unknown prepared statement handler given to EXECUTE")
     | Some statement ->
-        executePreparedWith
-            (fun updated session -> { session with Statements = Map.add statementId updated session.Statements })
-            session statement values
+        DynamicScope.withValue binaryResultProtocol true (fun () ->
+            executePreparedWith
+                (fun updated session -> { session with Statements = Map.add statementId updated session.Statements })
+                session statement values)

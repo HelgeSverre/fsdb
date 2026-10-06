@@ -2394,6 +2394,15 @@ let private isIntegerType typeId =
 
 let private isIntegerMetadata (metadata: ColumnMetadata) = isIntegerType metadata.TypeId
 
+let private approximateResultMetadata typeId (operands: ColumnMetadata list) =
+    let scale = operands |> List.fold (fun scale item -> max scale item.Decimals) 0uy
+    let width =
+        if scale = 31uy then 23u
+        else
+            let whole = operands |> List.fold (fun width item -> max width (int64 item.ColumnLength - int64 item.Decimals)) 0L
+            uint32 (min (int64 System.UInt32.MaxValue) (whole + int64 scale))
+    { Value.columnMetadata typeId with ColumnLength = width; Decimals = scale }
+
 type private DecimalShape =
     { Precision: int
       Scale: int }
@@ -2440,11 +2449,13 @@ let rec private columnsForQualifier (ctx: EvalContext) (qualifier: string) : Col
 type private OutputColumnFormat =
     { Fsp: int option
       DecimalScale: int option
+      ApproximateScale: int option
       Column: ColumnDef option }
 
 let private outputFormatOfColumn column =
     { Fsp = fspOfType column.Type
       DecimalScale = None
+      ApproximateScale = None
       Column = Some column }
 
 let private displayColumnForExpr ctx =
@@ -2725,9 +2736,12 @@ let private renderOutputValue format value =
         match format.Column |> Option.bind _.NumericDisplay, value with
         | Some display, VDouble number ->
             match display.Decimals with
-            | Some decimals -> Some(number.ToString("F" + string decimals, System.Globalization.CultureInfo.InvariantCulture))
+            | Some decimals -> Some(Value.formatDoubleWithScale decimals number)
             | None -> renderDouble number
-        | None, VDouble number -> renderDouble number
+        | None, VDouble number ->
+            match format.ApproximateScale with
+            | Some scale -> Some(Value.formatDoubleWithScale scale number)
+            | None -> renderDouble number
         | Some _, VDecimal number ->
             match format.Column |> Option.map _.Type with
             | Some(TDecimal(_, scale, _)) -> Some(number.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
@@ -4721,7 +4735,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Collate(e, _) -> eval e
     | Cast(e, ((TChar _ | TVarchar _ | TBinary _ | TVarBinary _) as ty))
         when (tryColumnDefForExpr ctx e |> Option.bind _.NumericDisplay |> Option.exists _.ZeroFill)
-             || (outputFormatOfExpr ctx e).DecimalScale.IsSome ->
+             || (let format = outputFormatOfExpr ctx e
+                 format.DecimalScale.IsSome || format.ApproximateScale.IsSome) ->
         eval e
         |> Result.bind (fun value -> eval (Cast(Lit(displayValueForText ctx e value), ty)))
     // MySQL doesn't support CAST-ing to VECTOR (STRING_TO_VECTOR is the
@@ -4909,12 +4924,14 @@ and private isLiteralConstantExpression registry expression =
 
 and private normalizeCompoundNumericResult ctx expression value =
     let promote number =
-        if metadataOfExpr ctx expression |> Option.exists (fun metadata -> metadata.TypeId = TypeNewDecimal) then
-            VDecimal number
-        else value
+        match metadataOfExpr ctx expression with
+        | Some metadata when metadata.TypeId = TypeNewDecimal -> VDecimal number
+        | Some metadata when metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat -> VDouble(Value.toDouble value)
+        | _ -> value
     match value with
     | VInt number -> promote (decimal number)
     | VUInt number -> promote (decimal number)
+    | VDecimal number -> promote number
     | _ -> value
 
 and private tryClosedNumericValue ctx expression =
@@ -4969,7 +4986,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             elif typeId = TypeLong then 11u
             elif typeId = TypeLongLong then 20u
             elif typeId = TypeFloat then 12u
-            elif typeId = TypeDouble then 22u
+            elif typeId = TypeDouble then 23u
             elif typeId = TypeNewDecimal then 67u
             elif typeId = TypeDate then 10u
             elif typeId = TypeDateTime then 19u
@@ -5002,21 +5019,21 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             if metadata.Decimals > 0uy then TypeNewDecimal else TypeLongLong
         else metadata.TypeId
 
-    let rec divisionOperandMetadata expression =
+    let rec numericOperandDisplayMetadata expression =
         let withNumericScale metadata =
             if metadata.TypeId = TypeString || metadata.TypeId = TypeVarString
                || metadata.TypeId = TypeBlob || metadata.TypeId = TypeJson then
                 { metadata with Decimals = 31uy }
             else metadata
         match expression with
-        | Distinct inner | OrderBy(inner, _) -> divisionOperandMetadata inner
+        | Distinct inner | OrderBy(inner, _) -> numericOperandDisplayMetadata inner
         | Subquery select ->
             match tryReducedScalarProjection ctx select with
-            | Some projection -> divisionOperandMetadata projection
+            | Some projection -> numericOperandDisplayMetadata projection
             | None ->
                 match select.Projections with
                 | [ projection, _ ] when isLiteralConstantExpression ctx.Registry projection ->
-                    divisionOperandMetadata projection
+                    numericOperandDisplayMetadata projection
                 | _ ->
                     selectProjectionColumns ctx.Store ctx.DbName select
                     |> List.tryHead
@@ -5029,6 +5046,16 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                 | Lit(VBinaryLiteral _) -> metadata
                 | Lit(VInt _ | VUInt _) -> withDecimalShape (decimalShape expression (Some metadata)) metadata
                 | _ -> withNumericScale metadata)
+
+    let approximateResult typeId expressions =
+        expressions |> List.choose numericOperandDisplayMetadata |> approximateResultMetadata typeId |> Some
+
+    let approximateUnary metadata =
+        let scale = metadata.Decimals
+        { Value.columnMetadata TypeDouble with
+            ColumnLength = if scale = 31uy then 23u else 17u + uint32 scale
+            Decimals = scale
+            Flags = metadata.Flags &&& (NotNullFlag ||| UnsignedFlag) }
 
     let temporalUnaryMetadata metadata =
         if isTemporalMetadata metadata then
@@ -5072,6 +5099,8 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
                     let metadata = { metadata with Flags = if unsigned then UnsignedFlag else 0us }
                     let shape = combineShapes (decimalShape left leftMetadata) (decimalShape right rightMetadata)
                     withDecimalShape shape metadata
+                elif metadata.TypeId = TypeDouble then
+                    approximateResult TypeDouble [ left; right ] |> Option.defaultValue metadata
                 else metadata)
 
         match inferred, leftMetadata, rightMetadata with
@@ -5081,17 +5110,10 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         | _ -> inferred
 
     let numericUnary expression =
-        metadataOfExpr ctx expression
-        |> Option.bind (fun metadata ->
-            if
-                isIntegerMetadata metadata
-                || metadata.TypeId = TypeFloat
-                || metadata.TypeId = TypeDouble
-                || metadata.TypeId = TypeNewDecimal
-            then
-                Some metadata
-            else
-                simple TypeDouble)
+        numericOperandDisplayMetadata expression
+        |> Option.map (fun metadata ->
+            if isIntegerMetadata metadata || metadata.TypeId = TypeNewDecimal then metadata
+            else approximateUnary metadata)
         |> Option.orElseWith (fun () -> simple TypeDouble)
 
     let choose expressions =
@@ -5122,7 +5144,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         let textMetadata = metadata |> List.filter isText
 
         match metadata with
-        | [ item ] when onlyUntypedNulls -> item |> withNullability |> Some
+        | [ item ] when onlyUntypedNulls && item.TypeId <> TypeDouble && item.TypeId <> TypeFloat -> item |> withNullability |> Some
         | _ when not textMetadata.IsEmpty ->
             textMetadata
             |> List.maxBy _.ColumnLength
@@ -5134,7 +5156,10 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             |> withNullability
             |> Some
         | _ when metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) ->
-            simple TypeDouble |> Option.map withNullability
+            let typeId =
+                if metadata |> List.exists (fun item -> item.TypeId = TypeDouble || item.TypeId = TypeNewDecimal) then TypeDouble
+                else TypeFloat
+            approximateResult typeId expressions |> Option.map withNullability
         | _ when metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal)
                  || (metadata |> List.forall isIntegerMetadata
                      && metadata |> List.exists (fun item -> item.TypeId = TypeLongLong && hasMetadataFlag UnsignedFlag item)
@@ -5365,7 +5390,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     | Between _
     | Exists _ -> simple TypeLongLong |> Option.map (fun metadata -> { metadata with ColumnLength = 1u })
     | RuntimeExpression operand -> metadataOfExpr ctx operand
-    | Neg(Lit(VBinaryLiteral _)) -> simple TypeDouble
+    | Neg(Lit(VBinaryLiteral _) as operand) -> numericUnary operand
     | Neg operand ->
         let source = metadataOfExpr ctx operand
         match source |> Option.bind temporalUnaryMetadata with
@@ -5373,7 +5398,11 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         | None ->
             numeric signedNumericResult (fun _ right -> right) (Lit(VInt 0L)) operand
             |> Option.map (fun metadata ->
-                if metadata.TypeId <> TypeLongLong then metadata
+                if metadata.TypeId = TypeDouble then
+                    numericUnary operand
+                    |> Option.map (fun item -> { item with Flags = item.Flags &&& ~~~UnsignedFlag })
+                    |> Option.defaultValue metadata
+                elif metadata.TypeId <> TypeLongLong then metadata
                 else
                     let promoted =
                         tryClosedNumericValue ctx operand
@@ -5397,8 +5426,8 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             { Precision = min 65 (left.Precision + right.Precision)
               Scale = min 30 (left.Scale + right.Scale) }) left right
     | BinOp(Div, left, right) ->
-        let leftDisplay = divisionOperandMetadata left
-        let rightDisplay = divisionOperandMetadata right
+        let leftDisplay = numericOperandDisplayMetadata left
+        let rightDisplay = numericOperandDisplayMetadata right
         let leftNumeric = numericMetadata left |> Option.orElse leftDisplay
         let rightNumeric = numericMetadata right |> Option.orElse rightDisplay
         let isExactNumeric =
@@ -5431,7 +5460,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             simple TypeDouble |> Option.map (fun metadata -> { metadata with ColumnLength = width; Decimals = byte scale })
     | BinOp(IntDiv, left, right) ->
         let operandShape expression =
-            let display = divisionOperandMetadata expression
+            let display = numericOperandDisplayMetadata expression
             let metadata = numericMetadata expression |> Option.orElse display
             let shape = decimalShape expression metadata
             let precision =
@@ -5458,7 +5487,11 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         |> Option.map (fun metadata -> withDecimalShape shape { metadata with Flags = if unsigned then UnsignedFlag else 0us })
     | Cast(value, ty) ->
         let metadata = ColumnWire.metadataOfType ty
-        let metadata = match ty with TBigInt _ -> { metadata with ColumnLength = 21u } | _ -> metadata
+        let metadata =
+            match ty with
+            | TBigInt _ -> { metadata with ColumnLength = 21u }
+            | TDouble _ | TFloat _ -> { metadata with ColumnLength = 23u }
+            | _ -> metadata
 
         metadataOfExpr ctx value
         |> Option.filter (hasMetadataFlag NotNullFlag)
@@ -5541,6 +5574,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             |> Option.map (fun metadata ->
                 if isIntegerMetadata metadata then
                     { metadata with TypeId = TypeLongLong; ColumnLength = 21u }
+                elif metadata.TypeId = TypeDouble then { metadata with ColumnLength = 23u; Decimals = 31uy }
                 elif metadata.TypeId <> TypeNewDecimal then metadata
                 else
                     let scale =
@@ -5558,6 +5592,9 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             |> Option.orElseWith (fun () -> numericUnary arg)
         | ("FLOOR" | "CEILING" | "CEIL"), arg :: _ ->
             numericUnary arg
+            |> Option.map (fun metadata ->
+                if metadata.TypeId = TypeDouble then { metadata with ColumnLength = 23u; Decimals = 31uy }
+                else metadata)
         | "MOD", [ left; right ] ->
             numeric signedNumericResult (fun left right ->
                 { Precision = max left.Precision right.Precision
@@ -5729,8 +5766,14 @@ and private outputFormatOfExpr ctx expr =
                     Some(int metadata.Decimals)
                 else None)
         | _ -> fspOfExpr ctx expr
+    let approximateScale =
+        metadataOfExpr ctx expr
+        |> Option.filter (fun metadata ->
+            (metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat) && metadata.Decimals < 31uy)
+        |> Option.map (fun metadata -> int metadata.Decimals)
     { Fsp = fsp
       DecimalScale = decimalScale
+      ApproximateScale = approximateScale
       Column = displayColumnForExpr ctx expr }
 
 and private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : OutputColumnFormat list =
@@ -5830,7 +5873,7 @@ and private displayValueForText (ctx: EvalContext) expression value =
         match value with
         | VDateTime _ | VTimestamp _ | VZeroDateTime _ | VTime _ ->
             renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
-        | _ when format.DecimalScale.IsSome ->
+        | _ when format.DecimalScale.IsSome || format.ApproximateScale.IsSome ->
             renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
         | _ -> value
 
@@ -12109,10 +12152,11 @@ and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
 
     if types |> List.exists (fun t -> t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob) then
         Value.columnMetadata Value.TypeVarString
-    elif types |> List.exists (fun t -> t = Value.TypeDouble) then
-        Value.columnMetadata Value.TypeDouble
-    elif types |> List.exists (fun t -> t = Value.TypeFloat) then
-        Value.columnMetadata Value.TypeFloat
+    elif types |> List.exists (fun t -> t = TypeDouble || t = TypeFloat) then
+        let typeId =
+            if types |> List.exists (fun t -> t = TypeDouble || t = TypeNewDecimal) then TypeDouble
+            else TypeFloat
+        approximateResultMetadata typeId columns
     elif types |> List.exists (fun t -> t = Value.TypeNewDecimal) then
         Value.columnMetadata Value.TypeNewDecimal
     elif types |> List.forall isInt then
@@ -12143,7 +12187,15 @@ and private coerceUnionValue (metadata: ColumnMetadata) (v: Value) : Value =
             | VUInt _ when hasMetadataFlag Value.UnsignedFlag metadata -> v
             | _ -> VInt(int64 (Value.toDouble v))
         | t when t = Value.TypeNewDecimal -> VDecimal(decimal (Value.toDouble v))
-        | t when t = Value.TypeDouble || t = Value.TypeFloat -> VDouble(Value.toDouble v)
+        | t when t = Value.TypeDouble || t = Value.TypeFloat ->
+            let number = Value.toDouble v
+            // UNION materializes finite-scale values before ordering and deduplication.
+            let rounded =
+                if metadata.Decimals < 31uy then
+                    Value.formatDoubleWithScale (int metadata.Decimals) number
+                    |> fun text -> System.Double.Parse(text, System.Globalization.CultureInfo.InvariantCulture)
+                else number
+            VDouble(if t = TypeFloat then float (float32 rounded) else rounded)
         | t when t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob ->
             VString(Value.toText v |> Option.defaultValue "")
         | _ -> v
@@ -12297,6 +12349,8 @@ and private runUnionStmtWithOuter
                         |> Array.mapi (fun i v ->
                             match v with
                             | VNull -> None
+                            | VDouble number when reconciled.[i].Decimals < 31uy ->
+                                Some(Value.formatDoubleWithScale (int reconciled.[i].Decimals) number)
                             | v ->
                                 match (if reconciled.[i].TypeId = Value.TypeDateTime then fsps.[i] else None) with
                                 | Some fsp -> Value.toTextFsp fsp v
@@ -17257,7 +17311,7 @@ let statementNumericMetadata store registry schema statement =
             let context = contextFactory store registry schema (columnIndexOf columns) (qualifierRanges sources) None (probeRow columns)
             outputColumnWireOverrides context columns select
             |> List.map (Option.filter (fun metadata ->
-                metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeLongLong))
+                metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat || metadata.TypeId = TypeLongLong))
             |> Some
     | _ -> None
 

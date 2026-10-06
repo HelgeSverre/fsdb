@@ -1259,6 +1259,28 @@ let private normalizeExponent (s: string) =
 let private formatDouble (value: float) =
     value.ToString(CultureInfo.InvariantCulture) |> normalizeExponent
 
+/// Fixed-scale DOUBLE text stops at the shortest round-trip digits before
+/// padding zeros. Round the binary value only when those digits exceed scale.
+let formatDoubleWithScale scale (value: float) =
+    let text = value.ToString("R", CultureInfo.InvariantCulture)
+    let exponentAt = text.IndexOf 'E'
+    let mantissa, exponent =
+        if exponentAt < 0 then text, 0
+        else text.Substring(0, exponentAt), Int32.Parse(text.Substring(exponentAt + 1), CultureInfo.InvariantCulture)
+    let sign, magnitude =
+        if mantissa.StartsWith "-" then "-", mantissa.Substring(1) else "", mantissa
+    let point = magnitude.IndexOf '.'
+    let wholeDigits = (if point < 0 then magnitude.Length else point) + exponent
+    let digits = magnitude.Replace(".", "")
+    if not (Double.IsFinite value) || digits.Length - wholeDigits > scale then
+        value.ToString("F" + string scale, CultureInfo.InvariantCulture)
+    else
+        let whole, fraction =
+            if wholeDigits <= 0 then "0", String('0', -wholeDigits) + digits
+            elif wholeDigits >= digits.Length then digits.PadRight(wholeDigits, '0'), ""
+            else digits.Substring(0, wholeDigits), digits.Substring(wholeDigits)
+        sign + whole + (if scale = 0 then "" else "." + fraction.PadRight(scale, '0'))
+
 let formatFloat (value: float32) =
     value.ToString(CultureInfo.InvariantCulture) |> normalizeExponent
 

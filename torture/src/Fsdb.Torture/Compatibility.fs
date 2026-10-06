@@ -2187,6 +2187,74 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE literal_context"; "DROP TABLE IF EXISTS literal_storage"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private approximateExpressionDescriptors =
+        { Name = "approximate-expression-descriptors"
+          Setup = [| "CREATE TABLE approximate_numbers(d DOUBLE,f FLOAT,df DOUBLE(10,2))"
+                     "INSERT INTO approximate_numbers VALUES(1.25,1.25,1.25)" |]
+          Steps =
+            [| for index, expression in
+                   [ "-1e0"
+                     "1e0+1"
+                     "'1'+1"
+                     "ABS(1e0)"
+                     "SQRT(4)"
+                     "ROUND(1e0,2)"
+                     "COALESCE(1e0,0)"
+                     "COALESCE(1e0,NULL)"
+                     "CAST(1 AS DOUBLE)"
+                     "d"
+                     "f"
+                     "df"
+                     "d+0"
+                     "f+0"
+                     "df+0"
+                     "-df"
+                     "ABS(df)"
+                     "ROUND(df,1)"
+                     "TRUNCATE(df,1)"
+                     "FLOOR(df)"
+                     "CEIL(df)"
+                     "ABS(f)"
+                     "-f"
+                     "df+df"
+                     "df*df"
+                     "df+NULL"
+                     "COALESCE(NULLIF(df,df),2)"
+                     "COALESCE(NULLIF(df,df),2)+0.5"
+                     "COALESCE(df,0)"
+                     "IF(1,df,0)"
+                     "COALESCE(f,0)"
+                     "COALESCE(f,1.25)"
+                     "IFNULL(f,1.25)"
+                     "IF(0,df,2)"
+                     "CASE WHEN 0 THEN df ELSE 2 END"
+                     "df*1.2345"
+                     "df+1.2345"
+                     "CAST(1 AS FLOAT)"
+                     "-b'01'"
+                     "ABS(b'01')" ] |> List.indexed do
+                   let sql = "SELECT " + expression + " AS value FROM approximate_numbers"
+                   Contract.query (sprintf "expression-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "expression-%d-binary" index) sql [||]
+               let unionSql = "SELECT df*df AS value FROM approximate_numbers UNION ALL SELECT df*df FROM approximate_numbers"
+               Contract.query "union-text" unionSql
+               Contract.preparedQuery "union-binary" unionSql [||]
+               for index, expression in [ "df*0.1"; "-df*0.1" ] |> List.indexed do
+                   let branch = "SELECT " + expression + " AS value FROM approximate_numbers"
+                   let sql = branch + " UNION ALL " + branch
+                   Contract.query (sprintf "union-round-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "union-round-%d-binary" index) sql [||]
+               Contract.execute "prepare-fixed-scale" "PREPARE fixed_scale FROM 'SELECT df*df AS value FROM approximate_numbers'"
+               Contract.query "execute-fixed-scale-text" "EXECUTE fixed_scale"
+               Contract.execute "deallocate-fixed-scale" "DEALLOCATE PREPARE fixed_scale"
+               Contract.execute "approximate-variable" "SET @value=1e0"
+               Contract.query "variable-descriptors" "SELECT @value AS a,@value+1 AS b,-@value AS c"
+               Contract.query "fixed-scale-text" "SELECT CAST(df*df AS CHAR) AS a,CONCAT(df+df) AS b,CAST(COALESCE(NULLIF(df,df),2) AS CHAR) AS c FROM approximate_numbers"
+               Contract.query "temporal-numeric-text" "SELECT CAST(-TIMESTAMP '2020-01-01 00:00:00.123' AS CHAR) AS a,CAST(ABS(CAST('2020-01-01 03:04:05.123456' AS DATETIME(6))) AS CHAR) AS b"
+               Contract.query "binary-literal-numeric-text" "SELECT CAST(-b'1000000000000000000000000000000000000000000000000000000000000000' AS CHAR) AS a,CAST((SELECT b'01' FROM (SELECT 1)t)/2 AS CHAR) AS b" |]
+          Cleanup = [| "DROP TABLE IF EXISTS approximate_numbers" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private integerExpressionDescriptors =
         { Name = "integer-expression-descriptors"
           Setup = [| "CREATE TABLE integer_expressions(n INT,u BIGINT UNSIGNED)"
@@ -2667,6 +2735,7 @@ module ContractCatalog =
            approximateAggregateDescriptors
            numericAggregateConversion
            temporalNumericConversion
+           approximateExpressionDescriptors
            integerExpressionDescriptors
            divisionOperandDescriptors
            temporalArithmeticDescriptors
