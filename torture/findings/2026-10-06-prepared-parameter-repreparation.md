@@ -130,9 +130,8 @@ integer conversion after a decimal assignment.
 
 Remaining boundaries:
 
-- Text-probed prepared statements have no retained expression AST. MySQL retains
-  BIGINT for `SET @x=@v` prepared while @v is -2: assigning 1.75 to @v and
-  executing stores BIGINT 2 in @x. fsdb still stores the current DECIMAL value.
+- Prepared system-variable and mixed user/system SET forms still follow the
+  text-probed path without a retained expression AST.
 - Schema changes that leave explicit parameter contexts unchanged do not trigger
   a fresh variable-type capture.
 - Decimal result-scale propagation beyond the covered ABS expression still
@@ -140,3 +139,31 @@ Remaining boundaries:
 - MySQL's direct decimal variable read after assigning 'abc' produces decimal
   wire text that MySqlConnector cannot parse; fsdb returns error 1292. This
   malformed-result edge is not included in the successful-history contract.
+
+## Prepared user-variable SET
+
+MySQL 8.4.11 retains BIGINT for `SET @x=@v` prepared while @v is -2:
+assigning 1.75 to @v and executing stores BIGINT 2 in @x. An invalid numeric
+string becomes BIGINT 0, and NULL stays NULL. fsdb now retains a typed
+assignment AST and uses the same parameter binding and reprepare rules as
+other parsed statements.
+
+For `SET @x=?,@y=@v`, a NULL parameter retains the initial integer type of
+@v. Changing the parameter to an integer triggers reprepare and captures a
+current decimal @v; changing it to decimal captures a current double @v.
+Both SQL and binary prepared handles follow these rules, without result columns.
+
+Outer assignments are delayed: `SET @v=1.75,@x=@v` reads the old @v for @x.
+Nested assignment expressions take effect during evaluation. With @side=9,
+@x=8 and @y=7, the following returns error 1242/21000 and leaves @side=1,
+@x=8 and @y=7, through both ordinary and prepared execution:
+
+```sql
+SET @x=(@side:=1),@y=(SELECT 1 UNION ALL SELECT 2);
+```
+
+The shared user-variable SET evaluator preserves those nested effects while
+publishing outer assignments only after all expressions succeed. Ordinary
+user-variable SET also now uses the SQL parser's string unescaping: an escaped
+quote is stored as a quote rather than retaining its escape backslash, matching
+the oracle.

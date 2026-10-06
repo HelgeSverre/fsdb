@@ -1145,10 +1145,7 @@ let private splitSetAssignments (options: Parser.ParserOptions) (sql: string) : 
                 Error "SET requires an assignment"
         | [] -> Error "SET requires an assignment")
 
-/// One `SET` fragment's parsed effect, applied only once every fragment in
-/// the statement has parsed successfully (see `handleSet`) — mirrors real
-/// MySQL executing a multi-assignment `SET` all-or-nothing rather than
-/// left-to-right with partial effect.
+/// Outer SET effects are published after all assignments have been validated.
 type private TransactionIsolationScope =
     | SessionIsolation
     | NextTransactionIsolation
@@ -1762,24 +1759,8 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | _ -> Ok()
 
-/// Applies every assignment only after the whole `SET` parses; MySQL leaves
-/// all variables unchanged when any assignment is invalid.
-let private handleSet (session: Session) (sql: string) : Session * QueryResult =
-    let options = parserOptionsForSession session
-
-    let parsed =
-        splitSetAssignments options sql
-        |> Result.mapError (fun _ -> syntaxError sql)
-        |> Result.bind (fun fragments ->
-            fragments
-            |> List.fold
-                (fun state fragment ->
-                    state
-                    |> Result.bind (fun (actions, sideEffects) ->
-                        parseSetFragment sql session sideEffects fragment
-                        |> Result.map (fun (action, nextSideEffects) -> action :: actions, nextSideEffects)))
-                (Ok([], session.UserVariables)))
-
+/// Publishes SET effects only after every assignment has been evaluated and validated.
+let private applySetActions (session: Session) parsed : Session * QueryResult =
     match parsed with
     | Error result -> session, result
     | Ok(actions, sideEffects) ->
@@ -1824,6 +1805,63 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
                         | _ -> true)
 
                 Session.trackSystemVariableAssignments changesSession changedSystemVariables updated, Affected 0UL
+
+let private executeUserVariableSet (session: Session) assignments =
+    let variables = expressionVariables session
+    let validateTarget (target, _) =
+        match UserVariableRef.validationError target with
+        | Some message -> Error(Err(3061, message))
+        | None -> Ok()
+    let evaluated =
+        assignments
+        |> traverse validateTarget
+        |> Result.bind (fun _ ->
+            assignments
+            |> traverse (fun (target, expression) ->
+                evaluateSessionExpression session variables expression
+                |> Result.map (fun value -> SetUserVarAction(target.Name, value))))
+    // Nested := effects occur during evaluation; outer SET assignments wait for success.
+    let session = { session with UserVariables = variables.UserVariables.Value }
+    let parsed = evaluated |> Result.map (fun actions -> List.rev actions, session.UserVariables)
+    applySetActions session parsed
+
+/// Parses assignment expressions together so parameter positions span the whole SET.
+let private tryParseUserVariableSet options sql =
+    splitSetAssignments options sql
+    |> Result.toOption
+    |> Option.bind (fun fragments ->
+        fragments
+        |> traverse Parser.parseUserVariableSetAssignment
+        |> Result.toOption)
+    |> Option.bind (fun assignments ->
+        let targets, expressions = List.unzip assignments
+        match Parser.parseWithOptions options ("DO " + String.concat "\n," expressions) with
+        | Ok(Do expressions) when targets.Length = expressions.Length ->
+            Some(List.zip targets expressions)
+        | _ -> None)
+
+let private handleMixedSet (session: Session) (sql: string) : Session * QueryResult =
+    let options = parserOptionsForSession session
+
+    let parsed =
+        splitSetAssignments options sql
+        |> Result.mapError (fun _ -> syntaxError sql)
+        |> Result.bind (fun fragments ->
+            fragments
+            |> List.fold
+                (fun state fragment ->
+                    state
+                    |> Result.bind (fun (actions, sideEffects) ->
+                        parseSetFragment sql session sideEffects fragment
+                        |> Result.map (fun (action, nextSideEffects) -> action :: actions, nextSideEffects)))
+                (Ok([], session.UserVariables)))
+
+    applySetActions session parsed
+
+let private handleSet session sql =
+    match tryParseUserVariableSet (parserOptionsForSession session) sql with
+    | Some assignments -> executeUserVariableSet session assignments
+    | None -> handleMixedSet session sql
 
 // Transaction control stays outside the data-statement AST because it changes
 // connection state without entering Executor.
@@ -2753,6 +2791,7 @@ let rec private statementStatusCommand = function
     | Select _
     | Union _ -> Some InformationSchema.StatusCommand.select
     | Do _ -> Some InformationSchema.StatusCommand.doStatement
+    | SetUserVariables _ -> Some InformationSchema.StatusCommand.setOption
     | Update statement when statement.Joins.IsEmpty -> Some InformationSchema.StatusCommand.update
     | Update _ -> Some InformationSchema.StatusCommand.updateMulti
     | Delete { Joins = []; Targets = [ _ ] } ->
@@ -3500,7 +3539,13 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
 
     TableHandler.invalidate session stmt executed result, result
 
-let private executeParsed session stmt = executeParsedWithTemporaryAction None session stmt
+let private executeParsed session stmt =
+    match stmt with
+    | SetUserVariables assignments ->
+        InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.setOption
+        let session, result = executeUserVariableSet session assignments
+        { session with LastResultColumnMetadata = [] }, result
+    | _ -> executeParsedWithTemporaryAction None session stmt
 
 let private parsedStatementCapacity = 16384
 let private parsedStatementCandidateCapacity = parsedStatementCapacity * 2
@@ -4792,6 +4837,7 @@ let renumberPlaceholders (stmt: Statement) : Statement * int =
             stmt
 
     renumbered, next.Value
+
 /// Validates COM_STMT_PREPARE without executing text-probed commands.
 let private prepareStatementWithOptions
     (options: Parser.ParserOptions)
@@ -4799,11 +4845,19 @@ let private prepareStatementWithOptions
     : Result<Statement option * int, int * string> =
     let trimmed = sql.Trim().TrimEnd(';').Trim()
     let command = Parser.stripVersionCommentsWithOptions options trimmed
+    let probe = tryProbe options trimmed
 
     if hasKeywordPrefix "LOAD DATA" command || hasKeywordPrefix "HANDLER" command || hasKeywordPrefix "XA" command then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
-    elif (tryProbe options trimmed).IsSome then
-        Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
+    elif probe.IsSome then
+        match probe with
+        | Some SetVar ->
+            match tryParseUserVariableSet options command with
+            | Some assignments ->
+                let statement, count = renumberPlaceholders (SetUserVariables assignments)
+                Result.Ok(Some statement, count)
+            | None -> Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
+        | _ -> Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
     else
         match Parser.parseWithOptions options sql with
         | Result.Ok stmt ->
@@ -7237,6 +7291,7 @@ let private countsAsAccountUpdate = function
     | Select _
     | SetRole _
     | Do _
+    | SetUserVariables _
     | Union _
     | ChecksumTables _
     | Explain _ -> false

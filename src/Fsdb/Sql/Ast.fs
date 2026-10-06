@@ -989,6 +989,7 @@ type Statement =
     | LoadData of LoadDataCommand
     | Select of SelectStmt
     | Do of expressions: Expr list
+    | SetUserVariables of assignments: (UserVariableRef * Expr) list
     /// A set operation over two or more `SELECT` branches — `UNION`,
     /// `INTERSECT` or `EXCEPT`, each `[ALL|DISTINCT]`, in any mix. `first`
     /// plus each `rest` member's own `SetOp` records which operator joined

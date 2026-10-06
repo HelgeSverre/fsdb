@@ -2786,7 +2786,7 @@ let tests =
               | other -> failtestf "expected the escaped quote to keep the fragment intact, got %A" other
 
               match handle session "SELECT @x, @y" |> snd with
-              | ResultSet(_, [ [ Some "a\\', @y=1"; None ] ]) -> ()
+              | ResultSet(_, [ [ Some "a', @y=1"; None ] ]) -> ()
               | other -> failtestf "expected only @x to be assigned, got %A" other
 
           testCase "a session refuses user variables beyond its fixed memory-growth cap"

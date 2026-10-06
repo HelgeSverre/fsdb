@@ -299,6 +299,74 @@ let tests =
                   [ TypeLongLong; TypeLongLong ]
                   "derived types survive the failed execution"
 
+          testCase "prepared SET retains variable types and delays outer assignments"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=-2"
+              let session, _ = handle session "PREPARE assignments FROM 'SET @x=@v'"
+              let session, _ = handle session "SET @v=1.75"
+              let session, result = handle session "EXECUTE assignments"
+              Expect.equal result (Affected 0UL) "SET has no result columns"
+              Expect.equal session.UserVariables["x"] (VInt 2L) "the captured integer type rounds the decimal"
+              let session, _ = handle session "SET @v=-2"
+              let session, _ = handle session "PREPARE delayed FROM 'SET @v=1.75,@x=@v'"
+              let session, _ = handle session "EXECUTE delayed"
+              Expect.equal session.UserVariables["x"] (VInt -2L) "outer assignments are applied after evaluation"
+              Expect.equal session.UserVariables["v"] (VDecimal 1.75M) "the assignment keeps its own type"
+
+          testCase "binary prepared SET binds parameters without advertising result columns"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=-2"
+              let sql = "SET @x=? -- parameter\n,@y=@v"
+              let ast, count = prepareStatement sql |> function Ok value -> value | Error error -> failtestf "%A" error
+              let statement = createPreparedStatement session sql ast count
+              let parameters, columns = preparedMetadata session statement.Ast count
+              Expect.hasLength parameters 1 "one bind parameter"
+              Expect.isEmpty columns "SET returns no columns"
+              let session = { session with Statements = Map.ofList [ 1, statement ] }
+              let session, _ = handle session "SET @v=1.75"
+              let session, result = executePreparedHandle session 1 [ VNull ]
+              Expect.equal result (Affected 0UL) "binary execution returns OK"
+              Expect.equal session.UserVariables["y"] (VInt 2L) "the prepare-time type survives"
+              let session, result = executePreparedHandle session 1 [ VInt 1L ]
+              Expect.equal result (Affected 0UL) "reprepare returns OK"
+              Expect.equal session.UserVariables["y"] (VDecimal 1.75M) "binary reprepare refreshes variable types"
+              Expect.isEmpty session.LastResultColumnMetadata "no stale result metadata"
+
+          testCase "SET preserves nested assignments when a later expression fails"
+          <| fun _ ->
+              for prepared in [ false; true ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "SET @side=9"
+                  let sql = "SET @x=(@side:=1),@y=(SELECT 1 UNION ALL SELECT 2)"
+                  let session, result =
+                      if prepared then
+                          let session, _ = handle session ("PREPARE failing_set FROM '" + sql + "'")
+                          handle session "EXECUTE failing_set"
+                      else
+                          handle session sql
+                  match result with
+                  | Err(1242, _) -> ()
+                  | other -> failtestf "expected the scalar subquery error, got %A" other
+                  Expect.equal session.UserVariables["side"] (VInt 1L) "nested effects survive the later evaluation error"
+                  Expect.isFalse (session.UserVariables.ContainsKey "x") "no outer assignment is published"
+
+          testCase "prepared SET parameter reprepare refreshes direct variables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=-2,@p=NULL"
+              let session, _ = handle session "PREPARE assignments FROM 'SET @x=?,@y=@v'"
+              let session, _ = handle session "SET @v=1.75"
+              let session, _ = handle session "EXECUTE assignments USING @p"
+              Expect.equal session.UserVariables["y"] (VInt 2L) "NULL keeps the captured type"
+              let session, _ = handle session "SET @p=1"
+              let session, _ = handle session "EXECUTE assignments USING @p"
+              Expect.equal session.UserVariables["y"] (VDecimal 1.75M) "parameter reprepare captures decimal"
+              let session, _ = handle session "SET @v=1.5e0,@p=2.5"
+              let session, _ = handle session "EXECUTE assignments USING @p"
+              Expect.equal session.UserVariables["y"] (VDouble 1.5) "the next reprepare captures double"
+
           testCase "direct prepared user variables retain their type while reading current values"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

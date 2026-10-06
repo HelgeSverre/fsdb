@@ -2021,6 +2021,39 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE assigned_variable" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private preparedUserAssignments =
+        { Name = "prepared-user-variable-assignments"
+          Setup = [||]
+          Steps =
+            [| Contract.execute "initial" "SET @set_v=-2"
+               Contract.execute "prepare" "PREPARE user_assignment FROM 'SET @set_x=@set_v'"
+               for name, value in [ "decimal", "1.75"; "string", "'hello'"; "null", "NULL" ] do
+                   Contract.execute (name + "-set") ("SET @set_v=" + value)
+                   Contract.execute (name + "-execute") "EXECUTE user_assignment"
+                   Contract.query (name + "-read") "SELECT @set_x AS assigned,@set_v AS source"
+               Contract.execute "delayed-initial" "SET @set_v=-2"
+               Contract.execute "delayed-prepare" "PREPARE delayed_assignment FROM 'SET @set_v=1.75,@set_x=@set_v'"
+               Contract.execute "delayed-execute" "EXECUTE delayed_assignment"
+               Contract.query "delayed-read" "SELECT @set_x AS assigned,@set_v AS source"
+               Contract.execute "mixed-initial" "SET @set_v=-2,@set_p=NULL"
+               Contract.execute "mixed-prepare" "PREPARE mixed_assignment FROM 'SET @set_x=?,@set_y=@set_v'"
+               for name, parameter, value in
+                   [ "retained", "NULL", "1.75"
+                     "decimal", "1", "1.75"
+                     "double", "2.5", "1.5e0" ] do
+                   Contract.execute ("mixed-" + name + "-set") ("SET @set_p=" + parameter + ",@set_v=" + value)
+                   Contract.execute ("mixed-" + name + "-execute") "EXECUTE mixed_assignment USING @set_p"
+                   Contract.query ("mixed-" + name + "-read") "SELECT @set_x AS parameter,@set_y AS assigned"
+               Contract.execute "failure-initial" "SET @set_side=9,@set_x=8,@set_y=7"
+               Contract.execute "failure-prepare" "PREPARE failing_assignment FROM 'SET @set_x=(@set_side:=1),@set_y=(SELECT 1 UNION ALL SELECT 2)'"
+               Contract.execute "failure-execute" "EXECUTE failing_assignment" |> Contract.fails 1242 "21000"
+               Contract.query "failure-read" "SELECT @set_side AS nested,@set_x AS first,@set_y AS second"
+               Contract.execute "ordinary-failure-initial" "SET @set_side=9,@set_x=8,@set_y=7"
+               Contract.execute "ordinary-failure-execute" "SET @set_x=(@set_side:=1),@set_y=(SELECT 1 UNION ALL SELECT 2)" |> Contract.fails 1242 "21000"
+               Contract.query "ordinary-failure-read" "SELECT @set_side AS nested,@set_x AS first,@set_y AS second" |]
+          Cleanup = [| "DEALLOCATE PREPARE user_assignment"; "DEALLOCATE PREPARE delayed_assignment"; "DEALLOCATE PREPARE mixed_assignment"; "DEALLOCATE PREPARE failing_assignment" |]
+          Coverage = [| "statement:set", [| "text-differential" |] |] }
+
     let all =
         [| comments
            exactErrors
@@ -2031,6 +2064,7 @@ module ContractCatalog =
            preparedProjectionNames
            preparedTypeHistory
            preparedUserVariables
+           preparedUserAssignments
            columnTypes
            generatedFunctionFamilies
            functionFamilies

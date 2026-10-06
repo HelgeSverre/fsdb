@@ -21260,6 +21260,7 @@ let rec executeAs
         | Error(code, message) -> ids, Err(code, message)
     | SetRole _
     | SetDefaultRole _ -> ids, Err(1235, "Role statement execution requires a session")
+    | SetUserVariables _ -> ids, Err(1235, "User-variable SET execution requires a session")
     | ChecksumTables(tables, quick) ->
         ids, checksumTables store dbName tables quick
     | Explain(format, inner) ->
