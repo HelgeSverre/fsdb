@@ -1,8 +1,8 @@
 # Custom stopword loading after restart
 
-Status: open. MySQL 8.4.11 loads remembered custom stopword sources on first
-full-text use. Fsdb resolves them during recovery. The difference affects both
-new index contents and future writes when the source changes after restart.
+Status: implemented for the tested custom-source loading paths. MySQL 8.4.11
+and fsdb load remembered custom stopword sources on first full-text use,
+including source edits after restart and cold index creation.
 
 Run the [native oracle](../scripts/fulltext-stopword-loading-oracle.py):
 
@@ -29,6 +29,7 @@ loaded before construction.
 | Full-text query, whether or not anything matches | none |
 | Insert an actual row | none |
 | UPDATE with no matching row | 2 |
+| UPDATE changing indexed text | none |
 | UPDATE assigning identical text | 2 |
 | UPDATE changing only the primary key | 2 |
 | DELETE, whether or not a row is removed | 2 |
@@ -36,9 +37,9 @@ loaded before construction.
 | Add an ordinary index | 2 |
 | Change the table comment | 2 |
 
-Only the tested full-text queries and insert load the source. The other
-operations leave it unloaded. This does not establish the behavior of every
-UPDATE shape or ALTER algorithm.
+The tested full-text queries, insert, and indexed-text update load the source.
+The other operations leave it unloaded. This does not establish the behavior
+of every UPDATE shape or ALTER algorithm.
 
 ## Source edits after restart
 
@@ -64,21 +65,39 @@ The first insert into `cold` loads the newer `the` list. The full-text query on
 index on `altered` did not load the list; its first insert also captures `the`.
 Historical postings remain unchanged in every case.
 
-## Fsdb divergence
+## Implementation and recovery
 
-The same wire probes on fsdb at `b936f85e` reproduce both differences:
+Each recovered custom source has a deferred load shared by its table's indexes.
+Queries and writes that index text resolve the source against the current catalog
+once. Ordinary reads, deletes, unchanged indexed text, and the tested metadata
+operations retain the unloaded state. A newly added index on a cold table builds
+without stopword filtering while sharing the same deferred load for future use.
+Historical document rules remain independent of the current policy.
 
-- A cold added index excludes `cobalt`; MySQL includes row 2.
-- After the post-restart source edit, `cold` matches only row 2 for `cobalt`;
-  MySQL matches rows 2 and 5.
+Snapshot serialization inspects cached rules without loading the source. It
+retains source names and historical rules in the existing format. Metadata
+reconstruction preserves the shared load; selecting a new physical rebuild
+policy replaces it. Recovery creates a fresh deferred load after replay.
 
-`Storage.reloadFullTextStopwords` resolves source tables while loading the
-catalog. Recovery therefore fixes the active policy too early. Changing only
-the added index's build policy would leave the ordinary-write difference open.
+WAL row events capture the policy used for indexed writes without forcing a cold
+policy for updates to other columns. ALTER captures its construction policy,
+independently of a concurrent query loading the source afterward. Replay therefore
+reconstructs the original postings without replaying the original query history.
 
-A compatible loading state must preserve historical document rules, capture
-source contents at first full-text use, and survive metadata operations without
-being forced. Snapshot serialization and WAL context capture must not themselves
-load a cold table. WAL replay must still reproduce the policy used for each
-historical mutation, independently of which reads preceded the original write.
+The Expecto regression covers post-restart edits, warmed and cold tables, added
+indexes, a checkpoint taken before first use, and another WAL recovery. The native
+and fsdb wire oracles agree for the operation matrix and source-edit sequence.
 No known-gap suppression is added.
+
+## Verification
+
+`just check` passes all 2,919 tests without build warnings or errors. The native
+and fsdb loading matrices agree, including indexed-text updates. The existing
+stopword configuration matrix passes. All 47 compatibility contracts pass
+5,007 steps without differences:
+`torture/artifacts/runs/20261007T083642060-8739/contracts`.
+
+The durability lane passes 12 crash restarts and preserves all 97 acknowledged
+commits, including automatic checkpoints, WAL-tail repair, snapshots, schema
+changes, and torn-tail recovery:
+`torture/artifacts/runs/20261007T083652254-8788/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

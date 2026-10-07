@@ -704,7 +704,12 @@ let private captureFullTextStopwords (store: Store) event captured =
             |> Option.map _.FullTextIndexes
             |> Option.defaultValue Map.empty
             |> Map.toList
-            |> List.map (fun (name, index) -> name, FullText.activeStopwords index)
+            |> List.map (fun (name, index) ->
+                let policy =
+                    match event with
+                    | SchemaChanged _ | SchemaChangedAt _ -> FullText.constructionStopwords index
+                    | _ -> (FullText.storedRules index).Stopwords
+                name, policy)
         if policies.IsEmpty then captured
         else WithFullTextStopwords(database, table, policies, captured)
     | _ -> captured
@@ -2995,9 +3000,13 @@ let private buildFullTextIndexesWithStopwords stopwordsFor rulesFor (table: Tabl
 
 let private buildFullTextIndexes rulesFor table =
     let stopwordsFor name =
-        table.FullTextIndexes |> Map.tryFind name |> Option.map FullText.activeStopwords
+        table.FullTextIndexes |> Map.tryFind name |> Option.map (FullText.storedRules >> _.Stopwords)
         |> Option.defaultValue FullText.StopwordPolicy.BuiltIn
     buildFullTextIndexesWithStopwords stopwordsFor rulesFor table
+    |> Map.map (fun name index ->
+        table.FullTextIndexes |> Map.tryFind name
+        |> Option.map (fun source -> FullText.withStopwordStateFrom source index)
+        |> Option.defaultValue index)
 
 let private rebuildFullTextIndexes table =
     buildFullTextIndexes (fun _ _ rules -> rules) table
@@ -3069,16 +3078,20 @@ let private reindexTableWithFullTextSettings size (settings: FullText.StopwordSe
         |> Map.map (fun _ index -> index |> FullText.withNgramTokenSize size |> FullText.withStopwordSource settings.Source)
     reindexTableWithFullTextIndexes indexes table
 
-let internal reloadFullTextStopwords (store: Store) =
+let internal deferFullTextStopwordReload (store: Store) =
     let catalog =
         store.Catalog |> Map.map (fun _ database ->
             database |> Map.map (fun _ table ->
+                let sources =
+                    table.FullTextIndexes |> Map.toSeq
+                    |> Seq.choose (snd >> FullText.stopwordSource)
+                    |> Seq.distinct
+                    |> Seq.map (fun source -> source, lazy (resolveFullTextStopwords store (Some source)).Policy)
+                    |> Map.ofSeq
                 let indexes = table.FullTextIndexes |> Map.map (fun _ index ->
                     match FullText.stopwordSource index with
                     | None -> index
-                    | Some source ->
-                        let settings = resolveFullTextStopwords store (Some source)
-                        FullText.withIndexingRules { FullText.activeRules index with Stopwords = settings.Policy } index)
+                    | Some source -> FullText.deferStopwords sources.[source] index)
                 { table with FullTextIndexes = indexes }))
     setCatalog store catalog
 
@@ -7207,21 +7220,24 @@ let private reindexAfterAlter size settings actions preserveFullText before afte
             | Some sourceName -> documentRulesFrom before Map.empty sourceName rowId fallback
             | None -> fallback
 
-        let inheritedSettings =
+        let inheritedIndex =
             fullTextKeyGroups before
             |> List.tryHead
             |> Option.bind (fun group -> before.FullTextIndexes |> Map.tryFind group.Name)
-            |> Option.map FullText.stopwordSettings
-            |> Option.defaultValue settings
-        let settingsFor name =
+        let sourceFor name =
             sourceNames |> Map.tryFind name
             |> Option.bind (fun sourceName -> before.FullTextIndexes |> Map.tryFind sourceName)
-            |> Option.map FullText.stopwordSettings
-            |> Option.defaultValue inheritedSettings
+            |> Option.orElse inheritedIndex
+        let settingsFor name =
+            sourceFor name |> Option.map FullText.stopwordBuildSettings |> Option.defaultValue settings
 
         let indexes =
             buildFullTextIndexesWithStopwords (fun name -> (settingsFor name).Policy) rulesFor after
-            |> Map.map (fun name index -> index |> FullText.withNgramTokenSize size |> FullText.withStopwordSource (settingsFor name).Source)
+            |> Map.map (fun name index ->
+                let index = index |> FullText.withNgramTokenSize size |> FullText.withStopwordSource (settingsFor name).Source
+                sourceFor name
+                |> Option.map (fun source -> FullText.withStopwordStateFrom source index)
+                |> Option.defaultValue index)
         reindexTableWithFullTextIndexes indexes after
 
 /// Applies `actions` in order against `tableName`, re-filing it under a new
@@ -10111,7 +10127,7 @@ let internal setFullTextStopwordsForReplay store database table policies onMissi
                 match Map.tryFind name policies with
                 | None -> index
                 | Some policy ->
-                    FullText.withIndexingRules { FullText.activeRules index with Stopwords = policy } index)
+                    FullText.withIndexingRules { FullText.storedRules index with Stopwords = policy } index)
         { table with FullTextIndexes = indexes }) onMissing
 
 let private replayRowIds (table: Table) (targets: Value[] list) : RowId option list =

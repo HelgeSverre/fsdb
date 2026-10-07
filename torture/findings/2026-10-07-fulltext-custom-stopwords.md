@@ -148,7 +148,7 @@ and each document's historical rules. Session selection is resolved lazily once
 when a statement needs the list, so index construction and its WAL event capture
 the same words. Metadata index rename retains the source; a physical rebuild
 captures the selected settings again. Recovery restores historical postings,
-then reloads remembered sources for future writes. A missing remembered source
+then defers remembered-source loading until full-text use. A missing remembered source
 selects built-in filtering without rebuilding old postings.
 
 WAL tag `0x1D` captures the source and loaded policy around DDL. It composes
@@ -173,10 +173,10 @@ the added index excludes `cobalt` and includes `orchard` and `the`. Fsdb matches
 this path, including a further WAL recovery before any ordinary row write.
 When ADD FULLTEXT is the first access to a cold table after restart, MySQL instead
 includes all three terms in the new index. A subsequent insert excludes `cobalt`.
-Fsdb eagerly reloads sources during recovery, so its added index excludes
-`cobalt` even on this cold path. The [loading oracle](2026-10-07-fulltext-stopword-loading.md) also shows that
-source edits after restart must remain visible until the first full-text query
-or insert. Both the index-build and future-write distinctions remain open.
+Fsdb preserves this unloaded state across recovery, metadata changes, and
+checkpoints. The [loading oracle](2026-10-07-fulltext-stopword-loading.md) also
+verifies that source edits after restart remain visible until the first full-text
+query or write that indexes text.
 
 Additional ALTER variants, query expansion, and more
 source charset/collation combinations remain outside this verified matrix.
@@ -221,15 +221,15 @@ or replay WAL tags `0x1C` and `0x1D`.
 The complete native oracle passes, including the same-datadir restart sequence
 and searches in natural and Boolean modes after each transition.
 
-The indexing-rule and snapshot changes pass `just check` with 2,918 tests and no build
+The indexing-rule and snapshot changes pass `just check` with 2,919 tests and no build
 warnings or errors. The existing stopword configuration matrix passes on fsdb.
 All 47 MySQL contracts (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T081648185-5907/contracts`.
+`torture/artifacts/runs/20261007T083642060-8739/contracts`.
 
-The durability lane passes 12 crash restarts, preserving all 106 acknowledged
+The durability lane passes 12 crash restarts, preserving all 97 acknowledged
 commits and transaction boundaries, with checkpoint, WAL-tail, snapshot, schema,
 and torn-tail checks:
-`torture/artifacts/runs/20261007T081658373-5963/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T083652254-8788/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
 
 The SQL wire matrix agrees for InnoDB source validation, precedence, loaded-list
 lifetime, physical rebuild, collation, phrases, and ngram filtering. No known-gap

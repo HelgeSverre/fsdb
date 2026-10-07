@@ -55,6 +55,7 @@ def check_first_access():
         ("empty_search", "SELECT id FROM probe.{table} WHERE MATCH(body) AGAINST('nomatch')", True),
         ("inserted", "INSERT INTO probe.{table} VALUES(4,'zzzz','zzzz')", True),
         ("empty_update", "UPDATE probe.{table} SET body='zzzz' WHERE id=999", False),
+        ("changed_text", "UPDATE probe.{table} SET body='zzzz' WHERE id=1", True),
         ("same_update", "UPDATE probe.{table} SET body=body WHERE id=1", False),
         ("changed_id", "UPDATE probe.{table} SET id=4 WHERE id=1", False),
         ("empty_delete", "DELETE FROM probe.{table} WHERE id=999", False),

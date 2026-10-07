@@ -1644,7 +1644,7 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
     w.WriteInt32LE t.RowsArray.Length
     if format.FullTextStopwords then
         for index in t.Indexes |> List.filter (fun index -> index.Kind.IsFullText) do
-            encodeStopwordPolicy w (FullText.activeStopwords t.FullTextIndexes.[index.Name])
+            encodeStopwordPolicy w (FullText.storedRules t.FullTextIndexes.[index.Name]).Stopwords
     if format.FullTextStopwordSources then
         for index in t.Indexes |> List.filter (fun index -> index.Kind.IsFullText) do
             writeOptStr w (FullText.stopwordSource t.FullTextIndexes.[index.Name])
@@ -2037,7 +2037,7 @@ let load (dataDir: string) : Store =
             fs.SetLength goodOffset
 
     configureNgramTokenSize store.NgramTokenSize store
-    reloadFullTextStopwords store
+    deferFullTextStopwordReload store
     restorePreparedXaLocks store
     store
 

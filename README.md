@@ -147,8 +147,9 @@ table's first column must be named `value` and have type `VARCHAR`.
 Custom lists replace the built-in list. Startup accepts literal source names
 before tables are available; invalid sources fall back to built-ins when an
 index is built. SQL `SET` instead rejects invalid references. Editing a loaded
-source does not change its indexes immediately. Restart reloads remembered
-sources for future writes while retaining historical postings. See the
+source does not change its indexes immediately. After restart, the first full-text
+query or write that indexes text reloads the remembered source; historical
+postings remain unchanged. See the
 [verified behavior and remaining boundaries](torture/findings/2026-10-07-fulltext-custom-stopwords.md).
 
 ### Option files

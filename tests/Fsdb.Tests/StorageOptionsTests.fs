@@ -97,6 +97,47 @@ let tests =
                   let final = connect (Persistence.load dir)
                   Expect.equal (final (query "the") |> rows) [ [ Some "3" ]; [ Some "5" ] ] "the complete history survives another WAL replay"
 
+          testCase "remembered stopwords load on full-text use rather than restart or checkpoint"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = TestSupport.directory "fulltext-deferred-source"
+                  let original = Db.create () |> Db.withDataDir dir |> Db.connect
+                  original.Query "CREATE TABLE words(value VARCHAR(30))" |> ignore
+                  original.Query "INSERT INTO words VALUES('orchard')" |> ignore
+                  original.Query "SET SESSION innodb_ft_user_stopword_table='fsdb/words'" |> ignore
+                  for name in [ "cold"; "warm" ] do
+                      original.Query ($"CREATE TABLE {name}(id INT PRIMARY KEY,body TEXT,other TEXT,FULLTEXT ft(body))") |> ignore
+                      original.Query ($"INSERT INTO {name} VALUES(1,'orchard','orchard'),(2,'cobalt','cobalt'),(3,'the','the')") |> ignore
+                  original.Query "DELETE FROM words" |> ignore
+                  original.Query "INSERT INTO words VALUES('cobalt')" |> ignore
+                  let db = Db.create () |> Db.withDataDir dir
+                  let connection = Db.connect db
+                  let query name column word = $"SELECT id FROM {name} WHERE MATCH({column}) AGAINST('{word}') ORDER BY id"
+                  connection.Query (query "warm" "body" "nomatch") |> ignore
+                  connection.Query "SELECT COUNT(*) FROM cold" |> ignore
+                  if checkpoint then Persistence.snapshotNow dir db.Store
+                  for name in [ "cold"; "warm" ] do
+                      Expect.equal (connection.Query ($"ALTER TABLE {name} ADD FULLTEXT ft_other(other)")) (Affected 0UL) "add index without loading a cold source"
+                  connection.Query "DELETE FROM words" |> ignore
+                  connection.Query "INSERT INTO words VALUES('the')" |> ignore
+                  for name in [ "cold"; "warm" ] do
+                      connection.Query ($"INSERT INTO {name} VALUES(5,'orchard cobalt the','orchard cobalt the')") |> ignore
+                  let verify run =
+                      for name, column, word, ids in
+                          [ "cold", "body", "orchard", [ "5" ]
+                            "cold", "body", "cobalt", [ "2"; "5" ]
+                            "cold", "body", "the", [ "3" ]
+                            "cold", "other", "orchard", [ "1"; "5" ]
+                            "cold", "other", "cobalt", [ "2"; "5" ]
+                            "cold", "other", "the", [ "3" ]
+                            "warm", "body", "cobalt", [ "2" ]
+                            "warm", "other", "cobalt", []
+                            "warm", "other", "the", [ "3"; "5" ] ] do
+                          Expect.equal (run (query name column word) |> rows) (ids |> List.map (fun id -> [ Some id ])) ($"{name}.{column}: {word}")
+                  verify connection.Query
+                  let recovered = Db.create () |> Db.withDataDir dir |> Db.connect
+                  verify recovered.Query
+
           testCase "adding a full-text index captures the reloaded stopword policy for recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do

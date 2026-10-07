@@ -147,7 +147,27 @@ type Index<'id when 'id: comparison> =
           PrefixPostings: Map<string, Map<'id, int>>
           Collation: Collation
           Rules: IndexingRules
-          StopwordSource: string option }
+          StopwordSource: string option
+          StopwordReload: Lazy<StopwordPolicy> option }
+
+/// Inspects cached rules without loading a remembered stopword source.
+let internal storedRules (index: Index<'id>) =
+    match index.StopwordReload with
+    | Some reload when reload.IsValueCreated -> { index.Rules with Stopwords = reload.Value }
+    | _ -> index.Rules
+
+let internal activeRules (index: Index<'id>) =
+    match index.StopwordReload with
+    | Some reload -> { index.Rules with Stopwords = reload.Value }
+    | None -> index.Rules
+
+let internal loadedStopwords (index: Index<'id>) =
+    match index.StopwordReload with
+    | Some reload when not reload.IsValueCreated -> None
+    | _ -> Some (storedRules index).Stopwords
+
+let internal deferStopwords reload (index: Index<'id>) =
+    { index with StopwordReload = Some reload }
 
 /// Query state is separate from the index maintained for future commits.
 type internal ReadView<'id when 'id: comparison> =
@@ -165,7 +185,7 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       Postings = index.Postings
       PrefixPostings = index.PrefixPostings
       Collation = index.Collation
-      Rules = index.Rules
+      Rules = activeRules index
       DocumentCount = index.Documents.Count
       VisibleDocumentIds = None }
 
@@ -281,7 +301,8 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       PrefixPostings = Map.empty
       Collation = collation
       Rules = { Tokenizer = tokenizer; Stopwords = policy }
-      StopwordSource = None }
+      StopwordSource = None
+      StopwordReload = None }
 
 let emptyIndex collation = emptyIndexWith StopwordPolicy.BuiltIn Words collation
 
@@ -290,19 +311,23 @@ let internal stopwordSource (index: Index<'id>) = index.StopwordSource
 let internal withStopwordSource source (index: Index<'id>) =
     { index with StopwordSource = source }
 
-let internal stopwordSettings (index: Index<'id>) =
-    { Source = index.StopwordSource; Policy = index.Rules.Stopwords }
+let internal stopwordBuildSettings (index: Index<'id>) =
+    // A cold table builds additional indexes before loading its remembered source.
+    { Source = index.StopwordSource; Policy = loadedStopwords index |> Option.defaultValue StopwordPolicy.Disabled }
+
+let internal withStopwordStateFrom (source: Index<'id>) (target: Index<'id>) =
+    { target with
+        StopwordSource = source.StopwordSource
+        StopwordReload = source.StopwordReload }
 
 
 /// Selects rules for queries and future writes, retaining each document's history.
 let internal withIndexingRules rules (index: Index<'id>) =
-    { index with Rules = rules }
-
-let internal activeRules (index: Index<'id>) = index.Rules
+    { index with Rules = rules; StopwordReload = None }
 
 /// Selects the tokenizer for queries and future writes, retaining existing postings.
 let internal withTokenizer tokenizer (index: Index<'id>) =
-    withIndexingRules { index.Rules with Tokenizer = tokenizer } index
+    { index with Rules = { index.Rules with Tokenizer = tokenizer } }
 
 let internal activeTokenizer (index: Index<'id>) = index.Rules.Tokenizer
 
@@ -387,7 +412,7 @@ let internal mergeDocuments sourceRowIds (baseline: Index<'id>) (source: Index<'
                 | None -> removeDocument (targetId id) target)
 
 let addDocumentFields id texts (index: Index<'id>) =
-    addDocumentFieldsWithRules index.Rules id texts index
+    addDocumentFieldsWithRules (activeRules index) id texts index
 
 let addDocument id text index = addDocumentFields id [ text ] index
 
@@ -400,7 +425,7 @@ let internal documentRules id (index: Index<'id>) =
 
 let internal rulesInUse (index: Index<'id>) =
     seq {
-        yield index.Rules
+        yield storedRules index
         for KeyValue(_, document) in index.Documents do
             yield document.Rules
     }
@@ -410,7 +435,10 @@ let internal rulesInUse (index: Index<'id>) =
 let internal documentTokenizer id index =
     documentRules id index |> Option.map _.Tokenizer
 
-let internal activeStopwords (index: Index<'id>) = index.Rules.Stopwords
+/// ALTER replay uses the build policy even if a concurrent query has since loaded the source.
+let internal constructionStopwords (index: Index<'id>) = index.Rules.Stopwords
+
+let internal activeStopwords (index: Index<'id>) = (activeRules index).Stopwords
 
 let internal buildIndexWithDocumentSettings rules collation documents =
     documents
