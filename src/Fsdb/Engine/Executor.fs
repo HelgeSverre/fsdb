@@ -9599,7 +9599,7 @@ and private prepareRecursiveBranch
             )
             |> Ok
 
-and private compatibleSemiJoinColumns (left: ColumnDef) (right: ColumnDef) =
+and private compatibleEqualityColumns (left: ColumnDef) (right: ColumnDef) =
     let sameTextDomain =
         match left.Type with
         | TChar _
@@ -9681,7 +9681,7 @@ and private tryIndexedSemiJoin
                 let compatible =
                     sameLength outerColumns rightColumns
                     && List.forall2
-                        (fun left right -> Option.map2 compatibleSemiJoinColumns left right |> Option.defaultValue false)
+                        (fun left right -> Option.map2 compatibleEqualityColumns left right |> Option.defaultValue false)
                         outerColumns
                         rightColumns
 
@@ -15292,6 +15292,81 @@ and private fullTextPhysicalSources (store: Store) (dbName: string) (sourceItems
         | _ -> Ok None)
     |> Result.map (List.choose id)
 
+/// Equality bounds only narrow scoring candidates; the original joins and predicates
+/// still decide the result, and relevance retains the complete indexed corpus.
+and private fullTextJoinBounds (sources: FullTextPhysicalSource list) (select: SelectStmt) =
+    let key (name: string) = name.ToLowerInvariant()
+    let qualifiers = sources |> List.map (fun source -> key source.Qualifier)
+    let columns =
+        sources
+        |> List.collect (fun source ->
+            source.Table.Columns |> List.map (fun column -> (key source.Qualifier, key column.Name), column))
+        |> Map.ofList
+    let ownedColumn = function
+        | QualifiedCol(qualifier, name) ->
+            let identity = key qualifier, key name
+            Map.tryFind identity columns |> Option.map (fun column -> identity, column)
+        | _ -> None
+    let rec validJoins bound (joins: Join list) =
+        match joins with
+        | [] -> true
+        | join :: rest ->
+            let visible = Set.add (key (fromItemQualifier join.Table)) bound
+            (join.Kind = InnerJoin || join.Kind = CrossJoin)
+            && join.Using.IsEmpty
+            && not (Expression.exists (function Col _ -> true | _ -> false) join.On)
+            && Set.isSubset (qualifiedReferences join.On) visible
+            && validJoins visible rest
+    let compatibleLiteral (column: ColumnDef) value =
+        match column.Type, value with
+        | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText), VString _ -> true
+        | (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBit _ | TDecimal _ | TDouble _ | TFloat _),
+          (VInt _ | VUInt _ | VDecimal _ | VDouble _) -> true
+        | _ -> false
+    let eligible =
+        not select.Joins.IsEmpty
+        && sources.Length = select.Joins.Length + 1
+        && (Set.ofList qualifiers).Count = qualifiers.Length
+        && (select.From |> Option.exists (fun source -> validJoins (Set.singleton (key (fromItemQualifier source))) select.Joins))
+    if not eligible then Map.empty
+    else
+        let predicates = optionalConjuncts select.Where @ (select.Joins |> List.collect (fun join -> conjuncts join.On))
+        let edges =
+            predicates
+            |> List.collect (function
+                | BinOp(Eq, left, right) ->
+                    match ownedColumn left, ownedColumn right with
+                    | Some(a, leftColumn), Some(b, rightColumn) when compatibleEqualityColumns leftColumn rightColumn ->
+                        [ a, b; b, a ]
+                    | _ -> []
+                | _ -> [])
+            |> List.groupBy fst
+            |> List.map (fun (column, edges) -> column, edges |> List.map snd)
+            |> Map.ofList
+        let reachable origin =
+            let rec visit seen = function
+                | [] -> seen
+                | next :: pending when Set.contains next seen -> visit seen pending
+                | next :: pending ->
+                    visit (Set.add next seen) ((Map.tryFind next edges |> Option.defaultValue []) @ pending)
+            visit Set.empty [ origin ]
+        let seed column literal =
+            match ownedColumn column, literal with
+            | Some(identity, definition), LiteralValue value when compatibleLiteral definition value ->
+                reachable identity
+                |> Set.remove identity
+                |> Set.toList
+                |> List.map (fun (qualifier, name) -> qualifier, BinOp(Eq, QualifiedCol(qualifier, name), literal))
+            | _ -> []
+        predicates
+        |> List.collect (function
+            | BinOp(Eq, left, right) -> seed left right @ seed right left
+            | _ -> [])
+        |> List.distinct
+        |> List.groupBy fst
+        |> List.choose (fun (qualifier, bounds) -> combineConjuncts (List.map snd bounds) |> Option.map (fun predicate -> qualifier, predicate))
+        |> Map.ofList
+
 and private fullTextIndexMatches (table: Table) (columns: MatchColumn list) =
     let names = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList
 
@@ -15457,6 +15532,7 @@ and private runFullTextSelect
                 tryFullTextDrivenJoinOrder store registry sources ownedNodes select
                 |> Option.defaultValue select
 
+            let inferredBounds = fullTextJoinBounds sources select
             let fromItem = select.From |> Option.defaultValue originalFromItem
             let joinConsumption = joinConsumptionFor select.Limit
             let sourcePredicates, remainingWhere =
@@ -15481,6 +15557,11 @@ and private runFullTextSelect
                             let candidatePredicate =
                                 Map.tryFind (source.Qualifier.ToLowerInvariant()) sourcePredicates
                                 |> Option.orElseWith (fun () -> if select.Joins.IsEmpty then select.Where else None)
+                                |> fun predicate ->
+                                    optionalConjuncts predicate
+                                    @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) inferredBounds)
+                                    |> List.distinct
+                                    |> combineConjuncts
 
                             match source.Item, candidatePredicate with
                             | FromTable tableRef, Some predicate when select.Locking.IsEmpty ->

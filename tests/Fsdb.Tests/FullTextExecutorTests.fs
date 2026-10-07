@@ -40,7 +40,63 @@ let private ids (result: QueryResult) : string list =
 let tests =
     testList
         "fulltext executor"
-        [ testCase "fulltext document replacement survives transaction publication with concurrent writes"
+        [ testCase "equality join bounds restrict fulltext row preparation"
+          <| fun _ ->
+              let mutable calls = 0
+              let registry =
+                  builtins
+                  |> registerScalar "TOUCH" (fun values ->
+                      calls <- calls + 1
+                      values.Head)
+              let store = create ()
+              let execute = TestSupport.Sql.execute store registry
+              execute "CREATE TABLE owners(id INT PRIMARY KEY)" |> ignore
+              execute "INSERT INTO owners VALUES(42)" |> ignore
+              Expect.equal
+                  (execute "CREATE TABLE docs(id INT PRIMARY KEY, owner_id INT, body TEXT, observed INT AS (TOUCH(id)) VIRTUAL, KEY(owner_id), FULLTEXT(body))")
+                  (Affected 0UL)
+                  "generated column measures prepared candidates"
+              let values =
+                  [ 1..1000 ]
+                  |> List.map (fun id -> sprintf "(%d,%d,'%s')" id (id % 100) (if id % 5 = 0 then "ordinary" else "needle"))
+                  |> String.concat ","
+              execute ("INSERT INTO docs(id,owner_id,body) VALUES " + values) |> ignore
+              execute "CREATE TABLE bounds(id INT PRIMARY KEY)" |> ignore
+              execute "INSERT INTO bounds VALUES(42)" |> ignore
+              for joins, bound in
+                  [ "JOIN owners o ON o.id=d.owner_id", "o.id=42"
+                    "JOIN owners o ON o.id=d.owner_id JOIN bounds b ON b.id=o.id", "42=b.id"
+                    "JOIN owners o ON o.id=d.owner_id AND 42=o.id", "TRUE"
+                    "CROSS JOIN owners o", "o.id=d.owner_id AND o.id=42" ] do
+                  let query redundant =
+                      "SELECT d.id, ROUND(MATCH(d.body) AGAINST('needle'),6) FROM docs d "
+                      + joins + " WHERE " + bound + " AND MATCH(d.body) AGAINST('needle')"
+                      + redundant + " ORDER BY d.id"
+                  let control = execute (query " AND d.owner_id=42")
+                  calls <- 0
+                  let actual = execute (query "")
+                  Expect.equal (ids actual) ([ 42..100..942 ] |> List.map string) "MySQL 8.4 matching IDs"
+                  Expect.equal actual control "the bound preserves scores from the complete corpus"
+                  Expect.isLessThan calls 30 "only the ten matching candidates need virtual values"
+
+          testCase "fulltext join bounds preserve text coercion and optional predicates"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE names(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,body TEXT,KEY(k),FULLTEXT(body))" |> ignore
+              run store "CREATE TABLE labels(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci)" |> ignore
+              run store "INSERT INTO names VALUES(1,'①','needle'),(2,'1','needle'),(3,'other','ordinary'),(4,'missing','needle')" |> ignore
+              run store "INSERT INTO labels VALUES('1')" |> ignore
+              let check expected joins predicate =
+                  run store ("SELECT d.id FROM names d " + joins + " WHERE " + predicate + " AND MATCH(d.body) AGAINST('needle') ORDER BY d.id")
+                  |> ids
+                  |> fun actual -> Expect.equal actual expected predicate
+              check [ "1"; "2" ] "JOIN labels o ON o.k=d.k" "o.k=1"
+              check [ "2" ] "JOIN labels o ON o.k=d.k" "o.k=1 AND d.k=1"
+              check [ "1"; "2" ] "JOIN labels o ON o.k=d.k" "o.k='1'"
+              check [ "1"; "2"; "4" ] "LEFT JOIN labels o ON o.k=d.k AND o.k='1'" "TRUE"
+              check [ "1"; "2"; "4" ] "CROSS JOIN labels o" "(o.k=d.k OR d.id=4) AND o.k='1'"
+
+          testCase "fulltext document replacement survives transaction publication with concurrent writes"
           <| fun _ ->
               let table store =
                   match tableSnapshot store defaultDatabase "docs" with
