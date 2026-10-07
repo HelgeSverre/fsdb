@@ -12,6 +12,47 @@ expect = oracle["expect"]
 def verify(client, _writer):
     client.query("CREATE TABLE probe.a(id INT);CREATE TABLE probe.b(id INT);CREATE TABLE probe.c(id INT);"
                  "INSERT INTO probe.a VALUES(1),(2);INSERT INTO probe.b VALUES(1),(3);INSERT INTO probe.c VALUES(3)")
+    for query, expected in [
+        ('SELECT a.id FROM a JOIN (a JOIN c ON a.id=c.id) ON 1', (1066, '42000')),
+        ('WITH d AS (SELECT * FROM a JOIN b ON a.id=b.id) SELECT 1 UNION ALL SELECT id FROM d', (1060, '42S21')),
+        ('WITH bad AS (SELECT * FROM a JOIN b USING(missing)) SELECT (WITH unused AS (SELECT * FROM bad) SELECT 1)', None),
+        ('WITH d AS (SELECT * FROM a JOIN b USING(missing)) SELECT (WITH d AS (SELECT 1 AS id) SELECT id FROM d)', None),
+        ('WITH d AS (SELECT * FROM a JOIN b USING(missing)) SELECT 1', None),
+        ('SELECT a.id AS chosen,(SELECT COUNT(*) FROM b JOIN c ON c.id=chosen) FROM a', None),
+        ('WITH bad AS (SELECT * FROM a JOIN b USING(missing)),good AS (SELECT * FROM c) SELECT * FROM good', None),
+        ('SELECT a.id FROM a JOIN (b JOIN c ON EXISTS(SELECT a.id)) ON 1', (1054, '42S22')),
+        ('WITH d AS (SELECT a.id FROM a JOIN b ON a.id=b.id) SELECT 1 UNION ALL SELECT id FROM d', None),
+        ('WITH d AS (SELECT a.id FROM a JOIN b ON b.missing=a.id) SELECT 1 UNION ALL SELECT id FROM d', (1054, '42S22')),
+        ('SELECT a.id FROM a JOIN b ON b.missing=a.id', (1054, '42S22')),
+        ('SELECT a.id FROM a JOIN b ON missing=a.id', (1054, '42S22')),
+        ('SELECT a.id FROM a JOIN b ON id=a.id', (1052, '23000')),
+        ('SELECT a.id FROM a JOIN b ON c.id=a.id JOIN c ON 1', (1054, '42S22')),
+        ('SELECT a.id FROM a LEFT JOIN (b JOIN c ON c.id=a.id) ON a.id=b.id', (1054, '42S22')),
+        ('SELECT a.id FROM a JOIN (b RIGHT JOIN c USING(id)) ON id=a.id', (1052, '23000')),
+        ('SELECT c.id FROM (SELECT 3 AS wanted) d JOIN (a RIGHT JOIN c USING(id)) ON id=d.wanted', None),
+        ('SELECT b.id FROM a RIGHT JOIN b USING(id) JOIN (SELECT 3 AS wanted) d ON id=d.wanted', None),
+        ('SELECT a.id,(SELECT COUNT(*) FROM b JOIN (c JOIN (SELECT 1 AS seed) d ON c.id=a.id+1) ON 1) FROM a', None),
+        ('SELECT a.id,(SELECT COUNT(*) FROM (SELECT 1 AS other) b JOIN (SELECT 1 AS seed) c ON id=1) FROM a', None),
+        ('SELECT a.id,(SELECT COUNT(*) FROM (SELECT 1 AS other) a JOIN b ON a.id=b.id) FROM a', None),
+        ('SELECT a.id FROM a JOIN (b JOIN c ON EXISTS(SELECT 1 WHERE a.id=c.id)) ON 1', (1054, '42S22')),
+        ('SELECT a.id FROM a JOIN b ON EXISTS(SELECT 1 WHERE c.id=a.id) JOIN c ON 1', (1054, '42S22')),
+        ('SELECT a.id AS chosen FROM a JOIN b ON chosen=b.id', (1054, '42S22')),
+        ('SELECT a.id,(SELECT COUNT(*) FROM (SELECT b.id FROM b JOIN c ON c.id=a.id) d) FROM a', None),
+        ('SELECT a.id FROM a JOIN LATERAL (SELECT b.id FROM b JOIN c ON c.id=a.id) d ON 1', None),
+        ('SELECT a.id FROM a JOIN (b JOIN LATERAL (SELECT c.id FROM c JOIN (SELECT 1 AS seed) d ON c.id=a.id) x ON 1) ON 1', None),
+        ('SELECT a.id FROM a JOIN (SELECT b.id FROM b JOIN c ON c.id=a.id) d ON 1', (1054, '42S22')),
+        ('WITH d AS (SELECT a.id FROM a JOIN b ON b.missing=a.id) SELECT * FROM d', (1054, '42S22')),
+        ('WITH d AS (SELECT a.id FROM a JOIN b ON b.missing=a.id) SELECT 1', None),
+        ('UPDATE a JOIN (b JOIN c ON c.id=a.id) ON 1 SET a.id=7', (1054, '42S22')),
+        ('DELETE a FROM a JOIN (b JOIN c ON c.id=a.id) ON 1', (1054, '42S22')),
+        ('SELECT a.id FROM a JOIN (b JOIN c ON b.missing=c.id) ON 0', (1054, '42S22')),
+    ]:
+        prepared = subprocess.run([*client.process.args, "-e", "USE probe;PREPARE scoped_join FROM '" + query + "'"], capture_output=True, text=True, check=False)
+        error = re.search(r"ERROR (\d+) \((\w+)\)", prepared.stderr)
+        actual = (int(error[1]), error[2]) if error else None
+        if expected is None:
+            expect("valid prepared join scope", prepared.returncode, 0)
+        expect("prepared join scope", actual, expected)
     for source, expected in [
         ("a,(b JOIN c ON b.id=c.id)", "1\t3\t3\n2\t3\t3"),
         ("a LEFT JOIN (b JOIN c ON b.id=c.id) ON a.id=b.id", "1\tNULL\tNULL\n2\tNULL\tNULL"),

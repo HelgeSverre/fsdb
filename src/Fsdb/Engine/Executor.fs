@@ -698,6 +698,10 @@ type private ViewColumnDescriptor =
     { Column: ColumnDef
       NumericParts: (int * int) option }
 
+type private DescribedJoinScope =
+    { Sources: (string * ViewColumnDescriptor list) list
+      LogicalColumns: FromItem.LogicalColumn list }
+
 type private ColumnDescriptionError =
     | DescriptionUnavailable
     | InvalidDescription of QueryResult
@@ -6584,25 +6588,61 @@ and private describeQueryColumnsChecked
             |> List.fold (fun merged branch -> List.map2 (fun left right -> unionColumn [ left; right ]) merged branch) first
             |> Ok
 
-    let rec describeBody (seen: Set<string * string>) dbName ctes =
+    let emptyScope: DescribedJoinScope = { Sources = []; LogicalColumns = [] }
+
+    let appendScopes (left: DescribedJoinScope) (right: DescribedJoinScope) =
+        { Sources = left.Sources @ right.Sources
+          LogicalColumns = left.LogicalColumns @ right.LogicalColumns }
+
+    let rec resolveReference (scopes: DescribedJoinScope list) clause (qualifier, name) =
+        let label = qualifier |> Option.map (fun qualifier -> qualifier + "." + name) |> Option.defaultValue name
+        match scopes with
+        | [] -> Error(InvalidDescription(Err(1054, sprintf "Unknown column '%s' in '%s'" label clause)))
+        | scope :: outer ->
+            let matches =
+                match qualifier with
+                | None -> scope.LogicalColumns |> List.filter (fun column -> equalsIgnoreCase name column.Name) |> List.length
+                | Some qualifier ->
+                    scope.Sources
+                    |> List.filter (fst >> equalsIgnoreCase qualifier)
+                    |> List.collect snd
+                    |> List.filter (fun descriptor -> equalsIgnoreCase name descriptor.Column.Name)
+                    |> List.length
+            match matches with
+            | 0 -> resolveReference outer clause (qualifier, name)
+            | 1 -> Ok()
+            | _ -> Error(InvalidDescription(Err(1052, sprintf "Column '%s' in %s is ambiguous" label clause)))
+
+    let validateReferences scopes clause expression =
+        Expression.collect (function
+            | Col name -> Some(None, name)
+            | QualifiedCol(qualifier, name) -> Some(Some qualifier, name)
+            | _ -> None) expression
+        |> traverse (resolveReference scopes clause)
+        |> Result.map ignore
+
+    let rec describeBody (seen: Set<string * string>) dbName ctes outerScopes =
         function
-        | PlainSelect select -> describeSelect seen dbName ctes select
+        | PlainSelect select -> describeSelect seen dbName ctes outerScopes select
         | UnionSelect(first, rest, _, _, _) ->
-            let branches = first :: (rest |> List.map snd)
+            let branches = first :: (rest |> List.map (fun (_, branch) -> { branch with Ctes = first.Ctes @ branch.Ctes }))
 
             branches
-            |> traverse (describeSelect seen dbName ctes)
+            |> traverse (describeSelect seen dbName ctes outerScopes)
             |> Result.bind unionColumns
 
-    and sourceColumns seen dbName ctes =
+    and sourceColumns seen dbName ctes outerScopes preceding : FromItem -> Result<ViewColumnDescriptor list, ColumnDescriptionError> =
         function
         | FromJoinGroup(source, joins) ->
-            (source :: (joins |> List.map _.Table)) |> traverse (sourceColumns seen dbName ctes) |> Result.map List.concat
+            describeJoinChain seen dbName ctes outerScopes preceding source joins
+            |> Result.map (fun scope -> scope.Sources |> List.collect snd)
         | FromTable tableRef ->
             let tableDb = tableRef.Database |> Option.defaultValue dbName
 
             if tableRef.Database.IsNone && Map.containsKey (tableRef.Table.ToLowerInvariant()) ctes then
-                Map.tryFind (tableRef.Table.ToLowerInvariant()) ctes |> requireDescription
+                Map.tryFind (tableRef.Table.ToLowerInvariant()) ctes
+                |> requireDescription
+                |> Result.bind (fun (columns: Lazy<Result<ViewColumnDescriptor list, ColumnDescriptionError>>) -> columns.Value)
             elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
                 InformationSchema.scan store.Catalog tableRef.Table None |> Option.map (fst >> List.map describeColumn) |> requireDescription
             else
@@ -6616,217 +6656,263 @@ and private describeQueryColumnsChecked
                         parseStoredViewStatement view.Definition
                         |> Result.mapError (fun _ -> DescriptionUnavailable)
                         |> Result.bind (function
-                            | Select select -> describeSelect (Set.add key seen) view.Schema Map.empty select
+                            | Select select -> describeSelect (Set.add key seen) view.Schema Map.empty [] select
                             | Union(first, rest, orderBy, limit, offset) ->
-                                describeBody (Set.add key seen) view.Schema Map.empty (UnionSelect(first, rest, orderBy, limit, offset))
+                                describeBody (Set.add key seen) view.Schema Map.empty [] (UnionSelect(first, rest, orderBy, limit, offset))
                             | _ -> Error DescriptionUnavailable)
                         |> Result.bind (fun columns ->
                             let declaredColumns: string list = view.Columns
 
                             renameColumns declaredColumns columns |> requireDescription)
                 | None -> scan store tableDb tableRef.Table |> Result.mapError (fun _ -> DescriptionUnavailable) |> Result.map (fst >> List.map describeColumn)
-        | FromSubquery(body, _)
-        | FromLateral(body, _) -> describeBody seen dbName ctes body
+        | FromSubquery(body, _) -> describeBody seen dbName ctes outerScopes body
+        | FromLateral(body, _) -> describeBody seen dbName ctes (preceding :: outerScopes) body
         | FromJsonTable(_, _, columns, _) -> jsonTableColumnDefs columns |> List.map describeColumn |> Ok
 
-    and describeSelect seen dbName inheritedCtes (select: SelectStmt) =
-        let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table) |> List.collect FromItem.leaves
+    and describeJoinSource seen dbName ctes outerScopes preceding item : Result<DescribedJoinScope, ColumnDescriptionError> =
+        match item with
+        | FromItem.Grouped(source, joins) -> describeJoinChain seen dbName ctes outerScopes preceding source joins
+        | FromItem.Qualified qualifier ->
+            sourceColumns seen dbName ctes outerScopes preceding item
+            |> Result.map (fun columns ->
+                { Sources = [ qualifier, columns ]
+                  LogicalColumns = columns |> List.map (fun column -> FromItem.SourceColumn(column.Column.Name, QualifiedCol(qualifier, column.Column.Name))) })
+
+    and describeJoinChain seen dbName ctes outerScopes preceding source joins : Result<DescribedJoinScope, ColumnDescriptionError> =
+        describeJoinSource seen dbName ctes outerScopes preceding source
+        |> Result.bind (fun initial ->
+            joins
+            |> List.fold (fun state join ->
+                state |> Result.bind (fun left ->
+                    let lateralScope = appendScopes preceding left
+                    describeJoinSource seen dbName ctes outerScopes lateralScope join.Table
+                    |> Result.bind (fun right ->
+                        let onScope = appendScopes left right
+                        validateExpression seen dbName ctes (onScope :: outerScopes) "on clause" join.On
+                        |> Result.bind (fun () ->
+                            let columnsOf qualifier =
+                                onScope.Sources |> List.tryFind (fst >> equalsIgnoreCase qualifier)
+                                |> Option.map (snd >> List.map (fun descriptor -> descriptor.Column.Name))
+                                |> Option.defaultValue []
+                            FromItem.logicalJoinColumns columnsOf left.LogicalColumns join
+                            |> Result.mapError (joinColumnError >> InvalidDescription)
+                            |> Result.map (fun columns -> { onScope with LogicalColumns = columns })))))
+                (Ok initial))
+
+    and validateExpression seen dbName ctes scopes clause expression =
+        validateReferences scopes clause expression
+        |> Result.bind (fun _ ->
+            Expression.collectSubqueries expression
+            |> traverse (fun nested ->
+                match describeSelect seen dbName ctes scopes nested with
+                | Error(InvalidDescription error) -> Error(InvalidDescription error)
+                | _ -> Ok())
+            |> Result.map ignore)
+
+    and describeSelect seen dbName inheritedCtes outerScopes (select: SelectStmt) =
 
         let describeCte ctes (cte: CommonTableExpr) =
             match cte.Recursive, cte.Body with
             | true, UnionSelect(anchor, recursiveBranches, _, _, _) ->
-                describeSelect seen dbName ctes anchor
+                describeSelect seen dbName ctes outerScopes anchor
                 |> Result.bind (renameColumns cte.CteColumns >> requireDescription)
                 |> Result.bind (fun anchorColumns ->
-                    let scope = Map.add (cte.CteName.ToLowerInvariant()) anchorColumns ctes
+                    let scope = Map.add (cte.CteName.ToLowerInvariant()) (lazy (Ok anchorColumns)) ctes
 
                     recursiveBranches
-                    |> traverse (snd >> describeSelect seen dbName scope)
+                    |> traverse (snd >> describeSelect seen dbName scope outerScopes)
                     |> Result.bind (fun branches ->
                         anchorColumns :: branches
                         |> unionColumns
                         |> Result.map (List.map (fun descriptor ->
                             { descriptor with Column = { descriptor.Column with Nullable = true; Default = None } }))))
             | _ ->
-                describeBody seen dbName ctes cte.Body
+                describeBody seen dbName ctes outerScopes cte.Body
                 |> Result.bind (renameColumns cte.CteColumns >> requireDescription)
 
-        let ctes =
+        // Resolve only referenced CTEs, in the namespace at their declaration.
+        let cteMap =
             select.Ctes
             |> List.fold
-                (fun resolved cte ->
-                    resolved
-                    |> Result.bind (fun ctes ->
-                        describeCte ctes cte
-                        |> Result.map (fun columns -> Map.add (cte.CteName.ToLowerInvariant()) columns ctes)))
-                (Ok inheritedCtes)
+                (fun ctes cte -> Map.add (cte.CteName.ToLowerInvariant()) (lazy (describeCte ctes cte)) ctes)
+                inheritedCtes
 
-        ctes
-        |> Result.bind (fun cteMap ->
-            sourceItems
-            |> List.fold
-                (fun collected item ->
-                    collected
-                    |> Result.bind (fun sources ->
-                        sourceColumns seen dbName cteMap item
-                        |> Result.bind (fun columns ->
-                            FromItem.tryQualifier item |> requireDescription
-                            |> Result.map (fun qualifier -> sources @ [ qualifier, columns ]))))
-                (Ok [])
-            |> Result.bind (fun sources ->
-                let rewritten =
-                    if select.Joins |> List.exists joinCoalescesColumns then
-                        let physicalSources = sources |> List.map (fun (qualifier, columns) -> qualifier, columns |> List.map _.Column)
-                        rewriteNaturalSelect select physicalSources
-                    else Ok select
-                let nestedQueries =
-                    selectJoinExpressions select
-                    |> List.collect Expression.collectSubqueries
-                    |> traverse (fun nested ->
-                        match describeSelect seen dbName cteMap nested with
-                        | Error(InvalidDescription error) -> Error(InvalidDescription error)
-                        | _ -> Ok())
+        let sources =
+            match select.From with
+            | None -> Ok emptyScope
+            | Some source -> describeJoinChain seen dbName cteMap outerScopes emptyScope source select.Joins
+        sources
+        |> Result.bind (fun scope ->
+            let sources = scope.Sources
+            let rewritten =
+                if select.Joins |> List.exists joinCoalescesColumns then
+                    let physicalSources = sources |> List.map (fun (qualifier, columns) -> qualifier, columns |> List.map _.Column)
+                    rewriteNaturalSelect select physicalSources
+                else Ok select
+            let projectionAliases =
+                { emptyScope with
+                    LogicalColumns = select.Projections |> List.choose (fun (expression, alias) ->
+                        alias |> Option.map (fun name -> FromItem.SourceColumn(name, expression))) }
+            let nestedQueries =
+                let expressions =
+                    (select.Projections |> List.map (fun (expression, _) -> expression, [ scope; projectionAliases ]))
+                    @ ((Option.toList select.Where @ select.GroupBy) |> List.map (fun expression -> expression, [ scope ]))
+                    @ ((Option.toList select.Having @ (select.OrderBy |> List.map fst))
+                       |> List.map (fun expression -> expression, [ scope; projectionAliases ]))
+                expressions
+                |> List.collect (fun (expression, scopes) ->
+                    Expression.collectSubqueries expression |> List.map (fun nested -> nested, scopes))
+                |> traverse (fun (nested, scopes) ->
+                    match describeSelect seen dbName cteMap (scopes @ outerScopes) nested with
+                    | Error(InvalidDescription error) -> Error(InvalidDescription error)
+                    | _ -> Ok())
 
-                nestedQueries
-                |> Result.bind (fun _ -> rewritten |> Result.mapError InvalidDescription)
-                |> Result.map (fun select ->
-                    let descriptors = sources |> List.collect snd
-                    let columns = descriptors |> List.map _.Column
-                    let qualifiers =
-                        sources
-                        |> List.map (fun (qualifier, source) -> qualifier, source |> List.map _.Column)
-                        |> qualifierRanges
-                    let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
+            let references =
+                (select.Projections |> List.map (fun (expression, _) -> expression, "field list"))
+                @ (select.Where |> Option.toList |> List.map (fun expression -> expression, "where clause"))
+                |> traverse (fun (expression, clause) -> validateReferences (scope :: outerScopes) clause expression)
 
-                    let columnForExpression name expression =
-                        match tryColumnDefForExpr context expression with
-                        | Some column -> directProjection name column |> describeColumn
-                        | None ->
-                            let concatColumn =
-                                match expression with
-                                | FuncCall(functionName, arguments) when functionName.Equals("CONCAT", System.StringComparison.OrdinalIgnoreCase) ->
-                                    let lengthOf =
-                                        function
-                                        | Lit(VString text) -> Some(text.EnumerateRunes() |> Seq.length)
-                                        | value ->
-                                            tryColumnDefForExpr context value
-                                            |> Option.bind (fun column ->
-                                                match column.Type with
-                                                | TChar length
-                                                | TVarchar length -> Some length
-                                                | _ -> None)
+            references
+            |> Result.bind (fun _ -> nestedQueries)
+            |> Result.bind (fun _ -> rewritten |> Result.mapError InvalidDescription)
+            |> Result.map (fun select ->
+                let descriptors = sources |> List.collect snd
+                let columns = descriptors |> List.map _.Column
+                let qualifiers =
+                    sources
+                    |> List.map (fun (qualifier, source) -> qualifier, source |> List.map _.Column)
+                    |> qualifierRanges
+                let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
 
-                                    let collation =
-                                        arguments
-                                        |> List.tryPick (fun argument -> tryColumnDefForExpr context argument |> Option.bind _.Collation)
+                let columnForExpression name expression =
+                    match tryColumnDefForExpr context expression with
+                    | Some column -> directProjection name column |> describeColumn
+                    | None ->
+                        let concatColumn =
+                            match expression with
+                            | FuncCall(functionName, arguments) when functionName.Equals("CONCAT", System.StringComparison.OrdinalIgnoreCase) ->
+                                let lengthOf =
+                                    function
+                                    | Lit(VString text) -> Some(text.EnumerateRunes() |> Seq.length)
+                                    | value ->
+                                        tryColumnDefForExpr context value
+                                        |> Option.bind (fun column ->
+                                            match column.Type with
+                                            | TChar length
+                                            | TVarchar length -> Some length
+                                            | _ -> None)
 
+                                let collation =
                                     arguments
-                                    |> List.map lengthOf
-                                    |> List.fold (fun total length -> total + Option.defaultValue 1 length) 0
-                                    |> min 65535
-                                    |> fun length -> Some(computedColumn name (TVarchar length) true None collation)
-                                | _ -> None
+                                    |> List.tryPick (fun argument -> tryColumnDefForExpr context argument |> Option.bind _.Collation)
 
-                            let decimalDefault scale =
-                                if scale = 0 then DConst(VString "0") else DConst(VString("0." + String.replicate scale "0"))
+                                arguments
+                                |> List.map lengthOf
+                                |> List.fold (fun total length -> total + Option.defaultValue 1 length) 0
+                                |> min 65535
+                                |> fun length -> Some(computedColumn name (TVarchar length) true None collation)
+                            | _ -> None
 
-                            let literalColumn =
-                                match expression with
-                                | Lit(VInt value) ->
-                                    let literalType =
-                                        if value >= -99999999L && value <= 99999999L then
-                                            TInt false
-                                        else
-                                            TBigInt false
+                        let decimalDefault scale =
+                            if scale = 0 then DConst(VString "0") else DConst(VString("0." + String.replicate scale "0"))
 
-                                    computedColumn name literalType false (Some(DConst(VInt 0L))) None
-                                    |> fun column -> describeLiteral column (VInt value)
-                                    |> Some
-                                | Lit(VUInt value) ->
-                                    computedColumn name (TBigInt true) false (Some(DConst(VInt 0L))) None
-                                    |> fun column -> describeLiteral column (VUInt value)
-                                    |> Some
-                                | Lit(VDecimal value) ->
-                                    literalDecimalParts (VDecimal value)
-                                    |> Option.map (fun (precision, scale) ->
-                                        computedColumn name (TDecimal(precision, scale, false)) false (Some(decimalDefault scale)) None
-                                        |> fun column -> describeLiteral column (VDecimal value))
-                                | ApproximateLiteral(_, spelling) ->
-                                    approximateLiteralColumn name spelling |> describeColumn |> Some
-                                | Lit(VDouble _) -> Some(computedColumn name (TDouble false) false (Some(DConst(VInt 0L))) None |> describeColumn)
-                                | Lit(VString text) ->
-                                    Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci") |> describeColumn)
-                                | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None |> describeColumn)
-                                | _ -> None
+                        let literalColumn =
+                            match expression with
+                            | Lit(VInt value) ->
+                                let literalType =
+                                    if value >= -99999999L && value <= 99999999L then
+                                        TInt false
+                                    else
+                                        TBigInt false
 
-                            let decimalExpressionColumn () =
-                                metadataOfExpr context expression
-                                |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
-                                |> Option.map (fun metadata ->
-                                    let shape = declaredDecimalShape metadata
-                                    computedColumn name (TDecimal(min 65 shape.Precision, shape.Scale, false))
-                                        (not (hasMetadataFlag NotNullFlag metadata)) None None)
+                                computedColumn name literalType false (Some(DConst(VInt 0L))) None
+                                |> fun column -> describeLiteral column (VInt value)
+                                |> Some
+                            | Lit(VUInt value) ->
+                                computedColumn name (TBigInt true) false (Some(DConst(VInt 0L))) None
+                                |> fun column -> describeLiteral column (VUInt value)
+                                |> Some
+                            | Lit(VDecimal value) ->
+                                literalDecimalParts (VDecimal value)
+                                |> Option.map (fun (precision, scale) ->
+                                    computedColumn name (TDecimal(precision, scale, false)) false (Some(decimalDefault scale)) None
+                                    |> fun column -> describeLiteral column (VDecimal value))
+                            | ApproximateLiteral(_, spelling) ->
+                                approximateLiteralColumn name spelling |> describeColumn |> Some
+                            | Lit(VDouble _) -> Some(computedColumn name (TDouble false) false (Some(DConst(VInt 0L))) None |> describeColumn)
+                            | Lit(VString text) ->
+                                Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci") |> describeColumn)
+                            | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None |> describeColumn)
+                            | _ -> None
 
-                            let arithmeticColumn =
-                                match expression with
-                                | BinOp((Add | Sub | SignedSub | Mul | Div), _, _) -> decimalExpressionColumn ()
-                                | _ -> None
+                        let decimalExpressionColumn () =
+                            metadataOfExpr context expression
+                            |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
+                            |> Option.map (fun metadata ->
+                                let shape = declaredDecimalShape metadata
+                                computedColumn name (TDecimal(min 65 shape.Precision, shape.Scale, false))
+                                    (not (hasMetadataFlag NotNullFlag metadata)) None None)
 
-                            let aggregateColumn =
-                                match expression with
-                                | FuncCall(functionName, _) when functionName.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) ->
-                                    Some(computedColumn name (TBigInt false) false (Some(DConst(VInt 0L))) None)
-                                | FuncCall(functionName, [ _ ])
-                                    when equalsIgnoreCase functionName "SUM" || equalsIgnoreCase functionName "AVG" ->
-                                    decimalExpressionColumn ()
-                                | FuncCall(functionName, [ argument ])
-                                    when functionName.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
-                                         || functionName.Equals("MAX", System.StringComparison.OrdinalIgnoreCase) ->
-                                    tryColumnDefForExpr context argument
-                                    |> Option.map (fun column -> { directProjection name column with Nullable = true; Default = None })
-                                | _ -> None
+                        let arithmeticColumn =
+                            match expression with
+                            | BinOp((Add | Sub | SignedSub | Mul | Div), _, _) -> decimalExpressionColumn ()
+                            | _ -> None
 
-                            let comparisonColumn =
-                                match expression with
-                                | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
-                                | Not _
-                                | IsNull _
-                                | IsNotNull _
-                                | IsTrue _
-                                | IsFalse _
-                                | Like _
-                                | Regexp _
-                                | In _
-                                | InSubquery _
-                                | QuantifiedComparison _
-                                | Between _
-                                | Exists _ -> Some(computedColumn name (TInt false) false (Some(DConst(VInt 0L))) None)
-                                | _ -> None
+                        let aggregateColumn =
+                            match expression with
+                            | FuncCall(functionName, _) when functionName.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) ->
+                                Some(computedColumn name (TBigInt false) false (Some(DConst(VInt 0L))) None)
+                            | FuncCall(functionName, [ _ ])
+                                when equalsIgnoreCase functionName "SUM" || equalsIgnoreCase functionName "AVG" ->
+                                decimalExpressionColumn ()
+                            | FuncCall(functionName, [ argument ])
+                                when functionName.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
+                                     || functionName.Equals("MAX", System.StringComparison.OrdinalIgnoreCase) ->
+                                tryColumnDefForExpr context argument
+                                |> Option.map (fun column -> { directProjection name column with Nullable = true; Default = None })
+                            | _ -> None
 
-                            match literalColumn, comparisonColumn, aggregateColumn, arithmeticColumn, concatColumn, metadataOfExpr context expression with
-                            | Some column, _, _, _, _, _ -> column
-                            | _, Some column, _, _, _, _ -> describeColumn column
-                            | _, _, Some column, _, _, _ -> describeColumn column
-                            | _, _, _, Some column, _, _ -> describeColumn column
-                            | _, _, _, _, Some column, _ -> describeColumn column
-                            | _, _, _, _, _, Some metadata ->
-                                deriveColumns [ name ] [ keyCollation context expression ] [ metadata ] |> List.head |> describeColumn
-                            | _ -> computedColumn name TText true None (Some "utf8mb4_0900_ai_ci") |> describeColumn
+                        let comparisonColumn =
+                            match expression with
+                            | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
+                            | Not _
+                            | IsNull _
+                            | IsNotNull _
+                            | IsTrue _
+                            | IsFalse _
+                            | Like _
+                            | Regexp _
+                            | In _
+                            | InSubquery _
+                            | QuantifiedComparison _
+                            | Between _
+                            | Exists _ -> Some(computedColumn name (TInt false) false (Some(DConst(VInt 0L))) None)
+                            | _ -> None
 
-                    select.Projections
-                    |> List.collect (fun (expression, alias) ->
-                        match expression with
-                        | Star None -> descriptors
-                        | Star(Some qualifier) ->
-                            qualifiers
-                            |> Map.tryFind (qualifier.ToLowerInvariant())
-                            |> Option.map (fst >> List.map describeColumn)
-                            |> Option.defaultValue []
-                        | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ]))))
+                        match literalColumn, comparisonColumn, aggregateColumn, arithmeticColumn, concatColumn, metadataOfExpr context expression with
+                        | Some column, _, _, _, _, _ -> column
+                        | _, Some column, _, _, _, _ -> describeColumn column
+                        | _, _, Some column, _, _, _ -> describeColumn column
+                        | _, _, _, Some column, _, _ -> describeColumn column
+                        | _, _, _, _, Some column, _ -> describeColumn column
+                        | _, _, _, _, _, Some metadata ->
+                            deriveColumns [ name ] [ keyCollation context expression ] [ metadata ] |> List.head |> describeColumn
+                        | _ -> computedColumn name TText true None (Some "utf8mb4_0900_ai_ci") |> describeColumn
+
+                select.Projections
+                |> List.collect (fun (expression, alias) ->
+                    match expression with
+                    | Star None -> descriptors
+                    | Star(Some qualifier) ->
+                        qualifiers
+                        |> Map.tryFind (qualifier.ToLowerInvariant())
+                        |> Option.map (fst >> List.map describeColumn)
+                        |> Option.defaultValue []
+                    | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ])))
 
     (match source with
-     | StoredRelation name -> sourceColumns Set.empty schema Map.empty (FromTable { Database = None; Table = name; Alias = None; Partitions = [] })
-     | QueryBody body -> describeBody Set.empty schema Map.empty body)
+     | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = [] })
+     | QueryBody body -> describeBody Set.empty schema Map.empty [] body)
     |> Result.map (List.map _.Column)
 
 and private describeQueryColumns store registry schema source =

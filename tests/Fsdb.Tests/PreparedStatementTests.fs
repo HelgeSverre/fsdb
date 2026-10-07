@@ -109,6 +109,65 @@ let tests =
                   | other -> failtestf "expected SQL PREPARE rejection for %s: %A" sql other
                   Expect.isFalse (Map.containsKey "invalid_join" prepared.TextStatements) "a rejected statement has no handle"
 
+          testCase "PREPARE validates ON names within operand and subquery scopes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)" ] do
+                  Expect.equal (handle session sql |> snd) (Affected 0UL) "create sources"
+              for sql, expected in
+                  [ "SELECT a.id FROM a JOIN (b JOIN c ON EXISTS(SELECT a.id)) ON 1", (1054, "Unknown column 'a.id' in 'field list'")
+                    "WITH d AS (SELECT a.id FROM a JOIN b ON b.missing=a.id) SELECT 1 UNION ALL SELECT id FROM d", (1054, "Unknown column 'b.missing' in 'on clause'")
+                    "SELECT a.id FROM a JOIN b ON b.missing=a.id", (1054, "Unknown column 'b.missing' in 'on clause'")
+                    "SELECT a.id FROM a JOIN b ON missing=a.id", (1054, "Unknown column 'missing' in 'on clause'")
+                    "SELECT a.id FROM a JOIN b ON id=a.id", (1052, "Column 'id' in on clause is ambiguous")
+                    "SELECT a.id FROM a JOIN b ON c.id=a.id JOIN c ON 1", (1054, "Unknown column 'c.id' in 'on clause'")
+                    "SELECT a.id FROM a LEFT JOIN (b JOIN c ON c.id=a.id) ON a.id=b.id", (1054, "Unknown column 'a.id' in 'on clause'")
+                    "SELECT a.id FROM a JOIN (b RIGHT JOIN c USING(id)) ON id=a.id", (1052, "Column 'id' in on clause is ambiguous")
+                    "SELECT a.id FROM a JOIN (b JOIN c ON EXISTS(SELECT 1 WHERE a.id=c.id)) ON 1", (1054, "Unknown column 'a.id' in 'where clause'")
+                    "SELECT a.id FROM a JOIN b ON EXISTS(SELECT 1 WHERE c.id=a.id) JOIN c ON 1", (1054, "Unknown column 'c.id' in 'where clause'")
+                    "SELECT a.id AS chosen FROM a JOIN b ON chosen=b.id", (1054, "Unknown column 'chosen' in 'on clause'")
+                    "SELECT a.id FROM a JOIN (SELECT b.id FROM b JOIN c ON c.id=a.id) d ON 1", (1054, "Unknown column 'a.id' in 'on clause'")
+                    "WITH d AS (SELECT a.id FROM a JOIN b ON b.missing=a.id) SELECT * FROM d", (1054, "Unknown column 'b.missing' in 'on clause'")
+                    "UPDATE a JOIN (b JOIN c ON c.id=a.id) ON 1 SET a.id=7", (1054, "Unknown column 'a.id' in 'on clause'")
+                    "DELETE a FROM a JOIN (b JOIN c ON c.id=a.id) ON 1", (1054, "Unknown column 'a.id' in 'on clause'")
+                    "SELECT a.id FROM a JOIN (b JOIN c ON b.missing=c.id) ON 0", (1054, "Unknown column 'b.missing' in 'on clause'") ] do
+                  match prepareStatementForSession session sql with
+                  | Error error -> Expect.equal error expected "binary preparation retains the native code and clause"
+                  | other -> failtestf "expected binding rejection for %s: %A" sql other
+                  let prepared, result = handle session ("PREPARE scoped_join FROM '" + sql + "'")
+                  match result with
+                  | Err(code, message) -> Expect.equal (code, message) expected "SQL PREPARE uses the same scopes"
+                  | other -> failtestf "expected SQL PREPARE binding rejection for %s: %A" sql other
+                  Expect.isFalse (Map.containsKey "scoped_join" prepared.TextStatements) "a rejected statement has no handle"
+
+          testCase "PREPARE retains valid outer lateral and CTE bindings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)" ] do
+                  Expect.equal (handle session sql |> snd) (Affected 0UL) "create sources"
+              for sql in
+                  [ "WITH bad AS (SELECT * FROM a JOIN b USING(missing)) SELECT (WITH unused AS (SELECT * FROM bad) SELECT 1)"
+                    "WITH d AS (SELECT * FROM a JOIN b USING(missing)) SELECT (WITH d AS (SELECT 1 AS id) SELECT id FROM d)"
+                    "WITH d AS (SELECT * FROM a JOIN b USING(missing)) SELECT 1"
+                    "SELECT a.id AS chosen,(SELECT COUNT(*) FROM b JOIN c ON c.id=chosen) FROM a"
+                    "WITH bad AS (SELECT * FROM a JOIN b USING(missing)),good AS (SELECT * FROM c) SELECT * FROM good"
+                    "WITH d AS (SELECT a.id FROM a JOIN b ON a.id=b.id) SELECT 1 UNION ALL SELECT id FROM d"
+                    "SELECT c.id FROM (SELECT 3 AS wanted) d JOIN (a RIGHT JOIN c USING(id)) ON id=d.wanted"
+                    "SELECT b.id FROM a RIGHT JOIN b USING(id) JOIN (SELECT 3 AS wanted) d ON id=d.wanted"
+                    "SELECT a.id,(SELECT COUNT(*) FROM b JOIN (c JOIN (SELECT 1 AS seed) d ON c.id=a.id+1) ON 1) FROM a"
+                    "SELECT a.id,(SELECT COUNT(*) FROM (SELECT 1 AS other) b JOIN (SELECT 1 AS seed) c ON id=1) FROM a"
+                    "SELECT a.id,(SELECT COUNT(*) FROM (SELECT 1 AS other) a JOIN b ON a.id=b.id) FROM a"
+                    "SELECT a.id,(SELECT COUNT(*) FROM (SELECT b.id FROM b JOIN c ON c.id=a.id) d) FROM a"
+                    "SELECT a.id FROM a JOIN LATERAL (SELECT b.id FROM b JOIN c ON c.id=a.id) d ON 1"
+                    "SELECT a.id FROM a JOIN (b JOIN LATERAL (SELECT c.id FROM c JOIN (SELECT 1 AS seed) d ON c.id=a.id) x ON 1) ON 1"
+                    "WITH d AS (SELECT a.id FROM a JOIN b ON b.missing=a.id) SELECT 1" ] do
+                  match prepareStatementForSession session sql with
+                  | Ok _ -> ()
+                  | Error error -> failtestf "native accepts %s but preparation failed: %A" sql error
+                  let prepared, result = handle session ("PREPARE scoped_join FROM '" + sql + "'")
+                  Expect.equal result (Affected 0UL) "SQL PREPARE accepts the same scope"
+                  Expect.isTrue (Map.containsKey "scoped_join" prepared.TextStatements) "the statement is available for execution"
+
           testCase "join preparation resolves schema without evaluating expressions or writing"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

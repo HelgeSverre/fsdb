@@ -30,8 +30,8 @@ Fsdb represents a grouped operand directly in `FromItem`. Execution preserves
 its association, qualified source columns, inner ON scope, and NULL-extension
 boundary. Regressions cover direct reads, mutations, lock checks, authorization,
 CTE dependencies, EXPLAIN, full-text scope, stored-view rendering, and recovery.
-Remaining work includes PREPARE-time ON-name validation and broader nested-source
-and prepared-metadata verification.
+Remaining work includes duplicate relation-name diagnostics, broader nested-source
+execution, and prepared-metadata verification.
 
 ## Nested USING column ownership
 
@@ -103,10 +103,31 @@ schema validation; grouped mutation privilege errors match native preparation.
 Regressions check both preparation paths, absence of a rejected SQL statement
 handle, and unchanged rows after preparing a mutation.
 
-PREPARE-time ON-name validation remains open. In particular, ambiguous bare ON
-references and references outside a group's ON scope still require a scoped
-name-binding pass. The native oracle retains those expectations alongside the
-covered USING errors.
+PREPARE also validates ordinary and grouped ON references against their operands.
+The native oracle and regressions cover unknown qualified and bare names,
+ambiguous names, references to later joins, and references to siblings outside
+a grouped operand. Subqueries inside ON retain that operand scope for their
+own projections, predicates, and nested joins; errors retain the native clause
+label. Valid merged USING keys and enclosing-query references remain accepted.
+
+## Preparation scopes and CTE dependencies
+
+Schema-only binding keeps qualified source columns and logical merged columns
+in a separate scope for each query block. LATERAL sources receive preceding
+tables, including tables preceding a grouped operand. Ordinary derived tables
+receive enclosing-query scopes but cannot see sibling sources. Correlated
+subqueries can refer to enclosing projection aliases where MySQL permits them.
+SQL and binary preparation share the same checks without evaluating rows.
+
+CTE descriptors are lazy and capture the namespace at their declaration.
+Unused CTEs are not bound, including unused nested CTEs and definitions shadowed
+by a nested WITH clause. Referenced CTEs in later UNION branches retain the
+first branch's WITH namespace. Native acceptance and rejection cases cover
+these boundaries.
+
+Duplicate table aliases and duplicate derived/CTE column names still need
+their relation-level diagnostics. This binding pass does not establish full
+PREPARE semantic parity or execution parity for every accepted nested source.
 
 ## CTE body source origins
 
