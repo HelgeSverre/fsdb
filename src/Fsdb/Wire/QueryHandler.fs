@@ -3480,6 +3480,8 @@ let rec private filterTemporaryEvent keys event =
         filterTemporaryEvent keys inner |> Option.map (fun retained -> WithNgramTokenSize(size, retained))
     | WithStopwordFiltering(enabled, inner) ->
         filterTemporaryEvent keys inner |> Option.map (fun retained -> WithStopwordFiltering(enabled, retained))
+    | WithFullTextStopwords(database, table, policies, inner) ->
+        filterTemporaryEvent keys inner |> Option.map (fun retained -> WithFullTextStopwords(database, table, policies, retained))
     | RowsInserted(db, table, _)
     | RowsUpdated(db, table, _)
     | RowsDeleted(db, table, _)

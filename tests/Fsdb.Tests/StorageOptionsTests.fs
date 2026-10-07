@@ -13,7 +13,52 @@ let private rows = function
 
 let tests =
     testList "storage options"
-        [ testCase "stopword startup values follow MySQL boolean parsing"
+        [ testCase "WAL captures loaded stopword policies for ordinary writes and transactions"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = TestSupport.directory "fulltext-wal-policy-history"
+                  let store = Persistence.load dir
+                  Persistence.attach dir store
+                  let mutable session = Session.create 1 store
+                  let run sql =
+                      let next, result = QueryHandler.handle session sql
+                      session <- next
+                      match result with
+                      | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                      | _ -> result
+                  let setPolicy (store: Storage.Store) policy =
+                      let database = store.Catalog.[Storage.defaultDatabase]
+                      let table = database.["docs"]
+                      let indexes = table.FullTextIndexes |> Map.map (fun _ index ->
+                          FullText.withIndexingRules { FullText.activeRules index with Stopwords = policy } index)
+                      Storage.setCatalog store (store.Catalog |> Map.add Storage.defaultDatabase (database |> Map.add "docs" { table with FullTextIndexes = indexes }))
+                  run "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body))" |> ignore
+                  setPolicy store (FullText.customStopwords Collation.defaultCollation [ "orchard" ])
+                  run "INSERT INTO docs VALUES(1,'orchard cobalt the')" |> ignore
+                  if checkpoint then Persistence.snapshotNow dir store
+                  setPolicy store (FullText.customStopwords Collation.defaultCollation [ "cobalt" ])
+                  run "START TRANSACTION" |> ignore
+                  run "INSERT INTO docs VALUES(2,'orchard cobalt the')" |> ignore
+                  run "COMMIT" |> ignore
+                  setPolicy store FullText.StopwordPolicy.BuiltIn
+                  run "INSERT INTO docs VALUES(3,'orchard cobalt the')" |> ignore
+                  let recovered = Persistence.load dir
+                  let query term = $"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}') ORDER BY id"
+                  for term, expected in
+                      [ "orchard", [ [ Some "2" ]; [ Some "3" ] ]
+                        "cobalt", [ [ Some "1" ]; [ Some "3" ] ]
+                        "the", [ [ Some "1" ]; [ Some "2" ] ] ] do
+                      Expect.equal (TestSupport.Sql.executeDefault recovered (query term) |> rows) expected "each write retains the list loaded at that time"
+                  Persistence.attach dir recovered
+                  let table = recovered.Catalog.[Storage.defaultDatabase].["docs"]
+                  Expect.equal (FullText.activeStopwords table.FullTextIndexes.["ft"]) FullText.StopwordPolicy.BuiltIn "the fallback policy is captured too"
+                  setPolicy recovered (FullText.customStopwords Collation.defaultCollation [ "cobalt" ])
+                  TestSupport.Sql.executeDefault recovered "UPDATE docs SET body='orchard cobalt the violet' WHERE id=1" |> ignore
+                  let updated = Persistence.load dir
+                  Expect.equal (TestSupport.Sql.executeDefault updated (query "the") |> rows) [ [ Some "1" ]; [ Some "2" ] ] "updates capture a newly loaded custom policy"
+                  Expect.equal (TestSupport.Sql.executeDefault updated (query "cobalt") |> rows) [ [ Some "3" ] ] "replay removes the replaced document's old posting"
+
+          testCase "stopword startup values follow MySQL boolean parsing"
           <| fun _ ->
               for value, enabled in
                   [ None, true; Some "ON", true; Some "TrUe", true; Some "1", true

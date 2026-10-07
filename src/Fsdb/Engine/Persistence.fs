@@ -1065,6 +1065,7 @@ let private KindXaPreparedWithLocks = 0x19uy
 let private KindWithNgramTokenSize = 0x1Auy
 [<Literal>]
 let private KindWithStopwordFiltering = 0x1Buy
+let private KindWithFullTextStopwords = 0x1Cuy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -1130,8 +1131,38 @@ let private encodeRowBin (w: Writer) (row: Value[]) : unit =
 let private decodeRowBin (r: #IReader) : Value[] =
     Array.init (r.ReadInt32LE()) (fun _ -> decodeValue r)
 
+let private encodeStopwordPolicy (w: Writer) = function
+    | FullText.StopwordPolicy.BuiltIn -> w.WriteByte 0uy
+    | FullText.StopwordPolicy.Disabled -> w.WriteByte 1uy
+    | FullText.StopwordPolicy.Custom words ->
+        let collation, words = FullText.customStopwordContents words
+        w.WriteByte 2uy
+        writeStr w collation
+        writeStrList w words
+
+let private decodeStopwordPolicy (r: #IReader) =
+    match r.ReadByte() with
+    | 0uy -> FullText.StopwordPolicy.BuiltIn
+    | 1uy -> FullText.StopwordPolicy.Disabled
+    | 2uy ->
+        let name = readStr r
+        let collation =
+            Collation.tryFind name
+            |> Option.defaultWith (fun () -> failwith "Persistence: invalid stopword source collation")
+        readStrList r |> FullText.customStopwords collation
+    | _ -> failwith "Persistence: invalid full-text stopword policy"
+
 let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
     match event with
+    | WithFullTextStopwords(database, table, policies, event) ->
+        w.WriteByte KindWithFullTextStopwords
+        writeStr w database
+        writeStr w table
+        w.WriteInt32LE policies.Length
+        for name, policy in policies do
+            writeStr w name
+            encodeStopwordPolicy w policy
+        encodeEvent w event
     | WithStopwordFiltering(enabled, event) ->
         w.WriteByte KindWithStopwordFiltering
         writeBool w enabled
@@ -1238,6 +1269,10 @@ let rec private decodeEventAt
     let str () = r.ReadLenEncString() |> Option.defaultValue ""
 
     match r.ReadByte() with
+    | k when k = KindWithFullTextStopwords ->
+        let database, table = readStr r, readStr r
+        let policies = List.init (r.ReadInt32LE()) (fun _ -> readStr r, decodeStopwordPolicy r)
+        WithFullTextStopwords(database, table, policies, decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
     | k when k = KindWithStopwordFiltering ->
         let enabled = readBool r
         WithStopwordFiltering(enabled, decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
@@ -1442,6 +1477,9 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         failwith "Persistence: transaction nesting exceeds the apply limit"
 
     match event with
+    | WithFullTextStopwords(database, table, policies, event) ->
+        setFullTextStopwordsForReplay store database table policies (Log.diagnostic "fsdb: WAL replay warning: %s")
+        applyEventAt (depth + 1) store event
     | WithStopwordFiltering(enabled, event) ->
         applyEventAt (depth + 1) { store with FullTextStopwordsEnabled = enabled } event
     | WithNgramTokenSize(size, event) ->
@@ -1528,27 +1566,6 @@ let private replayWal (store: Store) (walPath: string) : int64 =
         offset
 
 // Snapshots share the WAL row codec and publish through an atomic rename.
-
-let private encodeStopwordPolicy (w: Writer) = function
-    | FullText.StopwordPolicy.BuiltIn -> w.WriteByte 0uy
-    | FullText.StopwordPolicy.Disabled -> w.WriteByte 1uy
-    | FullText.StopwordPolicy.Custom words ->
-        let collation, words = FullText.customStopwordContents words
-        w.WriteByte 2uy
-        writeStr w collation
-        writeStrList w words
-
-let private decodeStopwordPolicy (r: #IReader) =
-    match r.ReadByte() with
-    | 0uy -> FullText.StopwordPolicy.BuiltIn
-    | 1uy -> FullText.StopwordPolicy.Disabled
-    | 2uy ->
-        let name = readStr r
-        let collation =
-            Collation.tryFind name
-            |> Option.defaultWith (fun () -> failwith "Persistence: invalid stopword source collation")
-        readStrList r |> FullText.customStopwords collation
-    | _ -> failwith "Persistence: invalid full-text stopword policy"
 
 let private encodeTokenizer (w: Writer) = function
     | FullText.Words -> w.WriteByte 0uy

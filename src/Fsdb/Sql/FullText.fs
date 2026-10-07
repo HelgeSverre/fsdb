@@ -30,14 +30,14 @@ type Tokenizer =
     | Words
     | Ngrams of size: int
 
-type internal StopwordList =
+type StopwordList =
     private
         { CollationName: string
           Words: Set<string>
           Keys: Set<string> }
 
 [<RequireQualifiedAccess>]
-type internal StopwordPolicy =
+type StopwordPolicy =
     | BuiltIn
     | Disabled
     | Custom of StopwordList

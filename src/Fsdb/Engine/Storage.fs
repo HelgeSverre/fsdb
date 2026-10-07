@@ -318,6 +318,7 @@ type TransactionLockClaim =
 type CommitEvent =
     | WithNgramTokenSize of size: int * event: CommitEvent
     | WithStopwordFiltering of enabled: bool * event: CommitEvent
+    | WithFullTextStopwords of database: string * table: string * policies: (string * FullText.StopwordPolicy) list * event: CommitEvent
     | RowsInserted of db: string * table: string * rows: Value[] list
     /// Retained for WAL records written before stable row identities were persisted.
     | RowsUpdated of db: string * table: string * changes: (Value[] * Value[]) list
@@ -590,7 +591,8 @@ let internal requiresImmediateAutoIncrementPublication (store: Store) =
 
 let rec private eventRollbackWork = function
     | WithNgramTokenSize(_, event)
-    | WithStopwordFiltering(_, event) -> eventRollbackWork event
+    | WithStopwordFiltering(_, event)
+    | WithFullTextStopwords(_, _, _, event) -> eventRollbackWork event
     | RowsInserted(_, _, rows)
     | RowsDeleted(_, _, rows) -> int64 rows.Length
     | RowsDeletedById(_, _, rows) -> int64 rows.Length
@@ -639,7 +641,8 @@ let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent li
 
 let rec private observerEvent = function
     | WithNgramTokenSize(_, event)
-    | WithStopwordFiltering(_, event) -> observerEvent event
+    | WithStopwordFiltering(_, event)
+    | WithFullTextStopwords(_, _, _, event) -> observerEvent event
     | RowsUpdatedById(db, table, changes) ->
         RowsUpdated(db, table, changes |> List.map (fun change -> change.Before, change.After))
     | RowsDeletedById(db, table, rows) -> RowsDeleted(db, table, rows |> List.map _.Row)
@@ -657,6 +660,23 @@ let private captureNgramTokenSize size event =
         WithNgramTokenSize(size, event)
     | _ -> event
 
+let private captureFullTextStopwords (store: Store) event captured =
+    match event with
+    | RowsInserted(database, table, _)
+    | RowsUpdated(database, table, _)
+    | RowsUpdatedById(database, table, _) ->
+        let policies =
+            store.Catalog
+            |> Map.tryFind database
+            |> Option.bind (Map.tryFind (table.ToLowerInvariant()))
+            |> Option.map _.FullTextIndexes
+            |> Option.defaultValue Map.empty
+            |> Map.toList
+            |> List.map (fun (name, index) -> name, FullText.activeStopwords index)
+        if policies.IsEmpty then captured
+        else WithFullTextStopwords(database, table, policies, captured)
+    | _ -> captured
+
 let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
     let events =
         events |> List.map (fun event ->
@@ -664,7 +684,7 @@ let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> un
             match event with
             | SchemaChanged _ | SchemaChangedAt _ when not store.FullTextStopwordsEnabled ->
                 WithStopwordFiltering(false, captured)
-            | _ -> captured)
+            | _ -> captureFullTextStopwords store event captured)
     recordRollbackWork store events
 
     match events, store.PendingEvents with
@@ -10034,6 +10054,17 @@ let private changeTableForReplay
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
         | Some table -> slot.Value <- slot.Value |> Map.add key (withTableNgramTokenSize store.NgramTokenSize table |> change)
+
+let internal setFullTextStopwordsForReplay store database table policies onMissing =
+    let policies = Map.ofList policies
+    changeTableForReplay store database table (fun table ->
+        let indexes =
+            table.FullTextIndexes |> Map.map (fun name index ->
+                match Map.tryFind name policies with
+                | None -> index
+                | Some policy ->
+                    FullText.withIndexingRules { FullText.activeRules index with Stopwords = policy } index)
+        { table with FullTextIndexes = indexes }) onMissing
 
 let private replayRowIds (table: Table) (targets: Value[] list) : RowId option list =
     let uniqueGroups = uniqueKeyGroups table

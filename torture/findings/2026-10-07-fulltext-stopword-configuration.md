@@ -58,6 +58,11 @@ commit observers. Legacy schema events retain enabled filtering. Recovery tests
 cover both WAL-only and checkpointed histories, including disabled stopwords
 combined with a non-default ngram size. Older binaries cannot replay this tag.
 
+WAL tag `0x1C` captures per-index loaded stopword policies for insert/update
+batches, including transactions and returns to built-in filtering. It shares
+the snapshot policy codec and preserves historical postings when the active
+write policy changes. Older binaries cannot replay this tag.
+
 Snapshot format 16 (`FSNG`) retains the active policy per full-text index and a
 shared table of historical tokenizer/stopword rules. Each row refers to the rules
 used for its postings, so reconstruction preserves mixed document histories.

@@ -200,7 +200,8 @@ module CommitEvents =
     let rec summarize =
         function
         | WithNgramTokenSize(_, event)
-        | WithStopwordFiltering(_, event) -> summarize event
+        | WithStopwordFiltering(_, event)
+        | WithFullTextStopwords(_, _, _, event) -> summarize event
         | RowsInserted(db, table, rows) ->
             sprintf "rows_inserted db=%s table=%s count=%d hash=%s" db table rows.Length (rows |> Seq.map rowHash |> Hashing.combine)
         | RowsUpdated(db, table, changes) ->

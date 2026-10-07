@@ -118,13 +118,18 @@ sequence above. Snapshot reconstruction must retain historical postings even
 when the active custom list changes.
 
 WAL recovery must also distinguish writes before and after a source reload.
-The existing stopword wrapper captures schema events only; source edits followed
-by restart and ordinary inserts cannot be reconstructed from that wrapper alone.
+WAL tag `0x1C` wraps insert/update batches with each full-text index's loaded
+stopword policy. Replay selects those active policies before applying the rows;
+existing document rules retain their own historical lists. The wrapper composes
+with ngram-size context and transaction envelopes. Temporary-table filtering and
+commit observers unwrap it consistently. This records a return to built-in
+filtering as well as custom-list changes, so replay does not depend on whichever
+list was loaded by an earlier DDL event.
 Query lookup must keep old postings reachable after the write policy changes,
 while phrase handling still observes stopword semantics.
 
 The policy type supports captured custom lists as well as built-in/disabled
-filtering. Remembered source names and reload context remain necessary for
+filtering. Remembered source names and source reload remain necessary for
 these histories. Accepting the system variables before
 those paths are connected would claim behavior the engine does not provide.
 Custom startup options, additional ALTER variants, query expansion, and more
@@ -145,8 +150,8 @@ also preserve historical postings when active filtering changes, including after
 snapshot recovery. Custom lists capture literal words and their source collation;
 compiled keys filter words and ngram substrings. Empty lists
 replace the defaults, and phrases use custom words for anchor selection.
-Custom source resolution, WAL reload context, and remaining custom query
-semantics remain open.
+Custom source resolution, remembered table names, source reload, and remaining
+custom query semantics remain open.
 
 ## Snapshot history
 
@@ -162,21 +167,21 @@ built-in, disabled, or custom policies within one index. Rule counts are bounded
 or out-of-range document references are rejected. Regressions cover mixed
 histories, subsequent writes, and malformed references with a valid checksum.
 Real format-13, format-14, and format-15 fixtures verify backward reading. Older
-fsdb binaries cannot read `FSNG`; the WAL format is unchanged.
+fsdb binaries cannot read `FSNG` or replay WAL tag `0x1C`.
 
 ## Verification
 
 The complete native oracle passes, including the same-datadir restart sequence
 and searches in natural and Boolean modes after each transition.
 
-The indexing-rule and snapshot changes pass `just check` with 2,909 tests and no build
+The indexing-rule and snapshot changes pass `just check` with 2,910 tests and no build
 warnings or errors. The existing stopword configuration matrix passes on fsdb.
 All 47 MySQL contracts (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T065304309-90018/contracts`.
+`torture/artifacts/runs/20261007T073035493-93186/contracts`.
 
-The durability lane passes 12 crash restarts, preserving all 60 acknowledged
+The durability lane passes 12 crash restarts, preserving all 108 acknowledged
 commits and transaction boundaries, with checkpoint, WAL-tail, snapshot, schema,
 and torn-tail checks:
-`torture/artifacts/runs/20261007T065328243-90037/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T073045471-93209/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
 
 Custom SQL variables remain unavailable and no known-gap suppression is added.
