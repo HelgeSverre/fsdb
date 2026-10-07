@@ -98,6 +98,25 @@ let tests =
                     "SELECT CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM materialized_literal", [ "cs"; "co"; "c" ], [ "latin1"; "latin1_bin"; "4" ] ] do
                   Expect.equal (handle session sql |> snd) (ResultSet(names, [ List.map Some row ])) sql
 
+          testCase "literal views retain coercibility through ordering and grouping"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+              Expect.equal (handle session "CREATE VIEW grouped_literal AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
+              let session = handle session "SET NAMES utf8mb4" |> fst
+              for sql, names, row in
+                  [ "SELECT COLLATION(v) AS c,COERCIBILITY(v) AS n FROM grouped_literal ORDER BY v", [ "c"; "n" ], [ "latin1_bin"; "4" ]
+                    "SELECT COLLATION(v) AS c,COERCIBILITY(v) AS n FROM grouped_literal GROUP BY v", [ "c"; "n" ], [ "latin1_bin"; "4" ]
+                    "SELECT v AS alias,COERCIBILITY(v) AS n FROM grouped_literal GROUP BY alias", [ "alias"; "n" ], [ "a"; "4" ]
+                    "SELECT COUNT(*) AS n,COERCIBILITY(v) AS c FROM grouped_literal GROUP BY v", [ "n"; "c" ], [ "1"; "4" ]
+                    "SELECT 'b' AS v,COERCIBILITY(grouped_literal.v) AS n FROM grouped_literal ORDER BY v", [ "v"; "n" ], [ "b"; "4" ] ] do
+                  Expect.equal (handle session sql |> snd) (ResultSet(names, [ List.map Some row ])) sql
+              for clause, code in [ "ORDER BY v COLLATE utf8mb4_bin", 1253; "GROUP BY v COLLATE latin1_bin", 1055 ] do
+                  let sql = "SELECT 'b' AS v,COERCIBILITY(grouped_literal.v) AS n FROM grouped_literal " + clause
+                  match handle session sql |> snd with
+                  | Err(actual, _) -> Expect.equal actual code sql
+                  | result -> failtestf "%s: expected %d, got %A" sql code result
+
           testCase "ordinary literal parser caches distinguish connection collations"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

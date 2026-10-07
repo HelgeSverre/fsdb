@@ -9687,15 +9687,22 @@ and private tryMergeDirectView
                      && not definition.Distinct && not definition.Rollup
                      && definition.OrderBy.IsEmpty && not definition.CalculateFoundRows
                      && not (SelectStmt.hasDestination definition)
-                     && select.Locking.IsEmpty && select.OrderBy.IsEmpty
-                     && select.GroupBy.IsEmpty && select.Having.IsNone
+                     && select.Locking.IsEmpty && select.Having.IsNone && not select.Rollup
                      && definition.Projections |> List.forall (fun projection ->
                          match projection.Expression with LiteralValue _ -> true | _ -> false)
                      && not (Expression.statementExists (Expression.collectSubqueries >> List.isEmpty >> not) (Select select)) ->
+                let qualifier = viewRef.Alias |> Option.defaultValue viewRef.Table
+                let preservesGrouping () =
+                    // Validate source dependencies before substitution turns them into constants.
+                    select.GroupBy.IsEmpty
+                    || (describeStoredViewColumns store registry view.Schema view.Name
+                        |> Option.exists (fun columns ->
+                            validateOnlyFullGroupBy store registry dbName columns (singleQualifier qualifier columns) select
+                            |> Result.isOk))
                 match registryForView store registry view statement with
                 | Error(code, message) -> Error(Err(code, message))
+                | Ok _ when not (preservesGrouping ()) -> Ok None
                 | Ok _ ->
-                    let qualifier = viewRef.Alias |> Option.defaultValue viewRef.Table
                     let names =
                         if sameLength view.Columns definition.Projections then view.Columns
                         else definition.Projections |> List.map (Projection.name exprLabel)
@@ -9714,9 +9721,16 @@ and private tryMergeDirectView
                             | Star(Some source) when equalsIgnoreCase source qualifier ->
                                 literals |> List.map (fun (name, value) -> Projection.create value (Some name))
                             | _ -> [ projection ])
+                    let rewriteOrder (expression, direction) =
+                        let expression =
+                            match expression with
+                            | Col name when select.Projections |> List.exists (fun projection -> equalsIgnoreCase (projectionLabel projection) name) -> expression
+                            | _ -> Expression.rewrite replace expression
+                        expression, direction
+                    let orderBy = select.OrderBy |> List.map rewriteOrder
                     let select = { select with From = None; Projections = expanded }
                     match Expression.rewriteStatementWithProjectionNames (exprLabel >> Some) replace (Select select) with
-                    | Select rewritten -> Ok(Some rewritten)
+                    | Select rewritten -> Ok(Some { rewritten with OrderBy = orderBy })
                     | _ -> Ok None
             | Ok((Select definition) as statement) ->
                 match updatableViewOfSelect store view definition with
@@ -14036,34 +14050,35 @@ and private validateOnlyFullGroupBy
         |> Option.defaultValue columns.[position].Name
 
     let invalidColumn groupExprs determined expr =
-        Expression.fold
-            (fun invalid node ->
-                match invalid with
-                | Some _ -> Expression.Prune invalid
-                | None when groupExprs |> List.contains node -> Expression.Prune None
-                | None when isAggregateCall registry node -> Expression.Prune None
-                | None ->
-                    match node with
-                    | FuncCall(name, _) when equalsIgnoreCase name "ANY_VALUE" -> Expression.Prune None
-                    | Star None ->
-                        [ 0 .. columns.Length - 1 ]
-                        |> List.tryFind (fun position -> not (Set.contains position determined))
-                        |> Expression.Prune
-                    | Star(Some qualifier) ->
-                        qualifiers
-                        |> Map.tryFind (qualifier.ToLowerInvariant())
-                        |> Option.bind (fun (sourceColumns, offset) ->
-                            [ offset .. offset + sourceColumns.Length - 1 ]
-                            |> List.tryFind (fun position -> not (Set.contains position determined)))
-                        |> Expression.Prune
-                    | Col _
-                    | QualifiedCol _ ->
-                        tryColumnPosition node
-                        |> Option.filter (fun position -> not (Set.contains position determined))
-                        |> Expression.Prune
-                    | _ -> Expression.Descend None)
-            None
-            expr
+        if groupExprs |> List.contains expr then None
+        else
+            Expression.fold
+                (fun invalid node ->
+                    match invalid with
+                    | Some _ -> Expression.Prune invalid
+                    | None when isAggregateCall registry node -> Expression.Prune None
+                    | None ->
+                        match node with
+                        | FuncCall(name, _) when equalsIgnoreCase name "ANY_VALUE" || equalsIgnoreCase name "GROUPING" -> Expression.Prune None
+                        | Star None ->
+                            [ 0 .. columns.Length - 1 ]
+                            |> List.tryFind (fun position -> not (Set.contains position determined))
+                            |> Expression.Prune
+                        | Star(Some qualifier) ->
+                            qualifiers
+                            |> Map.tryFind (qualifier.ToLowerInvariant())
+                            |> Option.bind (fun (sourceColumns, offset) ->
+                                [ offset .. offset + sourceColumns.Length - 1 ]
+                                |> List.tryFind (fun position -> not (Set.contains position determined)))
+                            |> Expression.Prune
+                        | Col _
+                        | QualifiedCol _ ->
+                            tryColumnPosition node
+                            |> Option.filter (fun position -> not (Set.contains position determined))
+                            |> Expression.Prune
+                        | _ -> Expression.Descend None)
+                None
+                expr
 
     let groupingError clause index groupExprs determined expr =
         match invalidColumn groupExprs determined expr with
@@ -14097,7 +14112,6 @@ and private validateOnlyFullGroupBy
 
             let initial =
                 groupExprs
-                |> List.collect expressionColumns
                 |> List.choose tryColumnPosition
                 |> Set.ofList
                 |> fun grouped ->

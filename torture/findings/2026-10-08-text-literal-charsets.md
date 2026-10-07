@@ -91,9 +91,19 @@ DDL and verifies latin1_bin with literal coercibility 4.
 
 A direct read of a literal-only view preserves literal coercibility by expanding
 its single row. The native constant-row result retains coercibility 4 even with
-ALGORITHM=TEMPTABLE. Expansion excludes nested queries and outer ordering or
-grouping clauses, preserving their existing scope rules. The nested-query
-control retains its inner `v` rather than substituting the view's `v`.
+ALGORITHM=TEMPTABLE. Expansion supports ordinary ordering and grouping. Bare ORDER BY projection
+names retain their output-alias precedence; references inside ordering
+expressions retain source-column precedence. Grouping dependencies are checked
+against the original source before literal substitution. Expansion excludes
+nested queries, HAVING, and rollup. The nested-query control retains its inner
+`v` rather than substituting the view's `v`.
+
+ONLY_FULL_GROUP_BY treats an entire grouped expression as valid, but does not
+infer that its input columns are determined. For a table containing -1 and 1,
+`SELECT v GROUP BY ABS(v)` and `SELECT ABS(v)+1 GROUP BY ABS(v)` both fail with
+1055. `SELECT ABS(v) GROUP BY ABS(v)` succeeds, as does `SELECT v+1 GROUP BY v`.
+GROUPING inspects a grouping key and remains valid with an expression argument.
+The same shared validator checks these contracts before literal-view folding.
 
 Stored schema expressions have a different native lifetime. Under
 `SET NAMES latin1 COLLATE latin1_bin`, generated and default expressions using
@@ -104,21 +114,34 @@ The parser shares this normalization across generated columns, expression
 defaults, checks, and functional indexes. Recovery tests pin the generated,
 default, and check behavior.
 
-Validation: `just check` passes 3,031 tests with zero build warnings or errors,
+Validation: `just check` passes 3,033 tests with zero build warnings or errors,
 using `DOTNET_PROCESSOR_COUNT=8` and a 4 GiB `DOTNET_GCHeapHardLimit`. The
 maintained native oracle passes. Differential contracts pass 49 cases and
 5,117 steps with no differences; the run artifact is
-`torture/artifacts/runs/20261007T232220511-59621/contracts`.
+`torture/artifacts/runs/20261007T233639319-67596/contracts`.
 
-Broader view shapes still materialize columns and may report column coercibility
-rather than the originating expression's coercibility. Stored-program binding
-combinations beyond the tested function, invalid byte sequences, client
-encodings beyond the current UTF-8 input assumption, and broader expression
-collation inference remain open. Introducer and national-literal definition rendering still need further
+## Remaining materialization and alias boundaries
+
+With `grouped_literal` defined as a latin1_bin literal `'a' AS v`, the native
+oracle and direct fsdb probes expose these remaining differences:
+
+| Query shape | MySQL | fsdb |
+|---|---|---|
+| COERCIBILITY(v) beside a scalar subquery | 4 | 2 |
+| COERCIBILITY(v) through a join | 4 | 2 |
+| COERCIBILITY(v) with GROUP BY v WITH ROLLUP | 4 for both detail and total | 2 for detail, 6 for total |
+| `SELECT v AS alias ... ORDER BY CONCAT(alias,'x')` | succeeds | 1054 for alias |
+
+The native cases are retained in the executable oracle. The fsdb boundary probe
+is `/tmp/fsdb-view-coercibility-boundary.log`. These are open differences, not
+accepted torture signatures. Stored-program binding combinations beyond the
+tested function, invalid byte sequences, client encodings beyond the current
+UTF-8 input assumption, and broader expression collation inference also remain
+open. Introducer and national-literal definition rendering needs further
 coverage beyond the ASCII export/recreate case.
 
-The initial gate and its repeat failed parallel primary-key timing probes; a
-clean committed control also failed a timing probe. The two probes now use the
-existing sequential test helper with unchanged limits. The
+Primary-key timing probes use the existing sequential test helper with unchanged
+limits. Both a clean committed control and view-export work encountered failures
+when those probes ran alongside other fixtures. The
 [timing-isolation record](../../benchmarks/results/70e0be67-primary-key-timing-isolation.md)
 keeps the controls and their interpretation.

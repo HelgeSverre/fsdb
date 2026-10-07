@@ -2428,6 +2428,22 @@ let tests =
               | Err(1055, _) -> ()
               | other -> failtestf "expected the sibling session to remain strict, got %A" other
 
+          testCase "grouped expressions do not determine their input columns"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              Expect.equal (handle session "CREATE TABLE grouping_inputs(v INT)" |> snd) (Affected 0UL) "table"
+              Expect.equal (handle session "INSERT INTO grouping_inputs VALUES(-1),(1)" |> snd) (Affected 2UL) "rows"
+              for sql in [ "SELECT v FROM grouping_inputs GROUP BY ABS(v)"; "SELECT ABS(v)+1 AS n FROM grouping_inputs GROUP BY ABS(v)" ] do
+                  match handle session sql |> snd with
+                  | Err(1055, _) -> ()
+                  | result -> failtestf "%s: expected an undetermined expression, got %A" sql result
+              Expect.equal (handle session "SELECT ABS(v) AS n FROM grouping_inputs GROUP BY ABS(v)" |> snd)
+                  (ResultSet([ "n" ], [ [ Some "1" ] ])) "the grouped expression remains usable"
+              Expect.equal (handle session "SELECT ABS(v) AS n,GROUPING(ABS(v)) AS g FROM grouping_inputs GROUP BY ABS(v) WITH ROLLUP" |> snd)
+                  (ResultSet([ "n"; "g" ], [ [ Some "1"; Some "0" ]; [ None; Some "1" ] ])) "GROUPING inspects a group key"
+              Expect.equal (handle session "SELECT v+1 AS n FROM grouping_inputs GROUP BY v ORDER BY n" |> snd)
+                  (ResultSet([ "n" ], [ [ Some "0" ]; [ Some "2" ] ])) "a grouped column determines expressions over it"
+
           testCase "ONLY_FULL_GROUP_BY accepts functionally determined columns"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
