@@ -23,7 +23,50 @@ let private closeTo (expected: float) (actual: float) (label: string) =
 let tests =
     testList
         "fulltext"
-        [ testCase "tokenizer: word chars, in-word apostrophes, case folding, punctuation"
+        [ testCase "read visibility retains committed term frequencies for word and ngram scores"
+          <| fun _ ->
+              for tokenizer, term, other in [ Words, "orchard", "cobalt"; Ngrams 2, "生日", "中文" ] do
+                  let index = buildIndexWithTokenizer tokenizer defaultCollation [ 1, term; 2, term; 3, other ]
+                  let view = readView index |> restrictReadView (Set.ofList [ 2; 3 ])
+                  let expected = log10(3.0 / 2.0) ** 2.0
+                  for scores in [ naturalScoresInView None view term; booleanScoresInView None view term ] do
+                      Expect.equal (scores |> Map.keys |> Seq.toList) [ 2 ] "only the unchanged committed document is visible"
+                      closeTo expected scores.[2] "hidden postings still contribute to document frequency"
+                  for scores in
+                      [ tryNaturalSingleTermScoresDictionaryInView None view term
+                        tryFlatBooleanScoresDictionaryInView None view term ] do
+                      let scores = scores |> Option.get
+                      Expect.equal (scores.Keys |> Seq.toList) [ 2 ] "dictionary paths use the same visibility"
+                      closeTo expected scores.[2] "dictionary relevance"
+                  Expect.isEmpty (naturalScoresInView (Some(Set.singleton 1)) view term) "predicate candidates cannot restore a hidden document"
+                  Expect.equal (naturalScores index term |> Map.keys |> Seq.toList) [ 1; 2 ] "the commit index remains complete"
+
+          testCase "read document counts vary independently of committed postings"
+          <| fun _ ->
+              let index = buildIndexWith defaultCollation [ 1, "orchard"; 2, "orchard"; 3, "cobalt" ]
+              let inserted = readView index |> withReadDocumentCount 4
+              closeTo (log10(4.0 / 2.0) ** 2.0) (naturalScoresInView None inserted "orchard").[1] "pending rows can affect population without adding postings"
+              Expect.equal (naturalScoresInView None inserted "orchard" |> Map.keys |> Seq.toList) [ 1; 2 ] "only committed documents have scores"
+              closeTo (log10(3.0 / 2.0) ** 2.0) (naturalScores index "orchard").[1] "read statistics do not alter the stored index"
+
+          testCase "query expansion excludes hidden seeds without restricting seeds to predicate candidates"
+          <| fun _ ->
+              let index =
+                  buildIndexWith defaultCollation
+                      [ 1, "orchard orchard forbidden"
+                        2, "orchard meadow"
+                        3, "forbidden signal"
+                        4, "meadow trail"
+                        5, "cobalt blue" ]
+              let view = readView index |> restrictReadView (Set.ofList [ 2; 3; 4; 5 ])
+              for query in [ "orchard"; "orchard orchard"; "\"orchard\"" ] do
+                  Expect.equal (expansionScoresInView None view query |> Map.keys |> Seq.toList) [ 2; 4 ] "hidden seed terms cannot introduce a match"
+                  Expect.equal
+                      (expansionScoresInView (Some(Set.singleton 4)) view query |> Map.keys |> Seq.toList)
+                      [ 4 ]
+                      "visible seed 2 can expand a query whose final predicate admits only row 4"
+
+          testCase "tokenizer: word chars, in-word apostrophes, case folding, punctuation"
           <| fun _ ->
               Expect.equal (tokenize "Never run mysqld as root!") [| "never"; "run"; "mysqld"; "as"; "root" |] "plain words"
               Expect.equal (tokenize "O'Brien's DB_2, 'quoted'") [| "o'brien's"; "db_2"; "quoted" |] "apostrophes and underscore"

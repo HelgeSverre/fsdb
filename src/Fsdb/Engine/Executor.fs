@@ -15138,35 +15138,21 @@ and private fullTextScoresForTable
 
             match indexColumns |> List.tryFind (snd >> (=) columns), Value.toText queryValue with
             | Some(index, _), Some queryText ->
-                let fullTextIndex = Map.find index.Name table.FullTextIndexes
-                let scoresWithinOrAll restricted unrestricted =
-                    match candidateIds with
-                    | Some candidates -> restricted candidates
-                    | None -> unrestricted ()
-
+                let view = Map.find index.Name table.FullTextIndexes |> FullText.readView
                 let scores =
                     match mode with
                     | NaturalLanguage ->
-                        FullText.tryNaturalSingleTermScoresDictionaryWithin candidateIds fullTextIndex queryText
+                        FullText.tryNaturalSingleTermScoresDictionaryInView candidateIds view queryText
                         |> Option.map HashedScores
                         |> Option.defaultWith (fun () ->
-                            scoresWithinOrAll
-                                (fun candidates -> FullText.naturalScoresWithin candidates fullTextIndex queryText)
-                                (fun () -> FullText.naturalScores fullTextIndex queryText)
-                            |> OrderedScores)
+                            FullText.naturalScoresInView candidateIds view queryText |> OrderedScores)
                     | BooleanMode ->
-                        FullText.tryFlatBooleanScoresDictionaryWithin candidateIds fullTextIndex queryText
+                        FullText.tryFlatBooleanScoresDictionaryInView candidateIds view queryText
                         |> Option.map HashedScores
                         |> Option.defaultWith (fun () ->
-                            scoresWithinOrAll
-                                (fun candidates -> FullText.booleanScoresWithin candidates fullTextIndex queryText)
-                                (fun () -> FullText.booleanScores fullTextIndex queryText)
-                            |> OrderedScores)
+                            FullText.booleanScoresInView candidateIds view queryText |> OrderedScores)
                     | QueryExpansion ->
-                        scoresWithinOrAll
-                            (fun candidates -> FullText.expansionScoresWithin candidates fullTextIndex queryText)
-                            (fun () -> FullText.expansionScores fullTextIndex queryText)
-                        |> OrderedScores
+                        FullText.expansionScoresInView candidateIds view queryText |> OrderedScores
 
                 Ok(node, mode, scores)
             | None, _ -> Error(1191, "Can't find FULLTEXT index matching the column list")

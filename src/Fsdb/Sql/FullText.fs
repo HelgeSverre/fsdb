@@ -126,7 +126,8 @@ type internal ReadView<'id when 'id: comparison> =
           PrefixPostings: Map<string, Map<'id, int>>
           Collation: Collation
           Tokenizer: Tokenizer
-          DocumentCount: int }
+          DocumentCount: int
+          VisibleDocumentIds: Set<'id> option }
 
 let internal readView (index: Index<'id>) : ReadView<'id> =
     { Documents = index.Documents
@@ -134,7 +135,25 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       PrefixPostings = index.PrefixPostings
       Collation = index.Collation
       Tokenizer = index.Tokenizer
-      DocumentCount = index.Documents.Count }
+      DocumentCount = index.Documents.Count
+      VisibleDocumentIds = None }
+
+let private intersectCandidates left right =
+    match left, right with
+    | Some left, Some right -> Some(Set.intersect left right)
+    | Some ids, None
+    | None, Some ids -> Some ids
+    | None, None -> None
+
+let internal restrictReadView visibleDocumentIds (view: ReadView<'id>) =
+    { view with VisibleDocumentIds = intersectCandidates view.VisibleDocumentIds (Some visibleDocumentIds) }
+
+let internal withReadDocumentCount count (view: ReadView<'id>) =
+    if count < 0 then invalidArg "count" "Full-text document count cannot be negative"
+    { view with DocumentCount = count }
+
+let private candidatesInView candidateIds (view: ReadView<'id>) =
+    intersectCandidates candidateIds view.VisibleDocumentIds
 
 type Corpus =
     private
@@ -460,6 +479,7 @@ let private scoreNaturalWordMatches (view: ReadView<'id>) matches =
             Map.change id (fun current -> Some(contribution + Option.defaultValue 0.0 current)) scores) scores) Map.empty
 
 let internal naturalScoresInView candidateIds (view: ReadView<'id>) query =
+    let candidateIds = candidatesInView candidateIds view
     if needsNaturalWordEvaluation view query then
         naturalWordClauses view query
         |> naturalWordMatches candidateIds view
@@ -478,6 +498,7 @@ let internal tryNaturalSingleTermScoresDictionaryInView
     (view: ReadView<'id>)
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
+    let candidateIds = candidatesInView candidateIds view
     match naturalTerms view query with
     | [| term |] when not (needsNaturalWordEvaluation view query) ->
         match Map.tryFind term view.Postings with
@@ -869,6 +890,7 @@ let private visibleBooleanScore score =
     if score = 0.0 then idfFloor * idfFloor else score
 
 let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =
+    let candidateIds = candidatesInView candidateIds view
     evalNodes candidateIds view (parseBooleanQuery view.Tokenizer view.Collation query)
     |> Map.map (fun _ score -> visibleBooleanScore score)
 
@@ -883,6 +905,7 @@ let internal tryFlatBooleanScoresDictionaryInView
     (view: ReadView<'id>)
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
+    let candidateIds = candidatesInView candidateIds view
     let rec flatTerms (found: (BoolOp * Token * bool) list) =
         function
         | [] when not found.IsEmpty -> Some(List.rev found)
@@ -1026,10 +1049,11 @@ let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
 // ---------------------------------------------------------------------------
 
 let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: string) =
+    let candidateIds = candidatesInView candidateIds view
     let clauseQuery =
         if needsNaturalWordEvaluation view query then
             let clauses = naturalWordClauses view query
-            Some(clauses, naturalWordMatches None view clauses)
+            Some(clauses, naturalWordMatches view.VisibleDocumentIds view clauses)
         else
             None
 

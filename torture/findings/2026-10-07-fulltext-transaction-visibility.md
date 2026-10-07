@@ -71,10 +71,17 @@ exploratory runs, so these are diagnostic samples rather than stable numeric
 fixtures; the maintained oracle asserts visibility and zero pending-row
 projections. Numeric parity needs controlled validation alongside the read model.
 
-`fullTextScoresForTable` currently reads `Table.FullTextIndexes` directly. Those
-indexes already contain the private transaction's inserts and updated text.
-`publishRowsWithDocumentTokenizers` maintains each index independently when its
-indexed fields change. Ordinary snapshot/rebase behavior lives in QueryHandler.
+`fullTextScoresForTable` creates a `FullText.ReadView` from the table's index and
+uses shared view-based scoring for natural, boolean, and expansion modes. A view
+can restrict document visibility and supply its scoring population without
+changing the write index or its term frequencies. Expansion excludes hidden seed
+documents while still allowing visible seeds outside a final predicate's row set.
+Focused regressions cover these rules and both optimized dictionary paths.
+
+The executor still creates its view from the private transaction index, so the
+runtime gap remains open. `publishRowsWithDocumentTokenizers` maintains each index
+independently when its indexed fields change. Ordinary snapshot/rebase behavior
+lives in QueryHandler.
 
 The fix needs to distinguish the ordinary row snapshot, committed full-text
 document identity across indexes, and the corpus used for relevance. The private
@@ -87,5 +94,9 @@ read model, including MATCH used by writes and joined sources.
 
 The maintained native oracle passes on MySQL 8.4.11. Separate disposable-server
 comparisons against fsdb's Debug executable reproduced the differences above.
-`just check` passes all 2,871 existing tests with no build warnings or errors.
-No runtime fix or known-gap suppression is included with this finding.
+`just check` passes all 2,874 tests with no build warnings or errors, including
+three read-view regressions. The follow-up native contract run could not start:
+MySQL initialization exhausted available disk space, including on a retry with
+64 MiB redo capacity. No new differential result is claimed for this foundation.
+The scoring-view foundation is implemented; transaction document visibility is
+not yet connected. No known-gap suppression is included.
