@@ -1522,7 +1522,7 @@ let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
         [| vs "def"; vs view.Schema; vs view.Name; vs (canonicalViewDefinition catalog view.Schema true view.Definition); vs view.CheckOption; vs (if isUpdatableView catalog view.Schema view.Definition then "YES" else "NO"); vs view.Definer
-           vs view.SecurityType; vs "utf8mb4"; vs view.CollationConnection |])
+           vs view.SecurityType; vs view.CharacterSetClient; vs view.CollationConnection |])
 
 let private viewTableUsageColumns =
     [ col "VIEW_CATALOG" (TVarchar 64)
@@ -3956,7 +3956,7 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
 
             Ok(
                 [ "View"; "Create View"; "character_set_client"; "collation_connection" ],
-                [ [ Some view.Name; Some ddl; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci" ] ]
+                [ [ Some view.Name; Some ddl; Some view.CharacterSetClient; Some view.CollationConnection ] ]
             )
 
 /// `SHOW CREATE TRIGGER trigger_name`.

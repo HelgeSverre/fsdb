@@ -81,6 +81,14 @@ snapshots, and expose it through `information_schema.VIEWS.COLLATION_CONNECTION`
 Stored functions already restore their creation context; the regression also
 pins that behavior.
 
+View client charset is independent of connection collation. The native export
+case creates a view under `character_set_client=ascii` and
+`collation_connection=latin1_bin`, then switches to utf8mb4. SHOW CREATE VIEW
+and information_schema.VIEWS retain ascii/latin1_bin. Both values are stored
+in fsdb's view catalog and survive WAL and snapshot recovery. An export/recreate
+regression restores the reported session context before executing the returned
+DDL and verifies latin1_bin with literal coercibility 4.
+
 A direct read of a literal-only view preserves literal coercibility by expanding
 its single row. The native constant-row result retains coercibility 4 even with
 ALGORITHM=TEMPTABLE. Expansion excludes nested queries and outer ordering or
@@ -96,16 +104,21 @@ The parser shares this normalization across generated columns, expression
 defaults, checks, and functional indexes. Recovery tests pin the generated,
 default, and check behavior.
 
-Validation: `just check` passes 3,030 tests with zero build warnings or errors,
+Validation: `just check` passes 3,031 tests with zero build warnings or errors,
 using `DOTNET_PROCESSOR_COUNT=8` and a 4 GiB `DOTNET_GCHeapHardLimit`. The
 maintained native oracle passes. Differential contracts pass 49 cases and
 5,117 steps with no differences; the run artifact is
-`torture/artifacts/runs/20261007T231023035-48133/contracts`.
+`torture/artifacts/runs/20261007T232220511-59621/contracts`.
 
 Broader view shapes still materialize columns and may report column coercibility
 rather than the originating expression's coercibility. Stored-program binding
 combinations beyond the tested function, invalid byte sequences, client
 encodings beyond the current UTF-8 input assumption, and broader expression
-collation inference remain open. View client-charset metadata and definition
-rendering need further coverage; capturing the connection collation alone does
-not establish complete stored-definition export parity.
+collation inference remain open. Introducer and national-literal definition rendering still need further
+coverage beyond the ASCII export/recreate case.
+
+The initial gate and its repeat failed parallel primary-key timing probes; a
+clean committed control also failed a timing probe. The two probes now use the
+existing sequential test helper with unchanged limits. The
+[timing-isolation record](../../benchmarks/results/70e0be67-primary-key-timing-isolation.md)
+keeps the controls and their interpretation.

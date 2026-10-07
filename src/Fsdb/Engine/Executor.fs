@@ -21559,7 +21559,8 @@ let rec executeAs
                                   "check_option"
                                   "security_type"
                                   "algorithm"
-                                  "collation_connection" ])
+                                  "collation_connection"
+                                  "character_set_client" ])
                                 [ [ VString viewName
                                     VString db
                                     VString viewDefinition
@@ -21569,7 +21570,8 @@ let rec executeAs
                                     VString checkOption
                                     VString security
                                     VString algorithm
-                                    VString store.ExecutionSettings.ConnectionCollation.Name ] ]
+                                    VString store.ExecutionSettings.ConnectionCollation.Name
+                                    VString store.ExecutionSettings.ConnectionCharset ] ]
                     with
                     | Ok _ -> ids, Affected 0UL
                     | Error error -> ids, storageErr error

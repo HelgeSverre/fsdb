@@ -49,6 +49,7 @@ cases = [
     ("SET NAMES latin1 COLLATE latin1_bin;CREATE TABLE captured_generated(id INT,eq INT GENERATED ALWAYS AS ('a'='A') STORED);SET NAMES utf8mb4;INSERT INTO captured_generated(id) VALUES(1);SELECT eq FROM captured_generated", 'eq\n1\n'),
     ("SET NAMES latin1 COLLATE latin1_bin;CREATE TABLE schema_context(id INT,eq INT DEFAULT ('a'='A'),explicit_eq INT GENERATED ALWAYS AS ('a' COLLATE latin1_bin='A') STORED,CHECK('a'='A'));INSERT INTO schema_context(id) VALUES(1);SELECT eq,explicit_eq FROM schema_context", 'eq\texplicit_eq\n1\t0\n'),
     ("SELECT COLLATION_CONNECTION FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='literal_view'", 'COLLATION_CONNECTION\nlatin1_bin\n'),
+    ("SET NAMES latin1 COLLATE latin1_bin;SET character_set_client=ascii;CREATE VIEW export_view AS SELECT 'a' AS v;SET NAMES utf8mb4;SHOW CREATE VIEW export_view;SELECT CHARACTER_SET_CLIENT,COLLATION_CONNECTION,VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='export_view'", "View\tCreate View\tcharacter_set_client\tcollation_connection\nexport_view\tCREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `export_view` AS select 'a' AS `v`\tascii\tlatin1_bin\nCHARACTER_SET_CLIENT\tCOLLATION_CONNECTION\tVIEW_DEFINITION\nascii\tlatin1_bin\tselect 'a' AS `v`\n"),
 ]
 
 

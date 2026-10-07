@@ -2402,12 +2402,18 @@ let tests =
                   attach dir store
                   let session = Fsdb.Session.create 1 store
                   let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+                  let session = handle session "SET character_set_client=ascii" |> fst
                   Expect.equal (handle session "CREATE VIEW captured_literal AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
                   if checkpoint then snapshotNow dir store
                   let session = Fsdb.Session.create 2 (load dir)
                   Expect.equal (handle session "SELECT CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM captured_literal" |> snd)
                       (ResultSet([ "cs"; "co"; "c" ], [ [ Some "latin1"; Some "latin1_bin"; Some "4" ] ]))
                       "creation context survives recovery"
+
+                  match handle session "SHOW CREATE VIEW captured_literal" |> snd with
+                  | ResultSet(_, [ [ Some "captured_literal"; Some _; Some charset; Some collation ] ]) ->
+                      Expect.equal (charset, collation) ("ascii", "latin1_bin") "recovered export context"
+                  | result -> failtestf "unexpected recovered export: %A" result
 
           testCase "introduced literal charsets survive WAL and snapshot recovery"
           <| fun _ ->

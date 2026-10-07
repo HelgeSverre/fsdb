@@ -63,6 +63,28 @@ let tests =
               Expect.equal (handle session "SELECT COLLATION_CONNECTION FROM information_schema.VIEWS WHERE TABLE_NAME='literal_view'" |> snd)
                   (ResultSet([ "COLLATION_CONNECTION" ], [ [ Some "latin1_bin" ] ])) "catalog exposes creation collation"
 
+          testCase "view export retains independent client charset and connection collation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+              let session = handle session "SET character_set_client=ascii" |> fst
+              Expect.equal (handle session "CREATE VIEW export_view AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
+              let session = handle session "SET NAMES utf8mb4" |> fst
+              let ddl, clientCharset, connectionCollation =
+                  match handle session "SHOW CREATE VIEW export_view" |> snd with
+                  | ResultSet(_, [ [ Some "export_view"; Some ddl; Some charset; Some collation ] ]) -> ddl, charset, collation
+                  | result -> failtestf "unexpected view export: %A" result
+              Expect.equal (clientCharset, connectionCollation) ("ascii", "latin1_bin") "export creation context"
+              Expect.equal (handle session "SELECT CHARACTER_SET_CLIENT,COLLATION_CONNECTION FROM information_schema.VIEWS WHERE TABLE_NAME='export_view'" |> snd)
+                  (ResultSet([ "CHARACTER_SET_CLIENT"; "COLLATION_CONNECTION" ], [ [ Some "ascii"; Some "latin1_bin" ] ])) "catalog creation context"
+              Expect.equal (handle session "DROP VIEW export_view" |> snd) (Affected 0UL) "drop exported view"
+              let session = handle session ("SET character_set_client=" + clientCharset) |> fst
+              let session = handle session ("SET collation_connection=" + connectionCollation) |> fst
+              Expect.equal (handle session ddl |> snd) (Affected 0UL) "restore exported view"
+              let session = handle session "SET NAMES utf8mb4" |> fst
+              Expect.equal (handle session "SELECT COLLATION(v) AS c,COERCIBILITY(v) AS n FROM export_view" |> snd)
+                  (ResultSet([ "c"; "n" ], [ [ Some "latin1_bin"; Some "4" ] ])) "restored literal identity"
+
           testCase "literal view expansion preserves nested scopes and source names"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
