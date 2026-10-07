@@ -118,6 +118,24 @@ type Index<'id when 'id: comparison> =
           Collation: Collation
           Tokenizer: Tokenizer }
 
+/// Query state is separate from the index maintained for future commits.
+type internal ReadView<'id when 'id: comparison> =
+    private
+        { Documents: Map<'id, Document>
+          Postings: Map<string, Map<'id, int>>
+          PrefixPostings: Map<string, Map<'id, int>>
+          Collation: Collation
+          Tokenizer: Tokenizer
+          DocumentCount: int }
+
+let internal readView (index: Index<'id>) : ReadView<'id> =
+    { Documents = index.Documents
+      Postings = index.Postings
+      PrefixPostings = index.PrefixPostings
+      Collation = index.Collation
+      Tokenizer = index.Tokenizer
+      DocumentCount = index.Documents.Count }
+
 type Corpus =
     private
         { Order: int[]
@@ -277,15 +295,15 @@ let buildCorpusWith (collation: Collation) (docs: string seq) : Corpus =
 let buildCorpus (docs: string seq) : Corpus =
     buildCorpusWith defaultCollation docs
 
-let private idf (index: Index<'id>) (df: int) : float =
+let private idf (view: ReadView<'id>) (df: int) : float =
     if df = 0 then 0.0
-    else max (log10 (float index.Documents.Count / float df)) idfFloor
+    else max (log10 (float view.DocumentCount / float df)) idfFloor
 
-let private termScoresWithin (candidateIds: Set<'id> option) (index: Index<'id>) (term: string) : Map<'id, float> =
-    match Map.tryFind term index.Postings with
+let private termScoresWithin (candidateIds: Set<'id> option) (view: ReadView<'id>) (term: string) : Map<'id, float> =
+    match Map.tryFind term view.Postings with
     | None -> Map.empty
     | Some rows ->
-        let weight = idf index rows.Count
+        let weight = idf view rows.Count
         let scale = weight * weight
 
         match candidateIds with
@@ -295,7 +313,7 @@ let private termScoresWithin (candidateIds: Set<'id> option) (index: Index<'id>)
             |> Seq.choose (fun id -> Map.tryFind id rows |> Option.map (fun frequency -> id, float frequency * scale))
             |> Map.ofSeq
 
-let private termScores index term = termScoresWithin None index term
+let private termScores view term = termScoresWithin None view term
 
 let private exactPhraseMatches (doc: Token[]) (words: Token[]) =
     if words.Length = 0 then
@@ -307,14 +325,14 @@ let private exactPhraseMatches (doc: Token[]) (words: Token[]) =
             |> Array.indexed
             |> Array.forall (fun (offset, word) -> doc.[start + offset].Key = word.Key))
 
-let private phraseCandidates (index: Index<'id>) (words: Token[]) =
+let private phraseCandidates (view: ReadView<'id>) (words: Token[]) =
     words
     // InnoDB omits short terms and stopwords from postings but retains their
     // positions after the first searchable word in a phrase.
-    |> Array.filter (isBooleanSearchable index.Tokenizer)
+    |> Array.filter (isBooleanSearchable view.Tokenizer)
     |> Array.distinctBy _.Key
     |> Array.map (fun word ->
-        index.Postings
+        view.Postings
         |> Map.tryFind word.Key
         |> Option.map (Map.keys >> Set.ofSeq)
         |> Option.defaultValue Set.empty)
@@ -328,14 +346,14 @@ let private phraseCandidates (index: Index<'id>) (words: Token[]) =
 // ---------------------------------------------------------------------------
 
 /// Distinct searchable terms of a natural-language query.
-let private queryTokens (index: Index<'id>) query =
-    tokensWith index.Tokenizer index.Collation query
+let private queryTokens (view: ReadView<'id>) query =
+    tokensWith view.Tokenizer view.Collation query
 
-let private naturalTerms (index: Index<'id>) (query: string) : string[] =
-    let tokens = queryTokens index query
+let private naturalTerms (view: ReadView<'id>) (query: string) : string[] =
+    let tokens = queryTokens view query
     let terms =
-        match index.Tokenizer with
-        | Words -> tokens |> Array.filter (isSearchable index.Tokenizer)
+        match view.Tokenizer with
+        | Words -> tokens |> Array.filter (isSearchable view.Tokenizer)
         // A stopped spelling can still match an indexed collation equivalent.
         | Ngrams _ -> tokens
 
@@ -347,28 +365,28 @@ let private naturalTerms (index: Index<'id>) (query: string) : string[] =
 /// Accumulates into one result map rather than retaining one map per term,
 /// so peak memory stays O(rows), not
 /// O(terms × rows) for a query with many distinct terms.
-let private sumTermScoresWithin (candidateIds: Set<'id> option) (index: Index<'id>) (terms: string[]) : Map<'id, float> =
+let private sumTermScoresWithin (candidateIds: Set<'id> option) (view: ReadView<'id>) (terms: string[]) : Map<'id, float> =
     match terms with
     | [||] -> Map.empty
-    | [| term |] -> termScoresWithin candidateIds index term
+    | [| term |] -> termScoresWithin candidateIds view term
     | _ ->
         terms
         |> Array.skip 1
         |> Array.fold
             (fun scores term ->
-                termScoresWithin candidateIds index term
+                termScoresWithin candidateIds view term
                 |> Map.fold
                     (fun scores id score ->
                         Map.change id (fun current -> Some(score + Option.defaultValue 0.0 current)) scores)
                     scores)
-            (termScoresWithin candidateIds index terms.[0])
+            (termScoresWithin candidateIds view terms.[0])
 
 type private NaturalClause =
     | NaturalWord of key: string
     | NaturalPhrase of Token[]
 
-let private naturalWordClauses (index: Index<'id>) (query: string) =
-    let words text = tokensWith Words index.Collation text
+let private naturalWordClauses (view: ReadView<'id>) (query: string) =
+    let words text = tokensWith Words view.Collation text
     let plain text = words text |> Array.filter (isSearchable Words) |> Array.map (fun word -> NaturalWord word.Key)
     let clauses = ResizeArray<NaturalClause>()
     let mutable start = 0
@@ -391,35 +409,35 @@ let private naturalClauseKeys = function
     | NaturalWord key -> [| key |]
     | NaturalPhrase words -> words |> Array.filter (isSearchable Words) |> Array.map _.Key
 
-let private needsNaturalWordEvaluation (index: Index<'id>) (query: string) =
-    match index.Tokenizer with
+let private needsNaturalWordEvaluation (view: ReadView<'id>) (query: string) =
+    match view.Tokenizer with
     | Ngrams _ -> false
     | Words ->
         if query.Contains '"' then true
         else
-            let terms = queryTokens index query |> Array.filter (isSearchable Words)
+            let terms = queryTokens view query |> Array.filter (isSearchable Words)
             terms.Length <> (terms |> Array.distinctBy _.Key).Length
 
 type private NaturalMatches<'id when 'id: comparison> =
     { Occurrences: Map<string, int>
       Documents: Map<string, Set<'id>> }
 
-let private naturalClauseDocuments (index: Index<'id>) = function
+let private naturalClauseDocuments (view: ReadView<'id>) = function
     | NaturalWord key ->
-        index.Postings
+        view.Postings
         |> Map.tryFind key
         |> Option.map (Map.keys >> Set.ofSeq)
         |> Option.defaultValue Set.empty
     | NaturalPhrase words ->
-        phraseCandidates index words
+        phraseCandidates view words
         |> Set.filter (fun id ->
-            index.Documents.[id].Fields |> Array.exists (fun field -> exactPhraseMatches field words))
+            view.Documents.[id].Fields |> Array.exists (fun field -> exactPhraseMatches field words))
 
 /// Matching terms retain their row sets separately from query occurrence counts.
 /// Repeated query words increase MySQL's document frequency, not a row's TF.
-let private naturalWordMatches candidateIds (index: Index<'id>) clauses =
+let private naturalWordMatches candidateIds (view: ReadView<'id>) clauses =
     let addClause matches clause =
-        let ids = naturalClauseDocuments index clause
+        let ids = naturalClauseDocuments view clause
         let ids = candidateIds |> Option.map (Set.intersect ids) |> Option.defaultValue ids
         if ids.IsEmpty then matches
         else
@@ -431,41 +449,41 @@ let private naturalWordMatches candidateIds (index: Index<'id>) clauses =
     { Occurrences = clauses |> Array.collect naturalClauseKeys |> Array.countBy id |> Map.ofArray
       Documents = clauses |> Array.fold addClause Map.empty }
 
-let private scoreNaturalWordMatches (index: Index<'id>) matches =
+let private scoreNaturalWordMatches (view: ReadView<'id>) matches =
     matches.Documents
     |> Map.fold (fun scores key ids ->
-        let rows = index.Postings.[key]
+        let rows = view.Postings.[key]
         let frequency = float rows.Count * float matches.Occurrences.[key]
-        let weight = max (abs (log10 (float index.Documents.Count / frequency))) idfFloor
+        let weight = max (abs (log10 (float view.DocumentCount / frequency))) idfFloor
         ids |> Set.fold (fun scores id ->
             let contribution = float rows.[id] * weight * weight
             Map.change id (fun current -> Some(contribution + Option.defaultValue 0.0 current)) scores) scores) Map.empty
 
-let private naturalScoresWithinOption candidateIds (index: Index<'id>) query =
-    if needsNaturalWordEvaluation index query then
-        naturalWordClauses index query
-        |> naturalWordMatches candidateIds index
-        |> scoreNaturalWordMatches index
+let internal naturalScoresInView candidateIds (view: ReadView<'id>) query =
+    if needsNaturalWordEvaluation view query then
+        naturalWordClauses view query
+        |> naturalWordMatches candidateIds view
+        |> scoreNaturalWordMatches view
     else
-        sumTermScoresWithin candidateIds index (naturalTerms index query)
+        sumTermScoresWithin candidateIds view (naturalTerms view query)
 
 let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
-    naturalScoresWithinOption None index query
+    naturalScoresInView None (readView index) query
 
 let internal naturalScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) : Map<'id, float> =
-    naturalScoresWithinOption (Some candidateIds) index query
+    naturalScoresInView (Some candidateIds) (readView index) query
 
-let internal tryNaturalSingleTermScoresDictionaryWithin
+let internal tryNaturalSingleTermScoresDictionaryInView
     (candidateIds: Set<'id> option)
-    (index: Index<'id>)
+    (view: ReadView<'id>)
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
-    match naturalTerms index query with
-    | [| term |] when not (needsNaturalWordEvaluation index query) ->
-        match Map.tryFind term index.Postings with
+    match naturalTerms view query with
+    | [| term |] when not (needsNaturalWordEvaluation view query) ->
+        match Map.tryFind term view.Postings with
         | None -> Collections.Generic.Dictionary() |> Some
         | Some rows ->
-            let weight = idf index rows.Count
+            let weight = idf view rows.Count
             let scale = weight * weight
             let capacity = candidateIds |> Option.map _.Count |> Option.defaultValue rows.Count |> min rows.Count
             let scores = Collections.Generic.Dictionary<'id, float>(capacity)
@@ -482,6 +500,9 @@ let internal tryNaturalSingleTermScoresDictionaryWithin
 
             Some scores
     | _ -> None
+
+let internal tryNaturalSingleTermScoresDictionaryWithin candidateIds index query =
+    tryNaturalSingleTermScoresDictionaryInView candidateIds (readView index) query
 
 let internal tryNaturalSingleTermScoresDictionary index query =
     tryNaturalSingleTermScoresDictionaryWithin None index query
@@ -726,11 +747,11 @@ let private proximityMatches (doc: Token[]) (words: Token[]) distance =
 /// `TF×IDF²` for a prefix wildcard, whose document frequency belongs to the
 /// prefix posting rather than any one complete-token posting.
 let private scoresFromTfsWithDocumentFrequency
-    (index: Index<'id>)
+    (view: ReadView<'id>)
     (documentFrequency: int)
     (tfs: Map<'id, int>)
     : Map<'id, float> =
-    let weight = idf index documentFrequency
+    let weight = idf view documentFrequency
     tfs |> Map.map (fun _ tf -> float tf * weight * weight)
 
 let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'value>) =
@@ -769,44 +790,44 @@ let private booleanCandidates (results: (BoolOp * Map<'id, float>) list) : seq<'
 /// Per-document contribution for one boolean term.
 let rec private evalTerm
     (candidateIds: Set<'id> option)
-    (index: Index<'id>)
+    (view: ReadView<'id>)
     (term: BoolTerm)
     : Map<'id, float> =
     match term with
-    | BWord(term, false) when not (isBooleanSearchable index.Tokenizer term) ->
+    | BWord(term, false) when not (isBooleanSearchable view.Tokenizer term) ->
         // Rejected words can still occupy positions inside a longer phrase.
         Map.empty
     | BWord(term, false) ->
-        termScoresWithin candidateIds index term.Key
+        termScoresWithin candidateIds view term.Key
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
         let rows =
-            index.PrefixPostings
+            view.PrefixPostings
             |> Map.tryFind term.Key
             |> Option.defaultValue Map.empty
 
         rows
         |> restrictScores candidateIds
-        |> scoresFromTfsWithDocumentFrequency index rows.Count
+        |> scoresFromTfsWithDocumentFrequency view rows.Count
     | BPhrase(words, proximity) ->
         let candidates =
-            phraseCandidates index words
+            phraseCandidates view words
             |> fun candidates -> candidateIds |> Option.map (Set.intersect candidates) |> Option.defaultValue candidates
 
         let terms =
             words
-            |> Array.filter (isBooleanSearchable index.Tokenizer)
+            |> Array.filter (isBooleanSearchable view.Tokenizer)
             |> Array.distinctBy _.Key
             |> Array.choose (fun word ->
-                index.Postings
+                view.Postings
                 |> Map.tryFind word.Key
                 |> Option.map (fun rows ->
-                    let weight = idf index rows.Count
+                    let weight = idf view rows.Count
                     rows, weight * weight))
 
         candidates
         |> Seq.choose (fun id ->
-            let fields = index.Documents.[id].Fields
+            let fields = view.Documents.[id].Fields
             let matches =
                 match proximity with
                 | None -> fields |> Array.exists (fun tokens -> exactPhraseMatches tokens words)
@@ -820,7 +841,7 @@ let rec private evalTerm
                 None)
         |> Map.ofSeq
     | BGroup nodes ->
-        evalNodes candidateIds index nodes
+        evalNodes candidateIds view nodes
 
 /// Per-document score over a node list — the boolean combination:
 /// a document is absent when a `+` term misses or a `-` term
@@ -828,10 +849,10 @@ let rec private evalTerm
 /// modifier-adjusted contributions.
 and private evalNodes
     (candidateIds: Set<'id> option)
-    (index: Index<'id>)
+    (view: ReadView<'id>)
     (nodes: (BoolOp * BoolTerm) list)
     : Map<'id, float> =
-    let results = nodes |> List.map (fun (op, term) -> op, evalTerm candidateIds index term)
+    let results = nodes |> List.map (fun (op, term) -> op, evalTerm candidateIds view term)
 
     booleanCandidates results
     |> Seq.choose (fun id ->
@@ -847,19 +868,19 @@ and private evalNodes
 let private visibleBooleanScore score =
     if score = 0.0 then idfFloor * idfFloor else score
 
-let private booleanScoresWithinOption candidateIds (index: Index<'id>) (query: string) =
-    evalNodes candidateIds index (parseBooleanQuery index.Tokenizer index.Collation query)
+let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =
+    evalNodes candidateIds view (parseBooleanQuery view.Tokenizer view.Collation query)
     |> Map.map (fun _ score -> visibleBooleanScore score)
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
-    booleanScoresWithinOption None index query
+    booleanScoresInView None (readView index) query
 
 let internal booleanScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) =
-    booleanScoresWithinOption (Some candidateIds) index query
+    booleanScoresInView (Some candidateIds) (readView index) query
 
-let internal tryFlatBooleanScoresDictionaryWithin
+let internal tryFlatBooleanScoresDictionaryInView
     (candidateIds: Set<'id> option)
-    (index: Index<'id>)
+    (view: ReadView<'id>)
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
     let rec flatTerms (found: (BoolOp * Token * bool) list) =
@@ -868,19 +889,19 @@ let internal tryFlatBooleanScoresDictionaryWithin
         | (op, BWord(term, prefix)) :: rest -> flatTerms ((op, term, prefix) :: found) rest
         | _ -> None
 
-    parseBooleanQuery index.Tokenizer index.Collation query
+    parseBooleanQuery view.Tokenizer view.Collation query
     |> flatTerms []
     |> Option.map (fun terms ->
         let postingFor (term: Token, prefix) =
-            if prefix then Map.tryFind term.Key index.PrefixPostings
-            elif isBooleanSearchable index.Tokenizer term then Map.tryFind term.Key index.Postings
+            if prefix then Map.tryFind term.Key view.PrefixPostings
+            elif isBooleanSearchable view.Tokenizer term then Map.tryFind term.Key view.Postings
             else None
 
         let postings =
             terms
             |> List.map (fun (op, term, prefix) ->
                 let rows = postingFor (term, prefix) |> Option.defaultValue Map.empty
-                let weight = idf index rows.Count
+                let weight = idf view rows.Count
                 { Operator = op
                   Rows = rows
                   Scale = weight * weight })
@@ -923,7 +944,7 @@ let internal tryFlatBooleanScoresDictionaryWithin
             let capacity =
                 positiveTerms
                 |> List.sumBy (fun posting -> int64 posting.Rows.Count)
-                |> min (int64 index.Documents.Count)
+                |> min (int64 view.DocumentCount)
                 |> int
 
             let totals = Collections.Generic.Dictionary<'id, float>(capacity)
@@ -987,6 +1008,9 @@ let internal tryFlatBooleanScoresDictionaryWithin
             | Some candidates, Some work when work < postingWork -> scoreCandidates candidates candidates.Count
             | _ -> accumulatePositivePostings ())
 
+let internal tryFlatBooleanScoresDictionaryWithin candidateIds index query =
+    tryFlatBooleanScoresDictionaryInView candidateIds (readView index) query
+
 let internal tryFlatBooleanScoresDictionary index query =
     tryFlatBooleanScoresDictionaryWithin None index query
 
@@ -1001,18 +1025,18 @@ let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
 // the top-ranked docs, NL pass again (blind relevance feedback).
 // ---------------------------------------------------------------------------
 
-let private expansionScoresWithinOption candidateIds (index: Index<'id>) (query: string) =
+let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: string) =
     let clauseQuery =
-        if needsNaturalWordEvaluation index query then
-            let clauses = naturalWordClauses index query
-            Some(clauses, naturalWordMatches None index clauses)
+        if needsNaturalWordEvaluation view query then
+            let clauses = naturalWordClauses view query
+            Some(clauses, naturalWordMatches None view clauses)
         else
             None
 
     let firstPass =
         match clauseQuery with
-        | Some(_, matches) -> scoreNaturalWordMatches index matches
-        | None -> naturalScores index query
+        | Some(_, matches) -> scoreNaturalWordMatches view matches
+        | None -> naturalScoresInView None view query
 
     let seedTerms =
         firstPass
@@ -1020,7 +1044,7 @@ let private expansionScoresWithinOption candidateIds (index: Index<'id>) (query:
         |> Array.sortByDescending snd
         |> Array.truncate queryExpansionLimit
         |> Array.collect (fun (id, _) ->
-            let document = index.Documents.[id]
+            let document = view.Documents.[id]
             Array.concat document.Fields |> Array.filter (isSearchable document.Tokenizer))
         |> Array.map _.Key
 
@@ -1032,18 +1056,18 @@ let private expansionScoresWithinOption candidateIds (index: Index<'id>) (query:
             |> Array.filter (fun key -> not (Map.containsKey key matches.Documents))
             |> Array.map NaturalWord
         Array.append clauses expansion
-        |> naturalWordMatches candidateIds index
-        |> scoreNaturalWordMatches index
+        |> naturalWordMatches candidateIds view
+        |> scoreNaturalWordMatches view
     | None ->
-        Array.append (naturalTerms index query) seedTerms
+        Array.append (naturalTerms view query) seedTerms
         |> Array.distinct
-        |> sumTermScoresWithin candidateIds index
+        |> sumTermScoresWithin candidateIds view
 
 let expansionScores (index: Index<'id>) (query: string) : Map<'id, float> =
-    expansionScoresWithinOption None index query
+    expansionScoresInView None (readView index) query
 
 let internal expansionScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) =
-    expansionScoresWithinOption (Some candidateIds) index query
+    expansionScoresInView (Some candidateIds) (readView index) query
 
 let expansionScoresOf (corpus: Corpus) (query: string) : float[] =
     expansionScores corpus.Index query |> scoresInCorpusOrder corpus
