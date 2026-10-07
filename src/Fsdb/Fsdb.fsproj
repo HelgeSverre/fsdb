@@ -15,6 +15,7 @@
     <Compile Include="Foundation/Diagnostics.fs" />
     <Compile Include="Foundation/GroupCommit.fs" />
     <Compile Include="Foundation/OptionFile.fs" />
+    <Compile Include="Foundation/StorageOptions.fs" />
     <Compile Include="Foundation/Limits.fs" />
     <Compile Include="Engine/Authentication.fs" />
     <Compile Include="Foundation/ServerOptions.fs" />

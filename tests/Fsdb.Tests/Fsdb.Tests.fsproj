@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="TestSupport.fs" />
     <Compile Include="LimitsTests.fs" />
+    <Compile Include="StorageOptionsTests.fs" />
     <Compile Include="PacketTests.fs" />
     <Compile Include="ProtocolTests.fs" />
     <Compile Include="ValueTests.fs" />

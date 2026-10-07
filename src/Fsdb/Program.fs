@@ -9,6 +9,7 @@ type Arguments =
     | Listen of address: string
     | Data_Dir of path: string
     | Defaults_File of path: string
+    | Ngram_Token_Size of size: string
     | Ssl_Cert of path: string
     | Ssl_Key of path: string
     | Ssl_Ca of path: string
@@ -27,6 +28,7 @@ type Arguments =
             | Listen _ -> "bind address (default 127.0.0.1)"
             | Data_Dir _ -> "persist trusted server state here (WAL + snapshots); omit for in-memory"
             | Defaults_File _ -> "read server settings from a my.cnf-style file's [mysqld] section"
+            | Ngram_Token_Size _ -> "ngram token size, clamped to 1–10 (default 2)"
             | Ssl_Cert _ -> "PEM server certificate for TLS"
             | Ssl_Key _ -> "PEM private key for TLS"
             | Ssl_Ca _ -> "PEM certificate authorities trusted for TLS clients"
@@ -68,7 +70,7 @@ let main argv =
         printfn "fsdb %s (MySQL protocol %s)" fsdbVersion Protocol.ServerVersion
         0
     else
-        let serverOptions =
+        let startupOptions =
             let parsed =
                 match results.TryGetResult Defaults_File with
                 | Some path -> OptionFile.parseFile path
@@ -81,7 +83,10 @@ let main argv =
                   Line = 1 }
 
             let commandLineEntries =
-                [ match results.TryGetResult Ssl_Cert with
+                [ match results.TryGetResult Ngram_Token_Size with
+                  | Some size -> yield commandLineEntry "ngram_token_size" (Some size)
+                  | None -> ()
+                  match results.TryGetResult Ssl_Cert with
                   | Some path -> yield commandLineEntry "ssl_cert" (Some path)
                   | None -> ()
                   match results.TryGetResult Ssl_Key with
@@ -110,28 +115,33 @@ let main argv =
 
             match ServerOptions.fromEntries (parsed.Entries @ commandLineEntries) with
             | Error message -> Error(String.concat "\n" (parsed.Errors @ [ message ]))
-            | Ok(options, limitEntries) ->
-                match Limits.applyEntries limitEntries with
+            | Ok(options, storageEntries) ->
+                match StorageOptions.fromEntries storageEntries with
                 | Error message -> Error(String.concat "\n" (parsed.Errors @ [ message ]))
-                | Ok() when List.isEmpty parsed.Errors -> Ok options
-                | Ok() -> Error(String.concat "\n" parsed.Errors)
+                | Ok(storageOptions, limitEntries) ->
+                    match Limits.applyEntries limitEntries with
+                    | Error message -> Error(String.concat "\n" (parsed.Errors @ [ message ]))
+                    | Ok() when List.isEmpty parsed.Errors -> Ok(options, storageOptions)
+                    | Ok() -> Error(String.concat "\n" parsed.Errors)
 
-        match serverOptions, resolveListenAddress results with
+        match startupOptions, resolveListenAddress results with
         | Error message, _ ->
             eprintfn "fsdb: %s" message
             1
         | Ok _, None ->
             eprintfn "fsdb: --listen expects an IP address or 'localhost'"
             1
-        | Ok options, Some address ->
+        | Ok(options, storageOptions), Some address ->
             let port = results.GetResult(Port, defaultValue = 3307)
+
+            let db = Db.create () |> Db.withNgramTokenSize storageOptions.NgramTokenSize
 
             let db =
                 match results.TryGetResult Data_Dir with
                 | Some dataDir ->
                     printfn "fsdb: durability on, data-dir %s" dataDir
-                    Db.create () |> Db.withDataDir dataDir
-                | None -> Db.create ()
+                    db |> Db.withDataDir dataDir
+                | None -> db
 
             let db = { db with Transport = options }
 

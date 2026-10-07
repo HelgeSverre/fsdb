@@ -1,6 +1,7 @@
 # Ngram startup sizing and recovery
 
-Status: open. fsdb uses token size 2 and rejects `--ngram-token-size`.
+Status: partial. Startup configuration and mixed-size recovery are implemented;
+metadata-only DDL across token-size changes remains open.
 
 The native MySQL 8.4.11 [oracle](../scripts/ngram-size-oracle.py) starts a
 private disposable server, retains its data directory across restarts, and
@@ -42,8 +43,8 @@ indexing context in an event wrapper; legacy records continue to mean size 2.
 Changing only the startup constant would silently retokenize historical data
 and disagree with the observed recovery behavior.
 
-Completing configurable sizing requires startup-option integration and
-validation of metadata-only DDL across size changes. Prepared-XA publication
+Completing configurable sizing requires validation of metadata-only DDL across
+size changes. Prepared-XA publication
 retains each document's recorded tokenizer through live commit, WAL replay,
 and snapshots. The [prepared-XA oracle](2026-10-07-ngram-xa-recovery.md) records
 missing pending ngram postings after MySQL restart even without a token-size
@@ -64,8 +65,7 @@ or replaced historical rows. The test failed on short boolean lookup before
 the document/query distinction was implemented.
 
 The maintained native oracle also checks quoted historical lookup and prefix
-removal inside a rolled-back transaction. This covers the engine foundation;
-startup options remain open.
+removal inside a rolled-back transaction. This covers the engine foundation.
 
 
 ## Snapshot recovery
@@ -84,9 +84,8 @@ snapshot-of-snapshot recovery, and a subsequent WAL-tail insert. It failed
 before tokenizer metadata was retained. A separate regression verifies FSNC
 row recovery without tokenizer metadata.
 
-Startup-option integration remains open. Historical snapshot
-and WAL formats predate configurable sizing and must continue to mean size 2,
-even when a future server starts with another configured size.
+Historical snapshot and WAL formats predate configurable sizing and retain
+size-2 semantics even when the server starts with another configured size.
 
 ## WAL recovery
 
@@ -103,14 +102,32 @@ index, temporary-table filtering, observer delivery, and snapshot recovery of
 the replayed state. Replaying counter advances updates the counter directly,
 so it does not rebuild historical full-text postings through ALTER TABLE.
 
+## Startup integration
+
+`StorageOptions` consumes the setting after transport options and before limits.
+It shares the checked integer/suffix parser, clamps to 1–10, and reports malformed
+values with their source location. The command line overrides option files.
+`Db.withNgramTokenSize` configures one store before sessions are opened; selecting
+a data directory preserves the setting regardless of builder order. Session and
+GLOBAL reporting read the store's configured size.
+
+The Expecto startup regressions cover parsing, independent embedded databases,
+read-only assignment, both builder orders, and mixed-size WAL/snapshot recovery.
+The [executable check](../scripts/ngram-startup-fsdb.py) verifies help/version,
+invalid arguments, option-file precedence, clamping, scope errors, process
+restarts, historical lookup, new writes, and explicit rebuilds. Its expected
+postings come from the native MySQL startup oracle. Before integration the
+executable rejected `--ngram-token-size` as an unrecognized argument.
+
 ## Validation
 
-On 2026-10-07, `just check` passes 2,862 tests with no build warnings or errors.
-The mixed-tokenizer WAL regression also passes independently. Native MySQL
-validation passes 45 contract cases and all 4,978 differential steps.
+On 2026-10-07, `just check` passes 2,870 tests with no build warnings or errors.
+The executable startup/restart check passes. Native MySQL 8.4.11 validation
+passes 47 contract cases and all 5,007 differential steps, with no differences:
+`torture/artifacts/runs/20261007T032401008-59315/contracts/manifest.json`.
 
 The durability lane with seed 101, four workers, 100 operations per worker,
 eight requested restarts, and checkpoint interval 16 passes. All 12 total
 crash/restart checks preserve acknowledged commits and transaction boundaries,
 including schema state, WAL tail, snapshots, and torn-tail repair. Artifact:
-`torture/artifacts/runs/20261007T021828277-47159/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T032446970-59507/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

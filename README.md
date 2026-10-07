@@ -96,7 +96,7 @@ fall into a few groups:
 | Concern | Options |
 |---|---|
 | Listener | `--listen`, `--port` / `-p` |
-| Storage | `--data-dir` |
+| Storage | `--data-dir`, `--ngram-token-size` |
 | Option files | `--defaults-file` |
 | TLS | `--ssl-cert`, `--ssl-key`, `--ssl-ca`, `--require-secure-transport` |
 | Server files | `--secure-file-priv` |
@@ -105,6 +105,19 @@ fall into a few groups:
 | Information | `--version`, `--help` |
 
 ## Configuration
+
+### Ngram token size
+
+`--ngram-token-size 3` (or `ngram_token_size=3` in an option file) selects
+full-text ngram tokenization at startup. The default is 2; numeric values are
+clamped to 1–10. Command-line values override option files. The GLOBAL
+`ngram_token_size` variable reports the selected value and is read-only.
+Embedded hosts can call `Db.withNgramTokenSize` before opening connections.
+
+Changing the size preserves existing postings across WAL and snapshot recovery;
+new writes use the selected size. Separate DROP INDEX and ADD FULLTEXT statements
+rebuild the index at the current size. Metadata-only ALTER TABLE preservation
+across size changes remains an open compatibility gap.
 
 ### Option files
 

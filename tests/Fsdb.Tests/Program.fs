@@ -13,7 +13,8 @@ let main argv =
             argv
             (testList
                 "fsdb"
-                [ LimitsTests.tests
+                [ StorageOptionsTests.tests
+                  LimitsTests.tests
                   PacketTests.tests
                   ProtocolTests.tests
                   QueryHandlerTests.tests

@@ -108,8 +108,10 @@ let defaultVariables: Map<string, string option> =
         |> Map.add "secure_file_priv" None
 
 /// Recomputes defaults so configured limits and reported values cannot drift.
-let private liveDefaults () : Map<string, string option> =
-    Limits.variables () |> List.fold (fun m (name, value) -> Map.add name (Some value) m) defaultVariables
+let private liveDefaults (store: Store) : Map<string, string option> =
+    Limits.variables ()
+    |> List.fold (fun m (name, value) -> Map.add name (Some value) m) defaultVariables
+    |> Map.add "ngram_token_size" (Some(string store.NgramTokenSize))
 
 /// GLOBAL overrides share Store.Lock identity and expire with the store.
 let private globalVariablesByStore =
@@ -173,7 +175,7 @@ let tryGlobalVariable (store: Store) (name: string) : string option option =
 
     match (globalVariablesOf store).TryGetValue name with
     | true, v -> Some v
-    | false, _ -> liveDefaults () |> Map.tryFind name
+    | false, _ -> liveDefaults store |> Map.tryFind name
 
 let initialRoles store account =
     let applicable = Fsdb.Auth.applicableRolesForAccount store account
@@ -192,7 +194,7 @@ let initialRoles store account =
 /// Returns defaults overlaid with the store's GLOBAL assignments.
 let globalVariablesSnapshot (store: Store) : Map<string, string option> =
     globalVariablesOf store
-    |> Seq.fold (fun m (kv: System.Collections.Generic.KeyValuePair<string, string option>) -> Map.add kv.Key kv.Value m) (liveDefaults ())
+    |> Seq.fold (fun m (kv: System.Collections.Generic.KeyValuePair<string, string option>) -> Map.add kv.Key kv.Value m) (liveDefaults store)
 
 [<RequireQualifiedAccess>]
 type PreparedDependency =
@@ -383,7 +385,7 @@ type Session =
 let create (connectionId: int) (store: Store) : Session =
     // New sessions inherit the current GLOBAL values.
     let variables =
-        (globalVariablesOf store) |> Seq.fold (fun acc (KeyValue(k, v)) -> Map.add k v acc) (liveDefaults ())
+        (globalVariablesOf store) |> Seq.fold (fun acc (KeyValue(k, v)) -> Map.add k v acc) (liveDefaults store)
     let sessionStore = { store with ExecutionSettings = store.ExecutionSettings }
 
     variables

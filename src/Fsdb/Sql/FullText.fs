@@ -24,7 +24,7 @@ let maxTokenLength = 84
 /// seed the second pass of WITH QUERY EXPANSION.
 let private queryExpansionLimit = 20
 
-let ngramTokenSize = 2
+let ngramTokenSize = StorageOptions.defaults.NgramTokenSize
 
 type Tokenizer =
     | Words

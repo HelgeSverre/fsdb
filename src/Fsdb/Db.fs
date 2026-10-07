@@ -34,8 +34,15 @@ let create () : Db =
 /// `Db.create () |> Db.withDataDir "/var/lib/fsdb" |> Db.listen ...`.
 let withDataDir (dataDir: string) (db: Db) : Db =
     let store = Persistence.load dataDir
+    Storage.configureNgramTokenSize db.Store.NgramTokenSize store
     Persistence.attach dataDir store
     { db with Store = store; DataDir = Some dataDir }
+
+/// Selects the ngram size (clamped to 1–10) before opening sessions or serving traffic.
+/// Existing postings retain their original tokenizer until the index is rebuilt.
+let withNgramTokenSize (size: int) (db: Db) : Db =
+    Storage.configureNgramTokenSize (StorageOptions.normalizeNgramTokenSize (int64 size)) db.Store
+    db
 
 /// Routes fsdb's diagnostic output (connection drops, WAL replay warnings,
 /// server-side query errors) through `f` instead of stderr. Returns `db`
