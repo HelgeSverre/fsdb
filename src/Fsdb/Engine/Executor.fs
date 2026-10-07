@@ -9123,40 +9123,46 @@ and private applyMutationJoin
                   Columns = joinColumns } ],
             List.ofSeq rows)
     | source ->
-        let resolved =
-            match source with
-            | FromJoinGroup(baseSource, joins) ->
-                let baseJoin = { Kind = CrossJoin; Table = baseSource; On = Lit(VInt 1L); Using = [] }
-                let initial = applyMutationJoin store registry dbName sourceOverrides ([], [ [], [||] ]) None baseJoin
-                joins
-                |> List.fold
-                    (fun state innerJoin ->
-                        state |> Result.bind (fun (rows, leftOperand) ->
-                            applyMutationJoin store registry dbName sourceOverrides rows (Some leftOperand) innerJoin
-                            |> Result.map (fun rows -> rows, FromJoinGroup(leftOperand, [ innerJoin ]))))
-                    (initial |> Result.map (fun rows -> rows, baseSource))
-                |> Result.map fst
-            | FromTable tableRef ->
-                let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
-
-                let resolved =
-                    match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
-                    | Some source -> Ok(source.Columns, source.Rows, source.IdentityOf)
-                    | None ->
-                        resolveTableRef store registry dbName tableRef
-                        |> Result.map (fun (columns, rows) -> columns, rows, Some)
-                resolved
-                |> Result.map (fun (columns, rows, identityOf) ->
-                    [ { Qualifier = qualifier; PhysicalTable = Some tableRef; Columns = columns } ],
-                    rows |> List.map (fun row -> [ identityOf row ], row))
-            | FromSubquery(_, qualifier)
-            | FromLateral(_, qualifier)
-            | FromJsonTable(_, _, _, qualifier) ->
-                resolveFromSubquery store registry dbName source None
-                |> Result.map (mutationDerivedSource qualifier)
-
-        resolved
+        prepareMutationJoinSource store registry dbName sourceOverrides source
         |> Result.bind (applyPreparedMutationJoin store registry dbName (sourcesSoFar, rowsSoFar) leftOperand join)
+
+and private prepareMutationJoinSource
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (sourceOverrides: MutationSourceOverrides)
+    (source: FromItem)
+    : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
+    match source with
+    | FromJoinGroup(baseSource, joins) ->
+        let baseJoin = { Kind = CrossJoin; Table = baseSource; On = Lit(VInt 1L); Using = [] }
+        let initial = applyMutationJoin store registry dbName sourceOverrides ([], [ [], [||] ]) None baseJoin
+        joins
+        |> List.fold
+            (fun state innerJoin ->
+                state |> Result.bind (fun (rows, leftOperand) ->
+                    applyMutationJoin store registry dbName sourceOverrides rows (Some leftOperand) innerJoin
+                    |> Result.map (fun rows -> rows, FromJoinGroup(leftOperand, [ innerJoin ]))))
+            (initial |> Result.map (fun rows -> rows, baseSource))
+        |> Result.map fst
+    | FromTable tableRef ->
+        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+
+        let resolved =
+            match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
+            | Some source -> Ok(source.Columns, source.Rows, source.IdentityOf)
+            | None ->
+                resolveTableRef store registry dbName tableRef
+                |> Result.map (fun (columns, rows) -> columns, rows, Some)
+        resolved
+        |> Result.map (fun (columns, rows, identityOf) ->
+            [ { Qualifier = qualifier; PhysicalTable = Some tableRef; Columns = columns } ],
+            rows |> List.map (fun row -> [ identityOf row ], row))
+    | FromSubquery(_, qualifier)
+    | FromLateral(_, qualifier)
+    | FromJsonTable(_, _, _, qualifier) ->
+        resolveFromSubquery store registry dbName source None
+        |> Result.map (mutationDerivedSource qualifier)
 
 and private applyPreparedMutationJoin
     (store: Store)
