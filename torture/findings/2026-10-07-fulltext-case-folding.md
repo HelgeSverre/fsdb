@@ -25,15 +25,45 @@ prefix keys. Index construction, query parsing, document removal, and
 recovery use that same normalization. Ordinary SQL collation behavior is
 unchanged.
 
-## Remaining binary phrase behavior
+## Binary phrase verification
 
-A broader native probe with the same orchard corpus found that quoted
-`"Orchard Cobalt"` matches no word-indexed rows under either binary
-collation, although ordinary `Orchard` matches the mixed-case row. Binary
-ngram Boolean queries `Orchard` and `ORCHARD` likewise match no rows,
-while lowercase `orchard` matches the lowercase row. Natural ngram queries
-still union their case-sensitive gram postings: `orchard` and `Orchard`
-each match the lowercase and mixed-case rows, while `ORCHARD` matches the
-uppercase row. Binary phrase verification needs a separate regression and
-implementation; the maintained case-folding oracle covers nonbinary phrase
-matching and binary ordinary word/prefix matching.
+Reproduce with `python3 torture/scripts/fulltext-binary-phrase-oracle.py`.
+The same expected rows pass through fsdb's SQL wire interface.
+
+Under `utf8mb4_bin` and `utf8mb4_0900_bin`, ordinary word and single-token
+quoted queries preserve case. Exact multi-token phrases first require the
+original case-sensitive postings, then verify lowercased document text at
+positions of the original first query token. Query tokens retain their case.
+
+For the following documents:
+
+| ID | Text |
+|---|---|
+| 1 | `orchard cobalt` |
+| 2 | `Orchard Cobalt` |
+| 3 | `ORCHARD COBALT` |
+| 4 | `Orchard cobalt orchard` |
+| 5 | `orchard Cobalt cobalt` |
+| 6 | `orchard cobalt Orchard Cobalt` |
+| 7 | `zzzz` |
+
+Natural and Boolean `"orchard cobalt"` match rows 1, 5, and 6. Row 5 has the
+required lowercase postings and lowercasing makes the adjacent `Cobalt`
+match. Row 4 has both postings, but its lowercase `orchard` occurs after
+`cobalt`; verification does not start at the uppercase `Orchard`.
+
+`"Orchard cobalt"`, `"orchard Cobalt"`, and `"Orchard Cobalt"` match nothing
+in natural, Boolean, and expansion modes. Single-token `"Orchard"` matches
+rows 2, 4, and 6. Boolean proximity `"Orchard Cobalt" @10` matches rows 2
+and 6 because proximity uses the original postings without exact phrase
+verification.
+
+Boolean ngram queries spanning multiple grams use the same exact verifier;
+`Orchard` fails while the single-gram quoted query `"Or"` matches rows 2, 4,
+and 6. Natural ngram queries continue to union original gram postings.
+
+The edge matrix also verifies that lowercasing cannot create a missing
+candidate posting, internal unindexed short words participate in lowercase
+verification, and accented document letters fold case without losing accents.
+fsdb shares this verifier between natural word phrases and Boolean phrases,
+retaining the original token keys for candidate selection and proximity.

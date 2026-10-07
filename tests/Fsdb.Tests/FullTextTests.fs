@@ -23,7 +23,48 @@ let private closeTo (expected: float) (actual: float) (label: string) =
 let tests =
     testList
         "fulltext"
-        [ testCase "nonbinary full-text collations fold case for words and ngrams"
+        [ testCase "binary exact phrases verify folded text at original anchor positions"
+          <| fun _ ->
+              let documents =
+                  [ 1, "orchard cobalt"; 2, "Orchard Cobalt"; 3, "ORCHARD COBALT"
+                    4, "Orchard cobalt orchard"; 5, "orchard Cobalt cobalt"
+                    6, "orchard cobalt Orchard Cobalt"; 7, "zzzz" ]
+              for name in [ "utf8mb4_bin"; "utf8mb4_0900_bin" ] do
+                  let collation = tryFind name |> Option.get
+                  for tokenizer in [ Words; Ngrams 2 ] do
+                      let rules = { Tokenizer = tokenizer; Stopwords = StopwordPolicy.Disabled }
+                      let index =
+                          buildIndexWithDocumentSettings rules collation
+                              (documents |> List.map (fun (id, text) -> id, rules, [ text ]))
+                      let ids scores = scores |> Map.keys |> Seq.toList
+                      Expect.equal (booleanScores index "\"orchard cobalt\"" |> ids) [ 1; 5; 6 ] "verification folds later document tokens but retains original anchor positions"
+                      for query in [ "\"Orchard cobalt\""; "\"orchard Cobalt\""; "\"Orchard Cobalt\"" ] do
+                          Expect.isEmpty (booleanScores index query) "uppercase query tokens fail multi-token verification"
+                      match tokenizer with
+                      | Words ->
+                          Expect.equal (naturalScores index "\"orchard cobalt\"" |> ids) [ 1; 5; 6 ] "natural phrases use the same verifier"
+                          Expect.equal (booleanScores index "\"Orchard\"" |> ids) [ 2; 4; 6 ] "a single quoted token keeps binary lookup semantics"
+                          Expect.equal (booleanScores index "\"Orchard Cobalt\" @10" |> ids) [ 2; 6 ] "proximity uses original postings"
+                          Expect.isEmpty (expansionScores index "\"Orchard Cobalt\"") "failed phrases cannot seed expansion"
+                      | Ngrams _ ->
+                          Expect.isEmpty (booleanScores index "Orchard") "a multi-gram word uses exact phrase verification"
+                          Expect.equal (booleanScores index "\"Or\"" |> ids) [ 2; 4; 6 ] "one gram keeps binary lookup semantics"
+                          Expect.equal (naturalScores index "Orchard" |> ids) [ 1; 2; 4; 5; 6 ] "natural ngrams still union original postings"
+
+          testCase "binary phrase verification retains candidate requirements and folds short internal words"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let index = buildIndexWith collation
+                              [ 1, "orchard Cobalt"; 2, "orchard XX cobalt"
+                                3, "orchard café"; 4, "orchard CAFÉ café"; 5, "zzzz" ]
+              for score in [ naturalScores; booleanScores ] do
+                  Expect.isEmpty (score index "\"orchard cobalt\"") "folding cannot create a missing lowercase posting"
+                  Expect.equal (score index "\"orchard xx cobalt\"" |> Map.keys |> Seq.toList) [ 2 ] "unindexed internal words are verified in lowercase"
+                  Expect.isEmpty (score index "\"orchard XX cobalt\"") "query tokens retain case"
+                  Expect.equal (score index "\"orchard café\"" |> Map.keys |> Seq.toList) [ 3; 4 ] "document folding includes accented letters"
+                  Expect.isEmpty (score index "\"orchard CAFÉ\"") "uppercase accented queries fail verification"
+
+          testCase "nonbinary full-text collations fold case for words and ngrams"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get
               for tokenizer in [ Words; Ngrams 2 ] do

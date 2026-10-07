@@ -501,7 +501,11 @@ Natural-language word queries preserve quoted phrases within each indexed
 column, including internal short words and stopwords. Mixed terms and phrases
 are alternatives; repeated query words retain MySQL's relevance calculation.
 Query expansion preserves phrase conditions while adding seed terms
-([oracle evidence](torture/findings/2026-10-07-fulltext-natural-phrases.md)).
+([oracle evidence](torture/findings/2026-10-07-fulltext-natural-phrases.md)). Binary exact
+phrases retain case-sensitive candidate postings and verify lowercased
+document text at original anchor positions; single-token and proximity
+queries retain their distinct lookup rules
+([oracle](torture/findings/2026-10-07-fulltext-case-folding.md#binary-phrase-verification)).
 
 The grouped evaluator begins with the smallest required child and probes the
 other required children; without one, only positive children seed candidates.
@@ -518,7 +522,6 @@ before evaluating joins, predicates, and assignments.
 | MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, indexed `IN`, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; cross-source inference and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
 | Transaction relevance | MySQL uses an approximate global table-row estimate for ranking | visibility cases agree; fsdb uses the committed corpus count rather than estimates that remain changed after rollback until ANALYZE ([controlled oracle](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary)); follows the deliberate statistics policy in section 16 | high (relevance correctness) | deliberate divergence |
 | Tunables | innodb_ft_min_token_size, innodb_ft_max_token_size, ft_query_expansion_limit, stopword tables, enable/disable | the three numeric defaults are exposed with MySQL's GLOBAL/read-only scope and drive `FullText` at 3 / 84 / 20; `INNODB_FT_DEFAULT_STOPWORD` exposes the exact duplicate-preserving built-in list, GLOBAL/SESSION `innodb_ft_enable_stopword` supports captured index policy, tested rebuild paths, and WAL/snapshot recovery; startup options seed both variable scopes ([configuration oracle](torture/findings/2026-10-07-fulltext-stopword-configuration.md)); custom stopword tables remain absent ([validation and restart oracle](torture/findings/2026-10-07-fulltext-custom-stopwords.md)) | low | divergence/refusal |
-| Binary phrases | binary full-text phrase verification differs from ordinary word lookup | ordinary binary word and prefix lookups preserve case; mixed-case binary phrase and Boolean ngram verification remain incomplete ([evidence](torture/findings/2026-10-07-fulltext-case-folding.md#remaining-binary-phrase-behavior)) | low | divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); MeCab remains open ([oracle and regressions](torture/findings/2026-10-07-ngram-fulltext.md)) | medium (for CJK) | partial |
 
 ## 12. Wire protocol and prepared statements

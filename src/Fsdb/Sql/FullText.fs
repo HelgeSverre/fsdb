@@ -170,10 +170,13 @@ type Corpus =
         { Order: int[]
           Index: Index<int> }
 
+let private isBinaryCollation (collation: Collation) =
+    collation.Name = "binary" || collation.Name.EndsWith("_bin", StringComparison.Ordinal)
+
 let private tokenWith (collation: Collation) (text: string) =
     // InnoDB folds full-text case even for nonbinary case-sensitive collations.
     let text =
-        if collation.Name = "binary" || collation.Name.EndsWith("_bin", StringComparison.Ordinal) then text
+        if isBinaryCollation collation then text
         else text.ToLowerInvariant()
     { Text = text
       Key = collation.KeyOf text }
@@ -407,15 +410,22 @@ let private termScoresWithin (candidateIds: Set<'id> option) (view: ReadView<'id
 
 let private termScores view term = termScoresWithin None view term
 
-let private exactPhraseMatches (doc: Token[]) (words: Token[]) =
+let private exactPhraseMatches collation (doc: Token[]) (words: Token[]) =
     if words.Length = 0 then
         false
     else
+        // InnoDB verifies multi-token phrases against lowercased document text,
+        // but finds their starting positions through the original first token.
+        let foldDocument = words.Length > 1 && isBinaryCollation collation
         seq { 0 .. doc.Length - words.Length }
         |> Seq.exists (fun start ->
-            words
-            |> Array.indexed
-            |> Array.forall (fun (offset, word) -> doc.[start + offset].Key = word.Key))
+            doc.[start].Key = words.[0].Key
+            && (words
+                |> Array.indexed
+                |> Array.forall (fun (offset, word) ->
+                    let token = doc.[start + offset]
+                    let key = if foldDocument then collation.KeyOf(token.Text.ToLowerInvariant()) else token.Key
+                    key = word.Key)))
 
 let private phraseCandidates (view: ReadView<'id>) (words: Token[]) =
     words
@@ -523,7 +533,7 @@ let private naturalClauseDocuments (view: ReadView<'id>) = function
     | NaturalPhrase words ->
         phraseCandidates view words
         |> Set.filter (fun id ->
-            view.Documents.[id].Fields |> Array.exists (fun field -> exactPhraseMatches field words))
+            view.Documents.[id].Fields |> Array.exists (fun field -> exactPhraseMatches view.Collation field words))
 
 /// Matching terms retain their row sets separately from query occurrence counts.
 /// Repeated query words increase MySQL's document frequency, not a row's TF.
@@ -925,7 +935,7 @@ let rec private evalTerm
             let fields = view.Documents.[id].Fields
             let matches =
                 match proximity with
-                | None -> fields |> Array.exists (fun tokens -> exactPhraseMatches tokens words)
+                | None -> fields |> Array.exists (fun tokens -> exactPhraseMatches view.Collation tokens words)
                 | Some distance -> proximityMatches (Array.concat fields) words distance
 
             if matches then
