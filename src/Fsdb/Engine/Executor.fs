@@ -8124,29 +8124,29 @@ and private applyLateralJoin
             |> traverse (fun leftRow ->
                 runBody (Some leftRow)
                 |> Result.bind (fun (bodyColumns, bodyRows) ->
-                    let padding = Array.create bodyColumns.Length VNull
+                    let ctxFor =
+                        contextFactory
+                            store
+                            registry
+                            dbName
+                            (columnIndexOf (combinedColumnsSoFar @ bodyColumns))
+                            (qualifierRanges (sourcesSoFar @ [ alias, bodyColumns ]))
+                            outer
 
-                    let expanded =
-                        if bodyRows.IsEmpty && join.Kind = LeftJoin then
-                            [ Array.append leftRow padding ]
-                        else
-                            bodyRows |> List.map (Array.append leftRow)
-
-                    expanded
-                    |> traverse (fun combined ->
-                        let ctxFor =
-                            contextFactory
-                                store
-                                registry
-                                dbName
-                                (columnIndexOf (combinedColumnsSoFar @ bodyColumns))
-                                (qualifierRanges (sourcesSoFar @ [ alias, bodyColumns ]))
-                                outer
-
+                    bodyRows
+                    |> traverse (fun rightRow ->
+                        let combined = Array.append leftRow rightRow
                         evalExpr { ctxFor combined with Clause = OnClause } join.On
-                        |> Result.map (fun v -> combined, truthy v = Some true))
+                        |> Result.map (fun value -> combined, truthy value = Some true))
                     |> Result.mapError Err
-                    |> Result.map (fun checked' -> bodyColumns, checked' |> List.filter snd |> List.map fst)))
+                    |> Result.map (fun checkedRows ->
+                        let matches = checkedRows |> List.filter snd |> List.map fst
+                        let joinedRows =
+                            if matches.IsEmpty && join.Kind = LeftJoin then
+                                [ Array.append leftRow (Array.create bodyColumns.Length VNull) ]
+                            else
+                                matches
+                        bodyColumns, joinedRows)))
             |> Result.map (fun perLeftRow ->
                 let bodyColumns =
                     perLeftRow |> List.tryPick (fun (cols, _) -> if List.isEmpty cols then None else Some cols)

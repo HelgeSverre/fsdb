@@ -299,3 +299,8 @@ join matcher as independent sources. Query and lateral contexts remain separate
 so dependency evaluation does not widen ordinary ON scope. Regressions compare
 ordered rows and the invalid ON error. Broader correlated source combinations
 and dependent mutations remain outside this coverage.
+
+LEFT LATERAL joins apply ON to candidate rows before deciding whether to emit
+NULL padding. The oracle and regression cover false and NULL conditions, an
+empty lateral body with a false condition, and a condition matching only one
+preceding row. Padding bypasses ON, preserving every unmatched left row.

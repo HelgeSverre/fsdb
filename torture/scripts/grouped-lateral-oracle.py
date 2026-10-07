@@ -25,6 +25,14 @@ def verify(client, _writer):
     ]:
         query = "SELECT a.id,b.id,d.v FROM a LEFT JOIN (" + source + ") ON 1 ORDER BY a.id"
         oracle["expect"](source, client.query(query), "1\t1\t1\n2\tNULL\tNULL")
+    for body, condition, first_value in [
+        ("SELECT a.id AS v", "0", "NULL"),
+        ("SELECT a.id AS v WHERE 0", "0", "NULL"),
+        ("SELECT a.id AS v", "d.v=1", "1"),
+        ("SELECT a.id AS v", "NULL", "NULL"),
+    ]:
+        query = "SELECT a.id,d.v FROM a LEFT JOIN LATERAL (" + body + ") d ON " + condition + " ORDER BY a.id"
+        oracle["expect"](query, client.query(query), "1\t" + first_value + "\n2\tNULL")
     query = "SELECT a.id FROM a LEFT JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON d.v=a.id) ON a.id=b.id"
     result = subprocess.run([*client.process.args, "-e", "USE probe;" + query], capture_output=True, text=True, check=False)
     oracle["expect"]("ordinary ON scope", "ERROR 1054 (42S22)" in result.stderr, True)

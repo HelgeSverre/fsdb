@@ -49,7 +49,19 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "grouped lateral sources receive preceding rows without widening ON scope"
+        [ testCase "lateral left joins pad after ON matching"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              for body, condition, firstValue in
+                  [ "SELECT a.id AS v", "0", None
+                    "SELECT a.id AS v WHERE 0", "0", None
+                    "SELECT a.id AS v", "d.v=1", Some "1"
+                    "SELECT a.id AS v", "NULL", None ] do
+                  let sql = "SELECT a.id,d.v FROM a LEFT JOIN LATERAL (" + body + ") d ON " + condition + " ORDER BY a.id"
+                  Expect.equal (run sql)
+                      (ResultSet([ "id"; "v" ], [ [ Some "1"; firstValue ]; [ Some "2"; None ] ])) sql
+
+          testCase "grouped lateral sources receive preceding rows without widening ON scope"
           <| fun _ ->
               let run = groupedJoinQuery ()
               for source, values in
