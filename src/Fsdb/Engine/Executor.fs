@@ -7504,7 +7504,15 @@ and private resolveRelationBody store registry dbName columnNames body outer : R
                     |> List.map (fun branch -> selectColumnCollations store registry dbName branch cols)
                     |> List.reduce (List.map2 strictestUnionCollation)
 
-            let derivedColumns = deriveColumns cols collations metadata
+            let resultCollations =
+                if sameLength collations metadata then
+                    List.map2 (fun fallback (column: ColumnMetadata) ->
+                        column.CollationId
+                        |> Option.bind (int >> Collation.tryFindById)
+                        |> Option.defaultValue fallback) collations metadata
+                else
+                    collations
+            let derivedColumns = deriveColumns cols resultCollations metadata
 
             let sourceColumns =
                 match body with
@@ -8077,20 +8085,7 @@ and private applyLateralJoin
     (body: SelectOrUnion)
     (alias: string)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
-    let runBody outer : Result<ColumnDef list * Value[] list, QueryResult> =
-        let result =
-            match body with
-            | PlainSelect select -> runSelectStmt store registry dbName select outer
-            | UnionSelect(first, rest, orderBy, limit, offset) ->
-                runUnionStmtWithOuter store registry dbName first rest orderBy limit offset outer
-        match result with
-        | Err(code, message), _, _ -> Error(Err(code, message))
-        | ResultSet(names, _), metadata, typedRows ->
-            deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata
-            |> uniqueRelationColumns _.Name
-            |> Result.map (fun columns -> columns, typedRows)
-        | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
-        | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
+    let runBody outer = resolveRelationBody store registry dbName [] body outer
 
     let matchBody leftRows (bodyColumns, bodyRows) =
         let source =
@@ -12758,7 +12753,7 @@ and private runUnionStmtWithOuter
                 let combined = rowsSoFar @ branchPaired
                 Ok(cols, combined, branchTypes :: typesSoFar, collations, fsps, boundaries @ [ setOp, List.length combined ]))
 
-    match runSelectStmt store registry dbName first None with
+    match runBranch first with
     | Err(code, message), _, _ -> Err(code, message), [], []
     | Affected _, _, _ -> Err(1064, "UNION branch did not return a resultset"), [], []
     | MultipleResults _, _, _ -> nestedResultsError "a UNION branch", [], []

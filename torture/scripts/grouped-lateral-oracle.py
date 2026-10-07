@@ -68,6 +68,15 @@ def verify(client, _writer):
     result = subprocess.run([*client.process.args, "-e", "USE probe;" + query], capture_output=True, text=True, check=False)
     oracle["expect"]("ordinary ON scope", "ERROR 1054 (42S22)" in result.stderr, True)
 
+    client.query("CREATE TABLE text_values(s VARCHAR(10) COLLATE utf8mb4_bin);INSERT INTO text_values VALUES('A')")
+    for source, count in [
+        ("a JOIN LATERAL (SELECT text_values.s FROM text_values WHERE a.id=1) d ON 1", 1),
+        ("text_values JOIN LATERAL (SELECT text_values.s) d ON 1", 1),
+        ("a JOIN LATERAL (SELECT text_values.s FROM text_values WHERE a.id=1 UNION ALL SELECT text_values.s FROM text_values WHERE a.id=1) d ON 1", 2),
+    ]:
+        query = "SELECT d.s='a',COLLATION(d.s) FROM " + source
+        oracle["expect"](query, client.query(query), "\n".join(["0\tutf8mb4_bin"] * count))
+
 
 if __name__ == "__main__":
     oracle["run"](verify)

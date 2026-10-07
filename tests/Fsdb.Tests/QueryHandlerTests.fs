@@ -49,7 +49,23 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "right lateral joins exclude their left operand but retain outer correlation"
+        [ testCase "lateral results preserve binary collation through correlation and UNION"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE a(id INT)"
+                        "CREATE TABLE b(s VARCHAR(10) COLLATE utf8mb4_bin)"
+                        "INSERT INTO a VALUES(1)"
+                        "INSERT INTO b VALUES('A')" ]
+              for source, count in
+                  [ "a JOIN LATERAL (SELECT b.s FROM b WHERE a.id=1) d ON 1", 1
+                    "b JOIN LATERAL (SELECT b.s) d ON 1", 1
+                    "a JOIN LATERAL (SELECT b.s FROM b WHERE a.id=1 UNION ALL SELECT b.s FROM b WHERE a.id=1) d ON 1", 2 ] do
+                  let sql = "SELECT d.s='a' AS matched,COLLATION(d.s) AS collation_name FROM " + source
+                  Expect.equal (run sql)
+                      (ResultSet([ "matched"; "collation_name" ], List.replicate count [ Some "0"; Some "utf8mb4_bin" ])) sql
+
+          testCase "right lateral joins exclude their left operand but retain outer correlation"
           <| fun _ ->
               let run = groupedJoinQuery ()
               Expect.equal

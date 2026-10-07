@@ -312,3 +312,11 @@ left operand. The preceding scope includes enclosing queries and earlier sibling
 outside the grouped operand. Native fixtures cover right padding, merged
 USING/NATURAL output, and correlation boundaries. SQL and binary preparation
 reject left-operand dependencies while retaining legal preceding references.
+
+LATERAL and ordinary derived sources share relation-body materialization.
+Materialized columns retain available result collation IDs, including binary
+collation from an enclosing source. The native fixture checks case-sensitive
+comparison and COLLATION for local-source projections, direct correlated
+projections, and correlated UNION ALL bodies. Every UNION branch receives the
+same outer context, including the first branch. Broader computed metadata and
+optimizer-dependent materialization behavior remain subject to verification.
