@@ -43,8 +43,11 @@ Changing only the startup constant would silently retokenize historical data
 and disagree with the observed recovery behavior.
 
 Completing configurable sizing requires startup-option integration and
-validation of prepared XA and metadata-only DDL across size changes. Index
-rebuilds must deliberately replace historical context. The same distinction
+validation of prepared XA and metadata-only DDL across size changes. The
+[prepared-XA oracle](2026-10-07-ngram-xa-recovery.md) records missing pending
+ngram postings after MySQL restart even without a token-size change; it does
+not establish the tokenizer for a surviving prepared posting. Index rebuilds
+must deliberately replace historical context. The same distinction
 will matter when implementing configurable stopwords. Default-size snapshots
 must remain readable, and reported system variables must agree with the
 active startup configuration.
