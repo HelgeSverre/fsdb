@@ -30,6 +30,11 @@ type Tokenizer =
     | Words
     | Ngrams of size: int
 
+[<RequireQualifiedAccess>]
+type internal StopwordPolicy =
+    | BuiltIn
+    | Disabled
+
 let tryTokenizer = function
     | None -> Some Words
     | Some name when String.Equals(name, "ngram", StringComparison.OrdinalIgnoreCase) -> Some(Ngrams ngramTokenSize)
@@ -108,7 +113,8 @@ type private Token =
 
 type private Document =
     { Fields: Token[][]
-      Tokenizer: Tokenizer }
+      Tokenizer: Tokenizer
+      Stopwords: StopwordPolicy }
 
 type Index<'id when 'id: comparison> =
     private
@@ -116,7 +122,8 @@ type Index<'id when 'id: comparison> =
           Postings: Map<string, Map<'id, int>>
           PrefixPostings: Map<string, Map<'id, int>>
           Collation: Collation
-          Tokenizer: Tokenizer }
+          Tokenizer: Tokenizer
+          Stopwords: StopwordPolicy }
 
 /// Query state is separate from the index maintained for future commits.
 type internal ReadView<'id when 'id: comparison> =
@@ -126,6 +133,7 @@ type internal ReadView<'id when 'id: comparison> =
           PrefixPostings: Map<string, Map<'id, int>>
           Collation: Collation
           Tokenizer: Tokenizer
+          Stopwords: StopwordPolicy
           DocumentCount: int
           VisibleDocumentIds: Set<'id> option }
 
@@ -135,6 +143,7 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       PrefixPostings = index.PrefixPostings
       Collation = index.Collation
       Tokenizer = index.Tokenizer
+      Stopwords = index.Stopwords
       DocumentCount = index.Documents.Count
       VisibleDocumentIds = None }
 
@@ -169,25 +178,26 @@ let private tokensWith tokenizer collation text =
 
 let private runeLength (text: string) = text.EnumerateRunes() |> Seq.length
 
-let private containsNgramStopword (text: string) =
+let private containsNgramStopword policy (text: string) =
     let lower = text.ToLowerInvariant()
-    stopwords |> Set.exists (fun word -> lower.Contains(word, StringComparison.Ordinal))
+    policy = StopwordPolicy.BuiltIn
+    && (stopwords |> Set.exists (fun word -> lower.Contains(word, StringComparison.Ordinal)))
 
 /// A token that survives the configured length and stopword rules.
-let private isSearchable tokenizer (token: Token) =
+let private isSearchable policy tokenizer (token: Token) =
     match tokenizer with
     | Words ->
         token.Text.Length >= minTokenLength
         && token.Text.Length <= maxTokenLength
-        && not (Set.contains (token.Text.ToLowerInvariant()) stopwords)
+        && (policy = StopwordPolicy.Disabled || not (Set.contains (token.Text.ToLowerInvariant()) stopwords))
     | Ngrams size ->
-        runeLength token.Text = size && not (containsNgramStopword token.Text)
+        runeLength token.Text = size && not (containsNgramStopword policy token.Text)
 
 /// Boolean terms can address postings created with an earlier ngram size.
-let private isBooleanSearchable tokenizer token =
+let private isBooleanSearchable policy tokenizer token =
     match tokenizer with
-    | Words -> isSearchable Words token
-    | Ngrams _ -> not (containsNgramStopword token.Text)
+    | Words -> isSearchable policy Words token
+    | Ngrams _ -> not (containsNgramStopword policy token.Text)
 
 let private prefixKeys (collation: Collation) (token: Token) =
     let mutable length = 0
@@ -203,14 +213,15 @@ let private removePosting id key postings =
         let remaining = Map.remove id rows
         if remaining.IsEmpty then Map.remove key postings else Map.add key remaining postings
 
-let private emptyIndexWith tokenizer (collation: Collation) : Index<'id> =
+let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> =
     { Documents = Map.empty
       Postings = Map.empty
       PrefixPostings = Map.empty
       Collation = collation
-      Tokenizer = tokenizer }
+      Tokenizer = tokenizer
+      Stopwords = policy }
 
-let emptyIndex collation = emptyIndexWith Words collation
+let emptyIndex collation = emptyIndexWith StopwordPolicy.BuiltIn Words collation
 
 /// Selects the tokenizer for queries and future writes, retaining existing postings.
 let internal withTokenizer tokenizer (index: Index<'id>) =
@@ -231,7 +242,7 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
         let frequencies = tokens |> Array.countBy _.Key
         let prefixes =
             tokens
-            |> Array.filter (isSearchable document.Tokenizer)
+            |> Array.filter (isSearchable document.Stopwords document.Tokenizer)
             |> Array.collect (prefixKeys index.Collation)
             |> Array.countBy (fun key -> key)
 
@@ -255,7 +266,7 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
     let postingTokens =
         match tokenizer with
         | Words -> tokens
-        | Ngrams _ -> tokens |> Array.filter (isSearchable tokenizer)
+        | Ngrams _ -> tokens |> Array.filter (isSearchable document.Stopwords tokenizer)
 
     let postings =
         postingTokens
@@ -268,7 +279,7 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
 
     let prefixPostings =
         tokens
-        |> Array.filter (isSearchable tokenizer)
+        |> Array.filter (isSearchable document.Stopwords tokenizer)
         |> Array.collect (prefixKeys index.Collation)
         |> Array.countBy (fun key -> key)
         |> Array.fold
@@ -285,7 +296,7 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
 let internal addDocumentFieldsWith tokenizer id texts (index: Index<'id>) =
     // Phrase positions retain tokens omitted from ngram postings.
     let fields = texts |> List.map (tokensWith tokenizer index.Collation) |> List.toArray
-    addDocumentData id { Fields = fields; Tokenizer = tokenizer } index
+    addDocumentData id { Fields = fields; Tokenizer = tokenizer; Stopwords = index.Stopwords } index
 
 let internal sameDocument id (left: Index<'id>) (right: Index<'id>) =
     match Map.tryFind id left.Documents, Map.tryFind id right.Documents with
@@ -316,7 +327,7 @@ let internal documentTokenizer id (index: Index<'id>) =
 let internal buildIndexWithDocumentTokenizers tokenizer collation documents =
     documents
     |> Seq.fold (fun index (id, documentTokenizer, fields) ->
-        addDocumentFieldsWith documentTokenizer id fields index) (emptyIndexWith tokenizer collation)
+        addDocumentFieldsWith documentTokenizer id fields index) (emptyIndexWith StopwordPolicy.BuiltIn tokenizer collation)
 
 let buildIndexWithFields tokenizer (collation: Collation) (documents: ('id * string list) seq) : Index<'id> =
     documents
@@ -370,7 +381,7 @@ let private phraseCandidates (view: ReadView<'id>) (words: Token[]) =
     words
     // InnoDB omits short terms and stopwords from postings but retains their
     // positions after the first searchable word in a phrase.
-    |> Array.filter (isBooleanSearchable view.Tokenizer)
+    |> Array.filter (isBooleanSearchable view.Stopwords view.Tokenizer)
     |> Array.distinctBy _.Key
     |> Array.map (fun word ->
         view.Postings
@@ -394,7 +405,7 @@ let private naturalTerms (view: ReadView<'id>) (query: string) : string[] =
     let tokens = queryTokens view query
     let terms =
         match view.Tokenizer with
-        | Words -> tokens |> Array.filter (isSearchable view.Tokenizer)
+        | Words -> tokens |> Array.filter (isSearchable view.Stopwords view.Tokenizer)
         // A stopped spelling can still match an indexed collation equivalent.
         | Ngrams _ -> tokens
 
@@ -428,7 +439,7 @@ type private NaturalClause =
 
 let private naturalWordClauses (view: ReadView<'id>) (query: string) =
     let words text = tokensWith Words view.Collation text
-    let plain text = words text |> Array.filter (isSearchable Words) |> Array.map (fun word -> NaturalWord word.Key)
+    let plain text = words text |> Array.filter (isSearchable view.Stopwords Words) |> Array.map (fun word -> NaturalWord word.Key)
     let clauses = ResizeArray<NaturalClause>()
     let mutable start = 0
     while start < query.Length do
@@ -440,15 +451,15 @@ let private naturalWordClauses (view: ReadView<'id>) (query: string) =
         else
             clauses.AddRange(plain (query.Substring(start, opening - start)))
             words (query.Substring(opening + 1, closing - opening - 1))
-            |> Array.skipWhile (isSearchable Words >> not)
+            |> Array.skipWhile (isSearchable view.Stopwords Words >> not)
             |> NaturalPhrase
             |> clauses.Add
             start <- closing + 1
     clauses.ToArray()
 
-let private naturalClauseKeys = function
+let private naturalClauseKeys policy = function
     | NaturalWord key -> [| key |]
-    | NaturalPhrase words -> words |> Array.filter (isSearchable Words) |> Array.map _.Key
+    | NaturalPhrase words -> words |> Array.filter (isSearchable policy Words) |> Array.map _.Key
 
 let private needsNaturalWordEvaluation (view: ReadView<'id>) (query: string) =
     match view.Tokenizer with
@@ -456,7 +467,7 @@ let private needsNaturalWordEvaluation (view: ReadView<'id>) (query: string) =
     | Words ->
         if query.Contains '"' then true
         else
-            let terms = queryTokens view query |> Array.filter (isSearchable Words)
+            let terms = queryTokens view query |> Array.filter (isSearchable view.Stopwords Words)
             terms.Length <> (terms |> Array.distinctBy _.Key).Length
 
 type private NaturalMatches<'id when 'id: comparison> =
@@ -482,12 +493,12 @@ let private naturalWordMatches candidateIds (view: ReadView<'id>) clauses =
         let ids = candidateIds |> Option.map (Set.intersect ids) |> Option.defaultValue ids
         if ids.IsEmpty then matches
         else
-            naturalClauseKeys clause
+            naturalClauseKeys view.Stopwords clause
             |> Array.fold (fun matches key ->
                 Map.change key (fun previous ->
                     Some(Set.union ids (Option.defaultValue Set.empty previous))) matches) matches
 
-    { Occurrences = clauses |> Array.collect naturalClauseKeys |> Array.countBy id |> Map.ofArray
+    { Occurrences = clauses |> Array.collect (naturalClauseKeys view.Stopwords) |> Array.countBy id |> Map.ofArray
       Documents = clauses |> Array.fold addClause Map.empty }
 
 let private scoreNaturalWordMatches (view: ReadView<'id>) matches =
@@ -626,7 +637,7 @@ let private addBooleanContribution operator contribution state =
 let private tryBooleanScore state =
     if state.Matched && not state.Excluded then Some state.Score else None
 
-let private parseBooleanQuery tokenizer (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
+let private parseBooleanQuery policy tokenizer (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
     let mutable i = 0
     let len = query.Length
 
@@ -655,8 +666,8 @@ let private parseBooleanQuery tokenizer (collation: Collation) (query: string) :
         words
         |> Array.skipWhile (fun word ->
             match tokenizer with
-            | Words -> not (isSearchable tokenizer word)
-            | Ngrams _ -> containsNgramStopword word.Text)
+            | Words -> not (isSearchable policy tokenizer word)
+            | Ngrams _ -> containsNgramStopword policy word.Text)
 
     // Cap parenthesis nesting so a query like "((((...))))" with thousands
     // of groups can't overflow the recursive-descent stack (a
@@ -732,7 +743,7 @@ let private parseBooleanQuery tokenizer (collation: Collation) (query: string) :
                             | Words -> BWord(w, prefix)
                             | Ngrams size when runeLength w.Text < size -> BWord(w, prefix)
                             | Ngrams _ ->
-                                let words = tokensWith tokenizer collation w.Text |> Array.skipWhile (isSearchable tokenizer >> not)
+                                let words = tokensWith tokenizer collation w.Text |> Array.skipWhile (isSearchable policy tokenizer >> not)
                                 match words with
                                 | [| word |] -> BWord(word, false)
                                 | _ -> BPhrase(words, None)
@@ -837,7 +848,7 @@ let rec private evalTerm
     (term: BoolTerm)
     : Map<'id, float> =
     match term with
-    | BWord(term, false) when not (isBooleanSearchable view.Tokenizer term) ->
+    | BWord(term, false) when not (isBooleanSearchable view.Stopwords view.Tokenizer term) ->
         // Rejected words can still occupy positions inside a longer phrase.
         Map.empty
     | BWord(term, false) ->
@@ -859,7 +870,7 @@ let rec private evalTerm
 
         let terms =
             words
-            |> Array.filter (isBooleanSearchable view.Tokenizer)
+            |> Array.filter (isBooleanSearchable view.Stopwords view.Tokenizer)
             |> Array.distinctBy _.Key
             |> Array.choose (fun word ->
                 view.Postings
@@ -913,7 +924,7 @@ let private visibleBooleanScore score =
 
 let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =
     let candidateIds = candidatesInView candidateIds view
-    evalNodes candidateIds view (parseBooleanQuery view.Tokenizer view.Collation query)
+    evalNodes candidateIds view (parseBooleanQuery view.Stopwords view.Tokenizer view.Collation query)
     |> Map.map (fun _ score -> visibleBooleanScore score)
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
@@ -934,12 +945,12 @@ let internal tryFlatBooleanScoresDictionaryInView
         | (op, BWord(term, prefix)) :: rest -> flatTerms ((op, term, prefix) :: found) rest
         | _ -> None
 
-    parseBooleanQuery view.Tokenizer view.Collation query
+    parseBooleanQuery view.Stopwords view.Tokenizer view.Collation query
     |> flatTerms []
     |> Option.map (fun terms ->
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key view.PrefixPostings
-            elif isBooleanSearchable view.Tokenizer term then Map.tryFind term.Key view.Postings
+            elif isBooleanSearchable view.Stopwords view.Tokenizer term then Map.tryFind term.Key view.Postings
             else None
 
         let postings =
@@ -1091,7 +1102,7 @@ let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: st
         |> Array.truncate queryExpansionLimit
         |> Array.collect (fun (id, _) ->
             let document = view.Documents.[id]
-            Array.concat document.Fields |> Array.filter (isSearchable document.Tokenizer))
+            Array.concat document.Fields |> Array.filter (isSearchable document.Stopwords document.Tokenizer))
         |> Array.map _.Key
 
     match clauseQuery with
