@@ -155,3 +155,33 @@ partitioned table returns 1178; permissive unknown ALTER engines retain InnoDB.
 Engine requests are transient syntax. Validation clears them before schema
 publication, and accepted partitions use InnoDB. WAL and snapshot recovery
 retain names and comments without changing the persistence format.
+
+## Row hints and node groups
+
+Status: open. Baseline `fd771308` rejects each of `MAX_ROWS=100`,
+`MIN_ROWS=10`, and `NODEGROUP=7` in a partition definition with 1064 / 42000.
+The maintained [hints oracle](../scripts/hash-partition-hints-oracle.py) passes
+on disposable native MySQL 8.4.11:
+
+```sh
+python3 torture/scripts/hash-partition-hints-oracle.py
+```
+
+`MAX_ROWS` and `MIN_ROWS` survive `SHOW CREATE TABLE` independently. Zero is
+omitted, repeated clauses use the last value, and `MIN_ROWS > MAX_ROWS` is
+accepted. Both accept 9223372036854775807; 9223372036854775808 and negative
+values fail with 1064 / 42000 without publishing a table. Equals signs are
+optional.
+
+`NODEGROUP` accepts unsigned 64-bit input and retains its low 16 bits.
+65535 means `default` in metadata and is omitted from rendered definitions;
+65536 becomes explicit zero. Zero differs from the default. Values above
+18446744073709551615 and negative values fail with 1064 / 42000. Repeated
+clauses use the last value.
+
+Rendering orders NODEGROUP before MAX_ROWS before MIN_ROWS before ENGINE.
+ADD retains the new values, COALESCE preserves surviving definitions, and
+named REORGANIZE clears omitted values in replacement definitions. No-list
+REORGANIZE retains the first partition's options. The oracle checks all six
+fixture rows after each alteration. These are retained schema properties;
+accepting their syntax without storing them would still diverge from MySQL.
