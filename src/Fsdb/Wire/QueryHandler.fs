@@ -5181,8 +5181,8 @@ let private preparedMetadataCore
         | Ok() ->
             let parameters = PreparedMetadata.parameterDefinitions store registry schema statement parameterCount
             let columns = Executor.statementColumns store registry schema statement |> Option.defaultValue []
-            let origins =
-                Executor.statementColumnOrigins store schema statement
+            let sources =
+                Executor.statementColumnSources store schema statement
                 |> Option.filter (fun values -> sameLength values columns)
                 |> Option.defaultValue (List.replicate columns.Length None)
 
@@ -5193,15 +5193,26 @@ let private preparedMetadataCore
 
             let resultColumns =
                 List.map3
-                    (fun (column: ColumnDef) origin numericMetadata ->
+                    (fun (column: ColumnDef) (source: Executor.ColumnSource option) numericMetadata ->
+                        let origin = source |> Option.map _.Origin
                         let metadata =
                             origin
                             |> Option.bind (fun source ->
                                 Storage.tableSnapshot store source.Schema source.OriginalTable
                                 |> Result.toOption
-                                |> Option.map (fun table -> ColumnWire.metadataOfTableColumn table.Indexes column))
+                                |> Option.bind (fun table ->
+                                    table.Columns
+                                    |> List.tryFind (fun physical -> physical.Name.Equals(source.OriginalName, System.StringComparison.OrdinalIgnoreCase))
+                                    |> Option.map (fun physical ->
+                                        ColumnWire.metadataOfColumn column
+                                        |> ColumnWire.withSourceColumnFlags table.Indexes physical)))
                             |> Option.orElse numericMetadata
                             |> Option.defaultWith (fun () -> ColumnWire.metadataOfColumn column)
+
+                        let metadata =
+                            match source with
+                            | Some(Executor.MaterializedColumn _) -> ColumnWire.withoutSourceColumnFlags metadata
+                            | _ -> metadata
 
                         { Name = column.Name
                           Metadata =
@@ -5209,7 +5220,7 @@ let private preparedMetadataCore
                                 Origin = origin } }
                         : Fsdb.Protocol.ColumnDef)
                     columns
-                    origins
+                    sources
                     numericDescriptors
 
             parameters, resultColumns

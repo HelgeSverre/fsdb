@@ -262,6 +262,25 @@ is optional in an enclosing join.
 Schema-only preparation and execution share the traversal of optional source
 qualifiers. Execution clears NOT_NULL without discarding the physical source's
 key flags. Regressions cover explicit projections, merged stars, LEFT/RIGHT
-boundaries, and empty results. Full flag parity remains open: prepared metadata
-still differs from execution in primary-key and related origin flags. Computed
-expressions and broader nested-source metadata also need independent coverage.
+boundaries, and empty results. Computed expressions and broader nested-source metadata still need independent
+coverage; the prepared source-flag boundary is covered below.
+
+## Prepared physical and materialized source flags
+
+The [prepared source-flag oracle](../scripts/prepared-source-flags-oracle.py)
+reads native COM_STMT_PREPARE column-definition packets. Direct projections
+retain primary-key, unique/index, auto-increment, and no-default flags through
+aliases. Optional outer-join columns drop NOT_NULL independently. Simple derived
+projections retain these source flags, but LIMIT-derived tables and CTEs drop
+them while retaining their physical origin names.
+
+Column-source metadata distinguishes physical from materialized values. CTE
+bindings retain that distinction after execution removes their WITH clause.
+Preparation reads physical flags from the original column name rather than the
+projection alias; materialized outputs clear source flags during preparation
+and execution. The native fixture and regression cover LIMIT, DISTINCT, GROUP BY, HAVING,
+and window boundaries. Scalar subqueries in the tested projections retain
+physical source flags. Output names remain independent of inferred types, so
+an unknown scalar descriptor does not discard a neighboring column's origin.
+Optimizer-dependent materialization choices and broader
+interactions with computed results remain subject to metadata verification.

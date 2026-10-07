@@ -187,6 +187,17 @@ let withIndexFlags (indexes: IndexDef list) (columnName: string) (metadata: Colu
 let metadataOfTableColumn (indexes: IndexDef list) (column: ColumnDef) =
     metadataOfColumn column |> withIndexFlags indexes column.Name
 
+let private sourceColumnFlagMask =
+    PrimaryKeyFlag ||| UniqueKeyFlag ||| MultipleKeyFlag ||| PartKeyFlag ||| AutoIncrementFlag ||| NoDefaultValueFlag ||| OnUpdateNowFlag
+
+let withoutSourceColumnFlags (metadata: ColumnMetadata) =
+    { metadata with Flags = metadata.Flags &&& ~~~sourceColumnFlagMask }
+
+/// Direct projections retain physical source flags independently of result nullability.
+let withSourceColumnFlags indexes source (metadata: ColumnMetadata) =
+    let sourceMetadata = metadataOfTableColumn indexes source
+    { metadata with Flags = (metadata.Flags &&& ~~~sourceColumnFlagMask) ||| (sourceMetadata.Flags &&& sourceColumnFlagMask) }
+
 /// Returns MySQL's canonical parameter descriptor for a contextual SQL type.
 let parameterMetadataOfType (ty: ColumnType) : ColumnMetadata =
     let binary typeId length decimals =

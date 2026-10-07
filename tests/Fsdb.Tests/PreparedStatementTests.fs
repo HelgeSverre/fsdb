@@ -33,7 +33,43 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "outer join metadata clears nullability on optional grouped sources"
+        [ testCase "prepared direct columns retain native source flags through aliases"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE t(id INT PRIMARY KEY AUTO_INCREMENT,u INT NOT NULL UNIQUE,k INT NOT NULL,KEY(k))"; "CREATE TABLE a(id INT PRIMARY KEY)" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              let mask = NotNullFlag ||| PrimaryKeyFlag ||| UniqueKeyFlag ||| MultipleKeyFlag ||| AutoIncrementFlag ||| NoDefaultValueFlag ||| PartKeyFlag
+              for sql, expected in
+                  [ "SELECT id,u,k FROM t", [ 16899us; 20485us; 20489us ]
+                    "SELECT id AS renamed,u AS un,k AS kn FROM t", [ 16899us; 20485us; 20489us ]
+                    "SELECT a.id,t.id,t.u,t.k FROM a LEFT JOIN t ON a.id=t.id", [ 20483us; 16898us; 20484us; 20488us ]
+                    "SELECT id FROM (SELECT id FROM t) d", [ 16899us ]
+                    "SELECT id FROM (SELECT DISTINCT id FROM t) d", [ 1us ]
+                    "SELECT id FROM (SELECT id FROM t GROUP BY id) d", [ 1us ]
+                    "SELECT id FROM (SELECT id FROM t HAVING id>0) d", [ 1us ]
+                    "SELECT id FROM (SELECT id,ROW_NUMBER() OVER() AS rn FROM t) d", [ 1us ]
+                    "SELECT id FROM (SELECT id,(SELECT 1) AS n FROM t) d", [ 16899us ]
+                    "SELECT id FROM (SELECT id,(SELECT MAX(id) FROM a) AS n FROM t) d", [ 16899us ]
+                    "SELECT id FROM (SELECT id FROM t LIMIT 1) d", [ 1us ]
+                    "WITH d AS (SELECT id,(SELECT 1) AS n FROM t) SELECT id FROM d", [ 16899us ]
+                    "WITH d AS (SELECT id FROM t LIMIT 1) SELECT id FROM d", [ 1us ] ] do
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.Flags &&& mask)) expected
+                      ("source flags match native COM_STMT_PREPARE: " + sql)
+              for sql in
+                  [ "SELECT id FROM (SELECT id FROM t LIMIT 1) d"
+                    "WITH d AS (SELECT id FROM t LIMIT 1) SELECT id FROM d" ] do
+                  let executed, result = handle session sql
+                  match result with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+                  Expect.equal (executed.LastResultColumnMetadata |> List.map (fun column -> column.Flags &&& mask)) [ NotNullFlag ]
+                      "materialized execution keeps origin names without physical key flags"
+
+          testCase "outer join metadata clears nullability on optional grouped sources"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               for sql in [ "CREATE TABLE a(id INT PRIMARY KEY)"; "CREATE TABLE b(id INT PRIMARY KEY)"; "CREATE TABLE c(id INT PRIMARY KEY)"; "INSERT INTO a VALUES(1)" ] do

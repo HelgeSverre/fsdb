@@ -577,10 +577,20 @@ let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
 
 let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMemo statementMemo
 
+type ColumnSource =
+    | PhysicalColumn of ColumnOrigin
+    | MaterializedColumn of ColumnOrigin
+    member source.Origin =
+        match source with PhysicalColumn origin | MaterializedColumn origin -> origin
+
+let private mapColumnSourceOrigin mapping = function
+    | PhysicalColumn origin -> PhysicalColumn(mapping origin)
+    | MaterializedColumn origin -> MaterializedColumn(mapping origin)
+
 type private CteBinding =
     { Columns: ColumnDef list
       Rows: Lazy<Result<Value[] list, QueryResult>>
-      Origins: ColumnOrigin option list
+      Origins: ColumnSource option list
       StatementStable: bool
       PhysicalProjection: PhysicalProjection option }
 
@@ -2746,17 +2756,25 @@ and private selectProjectionColumns (store: Store) (dbName: string) (select: Sel
             | Some value, Some name -> Some { value with Name = name }
             | _ -> column))
 
+let private sourceForBody (body: SelectStmt) (source: ColumnSource) =
+    let materialized =
+        body.Limit.IsSome || body.Offset.IsSome || body.Distinct
+        || not body.GroupBy.IsEmpty || body.Having.IsSome || body.Rollup
+        || body.Projections |> List.exists (fun (expression, _) ->
+            containsAggregate Functions.builtins expression || not (collectWindowFuncs expression).IsEmpty)
+    if materialized then MaterializedColumn source.Origin else source
+
 type private OutputColumnSource =
     { Qualifier: string
-      Columns: ColumnDef list
-      Origins: ColumnOrigin option list }
+      Columns: string list
+      Origins: ColumnSource option list }
 
-let rec private outputColumnOrigins
+let rec private outputColumnSources
     (store: Store)
     (dbName: string)
     (qualifiers: Map<string, ColumnDef list * int>)
     (select: SelectStmt)
-    : ColumnOrigin option list =
+    : ColumnSource option list =
     let qualifierColumns (qualifier: string) =
         qualifiers
         |> Map.tryFind (qualifier.ToLowerInvariant())
@@ -2772,6 +2790,27 @@ let rec private outputColumnOrigins
         | FromTable table -> leaf (table.Alias |> Option.defaultValue table.Table)
         | FromSubquery(_, alias) | FromLateral(_, alias) | FromJsonTable(_, _, _, alias) -> leaf alias
 
+    let rec namesForBody = function
+        | UnionSelect(first, _, _, _, _) -> namesForSelect first
+        | PlainSelect body -> namesForSelect body
+    and namesForSelect body =
+        let sources =
+            (body.From |> Option.toList) @ (body.Joins |> List.map _.Table)
+            |> List.collect FromItem.leaves
+        let namesForSource = function
+            | FromSubquery(nested, _) | FromLateral(nested, _) -> namesForBody nested
+            | source -> selectSourceColumns store dbName source |> List.choose id |> List.map _.Name
+        let namesForQualifier qualifier =
+            sources |> List.tryFind (sourceHasQualifier qualifier)
+            |> Option.map namesForSource |> Option.defaultValue []
+        body.Projections |> List.collect (fun (expression, alias) ->
+            match expression with
+            | Star None ->
+                FromItem.logicalSelectColumns namesForQualifier body |> Result.toOption
+                |> Option.map (List.map _.Name) |> Option.defaultValue []
+            | Star(Some qualifier) -> namesForQualifier qualifier
+            | _ -> [ alias |> Option.defaultValue (exprLabel expression) ])
+
     let alignOrigins columns origins =
         if sameLength columns origins then
             origins
@@ -2779,7 +2818,7 @@ let rec private outputColumnOrigins
             List.replicate columns.Length None
 
     let withQualifier qualifier =
-        Option.map (fun (origin: ColumnOrigin) -> { origin with Table = qualifier })
+        Option.map (mapColumnSourceOrigin (fun origin -> { origin with Table = qualifier }))
 
     let rec originsForBody qualifier columns =
         function
@@ -2788,16 +2827,17 @@ let rec private outputColumnOrigins
                 (body.From |> Option.toList) @ (body.Joins |> List.map _.Table)
                 |> List.collect sourceColumns
 
-            outputColumnOrigins store dbName (qualifierRangesOf sources) body
+            outputColumnSources store dbName (qualifierRangesOf sources) body
+            |> List.map (Option.map (sourceForBody body))
             |> List.map (withQualifier qualifier)
         | UnionSelect _ ->
             columns
             |> List.map (fun _ ->
-                Some
+                Some(MaterializedColumn
                     { Schema = ""
                       Table = qualifier
                       OriginalTable = ""
-                      OriginalName = "" })
+                      OriginalName = "" }))
 
     let localCtes = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), cte) |> Map.ofList
 
@@ -2831,15 +2871,20 @@ let rec private outputColumnOrigins
                 else
                     columns
                     |> List.map (fun column ->
-                        Some
+                        Some(PhysicalColumn
                             { Schema = table.Database |> Option.defaultValue dbName
                               Table = qualifier
                               OriginalTable = table.Table
-                              OriginalName = column.Name })
-            [ sourceWithOrigins qualifier columns origins ]
+                              OriginalName = column.Name }))
+            let names =
+                match localCte with
+                | Some cte when not cte.CteColumns.IsEmpty -> cte.CteColumns
+                | Some cte -> namesForBody cte.Body
+                | None -> columns |> List.map _.Name
+            [ sourceWithOrigins qualifier names origins ]
         | FromSubquery(body, alias) | FromLateral(body, alias) ->
-            [ sourceWithOrigins alias (qualifierColumns alias) (originsForBody alias (qualifierColumns alias) body) ]
-        | FromJsonTable(_, _, _, alias) -> [ sourceWithOrigins alias (qualifierColumns alias) [] ]
+            [ sourceWithOrigins alias (namesForBody body) (originsForBody alias (qualifierColumns alias) body) ]
+        | FromJsonTable(_, _, _, alias) -> [ sourceWithOrigins alias (qualifierColumns alias |> List.map _.Name) [] ]
 
     let sources = sourceItems |> List.collect sourcesOf
 
@@ -2849,7 +2894,7 @@ let rec private outputColumnOrigins
         source.Columns
         |> List.indexed
         |> List.choose (fun (index, column) ->
-            if equalsIgnoreCase column.Name name then Some(originAt source index) else None)
+            if equalsIgnoreCase column name then Some(originAt source index) else None)
 
     let byQualifier qualifier name =
         sources
@@ -2863,7 +2908,7 @@ let rec private outputColumnOrigins
         FromItem.logicalSelectColumns
             (fun qualifier ->
                 sources |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier qualifier)
-                |> Option.map (fun source -> source.Columns |> List.map _.Name)
+                |> Option.map _.Columns
                 |> Option.defaultValue [])
             select
         |> Result.toOption
@@ -6061,12 +6106,13 @@ and private outputColumnWireOverridesFor
                   | Some ty -> Some ty
                   | None -> metadataOfExpr ctx expr ])
 
-    let origins = outputColumnOrigins ctx.Store ctx.DbName ctx.Qualifiers select
+    let sources = outputColumnSources ctx.Store ctx.DbName ctx.Qualifiers select
     let nullable = nullableJoinQualifiers select
 
-    if sameLength origins overrides then
+    if sameLength sources overrides then
         List.map2
-            (fun origin metadata ->
+            (fun (source: ColumnSource option) (metadata: ColumnMetadata option) ->
+                let origin = source |> Option.map _.Origin
                 metadata
                 |> Option.map (fun value ->
                     let value =
@@ -6077,12 +6123,16 @@ and private outputColumnWireOverridesFor
                             |> Option.map (fun table -> ColumnWire.withIndexFlags table.Indexes source.OriginalName value))
                         |> Option.defaultValue value
 
+                    let value =
+                        match source with
+                        | Some(MaterializedColumn _) -> ColumnWire.withoutSourceColumnFlags value
+                        | _ -> value
                     let flags =
                         if origin |> Option.exists (fun source -> Set.contains (source.Table.ToLowerInvariant()) nullable) then
                             value.Flags &&& ~~~NotNullFlag
                         else value.Flags
                     { value with Flags = flags; Origin = origin }))
-            origins
+            sources
             overrides
     else
         overrides
@@ -9554,16 +9604,16 @@ and private withCteScope
                         |> List.collect FromItem.leaves
                         |> List.choose (fun source -> FromItem.tryQualifier source |> Option.map (fun qualifier -> qualifier, selectSourceColumns store dbName source |> List.choose id))
 
-                    outputColumnOrigins store dbName (qualifierRanges sources) select
-                    |> List.map (Option.map (fun origin -> { origin with Table = cte.CteName }))
+                    outputColumnSources store dbName (qualifierRanges sources) select
+                    |> List.map (Option.map (sourceForBody select >> mapColumnSourceOrigin (fun origin -> { origin with Table = cte.CteName })))
                 | UnionSelect _ ->
                     columns
                     |> List.map (fun _ ->
-                        Some
+                        Some(MaterializedColumn
                             { Schema = ""
                               Table = cte.CteName
                               OriginalTable = ""
-                              OriginalName = "" })
+                              OriginalName = "" }))
 
             if sameLength origins columns then origins else List.replicate columns.Length None
 
@@ -18048,15 +18098,18 @@ let statementNumericMetadata store registry schema statement =
 
 /// PREPARE must expose the same physical source fields as later execution
 /// without evaluating the statement to recover them.
-let statementColumnOrigins (store: Store) (schema: string) (statement: Statement) : ColumnOrigin option list option =
+let statementColumnSources (store: Store) (schema: string) (statement: Statement) : ColumnSource option list option =
     match statement with
     | Select select when not (SelectStmt.hasDestination select) ->
         let sources = statementSources store schema select
         let rewritten =
             if select.Joins |> List.exists joinCoalescesColumns then rewriteNaturalSelect select sources
             else Ok select
-        rewritten |> Result.toOption |> Option.map (outputColumnOrigins store schema (qualifierRanges sources))
+        rewritten |> Result.toOption |> Option.map (outputColumnSources store schema (qualifierRanges sources))
     | _ -> None
+
+let statementColumnOrigins store schema statement =
+    statementColumnSources store schema statement |> Option.map (List.map (Option.map (fun (source: ColumnSource) -> source.Origin)))
 
 // Storage uses zero and None when a statement assigns no id, preserving the
 // connection's previous OK-packet and LAST_INSERT_ID values in that case.
