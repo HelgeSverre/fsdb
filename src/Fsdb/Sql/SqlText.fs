@@ -140,7 +140,7 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
 
     match expr with
     | ApproximateLiteral(_, spelling) -> spelling
-    | Lit value -> literal value
+    | Lit value | ConnectionLiteral(value, _) -> literal value
     | IntroducedLiteral(value, charset) ->
         let bytes =
             match value with

@@ -1522,7 +1522,7 @@ let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
         [| vs "def"; vs view.Schema; vs view.Name; vs (canonicalViewDefinition catalog view.Schema true view.Definition); vs view.CheckOption; vs (if isUpdatableView catalog view.Schema view.Definition then "YES" else "NO"); vs view.Definer
-           vs view.SecurityType; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
+           vs view.SecurityType; vs "utf8mb4"; vs view.CollationConnection |])
 
 let private viewTableUsageColumns =
     [ col "VIEW_CATALOG" (TVarchar 64)

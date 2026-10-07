@@ -130,6 +130,8 @@ type Expr =
     | Lit of Value
     /// A charset introducer labels literal bytes independently of the connection.
     | IntroducedLiteral of value: Value * charset: string
+    /// Ordinary strings retain the connection collation used when parsed.
+    | ConnectionLiteral of value: Value * collation: string
     /// Scientific notation retains its spelling for projection names and wire width.
     | ApproximateLiteral of value: float * spelling: string
     // A `?` parameter placeholder in a prepared statement, numbered by its
@@ -1276,6 +1278,6 @@ and DeleteStmt =
 
 /// Literal values are independent of the spelling retained for result metadata.
 let (|LiteralValue|_|) = function
-    | Lit value | IntroducedLiteral(value, _) -> Some value
+    | Lit value | IntroducedLiteral(value, _) | ConnectionLiteral(value, _) -> Some value
     | ApproximateLiteral(value, _) -> Some(VDouble value)
     | _ -> None

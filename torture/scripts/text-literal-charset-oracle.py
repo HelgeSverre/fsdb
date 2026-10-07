@@ -43,6 +43,12 @@ cases = [
     ("SELECT HEX(CONCAT(_latin1'é',_latin1'x')) AS h,LENGTH(CONCAT(_latin1'é',_latin1'x')) AS n", 'h\tn\nC3A978\t3\n'),
     ("SELECT _utf8mb3'ÅGE' = 'age' AS v,COLLATION(CONCAT(_utf8mb3'a',_utf8mb4'b')) AS c", 'v\tc\n1\tutf8mb4_0900_ai_ci\n'),
     ("CREATE TABLE intro_recovery(id INT,cs VARCHAR(20) GENERATED ALWAYS AS (HEX(_latin1'é')) STORED);INSERT INTO intro_recovery(id) VALUES(1);SELECT cs FROM intro_recovery", 'cs\nC3A9\n'),
+    ("SET NAMES latin1 COLLATE latin1_bin;CREATE VIEW identity_view AS SELECT 'a' AS v;SET NAMES utf8mb4;SELECT (SELECT v FROM (SELECT 'inner' AS v) t) AS nested,v FROM identity_view", 'nested\tv\ninner\ta\n'),
+    ("SET NAMES latin1 COLLATE latin1_bin;CREATE ALGORITHM=TEMPTABLE VIEW materialized_literal AS SELECT 'a' AS v;SET NAMES utf8mb4;SELECT CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM materialized_literal", 'cs\tco\tc\nlatin1\tlatin1_bin\t4\n'),
+    ('SELECT identity_view.*,COERCIBILITY(v) AS c FROM identity_view', 'v\tc\na\t4\n'),
+    ("SET NAMES latin1 COLLATE latin1_bin;CREATE TABLE captured_generated(id INT,eq INT GENERATED ALWAYS AS ('a'='A') STORED);SET NAMES utf8mb4;INSERT INTO captured_generated(id) VALUES(1);SELECT eq FROM captured_generated", 'eq\n1\n'),
+    ("SET NAMES latin1 COLLATE latin1_bin;CREATE TABLE schema_context(id INT,eq INT DEFAULT ('a'='A'),explicit_eq INT GENERATED ALWAYS AS ('a' COLLATE latin1_bin='A') STORED,CHECK('a'='A'));INSERT INTO schema_context(id) VALUES(1);SELECT eq,explicit_eq FROM schema_context", 'eq\texplicit_eq\n1\t0\n'),
+    ("SELECT COLLATION_CONNECTION FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='literal_view'", 'COLLATION_CONNECTION\nlatin1_bin\n'),
 ]
 
 

@@ -440,6 +440,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     match expr with
     | Lit v -> w.WriteByte 0x01uy; encodeValue w v
     | IntroducedLiteral(value, charset) -> w.WriteByte 0x1Buy; encodeValue w value; writeStr w charset
+    | ConnectionLiteral(value, collation) -> w.WriteByte 0x1Cuy; encodeValue w value; writeStr w collation
     | ApproximateLiteral(value, spelling) ->
         w.WriteByte 0x19uy
         w.WriteDoubleLE value
@@ -558,6 +559,7 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
     | 0x13uy -> Cast(nested (), decodeColumnType r)
     | 0x1Auy -> BinaryCast(nested ())
     | 0x1Buy -> IntroducedLiteral(decodeValue r, readStr r)
+    | 0x1Cuy -> ConnectionLiteral(decodeValue r, readStr r)
     | 0x14uy -> Collate(nested (), readStr r)
     | 0x15uy -> Star(readOptStr r)
     | 0x16uy ->

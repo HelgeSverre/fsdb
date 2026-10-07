@@ -26,7 +26,8 @@ type ParserOptions =
       HighNotPrecedence: bool
       NoUnsignedSubtraction: bool
       RealAsFloat: bool
-      NoBackslashEscapes: bool }
+      NoBackslashEscapes: bool
+      LiteralCollation: string option }
 
 let defaultOptions: ParserOptions =
     { AnsiQuotes = false
@@ -35,7 +36,8 @@ let defaultOptions: ParserOptions =
       HighNotPrecedence = false
       NoUnsignedSubtraction = false
       RealAsFloat = false
-      NoBackslashEscapes = false }
+      NoBackslashEscapes = false
+      LiteralCollation = None }
 
 /// Diagnostics raised after recognizing syntax that MySQL rejects semantically.
 let trySemanticError (detail: string) =
@@ -2068,7 +2070,10 @@ let private atom: Parser<Expr, unit> =
           hexBytesLit |>> Lit
           nationalStringLit |>> fun value -> IntroducedLiteral(value, "utf8mb3")
           introducedStringLit
-          concatenatedStringLit |>> Lit
+          concatenatedStringLit |>> fun value ->
+              match (activeOptions ()).LiteralCollation with
+              | Some collation -> ConnectionLiteral(value, collation)
+              | None -> Lit value
           keyword "NULL" >>% Lit VNull
           keyword "TRUE" >>% Lit(VInt 1L)
           keyword "FALSE" >>% Lit(VInt 0L)
@@ -2360,6 +2365,13 @@ type private ColMod =
     | MCheck of name: string option * expression: Expr * enforced: bool
     | MComment of string
 
+// Stored schema expressions retain charset defaults; only explicit COLLATE retains a custom collation.
+let private schemaExpression =
+    expr |>> Expression.rewrite (function
+        | ConnectionLiteral(value, collation) ->
+            Some(IntroducedLiteral(value, Collation.charsetOfCollation collation))
+        | _ -> None)
+
 /// `CURRENT_TIMESTAMP[(N)]` — the `(N)` is accepted and dropped: MySQL
 /// requires it to match the column's own declared fsp, and the default is
 /// evaluated at that declared fsp regardless (`Storage.evalDefault`).
@@ -2379,7 +2391,7 @@ let private defaultValueLit: Parser<ColumnDefault, unit> =
     // MariaDB dumps emit the function-call spelling `current_timestamp()`;
     // the empty parens are the same as none.
     (keyword "CURRENT_TIMESTAMP" >>. optional (attempt widthLen) >>. optional (sym "(" >>. sym ")") >>% DCurrentTimestamp)
-    <|> attempt (between (sym "(") (sym ")") expr |>> DExpression)
+    <|> attempt (between (sym "(") (sym ")") schemaExpression |>> DExpression)
     <|> attempt (negativeNumber |>> DConst)
     <|> (literalValue |>> DConst)
 
@@ -2399,7 +2411,7 @@ let private generatedColumn: Parser<Expr * GeneratedKind, unit> =
     optional (keyword "GENERATED" >>. keyword "ALWAYS")
     >>. keyword "AS"
     >>. sym "("
-    >>. expr
+    >>. schemaExpression
     .>> sym ")"
     .>>. (opt ((keyword "VIRTUAL" >>% Virtual) <|> (keyword "STORED" >>% Stored))
           |>> Option.defaultValue Virtual)
@@ -2425,7 +2437,7 @@ let private checkEnforcement: Parser<bool, unit> =
 let private checkDefinition: Parser<string option * Expr * bool, unit> =
     (opt (attempt (keyword "CONSTRAINT" >>. opt identifier)) |>> Option.flatten)
     .>> keyword "CHECK"
-    .>>. between (sym "(") (sym ")") expr
+    .>>. between (sym "(") (sym ")") schemaExpression
     .>>. checkEnforcement
     |>> fun ((name, expression), enforced) -> name, expression, enforced
 
@@ -2589,7 +2601,7 @@ let private indexedColumn: Parser<IndexColumn, unit> =
               Direction = direction }
 
     let expressionColumn =
-        between (sym "(") (sym ")") expr
+        between (sym "(") (sym ")") schemaExpression
         .>>. indexDirection
         |>> fun (expression, direction) ->
             { Name = ""
@@ -5195,10 +5207,10 @@ type ParsedViewDefinition =
 
 let private parsedViewDefinitionCapacity = 1024
 let private cacheableViewDefinitionLength = 16384
-let private parsedViewDefinitions = BoundedConcurrentCache<string, ParsedViewDefinition>(parsedViewDefinitionCapacity)
+let private parsedViewDefinitions = BoundedConcurrentCache<struct (ParserOptions * string), ParsedViewDefinition>(parsedViewDefinitionCapacity)
 
-let private parseViewDefinitionUncached (sql: string) : Result<ParsedViewDefinition, string> =
-    let parsed = parse sql
+let private parseViewDefinitionUncached options (sql: string) : Result<ParsedViewDefinition, string> =
+    let parsed = parseWithOptions options sql
 
     let trailingCheckOption =
         Text.RegularExpressions.Regex.Match(
@@ -5226,7 +5238,7 @@ let private parseViewDefinitionUncached (sql: string) : Result<ParsedViewDefinit
 
     let parsedDefinition =
         match checkOptionMatch with
-        | Some _ -> parse definition
+        | Some _ -> parseWithOptions options definition
         | None -> parsed
 
     parsedDefinition
@@ -5237,15 +5249,17 @@ let private parseViewDefinitionUncached (sql: string) : Result<ParsedViewDefinit
               CheckOption = checkOption }
 
         if sql.Length <= cacheableViewDefinitionLength then
-            parsedViewDefinitions.TryAdd(sql, definition) |> ignore
+            parsedViewDefinitions.TryAdd(struct (options, sql), definition) |> ignore
 
         definition)
 
 /// Parses a stored view query and separates its trailing CHECK OPTION clause.
-let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
-    match parsedViewDefinitions.TryGetValue sql with
+let parseViewDefinitionWithOptions options (sql: string) : Result<ParsedViewDefinition, string> =
+    match parsedViewDefinitions.TryGetValue (struct (options, sql)) with
     | true, definition -> Result.Ok definition
-    | false, _ -> parseViewDefinitionUncached sql
+    | false, _ -> parseViewDefinitionUncached options sql
+
+let parseViewDefinition sql = parseViewDefinitionWithOptions defaultOptions sql
 
 let private maxLoadDataMarkerLength = 1
 let private maxLoadDataTerminatorLength = 16

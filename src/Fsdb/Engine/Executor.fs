@@ -693,7 +693,8 @@ type private StoredView =
       Definer: string
       CheckOption: string
       SecurityType: string
-      Algorithm: string }
+      Algorithm: string
+      CollationConnection: string }
 
 type private ViewAccess =
     { SecurityType: string
@@ -852,7 +853,8 @@ let private tryStoredViewDefinition (store: Store) (dbName: string) (viewName: s
               Definer = view.Definer
               CheckOption = view.CheckOption
               SecurityType = view.SecurityType
-              Algorithm = view.Algorithm })
+              Algorithm = view.Algorithm
+              CollationConnection = view.CollationConnection })
 
 let private tryStoredView (store: Store) (dbName: string) (viewName: string) =
     if store.TableShadows.ContainsKey(dbName.ToLowerInvariant(), viewName.ToLowerInvariant()) then
@@ -860,8 +862,9 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) =
     else
         tryStoredViewDefinition store dbName viewName
 
-let private parseStoredViewStatement definition =
-    Parser.parseViewDefinition definition |> Result.map _.Statement
+let private parseStoredViewStatement (view: StoredView) =
+    let options = { Parser.defaultOptions with LiteralCollation = Some view.CollationConnection }
+    Parser.parseViewDefinitionWithOptions options view.Definition |> Result.map _.Statement
 
 let private isStoredView store defaultDatabase qualifiedName =
     let database, view = splitQualified defaultDatabase qualifiedName
@@ -1071,7 +1074,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     let underlying =
                         underlyingStored
                         |> Option.bind (fun stored ->
-                            match parseStoredViewStatement stored.Definition with
+                            match parseStoredViewStatement stored with
                             | Ok(Select definition) -> classify (Set.add key seen) stored definition
                             | _ -> None)
 
@@ -1348,7 +1351,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     match tryStoredView store database tableRef.Table with
                     | Some stored ->
-                        match parseStoredViewStatement stored.Definition with
+                        match parseStoredViewStatement stored with
                         | Ok(Select definition) ->
                             let nested =
                                 if
@@ -2019,7 +2022,7 @@ let private opSymbol =
 let rec internal exprLabel (expr: Expr) : string =
     match expr with
     | ApproximateLiteral(_, spelling) -> spelling
-    | Lit v | IntroducedLiteral(v, _) -> v |> toText |> Option.defaultValue "NULL"
+    | Lit v | IntroducedLiteral(v, _) | ConnectionLiteral(v, _) -> v |> toText |> Option.defaultValue "NULL"
     | MatchAgainst(cols, q, _) ->
         let columnLabel (column: MatchColumn) =
             column.Qualifier
@@ -2709,7 +2712,7 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
                     []
                 else
                     DynamicScope.withValue viewStack (Set.add key stack) (fun () ->
-                        match parseStoredViewStatement view.Definition with
+                        match parseStoredViewStatement view with
                         | Ok(Select viewSelect) ->
                             let columns = selectProjectionColumns store view.Schema viewSelect
 
@@ -3203,6 +3206,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
                 | _ -> Ok(connection 2)
         | None -> Ok(connection 2)
     | Lit VNull -> named "binary" 6
+    | ConnectionLiteral(_, collation) -> named collation 4
     | IntroducedLiteral(_, charset) -> named (Collation.defaultNameForCharset charset) 4
     | Lit(VString _) -> Ok(connection 4)
     | Lit(VJson _) -> named "utf8mb4_bin" 4
@@ -3404,7 +3408,7 @@ let private combineConjuncts =
 let private canPushIntoSource (qualifier: string) =
     let rec eligible =
         function
-        | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
+        | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
         | QualifiedCol(source, _) -> source.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
         | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
             eligible left && eligible right
@@ -4284,7 +4288,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
     let every expressions = expressions |> List.forall (isStatementStableExpr store registry dbName scope)
 
     match expression with
-    | Lit _ | IntroducedLiteral _ | ApproximateLiteral _
+    | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _
     | Star None -> true
     | Star(Some qualifier) -> scope.Qualifiers.Contains(qualifier.ToLowerInvariant())
     | Col name -> scope.Columns.Contains(name.ToLowerInvariant())
@@ -4460,7 +4464,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         || (Temporal.hasZeroMonthOrDay date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | ApproximateLiteral(value, _) -> Ok(VDouble value)
-    | Lit v | IntroducedLiteral(v, _) -> Ok v
+    | Lit v | IntroducedLiteral(v, _) | ConnectionLiteral(v, _) -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
     // MATCH reaches scalar evaluation only when its statement shape has no
     // physical FULLTEXT source for the score pre-pass.
@@ -5230,7 +5234,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 and private isLiteralConstantExpression registry expression =
     let closed = isLiteralConstantExpression registry
     match expression with
-    | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
+    | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
     | Neg _ | Not _ | IsNull _ | IsNotNull _ | IsTrue _ | IsFalse _
     | BinOp _ | Cast _ | Expression.CollationOverride _ | Like _ | Between _ | In _ | Case _ ->
         Expression.children expression |> List.forall closed
@@ -5678,6 +5682,9 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         simple TypeNewDecimal
         |> Option.map (fun metadata ->
             withDecimalShape (decimalShape expr None) { metadata with Flags = NotNullFlag })
+    | ConnectionLiteral(value, collation) ->
+        metadataOfExpr ctx (Lit value)
+        |> Option.map (fun metadata -> { metadata with CollationId = metadataCollationId collation })
     | IntroducedLiteral(VString text, charset) ->
         Some
             { Value.columnMetadata TypeVarString with
@@ -6519,7 +6526,7 @@ and private resolveTableRef
                     cteScope.Value <- Map.empty
 
                     let resolved =
-                        match parseStoredViewStatement view.Definition with
+                        match parseStoredViewStatement view with
                         | Result.Ok((Select select) as statement) ->
                             match registryForView store registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
@@ -6832,7 +6839,7 @@ and private describeQueryColumnsChecked
                     if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
                         Error DescriptionUnavailable
                     else
-                        parseStoredViewStatement view.Definition
+                        parseStoredViewStatement view
                         |> Result.mapError (fun _ -> DescriptionUnavailable)
                         |> Result.bind (function
                             | Select select -> describeSelect (Set.add key seen) view.Schema Map.empty [] select
@@ -7039,6 +7046,8 @@ and private describeQueryColumnsChecked
                             | ApproximateLiteral(_, spelling) ->
                                 approximateLiteralColumn name spelling |> describeColumn |> Some
                             | Lit(VDouble _) -> Some(computedColumn name (TDouble false) false (Some(DConst(VInt 0L))) None |> describeColumn)
+                            | ConnectionLiteral(VString text, collation) ->
+                                Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some collation) |> describeColumn)
                             | IntroducedLiteral(VString text, charset) ->
                                 Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some(Collation.defaultNameForCharset charset)) |> describeColumn)
                             | Lit(VString text) ->
@@ -8912,7 +8921,7 @@ and private applyPreparedJoin
 
         let rec safeLeftFilter =
             function
-            | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
+            | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
             | QualifiedCol(qualifier, column) ->
                 leftQualifiers |> Set.contains (qualifier.ToLowerInvariant())
                 && (resolveQualified qualifier column
@@ -9637,7 +9646,7 @@ and private tryMergeDirectView
     let rec mergeablePredicate =
         function
         | Col _
-        | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
+        | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
         | BinOp(_, left, right)
         | Like(left, right, _, _)
         | Regexp(left, right) -> mergeablePredicate left && mergeablePredicate right
@@ -9668,7 +9677,47 @@ and private tryMergeDirectView
         match tryStoredView store viewDb viewRef.Table with
         | None -> Ok None
         | Some view ->
-            match parseStoredViewStatement view.Definition with
+            match parseStoredViewStatement view with
+            | Ok(Select definition as statement)
+                when definition.From.IsNone && definition.Joins.IsEmpty
+                     && definition.Where.IsNone && definition.GroupBy.IsEmpty
+                     && definition.Having.IsNone && definition.Limit.IsNone
+                     && definition.Offset.IsNone && definition.Ctes.IsEmpty
+                     && definition.Windows.IsEmpty && definition.Locking.IsEmpty
+                     && not definition.Distinct && not definition.Rollup
+                     && definition.OrderBy.IsEmpty && not definition.CalculateFoundRows
+                     && not (SelectStmt.hasDestination definition)
+                     && select.Locking.IsEmpty && select.OrderBy.IsEmpty
+                     && select.GroupBy.IsEmpty && select.Having.IsNone
+                     && definition.Projections |> List.forall (fun projection ->
+                         match projection.Expression with LiteralValue _ -> true | _ -> false)
+                     && not (Expression.statementExists (Expression.collectSubqueries >> List.isEmpty >> not) (Select select)) ->
+                match registryForView store registry view statement with
+                | Error(code, message) -> Error(Err(code, message))
+                | Ok _ ->
+                    let qualifier = viewRef.Alias |> Option.defaultValue viewRef.Table
+                    let names =
+                        if sameLength view.Columns definition.Projections then view.Columns
+                        else definition.Projections |> List.map (Projection.name exprLabel)
+                    let literals = List.zip names (definition.Projections |> List.map _.Expression)
+                    let resolve name =
+                        literals |> List.tryPick (fun (column, value) ->
+                            if equalsIgnoreCase column name then Some value else None)
+                    let replace = function
+                        | Col name -> resolve name
+                        | QualifiedCol(source, name) when equalsIgnoreCase source qualifier -> resolve name
+                        | _ -> None
+                    let expanded =
+                        select.Projections |> List.collect (fun projection ->
+                            match projection.Expression with
+                            | Star None -> literals |> List.map (fun (name, value) -> Projection.create value (Some name))
+                            | Star(Some source) when equalsIgnoreCase source qualifier ->
+                                literals |> List.map (fun (name, value) -> Projection.create value (Some name))
+                            | _ -> [ projection ])
+                    let select = { select with From = None; Projections = expanded }
+                    match Expression.rewriteStatementWithProjectionNames (exprLabel >> Some) replace (Select select) with
+                    | Select rewritten -> Ok(Some rewritten)
+                    | _ -> Ok None
             | Ok((Select definition) as statement) ->
                 match updatableViewOfSelect store view definition with
                 | Some direct
@@ -10650,7 +10699,7 @@ and private isNumericIndexValue = function
 
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let rec isSafe = function
-        | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
+        | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
         | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafe left && isSafe right
         | Expression.CollationOverride(expression, _) -> isSafe expression
         | FuncCall(name, arguments)
@@ -10687,7 +10736,7 @@ and private pointLookupEqualities
 
     let tryNonLiteralConstant expression =
         match expression with
-        | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> None
+        | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> None
         | _ -> tryNumericConstant expression
 
     let tryNumericColumn expression =
@@ -13421,7 +13470,7 @@ and private rewriteAggregates
             whens
             |> traverse (fun (c, r) -> sub c |> Result.bind (fun c' -> sub r |> Result.map (fun r' -> c', r')))
             |> Result.bind (fun whens' -> subOpt elseBranch |> Result.map (fun else' -> Case(subject', whens', else'))))
-    | Lit _ | IntroducedLiteral _ | ApproximateLiteral _
+    | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _
     | Col _
     | QualifiedCol _
     | Star _
@@ -13499,7 +13548,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
             whens
             |> traverse (fun (c, r) -> sub c |> Result.bind (fun c' -> sub r |> Result.map (fun r' -> c', r')))
             |> Result.bind (fun whens' -> subOpt elseBranch |> Result.map (fun else' -> Case(subject', whens', else'))))
-    | Lit _ | IntroducedLiteral _ | ApproximateLiteral _
+    | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _
     | QualifiedCol _
     | Star _
     | WindowOver _
@@ -17153,7 +17202,7 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
     match tryStoredView store dbName viewName with
     | None -> None
     | Some view ->
-        match parseStoredViewStatement view.Definition with
+        match parseStoredViewStatement view with
         | Ok(Select select) -> updatableViewOfSelect store view select
         | _ -> None
 
@@ -21327,7 +21376,7 @@ let rec executeAs
         let altering = viewSpec.Action = AlterViewDdl
 
         let parsedView, viewDefinition, checkOption =
-            match Parser.parseViewDefinition viewSpec.Definition with
+            match Parser.parseViewDefinitionWithOptions { Parser.defaultOptions with LiteralCollation = Some store.ExecutionSettings.ConnectionCollation.Name } viewSpec.Definition with
             | Ok definition -> Ok definition.Statement, definition.Sql, definition.CheckOption
             | Error error -> Error error, viewSpec.Definition, "NONE"
 
@@ -21414,7 +21463,8 @@ let rec executeAs
               Definer = definer
               CheckOption = checkOption
               SecurityType = security
-              Algorithm = algorithm }
+              Algorithm = algorithm
+              CollationConnection = store.ExecutionSettings.ConnectionCollation.Name }
 
         let supportsMergeAlgorithm = function
             | Select select ->
@@ -21508,7 +21558,8 @@ let rec executeAs
                                   "definer"
                                   "check_option"
                                   "security_type"
-                                  "algorithm" ])
+                                  "algorithm"
+                                  "collation_connection" ])
                                 [ [ VString viewName
                                     VString db
                                     VString viewDefinition
@@ -21517,7 +21568,8 @@ let rec executeAs
                                     VString definer
                                     VString checkOption
                                     VString security
-                                    VString algorithm ] ]
+                                    VString algorithm
+                                    VString store.ExecutionSettings.ConnectionCollation.Name ] ]
                     with
                     | Ok _ -> ids, Affected 0UL
                     | Error error -> ids, storageErr error

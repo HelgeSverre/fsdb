@@ -73,16 +73,39 @@ not reinterpret an already-decoded latin1 value as UTF-8 client text. WAL and
 snapshot regressions recover a generated `HEX(_latin1'é')` expression and
 produce `C3A9` after inserting into the recovered table.
 
-Validation: `just check` passes 3,024 tests with zero build warnings or errors,
+Ordinary literals parsed for a session retain their connection collation in the
+AST. Prepared execution keeps utf8mb4_general_ci after SET NAMES latin1.
+Statement and view parser caches include that collation in their keys. Views
+store their creation collation in the catalog, recover it through WAL and
+snapshots, and expose it through `information_schema.VIEWS.COLLATION_CONNECTION`.
+Stored functions already restore their creation context; the regression also
+pins that behavior.
+
+A direct read of a literal-only view preserves literal coercibility by expanding
+its single row. The native constant-row result retains coercibility 4 even with
+ALGORITHM=TEMPTABLE. Expansion excludes nested queries and outer ordering or
+grouping clauses, preserving their existing scope rules. The nested-query
+control retains its inner `v` rather than substituting the view's `v`.
+
+Stored schema expressions have a different native lifetime. Under
+`SET NAMES latin1 COLLATE latin1_bin`, generated and default expressions using
+`'a'='A'` evaluate to 1, while an explicit latin1_bin annotation evaluates to 0.
+CHECK uses the same charset-default rule. A separate native SHOW CREATE probe
+for `INDEX ((IF('a'='A',id,0)))` renders both literals with `_latin1` introducers.
+The parser shares this normalization across generated columns, expression
+defaults, checks, and functional indexes. Recovery tests pin the generated,
+default, and check behavior.
+
+Validation: `just check` passes 3,030 tests with zero build warnings or errors,
 using `DOTNET_PROCESSOR_COUNT=8` and a 4 GiB `DOTNET_GCHeapHardLimit`. The
 maintained native oracle passes. Differential contracts pass 49 cases and
 5,117 steps with no differences; the run artifact is
-`torture/artifacts/runs/20261007T225402087-97362/contracts`.
+`torture/artifacts/runs/20261007T231023035-48133/contracts`.
 
-Ordinary string expressions still retain no preparation-time connection
-collation. The prepared literal changes to latin1/latin1_swedish_ci after
-SET NAMES latin1, rather than retaining utf8mb4_general_ci. Connection capture
-must also survive stored definitions, and parser cache keys must distinguish
-the captured context. Invalid byte sequences, client encodings beyond the
-current UTF-8 input assumption, and broader expression collation inference
-remain outside the verified introducer coverage.
+Broader view shapes still materialize columns and may report column coercibility
+rather than the originating expression's coercibility. Stored-program binding
+combinations beyond the tested function, invalid byte sequences, client
+encodings beyond the current UTF-8 input assumption, and broader expression
+collation inference remain open. View client-charset metadata and definition
+rendering need further coverage; capturing the connection collation alone does
+not establish complete stored-definition export parity.

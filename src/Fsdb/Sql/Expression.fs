@@ -88,6 +88,7 @@ let children =
         @ Option.toList fallback
     | Lit _
     | IntroducedLiteral _
+    | ConnectionLiteral _
     | ApproximateLiteral _
     | Placeholder _
     | UserVariable _
@@ -453,6 +454,7 @@ let statementExists predicate statement =
 
 let private knownLiteralCharset = function
     | IntroducedLiteral(_, charset) -> Some charset
+    | ConnectionLiteral(_, collation) -> Some(Fsdb.Collation.charsetOfCollation collation)
     | Lit(Fsdb.Value.VNull | Fsdb.Value.VBytes _ | Fsdb.Value.VBinaryLiteral _ | Fsdb.Value.VBit _)
     | BinaryCast _
     | Cast(_, (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob)) -> Some "binary"

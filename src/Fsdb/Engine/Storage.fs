@@ -4287,7 +4287,8 @@ let mysqlViewsColumns: ColumnDef list =
       sysCol "definer" (TChar 93) false (Some(VString ""))
       sysCol "check_option" (TChar 8) false (Some(VString "NONE"))
       sysCol "security_type" (TChar 7) false (Some(VString "DEFINER"))
-      sysCol "algorithm" (TChar 9) false (Some(VString "UNDEFINED")) ]
+      sysCol "algorithm" (TChar 9) false (Some(VString "UNDEFINED"))
+      sysCol "collation_connection" (TVarchar 64) false (Some(VString "utf8mb4_0900_ai_ci")) ]
 
 let mysqlRoutinesColumns: ColumnDef list =
     [ keyCol "routine_schema" 64

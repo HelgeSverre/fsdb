@@ -33,7 +33,59 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "introduced literals retain charset and encoded byte identity"
+        [ testCase "ordinary prepared literals retain their preparation collation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci" |> fst
+              let sql = "SELECT CHARSET('a') AS cs,COLLATION('a') AS co,COERCIBILITY('a') AS c"
+              let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let statement = createPreparedStatement session sql ast count
+              let session = handle session "SET NAMES latin1" |> fst
+              let _, result = executePrepared session statement []
+              Expect.equal result
+                  (ResultSet([ "cs"; "co"; "c" ], [ [ Some "utf8mb4"; Some "utf8mb4_general_ci"; Some "4" ] ]))
+                  "literal identity belongs to preparation"
+
+          testCase "stored literal definitions retain their creation collation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+              for sql in
+                  [ "CREATE VIEW literal_view AS SELECT 'a' AS v"
+                    "CREATE FUNCTION literal_function() RETURNS VARCHAR(64) DETERMINISTIC RETURN COLLATION('a')" ] do
+                  Expect.equal (handle session sql |> snd) (Affected 0UL) sql
+              let session = handle session "SET NAMES utf8mb4" |> fst
+              Expect.equal (handle session "SELECT literal_function() AS c" |> snd)
+                  (ResultSet([ "c" ], [ [ Some "latin1_bin" ] ])) "routine creation context"
+              Expect.equal (handle session "SELECT CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM literal_view" |> snd)
+                  (ResultSet([ "cs"; "co"; "c" ], [ [ Some "latin1"; Some "latin1_bin"; Some "4" ] ]))
+                  "mergeable view literal creation context"
+              Expect.equal (handle session "SELECT COLLATION_CONNECTION FROM information_schema.VIEWS WHERE TABLE_NAME='literal_view'" |> snd)
+                  (ResultSet([ "COLLATION_CONNECTION" ], [ [ Some "latin1_bin" ] ])) "catalog exposes creation collation"
+
+          testCase "literal view expansion preserves nested scopes and source names"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+              Expect.equal (handle session "CREATE VIEW identity_view AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
+              Expect.equal (handle session "CREATE ALGORITHM=TEMPTABLE VIEW materialized_literal AS SELECT 'a' AS v" |> snd) (Affected 0UL) "materialized view"
+              let session = handle session "SET NAMES utf8mb4" |> fst
+              for sql, names, row in
+                  [ "SELECT (SELECT v FROM (SELECT 'inner' AS v) t) AS nested,v FROM identity_view", [ "nested"; "v" ], [ "inner"; "a" ]
+                    "SELECT identity_view.*,COERCIBILITY(v) AS c FROM identity_view", [ "v"; "c" ], [ "a"; "4" ]
+                    "SELECT CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM materialized_literal", [ "cs"; "co"; "c" ], [ "latin1"; "latin1_bin"; "4" ] ] do
+                  Expect.equal (handle session sql |> snd) (ResultSet(names, [ List.map Some row ])) sql
+
+          testCase "ordinary literal parser caches distinguish connection collations"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for collation in [ "latin1_bin"; "latin1_swedish_ci"; "latin1_bin" ] do
+                  session <- handle session ("SET NAMES latin1 COLLATE " + collation) |> fst
+                  for _ in 1 .. 4 do
+                      Expect.equal (handle session "SELECT COLLATION('cache') AS c" |> snd)
+                          (ResultSet([ "c" ], [ [ Some collation ] ])) "cached literals use their parsing context"
+
+          testCase "introduced literals retain charset and encoded byte identity"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               for expression, charset, collation, hex, length, characters in

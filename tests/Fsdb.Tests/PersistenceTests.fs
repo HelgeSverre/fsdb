@@ -2376,6 +2376,39 @@ let tests =
                   let _, result = handle session "SELECT calculated FROM literal_generated"
                   Expect.equal result (ResultSet([ "calculated" ], [ [ Some "3" ] ])) "literal origin survives recovery"
 
+          testCase "generated literal charsets use defaults unless explicitly collated"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let session = Fsdb.Session.create 1 store
+                  let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+                  Expect.equal
+                      (handle session "CREATE TABLE captured_generated(id INT,eq INT GENERATED ALWAYS AS ('a'='A') STORED,explicit_eq INT GENERATED ALWAYS AS ('a' COLLATE latin1_bin='A') STORED,default_eq INT DEFAULT ('a'='A'),CHECK('a'='A'))" |> snd)
+                      (Affected 0UL) "generated expressions"
+                  if checkpoint then snapshotNow dir store
+                  let session = Fsdb.Session.create 2 (load dir)
+                  Expect.equal (handle session "INSERT INTO captured_generated(id) VALUES(1)" |> snd) (Affected 1UL) "insert"
+                  Expect.equal (handle session "SELECT eq,explicit_eq,default_eq FROM captured_generated" |> snd)
+                      (ResultSet([ "eq"; "explicit_eq"; "default_eq" ], [ [ Some "1"; Some "0"; Some "1" ] ]))
+                      "generated literals retain charset defaults and explicit collations"
+
+          testCase "view literal creation collations survive WAL and snapshot recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let session = Fsdb.Session.create 1 store
+                  let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+                  Expect.equal (handle session "CREATE VIEW captured_literal AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
+                  if checkpoint then snapshotNow dir store
+                  let session = Fsdb.Session.create 2 (load dir)
+                  Expect.equal (handle session "SELECT CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM captured_literal" |> snd)
+                      (ResultSet([ "cs"; "co"; "c" ], [ [ Some "latin1"; Some "latin1_bin"; Some "4" ] ]))
+                      "creation context survives recovery"
+
           testCase "introduced literal charsets survive WAL and snapshot recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do

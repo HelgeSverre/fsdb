@@ -98,7 +98,7 @@ let private recurringSchedule =
 
 let private tryComment (options: Fsdb.Parser.ParserOptions) (text: string) =
     match Fsdb.Parser.parseExpressionWithOptions options text with
-    | Ok(Lit(VString comment)) -> Some comment
+    | Ok(LiteralValue(VString comment)) -> Some comment
     | _ -> None
 
 let private splitComment options (text: string) =

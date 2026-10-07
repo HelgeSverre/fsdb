@@ -2903,7 +2903,7 @@ let tests =
               | other -> failtestf "expected an unescaped quote to terminate the literal, got %A" other
 
               match prepareStatementForSession literalSession "SELECT CONCAT('x\\', ?)" with
-              | Ok(Some(Select { Projections = [ { Expression = FuncCall("CONCAT", [ Lit(VString "x\\"); Placeholder 0 ]); Alias = _ } ] }), 1) -> ()
+              | Ok(Some(Select { Projections = [ { Expression = FuncCall("CONCAT", [ LiteralValue(VString "x\\"); Placeholder 0 ]); Alias = _ } ] }), 1) -> ()
               | other -> failtestf "expected placeholder scanning to respect literal backslashes, got %A" other
 
               let textStatement =

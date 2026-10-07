@@ -134,7 +134,8 @@ module View =
           Definer: string
           CheckOption: string
           SecurityType: string
-          Algorithm: string }
+          Algorithm: string
+          CollationConnection: string }
 
     let tryRead (row: Value[]) : Entry option =
         readCompleteRow 5
@@ -147,7 +148,8 @@ module View =
                   Definer = textAt 5 row
                   CheckOption = textOr "NONE" 6 row
                   SecurityType = textOr "DEFINER" 7 row
-                  Algorithm = textOr "UNDEFINED" 8 row })
+                  Algorithm = textOr "UNDEFINED" 8 row
+                  CollationConnection = textOr StoredExecutionContext.legacyCollationConnection 9 row })
             row
 
     let withName name row = withValue 0 (VString name) row

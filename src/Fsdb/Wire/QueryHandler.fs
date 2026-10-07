@@ -1030,7 +1030,7 @@ let private showColumnsFieldFilter (sql: string) =
         None
     else
         match Parser.parseExpression matched.Groups.["value"].Value with
-        | Ok(Lit(VString field)) -> Some field
+        | Ok(LiteralValue(VString field)) -> Some field
         | _ -> None
 
 let private describeRe = Regex(@"^(?:DESCRIBE|DESC)\s+(\S+)\s*$", RegexOptions.IgnoreCase)
@@ -1053,7 +1053,7 @@ let private showIndexTextFilter (column: string) (sql: string) =
         None
     else
         match Parser.parseExpression matched.Groups.["value"].Value with
-        | Ok(Lit(VString value)) -> Some value
+        | Ok(LiteralValue(VString value)) -> Some value
         | _ -> None
 
 let private showTableStatusRe = Regex(@"^SHOW\s+TABLE\s+STATUS(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
@@ -1109,9 +1109,11 @@ let private literalSetRhs (options: Parser.ParserOptions) (rhs: string) : Value 
         None
 
 let private parserOptionsForSession (session: Session) =
-    sessionValue session "sql_mode"
-    |> Option.defaultValue ""
-    |> SqlMode.parserOptionsFor
+    let options =
+        sessionValue session "sql_mode"
+        |> Option.defaultValue ""
+        |> SqlMode.parserOptionsFor
+    { options with LiteralCollation = Some session.Store.ExecutionSettings.ConnectionCollation.Name }
 
 /// Evaluates a SET expression against private state so the statement remains
 /// atomic when any assignment fails.
@@ -2050,7 +2052,7 @@ let private alterCurrentUserPasswordRe =
 
 let private passwordCapture parserOptions (matched: Match) (index: int) =
     match Parser.parseExpressionWithOptions parserOptions matched.Groups.[index].Value with
-    | Ok(Lit(VString password)) -> Some password
+    | Ok(LiteralValue(VString password)) -> Some password
     | _ -> None
 
 let private showGrantsRe =
@@ -5275,7 +5277,7 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
         let source = prepared.Groups.["source"].Value
 
         match Parser.parseExpression source with
-        | Ok(Lit(VString text)) -> Ok(Some(PrepareText(matchedPreparedName prepared, PreparedLiteral text)))
+        | Ok(LiteralValue(VString text)) -> Ok(Some(PrepareText(matchedPreparedName prepared, PreparedLiteral text)))
         | Ok(UserVariable variable) ->
             Ok(Some(PrepareText(matchedPreparedName prepared, PreparedVariable variable)))
         | _ -> Error(syntaxError source)
