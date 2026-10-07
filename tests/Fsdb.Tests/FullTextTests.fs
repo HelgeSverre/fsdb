@@ -23,7 +23,32 @@ let private closeTo (expected: float) (actual: float) (label: string) =
 let tests =
     testList
         "fulltext"
-        [ testCase "document merging rebases inserted identities without replacing concurrent postings"
+        [ testCase "stopword policy applies to word and ngram queries and later writes"
+          <| fun _ ->
+              for tokenizer, term in [ Words, "the"; Ngrams 2, "ab" ] do
+                  let documents = [ 1, [ term ]; 2, [ "zzzz" ]; 3, [ term ] ]
+                  let enabled = buildIndexWithStopwords StopwordPolicy.BuiltIn tokenizer defaultCollation documents
+                  let disabled = buildIndexWithStopwords StopwordPolicy.Disabled tokenizer defaultCollation documents
+                  for scores in [ naturalScores enabled term; booleanScores enabled term; expansionScores enabled term ] do
+                      Expect.isEmpty scores "the built-in policy excludes the stopword"
+                  for scores in [ naturalScores disabled term; booleanScores disabled term; expansionScores disabled term ] do
+                      Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 3 ] "disabled stopwords remain searchable"
+                  for scores in
+                      [ tryNaturalSingleTermScoresDictionaryWithin None disabled term
+                        tryFlatBooleanScoresDictionaryWithin None disabled term ] do
+                      Expect.equal (scores |> Option.get |> _.Keys |> Seq.sort |> Seq.toList) [ 1; 3 ] "optimized scoring retains the index policy"
+                  let changed = disabled |> addDocument 4 term |> removeDocument 1
+                  Expect.equal (booleanScores changed term |> Map.keys |> Seq.toList) [ 3; 4 ] "later writes retain the policy"
+                  Expect.equal (booleanScores changed (term + "*") |> Map.keys |> Seq.toList) [ 3; 4 ] "prefix maintenance uses the document policy"
+                  Expect.equal (booleanScores disabled term |> Map.keys |> Seq.toList) [ 1; 3 ] "writes preserve the previous index"
+
+          testCase "disabling stopwords does not disable word length rules"
+          <| fun _ ->
+              let index = buildIndexWithStopwords StopwordPolicy.Disabled Words defaultCollation [ 1, [ "a the orchard" ]; 2, [ "orchard" ] ]
+              Expect.isEmpty (naturalScores index "a") "minimum token length still applies"
+              Expect.equal (naturalScores index "the" |> Map.keys |> Seq.toList) [ 1 ] "the length-eligible stopword is searchable"
+
+          testCase "document merging rebases inserted identities without replacing concurrent postings"
           <| fun _ ->
               let baseline = buildIndexWith defaultCollation [ 1, "orchard"; 2, "cobalt" ]
               let branch = baseline |> removeDocument 1 |> addDocument 3 "meadow"

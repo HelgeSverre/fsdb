@@ -321,6 +321,10 @@ let addDocumentFields id texts (index: Index<'id>) =
 
 let addDocument id text index = addDocumentFields id [ text ] index
 
+let internal buildIndexWithStopwords policy tokenizer collation documents =
+    documents
+    |> Seq.fold (fun index (id, fields) -> addDocumentFields id fields index) (emptyIndexWith policy tokenizer collation)
+
 let internal documentTokenizer id (index: Index<'id>) =
     index.Documents |> Map.tryFind id |> Option.map _.Tokenizer
 

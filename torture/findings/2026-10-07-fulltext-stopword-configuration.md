@@ -37,10 +37,17 @@ rules for every ALTER algorithm or multiple pre-existing full-text indexes.
 
 ## Implementation boundary
 
-`FullText.isSearchable`, boolean parsing, prefix postings, phrase term selection,
-and query-expansion seeds currently use the fixed built-in list. Ngram postings
-also omit excluded tokens during index construction. A session-only query filter
-would leave inserts, prefix matching, expansion, and existing indexes inconsistent.
+The full-text module now carries an explicit `StopwordPolicy` with indexes,
+documents, and read views. Its internal constructor supports the built-in list or
+disabled filtering. Natural and boolean parsing, prefix postings, phrase term
+selection, and query-expansion seeds use that policy. Document policy also governs
+removal and seed selection, preserving the rules used to build stored postings.
+
+Focused tests cover word and ngram searches, optimized dictionary paths, writes,
+removal, prefix maintenance, and retained minimum word length. The native oracle
+also verifies natural-language and query-expansion behavior. Production storage
+constructors still select the built-in policy; session settings and persisted
+configuration have not yet been connected.
 
 The effective filtering policy must be retained with the index state and used by
 both writes and queries. DDL must preserve or replace that state according to the
@@ -49,5 +56,12 @@ postings. Existing historical ngram-tokenizer handling provides a related model,
 but its preservation rules must not be assumed to cover stopword configuration.
 
 Custom stopword tables, global-setting inheritance, persistence across reopening,
-and additional ALTER variants have not yet been probed by this oracle. No runtime
-support or known-gap suppression is included in this change.
+and additional ALTER variants have not yet been probed by this oracle. Runtime
+configuration remains open; no known-gap suppression is included.
+
+## Verification
+
+The native stopword oracle passes. `just check` passes all 2,883 tests without
+build warnings or errors. The natural-phrase oracle and all 47 contracts
+(5,007 steps) pass without differences:
+`torture/artifacts/runs/20261007T050412911-75529/contracts`.

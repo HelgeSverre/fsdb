@@ -27,6 +27,14 @@ def verify(client, _other):
 
             seed()
             expect(f"{parser} {enabled} query setting", client.query(matches(term)), initial)
+            for mode, expected in [
+                ("IN NATURAL LANGUAGE MODE", initial),
+                ("WITH QUERY EXPANSION", "NULL" if enabled == "ON" else "1,2,4"),
+            ]:
+                statement = ("SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.docs "
+                             f"WHERE MATCH(body) AGAINST('{term}' {mode})")
+                expect(f"{parser} {enabled} {mode}", client.query(statement), expected)
+
             client.query(f"INSERT INTO probe.docs VALUES(5,'{term} cobalt')")
             expect("later insert retains policy", client.query(matches(term)),
                    "NULL" if enabled == "ON" else "4,5")
