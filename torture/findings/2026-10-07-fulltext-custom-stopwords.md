@@ -174,7 +174,9 @@ this path, including a further WAL recovery before any ordinary row write.
 When ADD FULLTEXT is the first access to a cold table after restart, MySQL instead
 includes all three terms in the new index. A subsequent insert excludes `cobalt`.
 Fsdb eagerly reloads sources during recovery, so its added index excludes
-`cobalt` even on this cold path. This lazy-loading distinction remains a gap.
+`cobalt` even on this cold path. The [loading oracle](2026-10-07-fulltext-stopword-loading.md) also shows that
+source edits after restart must remain visible until the first full-text query
+or insert. Both the index-build and future-write distinctions remain open.
 
 Additional ALTER variants, query expansion, and more
 source charset/collation combinations remain outside this verified matrix.
