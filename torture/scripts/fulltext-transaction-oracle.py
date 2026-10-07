@@ -195,7 +195,7 @@ def relevance_population(reader, writer):
                 reader.query("ROLLBACK")
 
 
-def run():
+def run(verify=None):
     with tempfile.TemporaryDirectory(prefix="fsdb-fulltext-transactions-") as directory:
         data = pathlib.Path(directory) / "data"
         data.mkdir()
@@ -226,9 +226,12 @@ def run():
                 with contextlib.closing(Client(["--socket=" + socket])) as reader, contextlib.closing(Client(["--socket=" + socket])) as writer:
                     expect("version", reader.query("SELECT VERSION()"), "8.4.11")
                     reader.query("CREATE DATABASE probe CHARACTER SET utf8mb4")
-                    own_writes(reader)
-                    concurrent_writes(reader, writer)
-                    relevance_population(reader, writer)
+                    if verify is None:
+                        own_writes(reader)
+                        concurrent_writes(reader, writer)
+                        relevance_population(reader, writer)
+                    else:
+                        verify(reader, writer)
         except Exception:
             print(log_path.read_text(), flush=True)
             raise
@@ -240,7 +243,7 @@ def run():
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait(timeout=10)
-    print("Full-text transaction oracle passed", flush=True)
+    print("Full-text native oracle passed", flush=True)
 
 
 if __name__ == "__main__":
