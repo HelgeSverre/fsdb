@@ -5149,7 +5149,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
             let store = preparedStore session
             let schema = session.Database |> Option.defaultValue defaultDatabase
             checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema ast)
-            |> Result.bind (fun () -> Executor.validatePreparedJoinColumns store (registryFor session) schema ast)
+            |> Result.bind (fun () -> Executor.validatePreparedBindings store (registryFor session) schema ast)
             |> Result.map (fun () -> statement, count))
 
 let createPreparedStatement (session: Session) sql ast count : PreparedStmt =

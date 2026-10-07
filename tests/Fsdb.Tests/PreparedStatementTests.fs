@@ -33,7 +33,89 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "COLLATE chains and SET retain native argument diagnostics"
+        [ testCase "literal binary charsets reject incompatible COLLATE before evaluation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let message = "COLLATION 'utf8mb4_bin' is not valid for CHARACTER SET 'binary'"
+              for sql in
+                  [ "SELECT NULL COLLATE utf8mb4_bin"
+                    "SELECT X'41' COLLATE utf8mb4_bin"
+                    "SELECT b'01' COLLATE utf8mb4_bin"
+                    "SELECT _binary'x' COLLATE utf8mb4_bin"
+                    "SELECT (BINARY 'x') COLLATE utf8mb4_bin"
+                    "SELECT (NULL COLLATE 'binary') COLLATE utf8mb4_bin"
+                    "SELECT NAME_CONST(1,NULL COLLATE utf8mb4_bin)"
+                    "SELECT NAME_CONST(NULL,NULL COLLATE utf8mb4_bin)"
+                    "SELECT IF(0,NULL COLLATE utf8mb4_bin,1)"
+                    "SELECT (SELECT NULL COLLATE utf8mb4_bin)"
+                    "SELECT IF(0,(SELECT NULL COLLATE utf8mb4_bin),1)"
+                    "SELECT NULL COLLATE utf8mb4_bin WHERE 0"
+                    "SELECT NULL COLLATE utf8mb4_bin,missing"
+                    "SELECT NULL COLLATE utf8mb4_bin + missing"
+                    "SET @x=NULL COLLATE utf8mb4_bin" ] do
+                  Expect.equal (handle session sql |> snd) (Err(1253, message)) sql
+                  Expect.equal (prepareStatementForSession session sql) (Error(1253, message)) ("prepare: " + sql)
+              Expect.equal (Fsdb.SqlState.forCode 1253) "42000" "native charset SQLSTATE"
+              let invalidShape = "SELECT NAME_CONST(1+1,NULL COLLATE utf8mb4_bin)"
+              Expect.equal (handle session invalidShape |> snd) (Err(1210, "Incorrect arguments to NAME_CONST")) "argument shape takes precedence"
+              for expression, value in
+                  [ "NULL COLLATE 'binary'", None
+                    "(BINARY 'x') COLLATE 'binary'", Some "x"
+                    "2 COLLATE utf8mb4_bin", Some "2"
+                    "2 COLLATE latin1_bin", Some "2" ] do
+                  let sql = "SELECT " + expression + " AS v"
+                  Expect.equal (handle session sql |> snd) (ResultSet([ "v" ], [ [ value ] ])) sql
+
+          testCase "literal binding diagnostics follow source resolution"
+          <| fun _ ->
+              let session = relationNameSession ()
+              for sql, code, message in
+                  [ "SELECT missing,NULL COLLATE utf8mb4_bin", 1054, "Unknown column 'missing' in 'field list'"
+                    "SELECT NAME_CONST(1+1,2) FROM absent", 1210, "Incorrect arguments to NAME_CONST"
+                    "SELECT NULL COLLATE UTF8MB4_BIN", 1253, "COLLATION 'UTF8MB4_BIN' is not valid for CHARACTER SET 'binary'"
+                    "SELECT 2 COLLATE utf8mb4_bin COLLATE latin1_bin", 1253, "COLLATION 'latin1_bin' is not valid for CHARACTER SET 'utf8mb4'" ] do
+                  Expect.equal (handle session sql |> snd) (Err(code, message)) sql
+              for sql in [ "SELECT NULL COLLATE utf8mb4_bin FROM absent"; "SELECT NAME_CONST(NULL,2) FROM absent" ] do
+                  match handle session sql |> snd with
+                  | Err(code, _) ->
+                      Expect.equal code 1146 sql
+                      Expect.equal (Fsdb.SqlState.forCode code) "42S02" "missing table wins over expression binding"
+                  | result -> failtestf "%s: expected missing table, got %A" sql result
+
+          testCase "stored definitions defer literal binding diagnostics until invocation"
+          <| fun _ ->
+              let mutable session = relationNameSession ()
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              let succeeds sql =
+                  match execute sql with
+                  | Err(code, message) -> failtestf "%s: %d %s" sql code message
+                  | _ -> ()
+              let collationError = Err(1253, "COLLATION 'utf8mb4_bin' is not valid for CHARACTER SET 'binary'")
+              for name, expression, expected in
+                  [ "c0", "NULL COLLATE utf8mb4_bin", collationError
+                    "c1", "NAME_CONST(NULL,2)", Err(1382, "The 'NAME_CONST' syntax is reserved for purposes internal to the MySQL server")
+                    "c2", "NAME_CONST(1,NULL COLLATE utf8mb4_bin)", collationError
+                    "c3", "NAME_CONST(NULL,NULL COLLATE utf8mb4_bin)", collationError ] do
+                  succeeds (sprintf "CREATE FUNCTION %s() RETURNS INT DETERMINISTIC RETURN %s" name expression)
+                  Expect.equal (execute (sprintf "SELECT %s()" name)) expected name
+              Expect.equal
+                  (execute "CREATE FUNCTION c4() RETURNS INT DETERMINISTIC RETURN NAME_CONST(1+1,NULL COLLATE utf8mb4_bin)")
+                  (Err(1210, "Incorrect arguments to NAME_CONST"))
+                  "argument shape is checked at definition time"
+              succeeds "CREATE PROCEDURE collated_proc() SELECT NULL COLLATE utf8mb4_bin"
+              Expect.equal (execute "CALL collated_proc()") collationError "procedure invocation binds its SELECT"
+              succeeds "CREATE TABLE collated_trigger_target(v INT)"
+              succeeds "CREATE TRIGGER collated_trigger BEFORE INSERT ON collated_trigger_target FOR EACH ROW SET NEW.v=NULL COLLATE utf8mb4_bin"
+              Expect.equal (execute "INSERT INTO collated_trigger_target VALUES(1)") collationError "trigger invocation binds its expression"
+              Expect.equal
+                  (execute "SELECT COUNT(*) AS n FROM collated_trigger_target")
+                  (ResultSet([ "n" ], [ [ Some "0" ] ]))
+                  "failed trigger leaves no inserted row"
+
+          testCase "COLLATE chains and SET retain native argument diagnostics"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session = handle session "SET @x=7" |> fst

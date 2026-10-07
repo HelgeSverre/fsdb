@@ -1768,6 +1768,21 @@ let private validateReferencesWith resolve expression =
     |> traverse resolve
     |> Result.map ignore
 
+let rec private validateExpressionBindings resolve validateSubquery diagnosticError expression =
+    Expression.children expression
+    |> traverse (validateExpressionBindings resolve validateSubquery diagnosticError)
+    |> Result.bind (fun _ ->
+        match expression with
+        | Col name -> resolve (None, name)
+        | QualifiedCol(qualifier, name) -> resolve (Some qualifier, name)
+        | _ -> Ok())
+    |> Result.bind (fun () ->
+        Expression.subqueries expression |> traverse validateSubquery |> Result.map ignore)
+    |> Result.bind (fun () ->
+        match Expression.tryLiteralNodeDiagnostic expression with
+        | Some error -> Error(diagnosticError error)
+        | None -> Ok())
+
 /// Aggregate-call recognition: a `FuncCall` whose name is registered as an
 /// aggregate on `registry` (see `Functions.Registry.Aggregates`) rather than
 /// a hardcoded name set here — the `registerAggregate` extension point is
@@ -4416,7 +4431,15 @@ let private isSubstringSearchFunction (name: string) =
 
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     try
-        evalExprCore ctx expr
+        match Expression.tryLiteralDiagnostic expr with
+        | None -> evalExprCore ctx expr
+        | Some _ ->
+            validateExpressionBindings
+                (function
+                | None, name -> resolveCol ctx name |> Result.map ignore
+                | Some qualifier, name -> resolveQualifiedCol ctx qualifier name |> Result.map ignore)
+                (fun _ -> Ok()) id expr
+            |> Result.bind (fun () -> evalExprCore ctx expr)
     with
     | Value.UnsignedOutOfRange ->
         Error(1690, sprintf "BIGINT UNSIGNED value is out of range in '%s'" (InformationSchema.exprToSql expr))
@@ -6768,9 +6791,6 @@ and private describeQueryColumnsChecked
                 | _ -> Error(InvalidDescription(Err(1052, sprintf "Column '%s' in %s is ambiguous" label clause)))
         resolve scopes
 
-    let validateReferences scopes clause expression =
-        validateReferencesWith (resolveReference scopes clause) expression
-
     let resolveTableFunctionReference (scopes: DescribedJoinScope list) reference =
         match reference with
         | Some qualifier, _ when scopes |> List.forall (fun scope -> scope.Sources.IsEmpty) ->
@@ -6862,14 +6882,12 @@ and private describeQueryColumnsChecked
                 (Ok initial))
 
     and validateExpression seen dbName ctes scopes resolve expression =
-        validateReferencesWith resolve expression
-        |> Result.bind (fun _ ->
-            Expression.collectSubqueries expression
-            |> traverse (fun nested ->
+        validateExpressionBindings resolve
+            (fun nested ->
                 match describeSelect seen dbName ctes scopes nested with
                 | Error(InvalidDescription error) -> Error(InvalidDescription error)
                 | _ -> Ok())
-            |> Result.map ignore)
+            (Err >> InvalidDescription) expression
 
     and describeSelect seen dbName inheritedCtes outerScopes (select: SelectStmt) =
 
@@ -6928,37 +6946,25 @@ and private describeQueryColumnsChecked
                 { emptyScope with
                     LogicalColumns = select.Projections |> List.choose (fun { Expression = expression; Alias = alias } ->
                         alias |> Option.map (fun name -> FromItem.SourceColumn(name, expression))) }
-            let nestedQueries =
-                let expressions =
-                    (select.Projections |> List.map (fun { Expression = expression } -> expression, [ scope; projectionAliases ]))
-                    @ ((Option.toList select.Where @ select.GroupBy) |> List.map (fun expression -> expression, [ scope ]))
-                    @ ((Option.toList select.Having @ (select.OrderBy |> List.map fst))
-                       |> List.map (fun expression -> expression, [ scope; projectionAliases ]))
-                expressions
-                |> List.collect (fun (expression, scopes) ->
-                    Expression.collectSubqueries expression |> List.map (fun nested -> nested, scopes))
-                |> traverse (fun (nested, scopes) ->
-                    match describeSelect seen dbName cteMap (scopes @ outerScopes) nested with
-                    | Error(InvalidDescription error) -> Error(InvalidDescription error)
-                    | _ -> Ok())
-
             let references =
-                (select.Projections |> List.map (fun { Expression = expression } -> expression, "field list"))
-                @ (select.Where |> Option.toList |> List.map (fun expression -> expression, "where clause"))
-                |> traverse (fun (expression, clause) -> validateReferences (scope :: outerScopes) clause expression)
+                (select.Projections |> List.map (fun projection -> projection.Expression, "field list", [ scope; projectionAliases ]))
+                @ (select.Where |> Option.toList |> List.map (fun expression -> expression, "where clause", [ scope ]))
+                |> traverse (fun (expression, clause, scopes) ->
+                    validateExpression seen dbName cteMap (scopes @ outerScopes)
+                        (resolveReference (scope :: outerScopes) clause) expression)
 
             let qualifiedClauseReferences =
-                (select.GroupBy |> List.map (fun expression -> expression, "group statement"))
-                @ (select.Having |> Option.toList |> List.map (fun expression -> expression, "having clause"))
-                @ (select.OrderBy |> List.map (fun (expression, _) -> expression, "order clause"))
-                |> traverse (fun (expression, clause) ->
-                    validateReferencesWith (function
+                (select.GroupBy |> List.map (fun expression -> expression, "group statement", [ scope ]))
+                @ (select.Having |> Option.toList |> List.map (fun expression -> expression, "having clause", [ scope; projectionAliases ]))
+                @ (select.OrderBy |> List.map (fun (expression, _) -> expression, "order clause", [ scope; projectionAliases ]))
+                |> traverse (fun (expression, clause, scopes) ->
+                    validateExpression seen dbName cteMap (scopes @ outerScopes)
+                        (function
                         | Some _, _ as reference -> resolveReference (scope :: outerScopes) clause reference
                         | None, _ -> Ok()) expression)
 
             references
             |> Result.bind (fun _ -> qualifiedClauseReferences)
-            |> Result.bind (fun _ -> nestedQueries)
             |> Result.bind (fun _ -> rewritten |> Result.mapError InvalidDescription)
             |> Result.map (fun select ->
                 let descriptors = sources |> List.collect snd
@@ -18230,8 +18236,8 @@ let statementColumns (store: Store) (registry: Registry) (schema: string) (state
         describeQueryColumns store registry schema (QueryBody(UnionSelect(first, rest, orderBy, limit, offset)))
     | _ -> None
 
-/// Retains known join-binding errors from schema-only description at PREPARE.
-let validatePreparedJoinColumns store registry schema statement =
+/// Binds references and literal diagnostics without evaluating prepared statements.
+let validatePreparedBindings store registry schema statement =
     let validateBody body =
         match describeQueryColumnsChecked store registry schema (QueryBody body) with
         | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
@@ -18239,8 +18245,7 @@ let validatePreparedJoinColumns store registry schema statement =
 
     let validateExpressions expressions =
         expressions
-        |> List.collect Expression.collectSubqueries
-        |> traverse (PlainSelect >> validateBody)
+        |> traverse (validateExpressionBindings (fun _ -> Ok()) (PlainSelect >> validateBody) id)
         |> Result.map ignore
 
     let rec validate = function
@@ -18262,6 +18267,7 @@ let validatePreparedJoinColumns store registry schema statement =
         | Replace(_, _, rows) -> validateExpressions (List.concat rows)
         | ReplaceSet(_, assignments) -> validateExpressions (assignments |> List.map snd)
         | Do expressions -> validateExpressions expressions
+        | SetVariables clauses -> validateExpressions (clauses |> List.choose SetClause.expression)
         | CreateTableAs(_, query, _, _) | Explain(_, query) -> validate query
         | _ -> Ok()
 

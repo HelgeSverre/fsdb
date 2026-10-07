@@ -41,8 +41,6 @@ let defaultOptions: ParserOptions =
 let trySemanticError (detail: string) =
     match detail.Trim() with
     | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
-    | "NAME_CONST name cannot be NULL" ->
-        Some(1382, "The 'NAME_CONST' syntax is reserved for purposes internal to the MySQL server")
     | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
     | _ -> None
 
@@ -1918,8 +1916,6 @@ nameConstArgumentsRef.Value <-
         | [ nameSource, name; valueSource, value ] ->
             if not (accepts nameConstNameSyntax nameSource && accepts nameConstValueSyntax valueSource) then
                 raise (SemanticParseError "Incorrect arguments to NAME_CONST")
-            elif name = Lit VNull then
-                raise (SemanticParseError "NAME_CONST name cannot be NULL")
             else preturn [ name; value ]
         | _ -> raise (SemanticParseError "Incorrect parameter count in the call to native function 'NAME_CONST'")
 

@@ -78,14 +78,29 @@ Expression rewriting, SQL rendering, and WAL/snapshot recovery preserve that
 identity, allowing validation to distinguish a conversion from a requested
 collation without changing the current evaluation rules.
 
-`SELECT NAME_CONST(1,NULL COLLATE utf8mb4_bin)` still returns NULL rather than
-1253/42000. This is a general expression-validation gap: native MySQL also
-rejects `NULL COLLATE utf8mb4_bin`, binary literals with that collation, and
-`'a' COLLATE 'binary'` in a utf8mb4 connection. The argument oracle retains
-these native controls.
+NULL, binary literals, and binary conversions reject incompatible COLLATE
+annotations with 1253/42000. Explicit COLLATE chains retain the inner charset;
+a numeric literal accepts either tested charset, but `2 COLLATE utf8mb4_bin
+COLLATE latin1_bin` rejects the outer annotation. Error messages preserve the
+written collation name's casing. Direct execution and PREPARE cover unused
+branches, nested SELECTs, empty results, and SET assignments.
 
-Validation order matters. An invalid NAME_CONST shape, such as
-`NAME_CONST(1+1,NULL COLLATE utf8mb4_bin)`, produces 1210/HY000; with a literal
-NULL name and the same value, the charset error takes precedence over the
-1382 NULL-name error. A shared expression-validation step must preserve those
-boundaries, including unused branches and PREPARE.
+Binding follows source resolution and visits operands in order. A missing
+table produces 1146/42S02 before literal binding. `SELECT missing,NULL COLLATE
+utf8mb4_bin` encounters the missing column first, whereas `SELECT NULL COLLATE
+utf8mb4_bin,missing` produces 1253/42000. The latter precedence also holds
+within `NULL COLLATE utf8mb4_bin + missing`. Invalid NAME_CONST argument syntax
+still produces 1210/HY000 before either binding step. With a valid literal NULL
+name and an incompatible COLLATE value, the value's charset error precedes
+the 1382/HY000 NULL-name error.
+
+Stored functions, procedures, and triggers accept these binding errors in
+their definitions and report them on invocation. Invalid NAME_CONST argument
+shapes remain definition-time errors. The regression verifies that a failing
+BEFORE INSERT trigger leaves no inserted row.
+
+Text literals still lack preserved connection/introducer charset identity;
+`'a' COLLATE 'binary'` in a utf8mb4 connection remains a native rejection that
+fsdb does not reproduce. Broader expression charset inference also remains
+open. The argument oracle retains the native text control alongside binary
+and NULL cases.

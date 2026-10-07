@@ -449,3 +449,34 @@ let statementCount predicate statement =
 
 let statementExists predicate statement =
     statementCount predicate statement > 0
+
+let private knownLiteralCharset = function
+    | Lit(Fsdb.Value.VNull | Fsdb.Value.VBytes _ | Fsdb.Value.VBinaryLiteral _ | Fsdb.Value.VBit _)
+    | BinaryCast _
+    | Cast(_, (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob)) -> Some "binary"
+    | Collate(_, name) -> Some(Fsdb.Collation.charsetOfCollation name |> Fsdb.Charset.canonicalName)
+    | _ -> None
+
+let tryLiteralNodeDiagnostic = function
+    | Collate(value, name) ->
+        knownLiteralCharset value
+        |> Option.bind (fun charset ->
+            if Fsdb.Collation.belongsToCharset charset name then None
+            else
+                Some(1253, sprintf "COLLATION '%s' is not valid for CHARACTER SET '%s'" name charset))
+    | FuncCall(name, [ Lit Fsdb.Value.VNull; _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) ->
+        Some(1382, "The 'NAME_CONST' syntax is reserved for purposes internal to the MySQL server")
+    | _ -> None
+
+// Diagnostics depend only on immutable syntax. Weak keys release standalone
+// SET expressions and preserve reuse of prepared and stored expressions.
+let private literalDiagnostics =
+    System.Runtime.CompilerServices.ConditionalWeakTable<Expr, Lazy<(int * string) option>>()
+
+/// Subqueries bind separately, after resolving their own tables and references.
+let rec tryLiteralDiagnostic expression =
+    literalDiagnostics.GetValue(expression, fun node ->
+        lazy (
+            children node
+            |> List.tryPick tryLiteralDiagnostic
+            |> Option.orElseWith (fun () -> tryLiteralNodeDiagnostic node))).Value
