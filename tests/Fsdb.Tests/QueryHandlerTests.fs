@@ -49,7 +49,28 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "qualified correlation skips scopes without the requested column"
+        [ testCase "grouped lateral sources receive preceding rows without widening ON scope"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              for source, values in
+                  [ "b JOIN LATERAL (SELECT b.id+1 AS v) d ON 1", [ Some "1"; Some "2" ]
+                    "b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1", [ Some "1"; Some "2" ]
+                    "b LEFT JOIN LATERAL (SELECT a.id+b.id AS v WHERE 0) d ON 1", [ Some "1"; None ]
+                    "b JOIN JSON_TABLE(JSON_ARRAY(b.id),'$[*]' COLUMNS(v INT PATH '$')) d ON 1", [ Some "1"; Some "1" ]
+                    "b JOIN JSON_TABLE(JSON_ARRAY(a.id+b.id),'$[*]' COLUMNS(v INT PATH '$')) d ON 1", [ Some "1"; Some "2" ] ] do
+                  let sql = "SELECT a.id,b.id,d.v FROM a LEFT JOIN (" + source + ") ON a.id=b.id ORDER BY a.id"
+                  Expect.equal (run sql) (ResultSet([ "id"; "id"; "v" ], [ Some "1" :: values; [ Some "2"; None; None ] ])) sql
+              for source in
+                  [ "LATERAL (SELECT a.id AS v) d JOIN b ON d.v=b.id"
+                    "JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(v INT PATH '$')) d JOIN b ON d.v=b.id" ] do
+                  let sql = "SELECT a.id,b.id,d.v FROM a LEFT JOIN (" + source + ") ON 1 ORDER BY a.id"
+                  Expect.equal (run sql)
+                      (ResultSet([ "id"; "id"; "v" ], [ [ Some "1"; Some "1"; Some "1" ]; [ Some "2"; None; None ] ])) sql
+              match run "SELECT a.id FROM a LEFT JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON d.v=a.id) ON a.id=b.id" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "ordinary grouped ON cannot see preceding siblings: %A" other
+
+          testCase "qualified correlation skips scopes without the requested column"
           <| fun _ ->
               let run =
                   queryFixture

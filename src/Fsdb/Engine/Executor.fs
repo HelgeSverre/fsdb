@@ -7968,8 +7968,77 @@ and private tryIndexedPreservedRightProbe
         equiKeys |> tryIndexProbe table leftColumns
     | _ -> None
 
-/// JSON_TABLE and LATERAL sources re-evaluate per left row; other join
-/// sources resolve once.
+and private groupReferencesPreceding store dbName (preceding: (string * ColumnDef list) list) item =
+    let columnsOf item =
+        FromItem.leaves item |> List.choose (fun source ->
+            FromItem.tryQualifier source |> Option.map (fun qualifier ->
+                qualifier, selectSourceColumns store dbName source |> List.choose id))
+    let containsColumn qualifier name sources =
+        sources |> List.exists (fun (source, columns: ColumnDef list) ->
+            (qualifier |> Option.forall (equalsIgnoreCase source))
+            && columns |> List.exists (fun column -> equalsIgnoreCase column.Name name))
+    let rec expressionReferencesPreceding locals value =
+        let isPrecedingColumn qualifier name =
+            not (containsColumn qualifier name locals)
+            && containsColumn qualifier name preceding
+        let references =
+            Expression.exists (function
+                | Col name -> isPrecedingColumn None name
+                | QualifiedCol(qualifier, name) ->
+                    isPrecedingColumn (Some qualifier) name
+                | _ -> false) value
+        references || (Expression.collectSubqueries value |> List.exists (queryReferencesPreceding locals))
+    and queryReferencesPreceding inherited select =
+        let items = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+        let locals = (items |> List.collect columnsOf) @ inherited
+        (selectJoinExpressions select |> List.exists (expressionReferencesPreceding locals))
+        || (select.Ctes |> List.exists (fun cte -> bodyReferencesPreceding inherited cte.Body))
+        || (items |> List.exists (sourceReferencesPreceding inherited))
+    and bodyReferencesPreceding locals = function
+        | PlainSelect select -> queryReferencesPreceding locals select
+        | UnionSelect(first, rest, _, _, _) -> queryReferencesPreceding locals first || (rest |> List.exists (snd >> queryReferencesPreceding locals))
+    and sourceReferencesPreceding locals = function
+        | FromLateral(value, _) | FromSubquery(value, _) -> bodyReferencesPreceding locals value
+        | FromJsonTable(value, _, _, _) -> expressionReferencesPreceding locals value
+        | FromJoinGroup(source, joins) -> groupReferencesPreceding locals source joins
+        | FromTable _ -> false
+    and groupReferencesPreceding locals source joins =
+        let initial = sourceReferencesPreceding locals source, columnsOf source @ locals
+        joins
+        |> List.fold (fun (found, visible) join ->
+            let dependsOnPreceding = found || sourceReferencesPreceding visible join.Table
+            dependsOnPreceding, columnsOf join.Table @ visible) initial
+        |> fst
+    match item with
+    | FromJoinGroup(source, joins) -> groupReferencesPreceding [] source joins
+    | _ -> false
+
+and private applyDependentJoinGroup
+    store registry dbName scope sourceOverrides sourcePredicates consumption
+    ((sources, rows): (string * ColumnDef list) list * Value[] seq) leftOperand (join: Join) =
+    let columns = sources |> List.collect snd
+    let contextFor = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sources) scope.LateralOuter
+    let prepare row =
+        let groupScope = { scope with LateralOuter = Some(contextFor row) }
+        prepareJoinSource store registry dbName groupScope sourceOverrides sourcePredicates join.Table
+    let matchSource leftRows preparedSource =
+        applyPreparedJoin store registry dbName scope None consumption (sources, leftRows) leftOperand join preparedSource
+    let matchRow row =
+        prepare row |> Result.bind (matchSource (Seq.singleton row))
+    match rows |> List.ofSeq with
+    | [] ->
+        prepare (probeRow columns)
+        |> Result.bind (matchSource Seq.empty)
+    | firstRow :: remainingRows ->
+        matchRow firstRow
+        |> Result.bind (fun (combinedSources, firstRows, names) ->
+            remainingRows
+            |> traverse matchRow
+            |> Result.map (fun remaining ->
+                let rows = Seq.append firstRows (remaining |> Seq.collect (fun (_, joined, _) -> joined))
+                combinedSources, rows, names))
+
+/// Dependent sources re-evaluate per left row; independent sources resolve once.
 and private applyJoin
     (store: Store)
     (registry: Registry)
@@ -7986,6 +8055,10 @@ and private applyJoin
     match join.Table with
     | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName scope state join source path columns alias
     | FromLateral(body, alias) -> applyLateralJoin store registry dbName scope state join body alias
+    | FromJoinGroup _ when
+        join.Kind <> RightJoin && join.Kind <> NaturalRightJoin
+        && groupReferencesPreceding store dbName (fst state) join.Table ->
+        applyDependentJoinGroup store registry dbName scope sourceOverrides sourcePredicates consumption state leftOperand join
     | _ -> applyResolvedJoin store registry dbName scope sourceOverrides sourcePredicates leftPhysicalTable consumption state leftOperand join
 
 /// `applyJoin`'s LATERAL branch — the derived table re-runs once per left
@@ -8015,7 +8088,7 @@ and private applyLateralJoin
         let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) scope.LateralOuter
 
         let runBody (leftRow: Value[] option) : Result<ColumnDef list * Value[] list, QueryResult> =
-            let bodyOuter = leftRow |> Option.map leftCtxFor |> Option.orElse scope.LateralOuter
+            let bodyOuter = leftRow |> Option.defaultWith (fun () -> probeRow combinedColumnsSoFar) |> leftCtxFor |> Some
 
             match body with
             | PlainSelect select ->
@@ -8037,9 +8110,8 @@ and private applyLateralJoin
                 | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
                 | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
 
-        // The body still has to name its columns even when there is no left
-        // row to run it against — a metadata-only pass with no outer context
-        // supplies them (its correlated references read as NULL).
+        // A NULL-valued left context retains correlated column names when
+        // no input row is available for output-column discovery.
         let columnsProbe () =
             if leftRows.IsEmpty then
                 runBody None |> Result.map fst
@@ -8562,6 +8634,10 @@ and private prepareJoinSource
         | Some source -> Ok(source.Columns, source.Rows, source.PhysicalTable)
         | None ->
             match item with
+            | (FromLateral _ | FromJsonTable _) when scope.LateralOuter.IsSome ->
+                let join = { Kind = CrossJoin; Table = item; On = Lit(VInt 1L); Using = [] }
+                applyJoin store registry dbName scope Map.empty Map.empty None ConsumesAllRows ([], Seq.singleton [||]) None join
+                |> Result.map (fun (sources, rows, _) -> sources |> List.collect snd, List.ofSeq rows :> Value[] seq, None)
             | FromTable tableRef ->
                 tryPhysicalTableRef store dbName tableRef
                 |> Result.bind (function
@@ -8625,9 +8701,6 @@ and private resolvedJoinCondition
                             resolve name right |> Result.map (fun right -> BinOp(Eq, left, right))))
                     |> Result.map (List.fold (fun condition term -> BinOp(And, condition, term)) (Lit(VInt 1L)))))
 
-/// Compatible equi-keys use a hash join; other predicates use lazy nested
-/// loops. Row indices distinguish duplicate-valued rows when padding outer
-/// joins.
 and private applyResolvedJoin
     (store: Store)
     (registry: Registry)
@@ -8641,363 +8714,377 @@ and private applyResolvedJoin
     (leftOperand: FromItem option)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    prepareJoinSource store registry dbName scope sourceOverrides sourcePredicates join.Table
+    |> Result.bind (applyPreparedJoin store registry dbName scope leftPhysicalTable consumption (sourcesSoFar, rowsSoFar) leftOperand join)
+
+/// Compatible equi-keys use a hash join; other predicates use lazy nested
+/// loops. Row indices distinguish duplicate-valued rows when padding outer
+/// joins.
+and private applyPreparedJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (scope: JoinEvaluationScope)
+    (leftPhysicalTable: Table option)
+    (consumption: JoinConsumption)
+    ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
+    (leftOperand: FromItem option)
+    (join: Join)
+    (joinSource: ResolvedJoinSource)
+    : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     let outer = scope.QueryOuter
-    let joinSource = prepareJoinSource store registry dbName scope sourceOverrides sourcePredicates join.Table
+    let { Sources = rightSources; Columns = joinColumns; Rows = joinRows; PhysicalTable = physicalTable } = joinSource
+    let newSources = sourcesSoFar @ rightSources
+    let qualifiers = qualifierRanges newSources
+    let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
+    let rowsSoFar, readLeft = alignPreparedRows combinedColumnsSoFar leftPhysicalTable rowsSoFar
+    let joinRows, readRight = alignPreparedRows joinColumns physicalTable joinRows
+    let leftNullPadding = Array.create combinedColumnsSoFar.Length VNull
+    let rightNullPadding = Array.create joinColumns.Length VNull
 
-    match joinSource with
-    | Error e -> Error e
-    | Ok { Sources = rightSources; Columns = joinColumns; Rows = joinRows; PhysicalTable = physicalTable } ->
-        let newSources = sourcesSoFar @ rightSources
-        let qualifiers = qualifierRanges newSources
-        let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
-        let rowsSoFar, readLeft = alignPreparedRows combinedColumnsSoFar leftPhysicalTable rowsSoFar
-        let joinRows, readRight = alignPreparedRows joinColumns physicalTable joinRows
-        let leftNullPadding = Array.create combinedColumnsSoFar.Length VNull
-        let rightNullPadding = Array.create joinColumns.Length VNull
+    // The column names this join coalesces (`SELECT *` shows them once):
+    // `NATURAL`'s intersection, or `USING`'s explicit list — empty for a
+    // plain `ON` join. Returned to `runSelectStmt` for its star/ref
+    // rewrite.
+    let coalesceNames =
+        match join.Kind with
+        | NaturalJoin
+        | NaturalLeftJoin
+        | NaturalRightJoin -> naturalCommonNames combinedColumnsSoFar joinColumns
+        | _ -> join.Using
 
-        // The column names this join coalesces (`SELECT *` shows them once):
-        // `NATURAL`'s intersection, or `USING`'s explicit list — empty for a
-        // plain `ON` join. Returned to `runSelectStmt` for its star/ref
-        // rewrite.
-        let coalesceNames =
+    let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers outer
+
+    // Most join strategies need an indexed left side, but keep that
+    // force lazy: an always-true inner/cross join below can compose its
+    // Cartesian product as a seq, allowing a whole chain of such joins
+    // to reach runSelect's LIMIT without materializing an earlier link.
+    let leftIndexed = lazy (rowsSoFar |> List.ofSeq |> List.indexed)
+    let resolveQualified (qualifier: string) (column: string) =
+        qualifiers
+        |> Map.tryFind (qualifier.ToLowerInvariant())
+        |> Option.bind (fun (columns, offset) ->
+            columns
+            |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
+            |> Option.map (fun index -> offset + index, columns.[index].Type))
+
+    let buildCombinedRows (rightIndexed: (int * Value[]) list) (matched: (int * int * Value[]) list) =
+        let matchedCombined = matched |> List.map (fun (_, _, c) -> c)
+
+        let combinedRows =
             match join.Kind with
-            | NaturalJoin
-            | NaturalLeftJoin
-            | NaturalRightJoin -> naturalCommonNames combinedColumnsSoFar joinColumns
-            | _ -> join.Using
+            | InnerJoin
+            | StraightJoin
+            | CrossJoin
+            | NaturalJoin -> matchedCombined
+            | LeftJoin
+            | NaturalLeftJoin ->
+                let matchesByLeft = matched |> List.groupBy (fun (li, _, _) -> li) |> Map.ofList
 
-        let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers outer
+                leftIndexed.Value
+                |> List.collect (fun (li, left) ->
+                    matchesByLeft
+                    |> Map.tryFind li
+                    |> Option.map (List.sortBy (fun (_, ri, _) -> ri) >> List.map (fun (_, _, combined) -> combined))
+                    |> Option.defaultWith (fun () -> [ Array.append left rightNullPadding ]))
+            | RightJoin
+            | NaturalRightJoin ->
+                let matchesByRight = matched |> List.groupBy (fun (_, ri, _) -> ri) |> Map.ofList
 
-        // Most join strategies need an indexed left side, but keep that
-        // force lazy: an always-true inner/cross join below can compose its
-        // Cartesian product as a seq, allowing a whole chain of such joins
-        // to reach runSelect's LIMIT without materializing an earlier link.
-        let leftIndexed = lazy (rowsSoFar |> List.ofSeq |> List.indexed)
-        let resolveQualified (qualifier: string) (column: string) =
-            qualifiers
-            |> Map.tryFind (qualifier.ToLowerInvariant())
-            |> Option.bind (fun (columns, offset) ->
-                columns
-                |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.map (fun index -> offset + index, columns.[index].Type))
+                rightIndexed
+                |> List.collect (fun (ri, right) ->
+                    matchesByRight
+                    |> Map.tryFind ri
+                    |> Option.map (List.sortBy (fun (li, _, _) -> li) >> List.map (fun (_, _, combined) -> combined))
+                    |> Option.defaultWith (fun () -> [ Array.append leftNullPadding right ]))
 
-        let buildCombinedRows (rightIndexed: (int * Value[]) list) (matched: (int * int * Value[]) list) =
-            let matchedCombined = matched |> List.map (fun (_, _, c) -> c)
+        newSources, combinedRows
 
-            let combinedRows =
-                match join.Kind with
-                | InnerJoin
-                | StraightJoin
-                | CrossJoin
-                | NaturalJoin -> matchedCombined
-                | LeftJoin
-                | NaturalLeftJoin ->
-                    let matchesByLeft = matched |> List.groupBy (fun (li, _, _) -> li) |> Map.ofList
+    let condition = resolvedJoinCondition sourcesSoFar rightSources leftOperand join
 
-                    leftIndexed.Value
-                    |> List.collect (fun (li, left) ->
-                        matchesByLeft
-                        |> Map.tryFind li
-                        |> Option.map (List.sortBy (fun (_, ri, _) -> ri) >> List.map (fun (_, _, combined) -> combined))
-                        |> Option.defaultWith (fun () -> [ Array.append left rightNullPadding ]))
-                | RightJoin
-                | NaturalRightJoin ->
-                    let matchesByRight = matched |> List.groupBy (fun (_, ri, _) -> ri) |> Map.ofList
+    match condition with
+    | Error error -> Error error
+    | Ok effectiveOn ->
+        let equiKeys, residualConjuncts = extractEquiKeys resolveQualified combinedColumnsSoFar.Length effectiveOn
 
-                    rightIndexed
-                    |> List.collect (fun (ri, right) ->
-                        matchesByRight
-                        |> Map.tryFind ri
-                        |> Option.map (List.sortBy (fun (li, _, _) -> li) >> List.map (fun (_, _, combined) -> combined))
-                        |> Option.defaultWith (fun () -> [ Array.append leftNullPadding right ]))
+        let keyClasses =
+            equiKeys
+            |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+            |> tryAllSome
 
-            newSources, combinedRows
+        let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
 
-        let condition = resolvedJoinCondition sourcesSoFar rightSources leftOperand join
+        let residualHolds (combined: Value[]) : Result<bool, EvalError> =
+            residualConjuncts
+            |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
+            |> Result.map (List.forall (fun v -> truthy v = Some true))
 
-        match condition with
-        | Error error -> Error error
-        | Ok effectiveOn ->
-            let equiKeys, residualConjuncts = extractEquiKeys resolveQualified combinedColumnsSoFar.Length effectiveOn
+        let rightIndexTable =
+            physicalTable |> Option.filter (fun table -> sameLength table.Columns joinColumns)
 
-            let keyClasses =
-                equiKeys
-                |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
-                |> tryAllSome
+        let leftIndexTable =
+            leftPhysicalTable
+            |> Option.filter (fun table -> sameLength table.Columns combinedColumnsSoFar)
+        let candidateIndexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns rightIndexTable equiKeys
+        let preservedRightProbe =
+            tryIndexedPreservedRightProbe store join combinedColumnsSoFar joinColumns leftIndexTable equiKeys
 
-            let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
+        let leftQualifiers = sourcesSoFar |> List.map (fst >> _.ToLowerInvariant()) |> Set.ofList
 
-            let residualHolds (combined: Value[]) : Result<bool, EvalError> =
-                residualConjuncts
-                |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
-                |> Result.map (List.forall (fun v -> truthy v = Some true))
+        let rec safeLeftFilter =
+            function
+            | Lit _ | ApproximateLiteral _ -> true
+            | QualifiedCol(qualifier, column) ->
+                leftQualifiers |> Set.contains (qualifier.ToLowerInvariant())
+                && (resolveQualified qualifier column
+                    |> Option.exists (fun (index, columnType) ->
+                        index < combinedColumnsSoFar.Length && not (InformationSchema.isStringy columnType)))
+            | Not expression
+            | IsNull expression
+            | IsNotNull expression
+            | IsTrue expression
+            | IsFalse expression -> safeLeftFilter expression
+            | BinOp((And | Or | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
+                safeLeftFilter left && safeLeftFilter right
+            | _ -> false
 
-            let rightIndexTable =
-                physicalTable |> Option.filter (fun table -> sameLength table.Columns joinColumns)
+        let hashCompatible =
+            lazy
+                (match keyClasses with
+                 | Some classes ->
+                     storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
+                     && not equiKeys.IsEmpty
+                     && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
+                     && rowsMatchKeyClasses classes (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
+                     && rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
+                 | None -> false)
 
-            let leftIndexTable =
-                leftPhysicalTable
-                |> Option.filter (fun table -> sameLength table.Columns combinedColumnsSoFar)
-            let candidateIndexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns rightIndexTable equiKeys
-            let preservedRightProbe =
-                tryIndexedPreservedRightProbe store join combinedColumnsSoFar joinColumns leftIndexTable equiKeys
+        let indexedJoinProbe =
+            candidateIndexedJoinProbe
+            |> Option.filter (fun probe ->
+                match consumption with
+                | MayStopEarly -> true
+                | ConsumesAllRows ->
+                    match chooseIndexedJoinPath store probe leftIndexed.Value.Length (leftIndexed.Value |> Seq.map snd) with
+                    | QueryPlanner.IndexProbe -> true
+                    | QueryPlanner.HashJoin -> not hashCompatible.Value)
 
-            let leftQualifiers = sourcesSoFar |> List.map (fst >> _.ToLowerInvariant()) |> Set.ofList
+        let hashEligible = indexedJoinProbe.IsNone && hashCompatible.Value
 
-            let rec safeLeftFilter =
-                function
-                | Lit _ | ApproximateLiteral _ -> true
-                | QualifiedCol(qualifier, column) ->
-                    leftQualifiers |> Set.contains (qualifier.ToLowerInvariant())
-                    && (resolveQualified qualifier column
-                        |> Option.exists (fun (index, columnType) ->
-                            index < combinedColumnsSoFar.Length && not (InformationSchema.isStringy columnType)))
-                | Not expression
-                | IsNull expression
-                | IsNotNull expression
-                | IsTrue expression
-                | IsFalse expression -> safeLeftFilter expression
-                | BinOp((And | Or | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
-                    safeLeftFilter left && safeLeftFilter right
-                | _ -> false
+        let isConstantTrue =
+            function
+            | LiteralValue value -> truthy value = Some true
+            | BinOp(Eq, LiteralValue left, LiteralValue right) -> Value.equals left right = Some true
+            | _ -> false
 
-            let hashCompatible =
-                lazy
-                    (match keyClasses with
-                     | Some classes ->
-                         storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
-                         && not equiKeys.IsEmpty
-                         && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
-                         && rowsMatchKeyClasses classes (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
-                         && rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
-                     | None -> false)
+        match preservedRightProbe, indexedJoinProbe with
+        | Some probe, _
+            when probe.Index.UsesWholeStoredValues
+                 && probe.ProbeIndices.Length = equiKeys.Length
+                 && residualConjuncts |> List.forall safeLeftFilter ->
+            let leftRowsFor (right: Value[]) =
+                probe.ProbeIndices
+                |> List.map (fun rightIndex -> right.[rightIndex])
+                |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
+                |> Option.map _.CandidateRows
+                |> Option.defaultValue probe.Table.RowsArray.Indexed
+                |> Seq.map (fun (rowId, left) -> rowId, readLeft left)
+                |> Seq.filter (fun (_, left) ->
+                    match residualHolds (Array.append left rightNullPadding) with
+                    | Ok matches -> matches
+                    | Error(code, message) -> raise (SqlError(code, message)))
+                |> List.ofSeq
 
-            let indexedJoinProbe =
-                candidateIndexedJoinProbe
-                |> Option.filter (fun probe ->
-                    match consumption with
-                    | MayStopEarly -> true
-                    | ConsumesAllRows ->
-                        match chooseIndexedJoinPath store probe leftIndexed.Value.Length (leftIndexed.Value |> Seq.map snd) with
-                        | QueryPlanner.IndexProbe -> true
-                        | QueryPlanner.HashJoin -> not hashCompatible.Value)
+            let rows =
+                seq {
+                    for right in joinRows do
+                        match leftRowsFor right with
+                        | [] -> yield Array.append leftNullPadding right
+                        | matches ->
+                            for _, left in matches do
+                                yield Array.append left right
+                }
+            Ok(newSources, rows, coalesceNames)
+        | _, Some probe ->
+            let exactKey =
+                probe.Index.UsesWholeStoredValues
+                && probe.ProbeIndices.Length = equiKeys.Length
 
-            let hashEligible = indexedJoinProbe.IsNone && hashCompatible.Value
+            let candidateHolds combined =
+                if exactKey then
+                    residualHolds combined
+                else
+                    evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
+                    |> Result.map (truthy >> (=) (Some true))
 
-            let isConstantTrue =
-                function
-                | LiteralValue value -> truthy value = Some true
-                | BinOp(Eq, LiteralValue left, LiteralValue right) -> Value.equals left right = Some true
-                | _ -> false
+            let rightRowsFor (left: Value[]) =
+                probe.ProbeIndices
+                |> List.map (fun leftIndex -> left.[leftIndex])
+                |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
+                |> Option.map _.CandidateRows
+                |> Option.defaultValue probe.Table.RowsArray.Indexed
+                |> Seq.map (fun (rowId, right) -> rowId, readRight right)
 
-            match preservedRightProbe, indexedJoinProbe with
-            | Some probe, _
-                when probe.Index.UsesWholeStoredValues
-                     && probe.ProbeIndices.Length = equiKeys.Length
-                     && residualConjuncts |> List.forall safeLeftFilter ->
-                let leftRowsFor (right: Value[]) =
-                    probe.ProbeIndices
-                    |> List.map (fun rightIndex -> right.[rightIndex])
-                    |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
-                    |> Option.map _.CandidateRows
-                    |> Option.defaultValue probe.Table.RowsArray.Indexed
-                    |> Seq.map (fun (rowId, left) -> rowId, readLeft left)
-                    |> Seq.filter (fun (_, left) ->
-                        match residualHolds (Array.append left rightNullPadding) with
-                        | Ok matches -> matches
-                        | Error(code, message) -> raise (SqlError(code, message)))
-                    |> List.ofSeq
-
-                let rows =
-                    seq {
-                        for right in joinRows do
-                            match leftRowsFor right with
-                            | [] -> yield Array.append leftNullPadding right
-                            | matches ->
-                                for _, left in matches do
-                                    yield Array.append left right
-                    }
-                Ok(newSources, rows, coalesceNames)
-            | _, Some probe ->
-                let exactKey =
-                    probe.Index.UsesWholeStoredValues
-                    && probe.ProbeIndices.Length = equiKeys.Length
-
-                let candidateHolds combined =
-                    if exactKey then
-                        residualHolds combined
-                    else
-                        evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
-                        |> Result.map (truthy >> (=) (Some true))
-
-                let rightRowsFor (left: Value[]) =
-                    probe.ProbeIndices
-                    |> List.map (fun leftIndex -> left.[leftIndex])
-                    |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
-                    |> Option.map _.CandidateRows
-                    |> Option.defaultValue probe.Table.RowsArray.Indexed
-                    |> Seq.map (fun (rowId, right) -> rowId, readRight right)
-
-                match join.Kind, exactKey, residualConjuncts with
-                | (InnerJoin | StraightJoin | NaturalJoin), true, [] ->
-                    let candidates =
-                        seq {
-                            for left in rowsSoFar do
-                                for _, right in rightRowsFor left do
-                                    yield Array.append left right
-                        }
-
-                    Ok(newSources, candidates, coalesceNames)
-                | (InnerJoin | StraightJoin | NaturalJoin), _, _ ->
+            match join.Kind, exactKey, residualConjuncts with
+            | (InnerJoin | StraightJoin | NaturalJoin), true, [] ->
+                let candidates =
                     seq {
                         for left in rowsSoFar do
                             for _, right in rightRowsFor left do
                                 yield Array.append left right
                     }
-                    |> traverseSeqWithLimit
-                        (Some(
-                            maxJoinCandidateRows,
-                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                        ))
-                        (fun combined -> candidateHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
-                    |> Result.mapError Err
-                    |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
-                | (LeftJoin | NaturalLeftJoin), true, [] ->
-                    let candidates =
-                        seq {
-                            for left in rowsSoFar do
-                                let mutable matched = false
 
-                                for _, right in rightRowsFor left do
-                                    matched <- true
-                                    yield Array.append left right
-
-                                if not matched then
-                                    yield Array.append left rightNullPadding
-                        }
-
-                    Ok(newSources, candidates, coalesceNames)
-                | (LeftJoin | NaturalLeftJoin), _, _ ->
+                Ok(newSources, candidates, coalesceNames)
+            | (InnerJoin | StraightJoin | NaturalJoin), _, _ ->
+                seq {
+                    for left in rowsSoFar do
+                        for _, right in rightRowsFor left do
+                            yield Array.append left right
+                }
+                |> traverseSeqWithLimit
+                    (Some(
+                        maxJoinCandidateRows,
+                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                    ))
+                    (fun combined -> candidateHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
+                |> Result.mapError Err
+                |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
+            | (LeftJoin | NaturalLeftJoin), true, [] ->
+                let candidates =
                     seq {
-                        for leftIndex, left in leftIndexed.Value do
-                            for rightIndex, (_, right) in rightRowsFor left |> Seq.indexed do
-                                yield leftIndex, rightIndex, Array.append left right
+                        for left in rowsSoFar do
+                            let mutable matched = false
+
+                            for _, right in rightRowsFor left do
+                                matched <- true
+                                yield Array.append left right
+
+                            if not matched then
+                                yield Array.append left rightNullPadding
                     }
-                    |> traverseSeqWithLimit
-                        (Some(
-                            maxJoinCandidateRows,
-                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                        ))
-                        (fun ((_, _, combined) as candidate) ->
-                            candidateHolds combined
-                            |> Result.map (fun matches -> if matches then Some candidate else None))
-                    |> Result.mapError Err
-                    |> Result.map (buildCombinedRows [] >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
-                | (RightJoin | NaturalRightJoin), _, _ ->
-                    let positionedRight =
-                        probe.Table.RowsArray.Indexed
-                        |> Seq.map (fun (rowId, right) -> rowId, readRight right)
-                        |> Seq.indexed
-                        |> List.ofSeq
-                    let rightPositions = positionedRight |> List.map (fun (index, (rowId, _)) -> rowId, index) |> Map.ofList
-                    let rightIndexed = positionedRight |> List.map (fun (index, (_, row)) -> index, row)
 
-                    seq {
-                        for leftIndex, left in leftIndexed.Value do
-                            for rowId, right in rightRowsFor left do
-                                match Map.tryFind rowId rightPositions with
-                                | Some rightIndex -> yield leftIndex, rightIndex, Array.append left right
-                                | None -> ()
-                    }
-                    |> traverseSeqWithLimit
-                        (Some(
-                            maxJoinCandidateRows,
-                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                        ))
-                        (fun ((_, _, combined) as candidate) ->
-                            candidateHolds combined
-                            |> Result.map (fun matches -> if matches then Some candidate else None))
-                    |> Result.mapError Err
-                    |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
-                | _ -> failwith "indexed join kind"
-            | _, None when hashEligible ->
-                let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
-                let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-                let rightCount = joinRows |> Seq.length
-                let buildOnLeft = leftIndexed.Value.Length <= rightCount
+                Ok(newSources, candidates, coalesceNames)
+            | (LeftJoin | NaturalLeftJoin), _, _ ->
+                seq {
+                    for leftIndex, left in leftIndexed.Value do
+                        for rightIndex, (_, right) in rightRowsFor left |> Seq.indexed do
+                            yield leftIndex, rightIndex, Array.append left right
+                }
+                |> traverseSeqWithLimit
+                    (Some(
+                        maxJoinCandidateRows,
+                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                    ))
+                    (fun ((_, _, combined) as candidate) ->
+                        candidateHolds combined
+                        |> Result.map (fun matches -> if matches then Some candidate else None))
+                |> Result.mapError Err
+                |> Result.map (buildCombinedRows [] >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
+            | (RightJoin | NaturalRightJoin), _, _ ->
+                let positionedRight =
+                    probe.Table.RowsArray.Indexed
+                    |> Seq.map (fun (rowId, right) -> rowId, readRight right)
+                    |> Seq.indexed
+                    |> List.ofSeq
+                let rightPositions = positionedRight |> List.map (fun (index, (rowId, _)) -> rowId, index) |> Map.ofList
+                let rightIndexed = positionedRight |> List.map (fun (index, (_, row)) -> index, row)
 
-                match join.Kind, residualConjuncts with
-                | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), [] ->
-                    // Nothing here needs to see every match up front: `INNER`/
-                    // `CROSS`/`NATURAL` keep only matched pairs (no
-                    // unmatched-side padding to compute, unlike `LEFT`/
-                    // `RIGHT`), and an empty residual means every hash-bucket
-                    // hit is already a real match (no `ON`-conjunct re-check
-                    // that could itself fail past the point a caller stops
-                    // pulling). So this is `hashPairs`' lazy `seq` straight
-                    // through, `Array.append`-combined but not collected —
-                    // `runSelect`'s `WHERE`/`LIMIT` streaming decides how
-                    // much of it ever actually runs.
-                    let combined : Value[] seq =
-                        if buildOnLeft then
-                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed.Value (joinRows |> Seq.indexed)
-                            |> Seq.map (fun (_, l, _, r) -> Array.append l r)
-                        else
-                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) (joinRows |> Seq.indexed |> List.ofSeq) leftIndexed.Value
-                            |> Seq.map (fun (_, r, _, l) -> Array.append l r)
+                seq {
+                    for leftIndex, left in leftIndexed.Value do
+                        for rowId, right in rightRowsFor left do
+                            match Map.tryFind rowId rightPositions with
+                            | Some rightIndex -> yield leftIndex, rightIndex, Array.append left right
+                            | None -> ()
+                }
+                |> traverseSeqWithLimit
+                    (Some(
+                        maxJoinCandidateRows,
+                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                    ))
+                    (fun ((_, _, combined) as candidate) ->
+                        candidateHolds combined
+                        |> Result.map (fun matches -> if matches then Some candidate else None))
+                |> Result.mapError Err
+                |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
+            | _ -> failwith "indexed join kind"
+        | _, None when hashEligible ->
+            let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
+            let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+            let rightCount = joinRows |> Seq.length
+            let buildOnLeft = leftIndexed.Value.Length <= rightCount
 
-                    Ok(newSources, combined, coalesceNames)
-                | _ ->
-                    let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
+            match join.Kind, residualConjuncts with
+            | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), [] ->
+                // Nothing here needs to see every match up front: `INNER`/
+                // `CROSS`/`NATURAL` keep only matched pairs (no
+                // unmatched-side padding to compute, unlike `LEFT`/
+                // `RIGHT`), and an empty residual means every hash-bucket
+                // hit is already a real match (no `ON`-conjunct re-check
+                // that could itself fail past the point a caller stops
+                // pulling). So this is `hashPairs`' lazy `seq` straight
+                // through, `Array.append`-combined but not collected —
+                // `runSelect`'s `WHERE`/`LIMIT` streaming decides how
+                // much of it ever actually runs.
+                let combined : Value[] seq =
+                    if buildOnLeft then
+                        hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed.Value (joinRows |> Seq.indexed)
+                        |> Seq.map (fun (_, l, _, r) -> Array.append l r)
+                    else
+                        hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) (joinRows |> Seq.indexed |> List.ofSeq) leftIndexed.Value
+                        |> Seq.map (fun (_, r, _, l) -> Array.append l r)
 
-                    let candidates : (int * int * Value[]) seq =
-                        if buildOnLeft then
-                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed.Value rightIndexed
-                            |> Seq.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
-                        else
-                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed.Value
-                            |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
-
-                    candidates
-                    |> traverseSeqWithLimit
-                        (Some(
-                            maxJoinCandidateRows,
-                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                        ))
-                        (fun ((_, _, combined) as candidate) ->
-                            residualHolds combined
-                            |> Result.map (fun matches -> if matches then Some candidate else None))
-                    |> Result.mapError Err
-                    |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
-            | _, None ->
+                Ok(newSources, combined, coalesceNames)
+            | _ ->
                 let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
-                match join.Kind, isConstantTrue effectiveOn with
-                | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), true ->
-                    let combined =
-                        seq {
-                            for left in rowsSoFar do
-                                for _, right in rightIndexed do
-                                    yield Array.append left right
-                        }
+                let candidates : (int * int * Value[]) seq =
+                    if buildOnLeft then
+                        hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed.Value rightIndexed
+                        |> Seq.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
+                    else
+                        hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed.Value
+                        |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
 
-                    Ok(newSources, combined, coalesceNames)
-                | _ ->
-                    let pairs = seq { for li, l in leftIndexed.Value do for ri, r in rightIndexed -> li, ri, l, r }
+                candidates
+                |> traverseSeqWithLimit
+                    (Some(
+                        maxJoinCandidateRows,
+                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                    ))
+                    (fun ((_, _, combined) as candidate) ->
+                        residualHolds combined
+                        |> Result.map (fun matches -> if matches then Some candidate else None))
+                |> Result.mapError Err
+                |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
+        | _, None ->
+            let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
-                    pairs
-                    |> traverseSeqWithLimit
-                        (Some(
-                            maxJoinCandidateRows,
-                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                        ))
-                        (fun (li, ri, l, r) ->
-                            let combined = Array.append l r
+            match join.Kind, isConstantTrue effectiveOn with
+            | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), true ->
+                let combined =
+                    seq {
+                        for left in rowsSoFar do
+                            for _, right in rightIndexed do
+                                yield Array.append left right
+                    }
 
-                            evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
-                            |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
-                    |> Result.mapError Err
-                    |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
+                Ok(newSources, combined, coalesceNames)
+            | _ ->
+                let pairs = seq { for li, l in leftIndexed.Value do for ri, r in rightIndexed -> li, ri, l, r }
+
+                pairs
+                |> traverseSeqWithLimit
+                    (Some(
+                        maxJoinCandidateRows,
+                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                    ))
+                    (fun (li, ri, l, r) ->
+                        let combined = Array.append l r
+
+                        evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
+                        |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
+                |> Result.mapError Err
+                |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
 
 /// Multi-table mutations retain each source row beside the flattened row.
 /// Derived sources can filter targets but have no writable identity.

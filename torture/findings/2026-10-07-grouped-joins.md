@@ -285,3 +285,17 @@ physical source flags. Output names remain independent of inferred types, so
 an unknown scalar descriptor does not discard a neighboring column's origin.
 Optimizer-dependent materialization choices and broader
 interactions with computed results remain subject to metadata verification.
+
+## Grouped dependent sources
+
+The [grouped lateral oracle](../scripts/grouped-lateral-oracle.py) verifies
+LATERAL and JSON_TABLE references to preceding rows, including a dependent
+source at the start of a group and an empty lateral result under LEFT JOIN.
+Ordinary ON expressions inside the group still reject references to preceding
+siblings outside that group.
+
+Dependent groups prepare their source for each preceding row and use the same
+join matcher as independent sources. Query and lateral contexts remain separate
+so dependency evaluation does not widen ordinary ON scope. Regressions compare
+ordered rows and the invalid ON error. Broader correlated source combinations
+and dependent mutations remain outside this coverage.
