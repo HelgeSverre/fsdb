@@ -20,10 +20,6 @@ let minTokenLength = 3
 /// `@@innodb_ft_max_token_size`'s default.
 let maxTokenLength = 84
 
-/// `@@ft_query_expansion_limit`'s default: how many top-ranked documents
-/// seed the second pass of WITH QUERY EXPANSION.
-let private queryExpansionLimit = 20
-
 let ngramTokenSize = StorageOptions.defaults.NgramTokenSize
 
 type Tokenizer =
@@ -1207,8 +1203,8 @@ let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
     booleanScores corpus.Index query |> scoresInCorpusOrder corpus
 
 // ---------------------------------------------------------------------------
-// Query expansion: NL pass, expand the query with every searchable token of
-// the top-ranked docs, NL pass again (blind relevance feedback).
+// Query expansion uses searchable tokens from every first-pass match.
+// InnoDB does not apply the MyISAM ft_query_expansion_limit.
 // ---------------------------------------------------------------------------
 
 let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: string) =
@@ -1228,8 +1224,6 @@ let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: st
     let seedTerms =
         firstPass
         |> Map.toArray
-        |> Array.sortByDescending snd
-        |> Array.truncate queryExpansionLimit
         |> Array.collect (fun (id, _) ->
             let document = view.Documents.[id]
             indexedTokens document)

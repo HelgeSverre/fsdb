@@ -473,6 +473,20 @@ let tests =
               Expect.equal (matches "+(alpha +beta) +common") [| 2; 3 |] "a nested required term constrains its group"
               Expect.equal (matches "-(alpha beta) common") [| 4 |] "an excluded group removes every group match"
 
+          testCase "query expansion uses every first-pass document beyond twenty seeds"
+          <| fun _ ->
+              let documents =
+                  [ for id in 1..25 do
+                        let word = "uniqueword" + string (char (int 'a' + id - 1))
+                        yield id, "orchard " + word
+                        yield 100 + id, word
+                    yield 999, "unrelated" ]
+              let index = buildIndexWith defaultCollation documents
+              let expected = Set.ofList ([ 1..25 ] @ [ 101..125 ])
+              Expect.equal (expansionScores index "orchard" |> Map.keys |> Set.ofSeq) expected "InnoDB expands from all matching documents"
+              Expect.equal (expansionScoresWithin (Set.singleton 125) index "orchard" |> Map.keys |> Set.ofSeq)
+                  (Set.singleton 125) "predicate candidates do not truncate the seed pass"
+
           testCase "query expansion ranks the seed docs first and pulls in term-sharing docs"
           <| fun _ ->
               // Oracle: AGAINST ('database' WITH QUERY EXPANSION) returns all

@@ -2711,6 +2711,30 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS natural_aggregates" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private fullTextExpansionSeeds =
+        let values =
+            [ for id in 1..25 do
+                  let word = "uniqueword" + string (char (int 'a' + id - 1))
+                  yield sprintf "(%d,'orchard %s')" id word
+                  yield sprintf "(%d,'%s')" (100 + id) word
+              yield "(999,'unrelated')" ] |> String.concat ","
+        let score = "MATCH(body) AGAINST('orchard' WITH QUERY EXPANSION)"
+        { Name = "fulltext-expansion-seeds"
+          Setup =
+            [| "CREATE TABLE expansion_seeds(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))"
+               "INSERT INTO expansion_seeds VALUES" + values
+               "ANALYZE TABLE expansion_seeds" |]
+          Steps =
+            [| for index, sql in
+                   [ "SELECT id FROM expansion_seeds WHERE " + score + " ORDER BY id"
+                     "SELECT id FROM expansion_seeds WHERE id=125 AND " + score
+                     "SELECT id FROM expansion_seeds WHERE id>=121 AND " + score + " ORDER BY id"
+                     "SELECT id,CAST(" + score + " AS DECIMAL(12,5)) AS relevance FROM expansion_seeds ORDER BY id" ] |> List.indexed do
+                   Contract.query (sprintf "seeds-%d-text" index) sql
+                   Contract.preparedQuery (sprintf "seeds-%d-binary" index) sql [||] |]
+          Cleanup = [| "DROP TABLE IF EXISTS expansion_seeds" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private naturalPhrases =
         { Name = "natural-fulltext-phrases"
           Setup =
@@ -3111,6 +3135,7 @@ module ContractCatalog =
            storedFunctionSet
            ngramFullText
            naturalPhrases
+           fullTextExpansionSeeds
            naturalAggregates
            singleGroupOrdering
            temporalNumericConversion
