@@ -4698,6 +4698,39 @@ let tests =
               | Err(1064, _) -> ()
               | other -> failtestf "expected local PREPARE source rejection, got %A" other
 
+          testCase "stored function definitions follow replacement and creation SQL mode"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let execute session sql =
+                  let next, result = handle session sql
+                  Expect.equal result (Affected 0UL) sql
+                  next
+              let expectValue session sql expected =
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual expected sql
+                  | other -> failtestf "expected scalar for %s, got %A" sql other
+
+              let session = execute session "CREATE FUNCTION cached_value(value INT) RETURNS INT RETURN value + 1"
+              for _ in 1..3 do expectValue session "SELECT cached_value(4)" "5"
+              let session = execute session "DROP FUNCTION cached_value"
+              let session = execute session "CREATE FUNCTION cached_value(value INT) RETURNS INT RETURN value + 2"
+              expectValue session "SELECT cached_value(4)" "6"
+              let session = execute session "DROP FUNCTION cached_value"
+              let session = execute session "CREATE FUNCTION cached_value(other INT) RETURNS INT RETURN other + 2"
+              expectValue session "SELECT cached_value(4)" "6"
+              let session = execute session "DROP FUNCTION cached_value"
+              let session = execute session "CREATE FUNCTION cached_value(other INT) RETURNS DECIMAL(5,2) RETURN other + 2"
+              expectValue session "SELECT cached_value(4)" "6.00"
+
+              let session = execute session "SET sql_mode = ''"
+              let session = execute session "CREATE FUNCTION joined() RETURNS VARCHAR(10) RETURN '1' || '2'"
+              expectValue session "SELECT joined()" "1"
+              let session = execute session "DROP FUNCTION joined"
+              let session = execute session "SET sql_mode = 'PIPES_AS_CONCAT'"
+              let session = execute session "CREATE FUNCTION joined() RETURNS VARCHAR(10) RETURN '1' || '2'"
+              let session = execute session "SET sql_mode = ''"
+              expectValue session "SELECT joined()" "12"
+
           testCase "stored functions return typed scalar values"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

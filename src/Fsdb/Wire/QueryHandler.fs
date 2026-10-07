@@ -5440,6 +5440,27 @@ let private parseFunctionDefinition options parameters returnType body =
         Error(Err(1336, "Dynamic SQL is not allowed in stored function or trigger"))
     | _, _, Error _ -> Error(syntaxError body)
 
+// Definitions are immutable syntax; account, catalog, and session checks remain per invocation.
+let private parsedFunctionDefinitions =
+    BoundedConcurrentCache<
+        struct (Parser.ParserOptions * string * string * string),
+        StoredProgram.Parameter list * ColumnType * StoredProgram.Statement list
+     >(256)
+
+let private functionDefinition options (parameters: string) (returnType: string) (body: string) =
+    let key = struct (options, parameters, returnType, body)
+
+    match parsedFunctionDefinitions.TryGetValue key with
+    | true, definition -> Ok definition
+    | false, _ ->
+        match parseFunctionDefinition options parameters returnType body with
+        | Ok definition as parsed ->
+            if int64 parameters.Length + int64 returnType.Length + int64 body.Length <= 16384L then
+                parsedFunctionDefinitions.TryAdd(key, definition) |> ignore
+
+            parsed
+        | Error _ as error -> error
+
 let private firstUnsafeStoredRoutineCall (registry: Functions.Registry) statements =
     statements
     |> List.collect StoredProgram.expressions
@@ -6418,7 +6439,7 @@ let rec private invokeStoredFunction
     let options = SqlMode.parserOptionsFor routine.SqlMode
 
     let parameters, returnType, statements =
-        match parseFunctionDefinition options routine.Parameters routine.ReturnType routine.Definition with
+        match functionDefinition options routine.Parameters routine.ReturnType routine.Definition with
         | Ok definition -> definition
         | Error error -> raiseFunctionError error
 

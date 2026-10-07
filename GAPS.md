@@ -642,9 +642,12 @@ The [post-compatibility comparison](benchmarks/results/10d2a1d8-windows.md)
 provides a saved fsdb baseline with alternating target order. The subsequent
 [RANGE boundary search measurements](benchmarks/results/range-boundary-search.md)
 show a large reduction from replacing partition scans with binary searches
-for compatible key domains. Mixed domains retain the scan fallback. Stored-function
-inputs and remaining aggregate/expression overhead are still profiling targets;
-control drift limits claims about smaller timing differences.
+for compatible key domains. Mixed domains retain the scan fallback.
+[Stored-function definition caching](benchmarks/results/stored-function-definition-cache.md)
+removes repeated syntax parsing and roughly halves latency in the measured
+window workload with function inputs. Function execution and aggregate/expression overhead
+remain substantially above MySQL; shared-host load and control drift limit
+precise timing claims.
 
 Unless an artifact header says otherwise, the linked planner profiles compare
 native in-memory fsdb with native durable MySQL. They expose query-shape and
