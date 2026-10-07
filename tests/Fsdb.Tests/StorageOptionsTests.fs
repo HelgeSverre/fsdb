@@ -123,6 +123,32 @@ let tests =
               | Err(1231, _) -> ()
               | result -> failtestf "invalid boolean setting: %A" result
 
+          testCase "metadata ALTER preserves each document's indexing rules"
+          <| fun _ ->
+              let store = Storage.create ()
+              let run = TestSupport.Sql.executeDefault store
+              run "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run "INSERT INTO docs VALUES(1,'ab'),(2,'ab')" |> ignore
+              let database = store.Catalog.[Storage.defaultDatabase]
+              let table = database.["docs"]
+              let filtered: FullText.IndexingRules =
+                  { Tokenizer = FullText.Ngrams 2; Stopwords = FullText.StopwordPolicy.BuiltIn }
+              let documents =
+                  table.RowsArray.Indexed
+                  |> Seq.mapi (fun position (id, _) ->
+                      let rules = if position = 0 then { filtered with Stopwords = FullText.StopwordPolicy.Disabled } else filtered
+                      id, rules, [ "ab" ])
+              let index = FullText.buildIndexWithDocumentSettings filtered Collation.defaultCollation documents
+              Storage.setCatalog store (store.Catalog |> Map.add Storage.defaultDatabase (database |> Map.add "docs" { table with FullTextIndexes = Map.ofList [ "ft", index ] }))
+              let query = "SELECT id FROM docs WHERE MATCH(body) AGAINST('ab') ORDER BY id"
+              Expect.equal (run query |> rows) [ [ Some "1" ] ] "initial historical posting"
+              Expect.equal (run "ALTER TABLE docs RENAME INDEX ft TO renamed") (Affected 0UL) "metadata rename"
+              Expect.equal (run query |> rows) [ [ Some "1" ] ] "rename retains historical filtering"
+              run "INSERT INTO docs VALUES(3,'ab')" |> ignore
+              Expect.equal (run query |> rows) [ [ Some "1" ] ] "future writes retain the index's active filtering"
+              run "ALTER TABLE docs ENGINE=InnoDB" |> ignore
+              Expect.isEmpty (run query |> rows) "physical rebuild replaces all historical rules"
+
           testCase "snapshots preserve fulltext stopword policies for empty and populated indexes"
           <| fun _ ->
               let run = TestSupport.Sql.executeDefault

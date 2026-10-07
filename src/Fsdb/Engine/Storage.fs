@@ -2923,36 +2923,40 @@ let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
         group.Name, entries)
     |> Map.ofList
 
-let private buildFullTextIndexesWithStopwords stopwordsFor tokenizerFor (table: Table) : FullTextIndexes =
+let private buildFullTextIndexesWithStopwords stopwordsFor rulesFor (table: Table) : FullTextIndexes =
     fullTextKeyGroups table
     |> List.map (fun group ->
+        let rules: FullText.IndexingRules =
+            { Tokenizer = group.Tokenizer; Stopwords = stopwordsFor group.Name }
         group.Name,
         (table.RowsArray.Indexed
          |> Seq.map (fun (rowId, row) ->
-             rowId, tokenizerFor group.Name rowId group.Tokenizer, fullTextFields group.Indices row)
-         |> FullText.buildIndexWithDocumentSettings (stopwordsFor group.Name) group.Tokenizer group.CollationSpec))
+             let documentRules = rulesFor group.Name rowId rules
+             rowId, documentRules, fullTextFields group.Indices row)
+         |> FullText.buildIndexWithDocumentSettings rules group.CollationSpec))
     |> Map.ofList
 
-let private buildFullTextIndexes tokenizerFor table =
+let private buildFullTextIndexes rulesFor table =
     let stopwordsFor name =
         table.FullTextIndexes |> Map.tryFind name |> Option.map FullText.activeStopwords
         |> Option.defaultValue FullText.StopwordPolicy.BuiltIn
-    buildFullTextIndexesWithStopwords stopwordsFor tokenizerFor table
+    buildFullTextIndexesWithStopwords stopwordsFor rulesFor table
 
 let private rebuildFullTextIndexes table =
-    buildFullTextIndexes (fun _ _ tokenizer -> tokenizer) table
+    buildFullTextIndexes (fun _ _ rules -> rules) table
 
 let internal restoreFullTextIndexesWithStopwords stopwords (tokenizers: Map<string, Map<RowId, FullText.Tokenizer>>) table =
-    let tokenizerFor name rowId fallback =
-        tokenizers |> Map.tryFind name |> Option.bind (Map.tryFind rowId) |> Option.defaultValue fallback
+    let rulesFor name rowId (fallback: FullText.IndexingRules) =
+        let tokenizer = tokenizers |> Map.tryFind name |> Option.bind (Map.tryFind rowId) |> Option.defaultValue fallback.Tokenizer
+        { fallback with Tokenizer = tokenizer }
     let stopwordsFor name = Map.tryFind name stopwords |> Option.defaultValue FullText.StopwordPolicy.BuiltIn
-    buildFullTextIndexesWithStopwords stopwordsFor tokenizerFor table
+    buildFullTextIndexesWithStopwords stopwordsFor rulesFor table
 
-let private documentTokenizerFrom (source: Table) sourceRowIds indexName rowId fallback =
+let private documentRulesFrom (source: Table) sourceRowIds indexName rowId fallback =
     let sourceRowId = sourceRowIds |> Map.tryFind rowId |> Option.defaultValue rowId
     source.FullTextIndexes
     |> Map.tryFind indexName
-    |> Option.bind (FullText.documentTokenizer sourceRowId)
+    |> Option.bind (FullText.documentRules sourceRowId)
     |> Option.defaultValue fallback
 
 let private rebuildSpatialIndexes (table: Table) : SpatialIndexes =
@@ -3001,11 +3005,14 @@ let private stopwordPolicy enabled =
     if enabled then FullText.StopwordPolicy.BuiltIn else FullText.StopwordPolicy.Disabled
 
 let private reindexTableWithFullTextSettings size stopwordsEnabled table =
-    let tokenizerFor _ _ = function
-        | FullText.Words -> FullText.Words
-        | FullText.Ngrams _ -> FullText.Ngrams size
+    let rulesFor _ _ (rules: FullText.IndexingRules) =
+        let tokenizer =
+            match rules.Tokenizer with
+            | FullText.Words -> FullText.Words
+            | FullText.Ngrams _ -> FullText.Ngrams size
+        { rules with Tokenizer = tokenizer }
     let indexes =
-        buildFullTextIndexesWithStopwords (fun _ -> stopwordPolicy stopwordsEnabled) tokenizerFor table
+        buildFullTextIndexesWithStopwords (fun _ -> stopwordPolicy stopwordsEnabled) rulesFor table
         |> Map.map (fun _ index -> FullText.withNgramTokenSize size index)
     reindexTableWithFullTextIndexes indexes table
 
@@ -3122,7 +3129,7 @@ let private reindexRow
 
     uniqueIndex, secondaryIndex, secondaryOrder
 
-let private publishRowsWithDocumentTokenizers tokenizerFor (before: Table) (after: Table) : Table =
+let private publishRowsWithDocumentRules rulesFor (before: Table) (after: Table) : Table =
     let compactedRows = after.RowsArray.CompactIfNeeded()
 
     let after =
@@ -3133,7 +3140,7 @@ let private publishRowsWithDocumentTokenizers tokenizerFor (before: Table) (afte
 
     if before.Indexes <> after.Indexes || before.Columns <> after.Columns then
         { after with
-            FullTextIndexes = buildFullTextIndexes tokenizerFor after
+            FullTextIndexes = buildFullTextIndexes rulesFor after
             SpatialIndexes = rebuildSpatialIndexes after }
     else
         let changes = after.RowsArray.ChangesFrom before.RowsArray |> Array.ofSeq
@@ -3155,8 +3162,8 @@ let private publishRowsWithDocumentTokenizers tokenizerFor (before: Table) (afte
                             |> fun current -> removed |> Option.fold (fun current _ -> FullText.removeDocument rowId current) current
                             |> fun current ->
                                 added |> Option.fold (fun current row ->
-                                    let tokenizer = tokenizerFor group.Name rowId (FullText.activeTokenizer current)
-                                    FullText.addDocumentFieldsWith tokenizer rowId (fullTextFields group.Indices row) current) current
+                                    let rules = rulesFor group.Name rowId (FullText.activeRules current)
+                                    FullText.addDocumentFieldsWithRules rules rowId (fullTextFields group.Indices row) current) current
 
                     let index = changes |> Array.fold update (Map.find group.Name indexes)
                     Map.add group.Name index indexes)
@@ -3186,7 +3193,7 @@ let private publishRowsWithDocumentTokenizers tokenizerFor (before: Table) (afte
             SpatialIndexes = spatialIndexes }
 
 let private publishRows before after =
-    publishRowsWithDocumentTokenizers (fun _ _ tokenizer -> tokenizer) before after
+    publishRowsWithDocumentRules (fun _ _ rules -> rules) before after
 
 let private mergeFullTextDocuments sourceRowIds (baseline: Table) (source: Table) (target: Table) =
     let targetRowIds = sourceRowIds |> Map.toSeq |> Seq.map (fun (targetId, sourceId) -> sourceId, targetId) |> Map.ofSeq
@@ -3248,7 +3255,7 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
             publish None (Some(addedId, row))
         | None, None -> ()
 
-    publishRowsWithDocumentTokenizers (documentTokenizerFrom batchTable sourceRowIds) liveTable
+    publishRowsWithDocumentRules (documentRulesFrom batchTable sourceRowIds) liveTable
         { liveTable with
             RowsArray = rows.DrainToImmutable()
             NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId
@@ -7127,10 +7134,10 @@ let private reindexAfterAlter size stopwordsEnabled actions preserveFullText bef
                 |> Option.map (fun source -> group.Name, source.Name))
             |> Map.ofList
 
-        let tokenizerFor name rowId fallback =
-            let fallback = tokenizerAtSize fallback
+        let rulesFor name rowId (fallback: FullText.IndexingRules) =
+            let fallback = { fallback with Tokenizer = tokenizerAtSize fallback.Tokenizer }
             match sourceNames |> Map.tryFind name with
-            | Some sourceName -> documentTokenizerFrom before Map.empty sourceName rowId fallback
+            | Some sourceName -> documentRulesFrom before Map.empty sourceName rowId fallback
             | None -> fallback
 
         let inheritedStopwords =
@@ -7146,7 +7153,7 @@ let private reindexAfterAlter size stopwordsEnabled actions preserveFullText bef
             |> Option.defaultValue inheritedStopwords
 
         let indexes =
-            buildFullTextIndexesWithStopwords stopwordsFor tokenizerFor after
+            buildFullTextIndexesWithStopwords stopwordsFor rulesFor after
             |> Map.map (fun _ index -> FullText.withNgramTokenSize size index)
         reindexTableWithFullTextIndexes indexes after
 
@@ -9233,7 +9240,7 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
             | _ -> conflict ()
 
         let mergedTable =
-            publishRowsWithDocumentTokenizers (documentTokenizerFrom batchTable Map.empty) liveTable
+            publishRowsWithDocumentRules (documentRulesFrom batchTable Map.empty) liveTable
                 { liveTable with
                     RowsArray = rows.DrainToImmutable()
                     NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId

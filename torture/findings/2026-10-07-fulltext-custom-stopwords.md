@@ -124,8 +124,31 @@ those paths are connected would claim behavior the engine does not provide.
 Custom startup options, additional ALTER variants, query expansion, and more
 source charset/collation combinations remain outside this verified matrix.
 
+## Indexing-rule foundation
+
+`FullText.IndexingRules` groups the tokenizer and stopword policy. An index keeps
+its active rules separately from the rules captured by each document.
+Reconstruction accepts historical rules per document, and transaction publication
+and metadata ALTER carry those complete rules rather than only token sizes.
+Physical rebuilds still apply the selected rules to every document.
+
+The core regressions cover mixed ngram sizes and stopword policies, active-rule
+changes, reconstruction, prefix removal, transaction merging, and metadata rename
+versus physical rebuild. This establishes the in-memory representation; custom
+source resolution, historical-policy persistence, and query lookup across changed
+custom policies remain open. The existing snapshot and WAL formats are unchanged.
+
 ## Verification
 
 The complete native oracle passes, including the same-datadir restart sequence
-and searches in natural and Boolean modes after each transition. No fsdb runtime
-behavior is changed and no known-gap suppression is added.
+and searches in natural and Boolean modes after each transition. The indexing-rule refactor passes `just check` with 2,894 tests and no build
+warnings or errors. The existing stopword configuration matrix passes on fsdb.
+All 47 MySQL contracts (5,007 steps) pass without differences:
+`torture/artifacts/runs/20261007T055754753-82959/contracts`.
+
+The durability lane passes 12 crash restarts, preserving all 44 acknowledged
+commits and transaction boundaries, with checkpoint, WAL-tail, snapshot, schema,
+and torn-tail checks:
+`torture/artifacts/runs/20261007T055817970-82996/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+
+Custom SQL variables remain unavailable and no known-gap suppression is added.

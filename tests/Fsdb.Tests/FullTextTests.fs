@@ -23,7 +23,43 @@ let private closeTo (expected: float) (actual: float) (label: string) =
 let tests =
     testList
         "fulltext"
-        [ testCase "stopword policy applies to word and ngram queries and later writes"
+        [ testCase "document indexing rules survive reconstruction and active policy changes"
+          <| fun _ ->
+              let filtered = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let unfiltered = { filtered with Stopwords = StopwordPolicy.Disabled }
+              let longer = { unfiltered with Tokenizer = Ngrams 3 }
+              let documents =
+                  [ 1, unfiltered, [ "ab" ]; 2, filtered, [ "ab" ]
+                    3, longer, [ "abc" ]; 4, filtered, [ "zz" ] ]
+              let index = buildIndexWithDocumentSettings filtered defaultCollation documents
+              Expect.equal (naturalScores index "ab" |> Map.keys |> Seq.toList) [ 1 ] "only historically indexed grams match"
+              Expect.equal (booleanScores index "a*" |> Map.keys |> Seq.toList) [ 1; 3 ] "prefixes retain each document's rules"
+              let changed = index |> withIndexingRules unfiltered |> addDocument 5 "ab"
+              Expect.equal (documentRules 2 changed) (Some filtered) "changing active rules leaves stored document rules intact"
+              Expect.equal (documentRules 5 changed) (Some unfiltered) "new writes capture active rules"
+              Expect.equal (naturalScores changed "ab" |> Map.keys |> Seq.toList) [ 1; 5 ] "new policy does not reinterpret older filtered documents"
+              let saved =
+                  documents @ [ 5, unfiltered, [ "ab" ] ]
+                  |> List.map (fun (id, _, fields) -> id, documentRules id changed |> Option.get, fields)
+              let restored = buildIndexWithDocumentSettings (activeRules changed) defaultCollation saved
+              Expect.equal (naturalScores restored "ab") (naturalScores changed "ab") "reconstructed postings retain historical rules"
+              Expect.equal (booleanScores (removeDocument 1 restored) "a*" |> Map.keys |> Seq.toList) [ 3; 5 ] "removal uses the removed document's rules"
+              Expect.equal (activeRules index) filtered "old immutable index retains its active rules"
+
+          testCase "transaction merge retains source document rules and target write rules"
+          <| fun _ ->
+              let filtered = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let unfiltered = { filtered with Stopwords = StopwordPolicy.Disabled }
+              let baseline = buildIndexWithDocumentSettings filtered defaultCollation [ 1, filtered, [ "zz" ] ]
+              let source = baseline |> withIndexingRules unfiltered |> addDocument 1 "ab"
+              let target = baseline |> addDocument 2 "ab"
+              let merged = mergeDocuments Map.empty baseline source target
+              Expect.equal (documentRules 1 merged) (Some unfiltered) "merged document keeps source indexing rules"
+              Expect.equal (documentRules 2 merged) (Some filtered) "concurrent document keeps target indexing rules"
+              Expect.equal (activeRules merged) filtered "publication does not replace the target's active rules"
+              Expect.equal (naturalScores merged "ab" |> Map.keys |> Seq.toList) [ 1 ] "only the unfiltered source document has the posting"
+
+          testCase "stopword policy applies to word and ngram queries and later writes"
           <| fun _ ->
               for tokenizer, term in [ Words, "the"; Ngrams 2, "ab" ] do
                   let documents = [ 1, [ term ]; 2, [ "zzzz" ]; 3, [ term ] ]
