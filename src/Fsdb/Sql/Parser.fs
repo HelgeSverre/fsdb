@@ -37,6 +37,18 @@ let defaultOptions: ParserOptions =
       RealAsFloat = false
       NoBackslashEscapes = false }
 
+/// Diagnostics raised after recognizing syntax that MySQL rejects semantically.
+let trySemanticError (detail: string) =
+    match detail.Trim() with
+    | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
+    | "NAME_CONST name cannot be NULL" ->
+        Some(1382, "The 'NAME_CONST' syntax is reserved for purposes internal to the MySQL server")
+    | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
+    | _ -> None
+
+// Ordinary parser backtracking must not reinterpret a rejected native call as a column.
+exception private SemanticParseError of string
+
 type private SqlSourcePart = Character | Quoted | OpenParenthesis | CloseParenthesis
 
 let inline private visitSqlSourceParts
@@ -1253,6 +1265,7 @@ let private depthGuard (p: Parser<'a, unit>) : Parser<'a, unit> =
 // into the full expression grammar, which is itself built on top of them —
 // tie the knot with a forward reference.
 let private expr, exprRef = createParserForwardedToRef<Expr, unit> ()
+let private nameConstArguments, nameConstArgumentsRef = createParserForwardedToRef<Expr list, unit> ()
 let private positionOperand, positionOperandRef = createParserForwardedToRef<Expr, unit> ()
 
 /// `SELECT`'s own clauses recurse into `expr` (projections, `WHERE`, ...),
@@ -1375,8 +1388,12 @@ let private genericFuncCall: Parser<Expr, unit> =
                 let openParen =
                     functionOpenParen (not qualified && whitespaceSensitiveFunctionNames.Contains normalizedName)
 
+                let arguments =
+                    if not qualified && normalizedName = "name_const" then nameConstArguments
+                    else sepBy (if not qualified && distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+
                 openParen
-                >>. sepBy (if not qualified && distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+                >>. arguments
                 .>> sym ")"
                 |>> fun args ->
                     match normalizedName, args with
@@ -1867,6 +1884,42 @@ let private temporalLit: Parser<Expr, unit> =
                 | Some value -> preturn (Cast(Lit(VTime value), TTime fsp))
                 | None -> refuse "TIME"
             | None -> refuse "TIME"
+
+// NAME_CONST validates syntax before folding can erase negation or Boolean literals.
+let private parenthesizedLiteral parser =
+    let nested, nestedRef = createParserForwardedToRef<unit, unit> ()
+    nestedRef.Value <- attempt parser <|> (sym "+" >>. nested) <|> between (sym "(") (sym ")") nested
+    nested
+
+let private nameConstNameSyntax =
+    parenthesizedLiteral ((attempt temporalLit >>% ()) <|> (introducedStringLit >>% ()) <|> (literalValue >>% ()))
+
+let private nameConstValueSyntax =
+    let literal =
+        parenthesizedLiteral (
+            notFollowedBy (keyword "TRUE" <|> keyword "FALSE")
+            >>. ((introducedStringLit >>% ()) <|> (literalValue >>% ())))
+    parenthesizedLiteral (
+        attempt (literal .>> keyword "COLLATE" .>> identifier)
+        <|> (sym "-" >>. literal)
+        <|> literal)
+
+nameConstArgumentsRef.Value <-
+    sepBy (withSkippedString (fun source expression -> source, expression) expr) (sym ",")
+    .>> followedBy (sym ")")
+    >>= fun arguments ->
+        let accepts parser source =
+            match run (parser .>> eof) source with
+            | Success _ -> true
+            | _ -> false
+        match arguments with
+        | [ nameSource, name; valueSource, value ] ->
+            if not (accepts nameConstNameSyntax nameSource && accepts nameConstValueSyntax valueSource) then
+                raise (SemanticParseError "Incorrect arguments to NAME_CONST")
+            elif name = Lit VNull then
+                raise (SemanticParseError "NAME_CONST name cannot be NULL")
+            else preturn [ name; value ]
+        | _ -> raise (SemanticParseError "Incorrect parameter count in the call to native function 'NAME_CONST'")
 
 let private caseWhenThen: Parser<Expr * Expr, unit> = (keyword "WHEN" >>. expr .>> keyword "THEN") .>>. expr
 
@@ -5103,8 +5156,9 @@ let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Res
             match run parser sql with
             | Success(value, _, _) -> Result.Ok value
             | Failure(message, _, _) -> Result.Error message
-    with ex ->
-        Result.Error ex.Message
+    with
+    | SemanticParseError message -> Result.Error message
+    | ex -> Result.Error ex.Message
 
 let private withParserState storedProgramSyntax (options: ParserOptions) (sql: string) parse =
     let source = expandVersionComments options sql

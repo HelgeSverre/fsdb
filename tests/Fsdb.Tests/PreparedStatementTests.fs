@@ -33,7 +33,65 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "special projection names normalize NAME_CONST literal values"
+        [ testCase "NAME_CONST validates argument syntax before execution and prepare"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let incorrect = "Incorrect arguments to NAME_CONST"
+              let reserved = "The 'NAME_CONST' syntax is reserved for purposes internal to the MySQL server"
+              for expression, code, message in
+                  [ "NAME_CONST(NULL,2)", 1382, reserved
+                    "NAME_CONST(NULL,NULL)", 1382, reserved
+                    "NAME_CONST(-0,2)", 1210, incorrect
+                    "NAME_CONST(-(-1),2)", 1210, incorrect
+                    "NAME_CONST(1+1,2)", 1210, incorrect
+                    "NAME_CONST('a' COLLATE utf8mb4_bin,2)", 1210, incorrect
+                    "NAME_CONST(1,1+1)", 1210, incorrect
+                    "NAME_CONST(1,ABS(2))", 1210, incorrect
+                    "NAME_CONST(1,TRUE)", 1210, incorrect
+                    "NAME_CONST(1,-TRUE)", 1210, incorrect
+                    "NAME_CONST(1,-(-2))", 1210, incorrect
+                    "NAME_CONST(1,DATE '2020-01-01')", 1210, incorrect
+                    "NAME_CONST(1,CAST(2 AS SIGNED))", 1210, incorrect
+                    "NAME_CONST(1,(SELECT 2))", 1210, incorrect
+                    "NAME_CONST(@x,2)", 1210, incorrect
+                    "NAME_CONST(1,@x)", 1210, incorrect
+                    "NAME_CONST(NULL,TRUE)", 1210, incorrect
+                    "IF(0,NAME_CONST(1+1,2),3)", 1210, incorrect ] do
+                  let sql = "SELECT " + expression
+                  Expect.equal (handle session sql |> snd) (Err(code, message)) sql
+                  Expect.equal (prepareStatementForSession session sql) (Error(code, message)) ("prepare: " + sql)
+              let session = relationNameSession ()
+              for sql in
+                  [ "CREATE PROCEDURE invalid_name() SELECT NAME_CONST(1+1,2)"
+                    "CREATE FUNCTION invalid_name_f() RETURNS INT DETERMINISTIC RETURN NAME_CONST(1+1,2)"
+                    "CREATE VIEW invalid_name_v AS SELECT NAME_CONST(1+1,2)"
+                    "SELECT NAME_CONST('x',id) FROM a WHERE 0" ] do
+                  Expect.equal (handle session sql |> snd) (Err(1210, incorrect)) sql
+              let arityMessage = "Incorrect parameter count in the call to native function 'NAME_CONST'"
+              Expect.equal (handle session "SELECT NAME_CONST(1)" |> snd) (Err(1582, arityMessage)) "arity"
+              Expect.equal (prepareStatementForSession session "SELECT NAME_CONST(1)") (Error(1582, arityMessage)) "prepared arity"
+              for sql in [ "SELECT NAME_CONST(?,2)"; "SELECT NAME_CONST(1,?)" ] do
+                  Expect.equal (prepareStatementForSession session sql) (Error(1210, incorrect)) sql
+              for sql in [ "SELECT NAME_CONST(NULL,2"; "SELECT NAME_CONST(1" ] do
+                  match handle session sql |> snd with
+                  | Err(1064, _) -> ()
+                  | result -> failtestf "%s: %A" sql result
+              for expression, value in
+                  [ "NAME_CONST(1,('x') COLLATE utf8mb4_bin)", Some "x"
+                    "NAME_CONST(1,+(('x') COLLATE utf8mb4_bin))", Some "x"
+                    "NAME_CONST(+1,2)", Some "2"
+                    "NAME_CONST(1,-2)", Some "-2"
+                    "NAME_CONST(1,-0)", Some "0"
+                    "NAME_CONST(1,NULL)", None
+                    "NAME_CONST(1,-NULL)", None
+                    "NAME_CONST(1,-(+2))", Some "-2"
+                    "NAME_CONST(1,'x' COLLATE utf8mb4_bin)", Some "x"
+                    "NAME_CONST(1,'a' 'b')", Some "ab" ] do
+                  let sql = "SELECT " + expression
+                  Expect.equal (handle session sql |> snd) (ResultSet([ "1" ], [ [ value ] ])) sql
+                  Expect.isOk (prepareStatementForSession session sql) ("prepare: " + sql)
+
+          testCase "special projection names normalize NAME_CONST literal values"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               for argument, label in

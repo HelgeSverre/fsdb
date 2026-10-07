@@ -57,7 +57,10 @@ let private parserError (sql: string) (detail: string) =
             @"(?:^|\r?\n)\s*(?<message>Incorrect (?:DATE|DATETIME|TIME) value: '[^\r\n]*')\s*$"
         )
 
-    if temporal.Success then Err(1525, temporal.Groups.["message"].Value) else syntaxError sql
+    match Parser.trySemanticError detail with
+    | Some(code, message) -> Err(code, message)
+    | None when temporal.Success -> Err(1525, temporal.Groups.["message"].Value)
+    | None -> syntaxError sql
 
 let private hasKeywordPrefix (keyword: string) (text: string) =
     text.StartsWith(keyword, StringComparison.OrdinalIgnoreCase)
@@ -5443,7 +5446,7 @@ let private parseRoutineDefinition options parameters body =
         |> Result.mapError routineValidationError
         |> Result.map (fun () -> parsedParameters, statements)
     | Error _, _ -> Error(syntaxError parameters)
-    | _, Error _ -> Error(syntaxError body)
+    | _, Error detail -> Error(parserError body detail)
 
 let private parseFunctionCharacteristics (text: string) =
     let security =
@@ -5511,7 +5514,7 @@ let private parseFunctionDefinition options parameters returnType body =
     | _, Error _, _ -> Error(syntaxError returnType)
     | _, _, Error _ when Regex.IsMatch(body, @"\b(?:PREPARE|EXECUTE|DEALLOCATE\s+PREPARE)\b", RegexOptions.IgnoreCase) ->
         Error(Err(1336, "Dynamic SQL is not allowed in stored function or trigger"))
-    | _, _, Error _ -> Error(syntaxError body)
+    | _, _, Error detail -> Error(parserError body detail)
 
 // Definitions are immutable syntax; account, catalog, and session checks remain per invocation.
 let private parsedFunctionDefinitions =

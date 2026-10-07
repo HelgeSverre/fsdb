@@ -21421,7 +21421,11 @@ let rec executeAs
             | _ -> false
 
         match parsedView, Map.containsKey db store.Catalog, duplicateColumns, objectError, definer with
-        | Result.Error message, _, _, _, _ -> ids, Err(1064, sprintf "View definition has a syntax error: %s" message)
+        | Result.Error message, _, _, _, _ ->
+            let code, message =
+                Parser.trySemanticError message
+                |> Option.defaultValue (1064, sprintf "View definition has a syntax error: %s" message)
+            ids, Err(code, message)
         | _, false, _, _, _ -> ids, storageErr (NoSuchDatabase db)
         | _, _, Some(column, _), _, _ -> ids, Err(1060, sprintf "Duplicate column name '%s'" column)
         | _, _, _, Some(code, message), _ -> ids, Err(code, message)

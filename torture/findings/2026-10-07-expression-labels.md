@@ -47,12 +47,28 @@ source expression, including parentheses and interior comments; unintroduced
 
 The `_latin1'é'` control retains the decoded name `Ã©` on both engines.
 
-## Remaining NAME_CONST argument validation
+## NAME_CONST argument validation
 
-Native MySQL 8.4.11 rejects a NULL name with 1382/HY000 and rejects negative
-names (including `-0`), arithmetic, function calls, and COLLATE expressions
-with 1210/HY000. The maintained oracle checks these errors. fsdb currently
-returns NULL for a NULL name and accepts the other expressions. Its scalar
-implementation only checks arity and NULL; parser folding also erases the
-negative syntax in `-0`. Validation must preserve the relevant argument shape
-rather than infer acceptance solely from its evaluated value.
+The [argument oracle](../scripts/name-const-oracle.py) checks acceptance,
+column names, values, error codes, and SQLSTATE on native MySQL 8.4.11.
+
+The name accepts a literal, including Boolean and temporal literals, with
+parentheses and unary plus. NULL names produce 1382/HY000. Negation, arithmetic,
+function calls, variables, parameters, and COLLATE names produce 1210/HY000.
+The value accepts ordinary literals or a single negation or COLLATE wrapper;
+Boolean and typed temporal literals are rejected. Wrappers cannot nest.
+Invalid argument shapes take precedence over the NULL-name error.
+
+fsdb validates argument source syntax before folding can erase `-0` or
+Boolean literal spelling. Execution and PREPARE regressions also check unused
+branches, empty-result queries, views, and stored definitions. Wrong arity
+produces 1582/42000. Parsing and definition validation share the diagnostic
+mapping.
+
+Remaining cases from the broader comparison:
+
+| Statement | MySQL | fsdb |
+|---|---|---|
+| `SELECT NAME_CONST(1,'x' COLLATE utf8mb4_bin COLLATE utf8mb4_bin)` | 1210/HY000 | 1064/42000; the expression grammar accepts only one COLLATE |
+| `SELECT NAME_CONST(1,NULL COLLATE utf8mb4_bin)` | 1253/42000 | NULL result; NULL charset validation is absent |
+| `SET @x=NAME_CONST(1+1,2)` | 1210/HY000 | 1064/42000; SET discards expression parser diagnostics |
