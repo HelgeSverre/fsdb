@@ -13512,10 +13512,13 @@ and private validateOnlyFullGroupBy
                 |> Option.defaultValue (Ok(Lit(VInt 1L)))
                 |> Result.bind (groupingError "HAVING clause" 1 groupExprs determined))
             |> Result.bind (fun _ ->
-                select.OrderBy
-                |> List.mapi (fun index (expr, _) -> groupingError "ORDER BY clause" (index + 1) groupExprs determined (resolveOrderExpr expr))
-                |> traverse id
-                |> Result.map ignore))
+                if groupExprs.IsEmpty then
+                    Ok()
+                else
+                    select.OrderBy
+                    |> List.mapi (fun index (expr, _) -> groupingError "ORDER BY clause" (index + 1) groupExprs determined (resolveOrderExpr expr))
+                    |> traverse id
+                    |> Result.map ignore))
 
 and private isIndexOwnedGroupingShape predicateCovered (select: SelectStmt) =
     predicateCovered
@@ -13711,13 +13714,14 @@ and private runGroupedSelect
 
     match
         withMetadataProbe (fun () ->
-            matches probe
-            |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr probeContext) |> Result.map ignore)
-            |> Result.bind (fun _ -> havingOk probeRewrite [])
-            |> Result.bind (fun _ -> projectGroup probeRewrite [])
-            |> Result.bind (fun probeProjected ->
-                orderKeysOf probeRewrite probeProjected []
-                |> Result.map (fun _ -> probeProjected)))
+            withSuppressedVariableAssignments (fun () ->
+                matches probe
+                |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr probeContext) |> Result.map ignore)
+                |> Result.bind (fun _ -> havingOk probeRewrite [])
+                |> Result.bind (fun _ -> projectGroup probeRewrite [])
+                |> Result.bind (fun probeProjected ->
+                    orderKeysOf probeRewrite probeProjected []
+                    |> Result.map (fun _ -> probeProjected))))
     with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjected ->
@@ -13891,7 +13895,9 @@ and private runGroupedSelect
                             else
                                 projectGroup rollup groupRows
                                 |> Result.bind (fun proj ->
-                                    orderKeysOf rollup proj groupRows |> Result.map (fun keys -> Some(proj, keys, key)))))
+                                    // A single aggregate group has no runtime sort; the metadata probe still validates its names.
+                                    let orderKeys = if groupExprs.IsEmpty then Ok [] else orderKeysOf rollup proj groupRows
+                                    orderKeys |> Result.map (fun keys -> Some(proj, keys, key)))))
 
                 match groups |> traverseSeq processGroup with
                 | Error(code, message) -> Err(code, message), [], []

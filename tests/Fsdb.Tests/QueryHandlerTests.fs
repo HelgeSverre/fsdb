@@ -1757,6 +1757,35 @@ let tests =
               | ResultSet(_, [ [ Some "a"; Some "first"; Some "2" ]; [ Some "b"; Some "third"; Some "1" ] ]) -> ()
               | other -> failtestf "expected ANY_VALUE to opt out of dependency checking, got %A" other
 
+          testCase "ONLY_FULL_GROUP_BY permits single-group ordering without side effects"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              connection.Query "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))" |> ignore
+              connection.Query "INSERT INTO docs VALUES(1,'database concurrency'),(2,'storage transactions')" |> ignore
+              for sql, expected in
+                  [ "SELECT COUNT(*) AS n FROM docs ORDER BY body", "2"
+                    "SELECT COUNT(*) AS n FROM docs WHERE 1=0 ORDER BY body", "0"
+                    "SELECT COUNT(*) AS n FROM docs WHERE MATCH(body) AGAINST('database') ORDER BY body", "1" ] do
+                  Expect.equal (connection.Query sql) (ResultSet([ "n" ], [ [ Some expected ] ])) sql
+              for sql, code, state in
+                  [ "SELECT COUNT(*) AS n FROM docs ORDER BY missing", 1054, "42S22"
+                    "SELECT COUNT(*) AS n FROM docs GROUP BY body ORDER BY id", 1055, "42000"
+                    "SELECT COUNT(*) AS n,ROW_NUMBER() OVER(ORDER BY body) AS rn FROM docs", 1140, "42000" ] do
+                  match connection.Query sql |> errorInfo with
+                  | Some error -> Expect.equal (error.Code, error.State) (code, state) sql
+                  | None -> failtestf "expected error %d from %s" code sql
+              connection.Query "SET @n=0" |> ignore
+              Expect.equal
+                  (connection.Query "SELECT COUNT(*) AS n FROM docs ORDER BY (@n:=@n+1)")
+                  (ResultSet([ "n" ], [ [ Some "2" ] ]))
+                  "aggregate result"
+              Expect.equal (connection.Query "SELECT @n") (ResultSet([ "@n" ], [ [ Some "0" ] ])) "unused sort expression is not evaluated"
+              Expect.equal
+                  (connection.Query "SELECT COUNT(*)+(@n:=@n+1) AS n FROM docs")
+                  (ResultSet([ "n" ], [ [ Some "3" ] ]))
+                  "projection assignment runs only during execution"
+              Expect.equal (connection.Query "SELECT @n") (ResultSet([ "@n" ], [ [ Some "1" ] ])) "metadata probing does not assign"
+
           testCase "ONLY_FULL_GROUP_BY validates ORDER BY expressions"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

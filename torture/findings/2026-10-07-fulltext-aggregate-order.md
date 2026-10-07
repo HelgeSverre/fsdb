@@ -18,7 +18,8 @@ aggregate with error 1055 because its implicit relevance sort referenced
 Implicit relevance ordering now applies only when the query does not group
 rows. Aggregate projections, aggregates nested inside window functions, and
 HAVING-only aggregates suppress that implicit sort. Ordinary full-text queries
-retain their relevance ordering. Explicit ORDER BY behavior is unchanged.
+retain their relevance ordering. Explicit ordering of a single aggregate group
+is covered by the [ordering regression](2026-10-07-single-group-ordering.md).
 
 The performance probe encountered this using a 1,000-row corpus. The native
 MySQL 8.4.11 reproduction used the two-row example above and confirmed the

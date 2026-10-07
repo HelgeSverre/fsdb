@@ -2659,6 +2659,37 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS aggregate_warning_input" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private singleGroupOrdering =
+        { Name = "single-group-ordering"
+          Setup =
+            [| "CREATE TABLE single_group_order(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))"
+               "INSERT INTO single_group_order VALUES(1,'database concurrency'),(2,'storage transactions')"
+               "ANALYZE TABLE single_group_order" |]
+          Steps =
+            [| for index, sql in
+                   [ "SELECT COUNT(*) AS n FROM single_group_order ORDER BY body"
+                     "SELECT COUNT(*) AS n FROM single_group_order WHERE 1=0 ORDER BY body"
+                     "SELECT COUNT(*) AS n FROM single_group_order WHERE MATCH(body) AGAINST('database') ORDER BY body" ]
+                   |> List.indexed do
+                   let name = sprintf "order-%d" index
+                   Contract.query (name + "-text") sql
+                   Contract.preparedQuery (name + "-binary") sql [||]
+               for index, (sql, code, state) in
+                   [ "SELECT COUNT(*) AS n FROM single_group_order ORDER BY missing", 1054, "42S22"
+                     "SELECT COUNT(*) AS n FROM single_group_order GROUP BY body ORDER BY id", 1055, "42000"
+                     "SELECT COUNT(*) AS n,ROW_NUMBER() OVER(ORDER BY body) AS rn FROM single_group_order", 1140, "42000" ]
+                   |> List.indexed do
+                   let name = sprintf "invalid-order-%d" index
+                   Contract.query (name + "-text") sql |> Contract.fails code state
+                   Contract.preparedQuery (name + "-binary") sql [||] |> Contract.fails code state
+               Contract.execute "reset-counter" "SET @n=0"
+               Contract.query "sort-side-effect" "SELECT COUNT(*) AS n FROM single_group_order ORDER BY (@n:=@n+1)"
+               Contract.query "counter" "SELECT @n"
+               Contract.query "projection-side-effect" "SELECT COUNT(*)+(@n:=@n+1) AS n FROM single_group_order"
+               Contract.query "projection-counter" "SELECT @n" |]
+          Cleanup = [| "DROP TABLE IF EXISTS single_group_order" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private naturalAggregates =
         { Name = "natural-fulltext-aggregates"
           Setup =
@@ -3081,6 +3112,7 @@ module ContractCatalog =
            ngramFullText
            naturalPhrases
            naturalAggregates
+           singleGroupOrdering
            temporalNumericConversion
            roundingPrecisionDescriptors
            integralRoundingDescriptors
