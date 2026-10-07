@@ -8061,7 +8061,7 @@ and private applyJoin
         applyDependentJoinGroup store registry dbName scope sourceOverrides sourcePredicates consumption state leftOperand join
     | _ -> applyResolvedJoin store registry dbName scope sourceOverrides sourcePredicates leftPhysicalTable consumption state leftOperand join
 
-/// Lateral bodies run per preceding row; ordinary join matching retains ON and merged-column semantics.
+/// Lateral bodies receive the permitted outer scope; matching uses the ordinary join rules.
 and private applyLateralJoin
     (store: Store)
     (registry: Registry)
@@ -8074,54 +8074,51 @@ and private applyLateralJoin
     (body: SelectOrUnion)
     (alias: string)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
-    match join.Kind with
-    | InnerJoin | StraightJoin | CrossJoin | LeftJoin | NaturalJoin | NaturalLeftJoin ->
-        let leftRows = rowsSoFar |> List.ofSeq
-        let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
-        let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) scope.LateralOuter
-
-        let runBody (leftRow: Value[] option) : Result<ColumnDef list * Value[] list, QueryResult> =
-            let bodyOuter = leftRow |> Option.defaultWith (fun () -> probeRow combinedColumnsSoFar) |> leftCtxFor |> Some
-
+    let runBody outer : Result<ColumnDef list * Value[] list, QueryResult> =
+        let result =
             match body with
-            | PlainSelect select ->
-                match runSelectStmt store registry dbName select bodyOuter with
-                | Err(code, message), _, _ -> Error(Err(code, message))
-                | ResultSet(names, _), metadata, typedRows ->
-                    deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata
-                    |> uniqueRelationColumns _.Name
-                    |> Result.map (fun columns -> columns, typedRows)
-                | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
-                | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
+            | PlainSelect select -> runSelectStmt store registry dbName select outer
             | UnionSelect(first, rest, orderBy, limit, offset) ->
-                match runUnionStmtWithOuter store registry dbName first rest orderBy limit offset bodyOuter with
-                | Err(code, message), _, _ -> Error(Err(code, message))
-                | ResultSet(names, _), metadata, typedRows ->
-                    deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata
-                    |> uniqueRelationColumns _.Name
-                    |> Result.map (fun columns -> columns, typedRows)
-                | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
-                | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
+                runUnionStmtWithOuter store registry dbName first rest orderBy limit offset outer
+        match result with
+        | Err(code, message), _, _ -> Error(Err(code, message))
+        | ResultSet(names, _), metadata, typedRows ->
+            deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata
+            |> uniqueRelationColumns _.Name
+            |> Result.map (fun columns -> columns, typedRows)
+        | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
+        | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
 
-        let matchBody leftRows (bodyColumns, bodyRows) =
-            let source =
-                { Sources = [ alias, bodyColumns ]
-                  Columns = bodyColumns
-                  Rows = bodyRows
-                  PhysicalTable = None }
-            applyPreparedJoin store registry dbName scope None consumption (sourcesSoFar, leftRows) leftOperand join source
-            |> Result.map (fun (sources, rows, names) -> sources, List.ofSeq rows, names)
+    let matchBody leftRows (bodyColumns, bodyRows) =
+        let source =
+            { Sources = [ alias, bodyColumns ]
+              Columns = bodyColumns
+              Rows = Seq.ofList bodyRows
+              PhysicalTable = None }
+        applyPreparedJoin store registry dbName scope None consumption (sourcesSoFar, leftRows) leftOperand join source
+        |> Result.map (fun (sources, rows, names) -> sources, List.ofSeq rows, names)
 
+    let asSequence (sources, rows, names) = sources, Seq.ofList rows, names
+
+    match join.Kind with
+    | RightJoin | NaturalRightJoin ->
+        // The preserved source cannot depend on the operand it null-extends.
+        runBody scope.QueryOuter
+        |> Result.bind (matchBody rowsSoFar)
+        |> Result.map asSequence
+    | InnerJoin | StraightJoin | CrossJoin | LeftJoin | NaturalJoin | NaturalLeftJoin ->
+        let columns = sourcesSoFar |> List.collect snd
+        let contextFor = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sourcesSoFar) scope.LateralOuter
         let matchRow row =
-            runBody (Some row)
-            |> Result.bind (fun (columns, rows) -> matchBody (Seq.singleton row) (columns, Seq.ofList rows))
+            runBody (Some(contextFor row))
+            |> Result.bind (matchBody (Seq.singleton row))
 
-        match leftRows with
+        match rowsSoFar |> List.ofSeq with
         | [] ->
             // Retain correlated column names even when there is no input row.
-            runBody None
-            |> Result.bind (fun (columns, rows) -> matchBody Seq.empty (columns, Seq.ofList rows))
-            |> Result.map (fun (sources, rows, names) -> sources, Seq.ofList rows, names)
+            runBody (Some(contextFor (probeRow columns)))
+            |> Result.bind (matchBody Seq.empty)
+            |> Result.map asSequence
         | first :: rest ->
             matchRow first
             |> Result.bind (fun (sources, firstRows, names) ->
@@ -8130,8 +8127,6 @@ and private applyLateralJoin
                 |> Result.map (fun remaining ->
                     let rows = Seq.append firstRows (remaining |> Seq.collect (fun (_, rows, _) -> rows))
                     sources, rows, names))
-    | _ ->
-        Error(Err(1064, "LATERAL does not support RIGHT JOIN"))
 
 /// Expands a lateral JSON_TABLE source while retaining caller-owned state
 /// such as writable row identities.

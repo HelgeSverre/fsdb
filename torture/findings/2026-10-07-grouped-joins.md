@@ -307,5 +307,6 @@ preceding row. Padding bypasses ON, preserving every unmatched left row.
 
 LATERAL uses the shared prepared-source join matcher for ON, USING, NATURAL,
 and left-outer matching. Native fixtures cover merged stars for USING and
-NATURAL joins, including empty dependent results under LEFT JOIN. Independent
-RIGHT LATERAL joins are accepted by MySQL but remain refused by fsdb.
+NATURAL joins, including empty dependent results under LEFT JOIN. RIGHT LATERAL sources execute once in the enclosing query scope, without the
+current left operand. Native fixtures cover right padding, merged USING/NATURAL
+output, enclosing-query correlation, and rejection of left-operand dependencies.

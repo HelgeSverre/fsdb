@@ -49,7 +49,25 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "lateral joins use shared USING and NATURAL matching"
+        [ testCase "right lateral joins exclude their left operand but retain outer correlation"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              Expect.equal
+                  (run "SELECT a.id,d.id FROM a RIGHT JOIN LATERAL (SELECT 1 AS id UNION ALL SELECT 3) d ON a.id=d.id ORDER BY d.id")
+                  (ResultSet([ "id"; "id" ], [ [ Some "1"; Some "1" ]; [ None; Some "3" ] ])) "right padding"
+              for join in
+                  [ "RIGHT JOIN LATERAL (SELECT 1 AS id UNION ALL SELECT 3) d USING(id)"
+                    "NATURAL RIGHT JOIN LATERAL (SELECT 1 AS id UNION ALL SELECT 3) d" ] do
+                  Expect.equal (run ("SELECT * FROM a " + join + " ORDER BY id"))
+                      (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ] ])) join
+              Expect.equal
+                  (run "SELECT a.id,(SELECT d.v FROM (SELECT 1 AS n) b RIGHT JOIN LATERAL (SELECT a.id AS v) d ON 1) AS v FROM a ORDER BY a.id")
+                  (ResultSet([ "id"; "v" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ])) "enclosing query remains visible"
+              match run "SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.id AS id) d ON 1" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "left dependency must be rejected: %A" other
+
+          testCase "lateral joins use shared USING and NATURAL matching"
           <| fun _ ->
               let run = groupedJoinQuery ()
               for join in

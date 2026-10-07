@@ -33,6 +33,16 @@ def verify(client, _writer):
     ]:
         query = "SELECT * FROM a " + join + " ORDER BY id"
         oracle["expect"](query, client.query(query), "1\n2")
+    for query, expected in [
+        ("SELECT a.id,d.id FROM a RIGHT JOIN LATERAL (SELECT 1 AS id UNION ALL SELECT 3) d ON a.id=d.id ORDER BY d.id", "1\t1\nNULL\t3"),
+        ("SELECT * FROM a RIGHT JOIN LATERAL (SELECT 1 AS id UNION ALL SELECT 3) d USING(id) ORDER BY id", "1\n3"),
+        ("SELECT * FROM a NATURAL RIGHT JOIN LATERAL (SELECT 1 AS id UNION ALL SELECT 3) d ORDER BY id", "1\n3"),
+        ("SELECT a.id,(SELECT d.v FROM (SELECT 1 AS n) b RIGHT JOIN LATERAL (SELECT a.id AS v) d ON 1) FROM a ORDER BY a.id", "1\t1\n2\t2"),
+    ]:
+        oracle["expect"](query, client.query(query), expected)
+    query = "SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.id AS id) d ON 1"
+    result = subprocess.run([*client.process.args, "-e", "USE probe;" + query], capture_output=True, text=True, check=False)
+    oracle["expect"]("right lateral dependency", "ERROR 1054 (42S22)" in result.stderr, True)
     for body, condition, first_value in [
         ("SELECT a.id AS v", "0", "NULL"),
         ("SELECT a.id AS v WHERE 0", "0", "NULL"),
