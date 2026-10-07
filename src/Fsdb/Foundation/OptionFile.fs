@@ -21,6 +21,38 @@ type Parsed =
 /// option names are case-insensitive.
 let normalizeName (name: string) = name.Trim().Replace('-', '_').ToLowerInvariant()
 
+/// MySQL's size suffixes: `64M`, `16K`, `1G`. Plain digits pass through.
+/// Deliberately strict — `64MB` and `64 megs` are errors, not a guess.
+let internal tryParseSize (text: string) : int64 option =
+    let text = text.Trim()
+
+    if text = "" then
+        None
+    else
+        let multiplier =
+            match Char.ToUpperInvariant text.[text.Length - 1] with
+            | 'K' -> Some 1024L
+            | 'M' -> Some(1024L * 1024L)
+            | 'G' -> Some(1024L * 1024L * 1024L)
+            | _ -> None
+
+        let digits =
+            if multiplier.IsSome then
+                text.Substring(0, text.Length - 1).Trim()
+            else
+                text
+
+        match Int64.TryParse digits with
+        | true, n ->
+            // Checked: an unchecked multiply wraps, and the wrapped result
+            // can land back inside a knob's range, so `18014398509483008K`
+            // (2^64 + 1 MiB) would be accepted as 1 MiB rather than refused.
+            try
+                Some(Checked.(*) n (defaultArg multiplier 1L))
+            with :? OverflowException ->
+                None
+        | _ -> None
+
 /// Cuts a `#` or `;` comment, which may start mid-line, without cutting one
 /// inside a quoted value — MySQL's own rule is to quote a value containing a
 /// comment character.

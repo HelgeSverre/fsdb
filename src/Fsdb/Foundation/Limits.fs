@@ -333,38 +333,6 @@ let private knobs =
         Get = fun () -> int64 walGroupCommitQueueCapacity
         Reportable = false } ]
 
-/// MySQL's size suffixes: `64M`, `16K`, `1G`. Plain digits pass through.
-/// Deliberately strict — `64MB` and `64 megs` are errors, not a guess.
-let private parseSize (text: string) : int64 option =
-    let text = text.Trim()
-
-    if text = "" then
-        None
-    else
-        let multiplier =
-            match Char.ToUpperInvariant text.[text.Length - 1] with
-            | 'K' -> Some 1024L
-            | 'M' -> Some(1024L * 1024L)
-            | 'G' -> Some(1024L * 1024L * 1024L)
-            | _ -> None
-
-        let digits =
-            if multiplier.IsSome then
-                text.Substring(0, text.Length - 1).Trim()
-            else
-                text
-
-        match Int64.TryParse digits with
-        | true, n ->
-            // Checked: an unchecked multiply wraps, and the wrapped result
-            // can land back inside a knob's range, so `18014398509483008K`
-            // (2^64 + 1 MiB) would be accepted as 1 MiB rather than refused.
-            try
-                Some(Checked.(*) n (defaultArg multiplier 1L))
-            with :? OverflowException ->
-                None
-        | _ -> None
-
 /// my.cnf treats `-` and `_` in an option name as the same character, and
 /// option names are case-insensitive.
 let private normalizeName = OptionFile.normalizeName
@@ -403,7 +371,7 @@ let private validatedSetting (name: string) (value: string) : Result<Knob * int6
                 | "false" -> Some 0L
                 | _ -> None
             else
-                parseSize value
+                OptionFile.tryParseSize value
 
         match parsed with
         | None -> Error(sprintf "%s: '%s' is not a number (digits, optionally suffixed K, M or G)" name value)
