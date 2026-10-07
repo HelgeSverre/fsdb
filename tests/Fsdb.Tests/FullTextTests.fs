@@ -23,7 +23,38 @@ let private closeTo (expected: float) (actual: float) (label: string) =
 let tests =
     testList
         "fulltext"
-        [ testCase "word lookups use indexed collation equivalents of stopped spellings"
+        [ testCase "nonbinary full-text collations fold case for words and ngrams"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get
+              for tokenizer in [ Words; Ngrams 2 ] do
+                  let rules = { Tokenizer = tokenizer; Stopwords = StopwordPolicy.Disabled }
+                  let index =
+                      buildIndexWithDocumentSettings rules collation
+                          [ 1, rules, [ "orchard cobalt" ]; 2, rules, [ "Orchard Cobalt" ]
+                            3, rules, [ "ORCHARD COBALT" ]; 4, rules, [ "zzzz" ] ]
+                  for query in [ "orchard"; "Orchard"; "ORCHARD"; "\"orchard cobalt\""; "\"Orchard Cobalt\"" ] do
+                      for scores in [ naturalScores index query; booleanScores index query; expansionScores index query ] do
+                          Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 2; 3 ] "nonbinary full-text matching folds case in every mode"
+                  for query in [ "orch*"; "Orch*"; "ORCH*" ] do
+                      Expect.equal (booleanScores index query |> Map.keys |> Seq.toList) [ 1; 2; 3 ] "prefix postings use normalized text"
+                  let changed = index |> removeDocument 2 |> addDocument 3 "violet violet"
+                  Expect.equal (booleanScores changed "ORCH*" |> Map.keys |> Seq.toList) [ 1 ] "mutation removes normalized prefixes"
+                  Expect.equal (naturalScores changed "Orchard" |> Map.keys |> Seq.toList) [ 1 ] "mutation removes normalized exact postings"
+
+          testCase "case-sensitive nonbinary full-text retains accent sensitivity"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get
+              let index = buildIndexWith collation [ 1, "cafe"; 2, "café"; 3, "CAFÉ"; 4, "zzzz" ]
+              for score in [ naturalScores; booleanScores; expansionScores ] do
+                  Expect.equal (score index "CAFE" |> Map.keys |> Seq.toList) [ 1 ] "case folding retains unaccented spelling"
+                  Expect.equal (score index "café" |> Map.keys |> Seq.toList) [ 2; 3 ] "accented spellings share a case-folded posting"
+              for scores in
+                  [ tryNaturalSingleTermScoresDictionaryInView None (readView index) "CAFÉ"
+                    tryFlatBooleanScoresDictionaryInView None (readView index) "CAFÉ" ] do
+                  Expect.equal ((Option.get scores).Keys |> Seq.sort |> Seq.toList) [ 2; 3 ] "optimized lookups normalize case"
+              closeTo (log10 2.0 ** 2.0) (naturalScores index "CAFÉ").[2] "case variants share document frequency"
+
+          testCase "word lookups use indexed collation equivalents of stopped spellings"
           <| fun _ ->
               let index = buildIndexWith defaultCollation [ 1, "the"; 2, "thé"; 3, "THE"; 4, "tHe"; 5, "zzzz" ]
               for query in [ "the"; "thé"; "THE"; "the the" ] do

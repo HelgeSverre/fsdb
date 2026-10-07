@@ -170,7 +170,11 @@ type Corpus =
         { Order: int[]
           Index: Index<int> }
 
-let private tokenWith (collation: Collation) text =
+let private tokenWith (collation: Collation) (text: string) =
+    // InnoDB folds full-text case even for nonbinary case-sensitive collations.
+    let text =
+        if collation.Name = "binary" || collation.Name.EndsWith("_bin", StringComparison.Ordinal) then text
+        else text.ToLowerInvariant()
     { Text = text
       Key = collation.KeyOf text }
 
