@@ -2855,7 +2855,7 @@ let private statementContainsLockingReadWhere predicate statement =
         || (select.Ctes |> List.exists (_.Body >> bodyContains))
         || (select.From |> Option.exists sourceContains)
         || (select.Joins |> List.exists (fun join -> sourceContains join.Table || expressionContains join.On))
-        || (select.Projections |> List.exists (fst >> expressionContains))
+        || (select.Projections |> List.exists (_.Expression >> expressionContains))
         || (select.Where |> Option.exists expressionContains)
         || (select.GroupBy |> List.exists expressionContains)
         || (select.Having |> Option.exists expressionContains)
@@ -5284,7 +5284,7 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
                         state
                         |> Result.bind (fun variables ->
                             match projection with
-                            | UserVariable variable, None -> Ok(variable :: variables)
+                            | { Expression = UserVariable variable; Alias = None } -> Ok(variable :: variables)
                             | _ -> Error(Err(1064, "EXECUTE USING requires user variables"))))
                     (Ok [])
                 |> Result.map List.rev

@@ -433,7 +433,9 @@ and CheckConstraintDef =
       Column: string option }
 
 /// A `SELECT` projection: the expression and its optional `AS alias`.
-and Projection = Expr * string option
+and Projection =
+    { Expression: Expr
+      Alias: string option }
 
 and SelectOutfileOptions =
     { CharacterSet: string option
@@ -644,6 +646,10 @@ and SelectStmt =
       /// Locking clauses apply to this query block only. An empty `Tables`
       /// list targets every physical source not named by another clause.
       Locking: LockingRead list }
+
+module Projection =
+    let create expression alias : Projection =
+        { Expression = expression; Alias = alias }
 
 module FromItem =
     let (|Qualified|Grouped|) = function

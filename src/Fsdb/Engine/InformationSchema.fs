@@ -1496,7 +1496,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                     && select.Offset.IsNone
                     && select.Locking.IsEmpty
                     && (select.Projections
-                        |> List.exists (fun (expression, _) ->
+                        |> List.exists (fun { Expression = expression } ->
                             match expression with
                             | Col _
                             | QualifiedCol _ -> true
@@ -1603,7 +1603,7 @@ and private calledFunctionsInFromItem (item: FromItem) : string list =
 
 and private calledFunctionsInSelect (select: SelectStmt) : string list =
     let expressions =
-        (select.Projections |> List.map fst)
+        (select.Projections |> List.map _.Expression)
         @ Option.toList select.Where
         @ Option.toList select.Having
         @ select.GroupBy

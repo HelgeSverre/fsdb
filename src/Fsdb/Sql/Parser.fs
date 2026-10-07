@@ -3519,7 +3519,7 @@ let private projectionAlias: Parser<string option, unit> =
     let implicitName = identifier <|> stringName
     (attempt (keyword "AS" >>. explicitName) |>> Some) <|> (attempt implicitName |>> Some) <|> preturn None
 
-let private projection: Parser<Projection, unit> = expr .>>. projectionAlias
+let private projection: Parser<Projection, unit> = pipe2 expr projectionAlias Projection.create
 
 let private orderKey: Parser<OrderKey, unit> =
     (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc)))
@@ -3616,7 +3616,7 @@ let private expressionSelect =
     function
     | PlainSelect select -> select
     | (UnionSelect _ as body) ->
-        { Projections = [ Star None, None ]
+        { Projections = [ Projection.create (Star None) None ]
           IntoVariables = []
           IntoFile = None
           Distinct = false
@@ -3788,7 +3788,7 @@ let private valuesTable: Parser<FromItem, unit> =
                 fail "the column list of a VALUES table must match its ROW() width"
             else
                 let branch (cells: Expr list) : SelectStmt =
-                    { Projections = List.map2 (fun name cell -> cell, Some name) names cells
+                    { Projections = List.map2 (fun name cell -> Projection.create cell (Some name)) names cells
                       IntoVariables = []
                       IntoFile = None
                       Distinct = false
@@ -4174,7 +4174,7 @@ let private queryTail =
 let private tableQueryStmt: Parser<Statement, unit> =
     keyword "TABLE" >>. tableRef .>>. queryTail
     |>> fun (table, (orderBy, limit, offset)) ->
-        Select(querySelect [ Star None, None ] (Some(FromTable table)) orderBy limit offset)
+        Select(querySelect [ Projection.create (Star None) None ] (Some(FromTable table)) orderBy limit offset)
 
 let private valuesQueryStmt: Parser<Statement, unit> =
     let row = keyword "ROW" >>. between (sym "(") (sym ")") (sepBy1 expr (sym ","))
@@ -4187,7 +4187,7 @@ let private valuesQueryStmt: Parser<Statement, unit> =
         | Some _ ->
             let selectOf values =
                 values
-                |> List.mapi (fun index value -> value, Some(sprintf "column_%d" index))
+                |> List.mapi (fun index value -> Projection.create value (Some(sprintf "column_%d" index)))
                 |> fun projections -> querySelect projections None [] None None
 
             match rows with

@@ -2653,11 +2653,11 @@ let tests =
               | other -> failtestf "expected PIPES_AS_CONCAT precedence and NULL propagation, got %A" other
 
               match prepareStatementForSession concatSession "SELECT ? || ?" with
-              | Ok(Some(Select { Projections = [ FuncCall("CONCAT", [ Placeholder 0; Placeholder 1 ]), _ ] }), 2) -> ()
+              | Ok(Some(Select { Projections = [ { Expression = FuncCall("CONCAT", [ Placeholder 0; Placeholder 1 ]); Alias = _ } ] }), 2) -> ()
               | other -> failtestf "expected prepared pipes to capture concatenation mode, got %A" other
 
               match prepareStatementForSession defaultSession "SELECT ? || ?" with
-              | Ok(Some(Select { Projections = [ BinOp(Or, Placeholder 0, Placeholder 1), _ ] }), 2) -> ()
+              | Ok(Some(Select { Projections = [ { Expression = BinOp(Or, Placeholder 0, Placeholder 1); Alias = _ } ] }), 2) -> ()
               | other -> failtestf "expected prepared pipes to retain default OR semantics, got %A" other
 
               match handle concatSession "SELECT 'a' || 'b'" |> snd, handle defaultSession "SELECT 'a' || 'b'" |> snd with
@@ -2685,11 +2685,11 @@ let tests =
               | other -> failtestf "expected HIGH_NOT_PRECEDENCE results, got %A" other
 
               match prepareStatementForSession highNotSession "SELECT NOT ? BETWEEN -1 AND 1" with
-              | Ok(Some(Select { Projections = [ Between(Not(Placeholder 0), _, _), _ ] }), 1) -> ()
+              | Ok(Some(Select { Projections = [ { Expression = Between(Not(Placeholder 0), _, _); Alias = _ } ] }), 1) -> ()
               | other -> failtestf "expected prepared HIGH_NOT_PRECEDENCE AST, got %A" other
 
               match prepareStatementForSession defaultSession "SELECT NOT ? BETWEEN -1 AND 1" with
-              | Ok(Some(Select { Projections = [ Not(Between(Placeholder 0, _, _)), _ ] }), 1) -> ()
+              | Ok(Some(Select { Projections = [ { Expression = Not(Between(Placeholder 0, _, _)); Alias = _ } ] }), 1) -> ()
               | other -> failtestf "expected prepared default NOT AST, got %A" other
 
               match handle highNotSession "SELECT NOT 1 BETWEEN -1 AND 1" |> snd, handle defaultSession "SELECT NOT 1 BETWEEN -1 AND 1" |> snd with
@@ -2831,11 +2831,11 @@ let tests =
               | metadata -> failtestf "expected subtraction metadata, got %A" metadata
 
               match prepareStatementForSession signedSession "SELECT CAST(? AS UNSIGNED) - ?" with
-              | Ok(Some(Select { Projections = [ BinOp(SignedSub, _, _), _ ] }), 2) -> ()
+              | Ok(Some(Select { Projections = [ { Expression = BinOp(SignedSub, _, _); Alias = _ } ] }), 2) -> ()
               | other -> failtestf "expected prepared signed-subtraction AST, got %A" other
 
               match prepareStatementForSession defaultSession "SELECT CAST(? AS UNSIGNED) - ?" with
-              | Ok(Some(Select { Projections = [ BinOp(Sub, _, _), _ ] }), 2) -> ()
+              | Ok(Some(Select { Projections = [ { Expression = BinOp(Sub, _, _); Alias = _ } ] }), 2) -> ()
               | other -> failtestf "expected prepared default-subtraction AST, got %A" other
 
               match handle signedSession "SELECT CAST(0 AS UNSIGNED) - 1" |> snd with
@@ -2903,7 +2903,7 @@ let tests =
               | other -> failtestf "expected an unescaped quote to terminate the literal, got %A" other
 
               match prepareStatementForSession literalSession "SELECT CONCAT('x\\', ?)" with
-              | Ok(Some(Select { Projections = [ FuncCall("CONCAT", [ Lit(VString "x\\"); Placeholder 0 ]), _ ] }), 1) -> ()
+              | Ok(Some(Select { Projections = [ { Expression = FuncCall("CONCAT", [ Lit(VString "x\\"); Placeholder 0 ]); Alias = _ } ] }), 1) -> ()
               | other -> failtestf "expected placeholder scanning to respect literal backslashes, got %A" other
 
               let textStatement =

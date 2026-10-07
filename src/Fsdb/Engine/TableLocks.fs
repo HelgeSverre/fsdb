@@ -499,7 +499,7 @@ and private selectAccesses boundCtes defaultDb (select: SelectStmt) =
        |> List.collect (fun join ->
            sourceAccesses localCtes defaultDb join.Table
            @ expressionAccesses localCtes defaultDb join.On))
-    @ (select.Projections |> List.collect (fst >> expressionAccesses localCtes defaultDb))
+    @ (select.Projections |> List.collect (_.Expression >> expressionAccesses localCtes defaultDb))
     @ optionalExpressionAccesses localCtes defaultDb select.Where
     @ (select.GroupBy |> List.collect (expressionAccesses localCtes defaultDb))
     @ optionalExpressionAccesses localCtes defaultDb select.Having

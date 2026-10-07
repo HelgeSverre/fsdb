@@ -498,7 +498,7 @@ let tests =
               Expect.stringContains literal "\\r" "CR is escaped in the literal"
 
               match Fsdb.Parser.parse (sprintf "SELECT %s AS x" literal) with
-              | Result.Ok(Select { Projections = [ Lit(VString roundtripped), _ ] }) ->
+              | Result.Ok(Select { Projections = [ { Expression = Lit(VString roundtripped); Alias = _ } ] }) ->
                   Expect.equal roundtripped original "CR/LF survive the literal round-trip"
               | other -> failtestf "expected a parsed SELECT literal, got %A" other
 
@@ -513,7 +513,7 @@ let tests =
               Expect.equal literal "_binary X'00FF80'" "lossless binary literal"
 
               match Fsdb.Parser.parse ("SELECT " + literal) with
-              | Result.Ok(Select { Projections = [ Lit(VBytes bytes), _ ] }) ->
+              | Result.Ok(Select { Projections = [ { Expression = Lit(VBytes bytes); Alias = _ } ] }) ->
                   Expect.equal bytes [| 0x00uy; 0xffuy; 0x80uy |] "prepared substitution round-trip"
               | other -> failtestf "expected a parsed binary literal, got %A" other
 

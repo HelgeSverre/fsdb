@@ -131,7 +131,7 @@ let hasQualifiedOuterReference (select: SelectStmt) =
         |> Set.ofList
 
     let expressions =
-        (select.Projections |> List.map fst)
+        (select.Projections |> List.map _.Expression)
         @ (select.Where |> Option.toList)
         @ (select.Having |> Option.toList)
         @ select.GroupBy
@@ -294,9 +294,10 @@ and private rewriteSelect rules (select: SelectStmt) =
     { select with
         Projections =
             select.Projections
-            |> List.map (fun (expression, alias) ->
+            |> List.map (fun projection ->
+                let expression, alias = projection.Expression, projection.Alias
                 let name = alias |> Option.orElseWith (fun () -> rules.ProjectionName expression)
-                rewriteTreeWith rules expression, name)
+                { projection with Expression = rewriteTreeWith rules expression; Alias = name })
         From = Option.map (rewriteFromItem rules) select.From
         Joins = List.map (rewriteJoin rules) select.Joins
         Where = Option.map (rewriteTreeWith rules) select.Where

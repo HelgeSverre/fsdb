@@ -400,7 +400,7 @@ and private renderJoinChain options context source sourceJoins =
 
     joined, sources
 
-and private renderProjection (options: ViewRenderOptions) (context: ViewContext) ((expr, alias): Projection) : string * string =
+and private renderProjection (options: ViewRenderOptions) (context: ViewContext) ({ Expression = expr; Alias = alias }: Projection) : string * string =
     let rendered = renderViewExpression options context expr
 
     match expr, alias with
@@ -417,12 +417,12 @@ and private expandProjections (context: ViewContext) (projections: Projection li
             | Some value -> trySource value context.Sources |> Option.toList
 
         sources
-        |> List.collect (fun source -> source.Columns |> List.map (fun column -> QualifiedCol(source.Qualifier, column), None))
+        |> List.collect (fun source -> source.Columns |> List.map (fun column -> Projection.create (QualifiedCol(source.Qualifier, column)) None))
 
     projections
     |> List.collect (fun projection ->
         match projection with
-        | Star qualifier, _ ->
+        | { Expression = Star qualifier } ->
             match expand qualifier with
             | [] -> [ projection ]
             | expanded -> expanded
@@ -465,12 +465,12 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
                         match cte.Body with
                         | PlainSelect body ->
                             body.Projections
-                            |> List.map (fun (expr, alias) ->
+                            |> List.map (fun { Expression = expr; Alias = alias } ->
                                 alias
                                 |> Option.defaultValue (expressionName expr (renderViewExpression options context expr)))
                         | UnionSelect(first, _, _, _, _) ->
                             first.Projections
-                            |> List.map (fun (expr, alias) ->
+                            |> List.map (fun { Expression = expr; Alias = alias } ->
                                 alias
                                 |> Option.defaultValue (expressionName expr (renderViewExpression options context expr)))
                     else
@@ -506,9 +506,9 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
     let projections =
         select.Projections
         |> List.collect (function
-            | (Star None, _) as projection ->
+            | { Expression = Star None } as projection ->
                 match logicalColumns with
-                | Ok (_ :: _ as columns) -> columns |> List.map (fun column -> column.Expression, Some column.Name)
+                | Ok (_ :: _ as columns) -> columns |> List.map (fun column -> Projection.create column.Expression (Some column.Name))
                 | _ -> expandProjections context [ projection ]
             | projection -> expandProjections context [ projection ])
     let projectionText, outputNames = projections |> List.map (renderProjection options context) |> List.unzip

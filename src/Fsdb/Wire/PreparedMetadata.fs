@@ -400,7 +400,7 @@ let private inferParameters
 
         let infer = inferExpression scope None DescribeOnly
         select.Projections
-        |> List.iter (fun (expression, _) ->
+        |> List.iter (fun { Expression = expression } ->
             projectedParameters <-
                 Fsdb.Sql.Expression.fold
                     (fun parameters expression ->
@@ -472,7 +472,7 @@ let private inferParameters
         let targets = targetColumns table columns
 
         Seq.zip select.Projections targets
-        |> Seq.iter (fun ((expression, _), column) ->
+        |> Seq.iter (fun ({ Expression = expression }, column) ->
             inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) AssignToColumn expression)
 
         inferAssignments table onDuplicate
@@ -481,7 +481,7 @@ let private inferParameters
         let targets = targetColumns table columns
 
         Seq.zip select.Projections targets
-        |> Seq.iter (fun ((expression, _), column) ->
+        |> Seq.iter (fun ({ Expression = expression }, column) ->
             inferExpression [] (Some(ColumnWire.parameterMetadataOfType column.Type)) AssignToColumn expression)
     | Update update ->
         let scope = inferScope [] update.Ctes (Some(FromTable update.From)) update.Joins

@@ -1814,11 +1814,11 @@ let private applyResolvedPrivileges store grantor name host resolved target with
     |> Result.bind (fun () ->
         applyDynamicPrivileges store name host resolved.Dynamic withGrantOption granting)
 
-let private projectionName =
-    function
-    | _, Some alias -> Some alias
-    | Col name, None -> Some name
-    | QualifiedCol(_, name), None -> Some name
+let private projectionName (projection: Projection) =
+    match projection with
+    | { Alias = Some alias } -> Some alias
+    | { Expression = Col name; Alias = None } -> Some name
+    | { Expression = QualifiedCol(_, name); Alias = None } -> Some name
     | _ -> None
 
 let private projectionNames (select: SelectStmt) =
@@ -2462,7 +2462,7 @@ and private selectReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (s: 
     @ (s.Joins |> List.collect (fun j -> fromItemReadTablesIn localCtes defaultDb j.Table @ exprReadTablesIn localCtes defaultDb j.On))
     @ (s.Where |> Option.map (exprReadTablesIn localCtes defaultDb) |> Option.defaultValue [])
     @ (s.Having |> Option.map (exprReadTablesIn localCtes defaultDb) |> Option.defaultValue [])
-    @ (s.Projections |> List.collect (fst >> exprReadTablesIn localCtes defaultDb))
+    @ (s.Projections |> List.collect (_.Expression >> exprReadTablesIn localCtes defaultDb))
     @ (s.GroupBy |> List.collect (exprReadTablesIn localCtes defaultDb))
     @ (s.Windows
        |> List.collect (fun (_, spec) ->
@@ -2689,7 +2689,7 @@ let rec private selectColumnRequirements store defaultDb outerSources inheritedC
 
     let aliases =
         select.Projections
-        |> List.choose snd
+        |> List.choose _.Alias
         |> List.map _.ToLowerInvariant()
         |> Set.ofList
 
@@ -2703,7 +2703,7 @@ let rec private selectColumnRequirements store defaultDb outerSources inheritedC
     let plain expression =
         expressionColumnRequirements store defaultDb sources outerSources ctes Set.empty expression
 
-    let projectionRequirements (expression, _) =
+    let projectionRequirements ({ Expression = expression }: Projection) =
         let references =
             match expression with
             | Star None -> [ AllColumns ]

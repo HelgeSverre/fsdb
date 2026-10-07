@@ -38,10 +38,10 @@ let private createTableSpec name columns =
 /// case; `from` is still a bare table name string here since none of these
 /// tests exercise a qualified name or alias.
 let private mkSelect
-    (projections: Projection list, from: string option, where: Expr option, orderBy: OrderKey list, limit: int option, offset: int option)
+    (projections: (Expr * string option) list, from: string option, where: Expr option, orderBy: OrderKey list, limit: int option, offset: int option)
     : Statement =
     Select
-        { Projections = projections
+        { Projections = projections |> List.map (fun (expression, alias) -> Projection.create expression alias)
           IntoVariables = []
           IntoFile = None
           Distinct = false
@@ -128,7 +128,7 @@ let tests =
                 testCase "SELECT DISTINCT col FROM t sets Distinct"
                 <| fun _ ->
                     match parseOk "SELECT DISTINCT name FROM t" with
-                    | Select { Distinct = true; Projections = [ Col "name", None ] } -> ()
+                    | Select { Distinct = true; Projections = [ { Expression = Col "name"; Alias = None } ] } -> ()
                     | other -> failtestf "expected Distinct = true, got %A" other
 
                 testCase "SELECT SQL_CALC_FOUND_ROWS carries the modifier"
@@ -177,7 +177,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM information_schema.tables AS t")
                         (Select
-                            { Projections = [ Star None, None ]
+                            { Projections = [ { Expression = Star None; Alias = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false
@@ -202,7 +202,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM t x")
                         (Select
-                            { Projections = [ Star None, None ]
+                            { Projections = [ { Expression = Star None; Alias = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false
@@ -375,11 +375,11 @@ let tests =
                         "mode pipes are CONCAT"
 
                     match parseWithOptions options "SELECT 'a||b', 'a' /* || */ || 'b'" with
-                    | Ok(Select { Projections = [ Lit(VString "a||b"), _; FuncCall("CONCAT", _), _ ] }) -> ()
+                    | Ok(Select { Projections = [ { Expression = Lit(VString "a||b"); Alias = _ }; { Expression = FuncCall("CONCAT", _); Alias = _ } ] }) -> ()
                     | other -> failtestf "expected quoted/comment pipes to remain untouched, got %A" other
 
                     match parseWithOptions options "SELECT /*!80000 'a' || */ 'b'" with
-                    | Ok(Select { Projections = [ FuncCall("CONCAT", _), _ ] }) -> ()
+                    | Ok(Select { Projections = [ { Expression = FuncCall("CONCAT", _); Alias = _ } ] }) -> ()
                     | other -> failtestf "expected executable-comment pipes to use the active mode, got %A" other
 
                 testCase "NO_BACKSLASH_ESCAPES keeps backslashes literal"
@@ -389,7 +389,7 @@ let tests =
                             NoBackslashEscapes = true }
 
                     match parseWithOptions options "SELECT 'a\\nb', 'it''s'" with
-                    | Ok(Select { Projections = [ Lit(VString "a\\nb"), None; Lit(VString "it's"), None ] }) -> ()
+                    | Ok(Select { Projections = [ { Expression = Lit(VString "a\\nb"); Alias = None }; { Expression = Lit(VString "it's"); Alias = None } ] }) -> ()
                     | other -> failtestf "expected literal backslashes and doubled quotes, got %A" other
 
                     match parseWithOptions options "SELECT 'it\\'s'" with
@@ -397,7 +397,7 @@ let tests =
                     | Ok statement -> failtestf "expected a backslash before a quote to remain literal, got %A" statement
 
                     match parseWithOptions options "SELECT 'x\\' /*!80000 + 1 */" with
-                    | Ok(Select { Projections = [ BinOp(Add, Lit(VString "x\\"), Lit(VInt 1L)), None ] }) -> ()
+                    | Ok(Select { Projections = [ { Expression = BinOp(Add, Lit(VString "x\\"), Lit(VInt 1L)); Alias = None } ] }) -> ()
                     | other -> failtestf "expected executable comments to respect quote boundaries, got %A" other
 
                 testCase "SELECT cannot be parsed as a function name"
@@ -809,13 +809,13 @@ let tests =
               [ testCase "an integer beyond BIGINT remains exact while it fits DECIMAL"
                 <| fun _ ->
                     match parseOk "SELECT 99999999999999999999" with
-                    | Select { Projections = [ Lit(VDecimal 99999999999999999999M), None ] } -> ()
+                    | Select { Projections = [ { Expression = Lit(VDecimal 99999999999999999999M); Alias = None } ] } -> ()
                     | other -> failtestf "expected an exact VDecimal, got %A" other
 
                 testCase "an out-of-range decimal literal falls back to VDouble instead of throwing"
                 <| fun _ ->
                     match parseOk "SELECT 123456789012345678901234567890123456789.5" with
-                    | Select { Projections = [ Lit(VDouble _), None ] } -> ()
+                    | Select { Projections = [ { Expression = Lit(VDouble _); Alias = None } ] } -> ()
                     | other -> failtestf "expected a VDouble fallback, got %A" other
 
                 testCase "single-quoted string with doubled-quote escape"
@@ -882,7 +882,7 @@ let tests =
                     Expect.isError (parse "SELECT ROW(1, 'A') = (SELECT 1, _utf8mb4)") "subquery introducer"
 
                     match parseOk "SELECT t._sjis, `_utf8mb4` FROM t" with
-                    | Select { Projections = [ (QualifiedCol("t", "_sjis"), None); (Col "_utf8mb4", None) ] } -> ()
+                    | Select { Projections = [ { Expression = QualifiedCol("t", "_sjis"); Alias = None }; { Expression = Col "_utf8mb4"; Alias = None } ] } -> ()
                     | other -> failtestf "expected qualified and quoted identifiers, got %A" other
 
                 testCase "bit and national string literals parse as MySQL literals"
@@ -1124,11 +1124,11 @@ let tests =
                 testCase "CREATE TABLE AS SELECT"
                 <| fun _ ->
                     match parseOk "CREATE TABLE IF NOT EXISTS archive AS SELECT id, name FROM source" with
-                    | CreateTableAs("archive", Select { Projections = [ Col "id", None; Col "name", None ] }, true, None) -> ()
+                    | CreateTableAs("archive", Select { Projections = [ { Expression = Col "id"; Alias = None }; { Expression = Col "name"; Alias = None } ] }, true, None) -> ()
                     | other -> failtestf "expected CREATE TABLE AS SELECT, got %A" other
 
                     match parseOk "CREATE TABLE archive ENGINE=MEMORY SELECT name FROM source" with
-                    | CreateTableAs("archive", Select { Projections = [ Col "name", None ] }, false, Some "MEMORY") -> ()
+                    | CreateTableAs("archive", Select { Projections = [ { Expression = Col "name"; Alias = None } ] }, false, Some "MEMORY") -> ()
                     | other -> failtestf "expected CREATE TABLE AS SELECT with options, got %A" other
 
                 testCase "IF NOT EXISTS"
@@ -1360,7 +1360,7 @@ let tests =
                     | other -> failtestf "expected ANSI-quoted identifiers, got %A" other
 
                     match parse "SELECT \"still a string\"" with
-                    | Ok(Select { Projections = [ Lit(VString "still a string"), None ] }) -> ()
+                    | Ok(Select { Projections = [ { Expression = Lit(VString "still a string"); Alias = None } ] }) -> ()
                     | other -> failtestf "expected default double-quoted string semantics, got %A" other
 
                 testCase "HASH partition declarations are accepted"
@@ -1845,7 +1845,7 @@ let tests =
                         (InsertSelect(
                             "t",
                             [ "a"; "b" ],
-                            { Projections = [ col "x", None; col "y", None ]
+                            { Projections = [ { Expression = col "x"; Alias = None }; { Expression = col "y"; Alias = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false
@@ -1877,7 +1877,7 @@ let tests =
                 testCase "INSERT accepts a parenthesized SELECT source"
                 <| fun _ ->
                     match parseOk "INSERT INTO t (SELECT x, y FROM u WHERE x > 1)" with
-                    | InsertSelect("t", [], { Projections = [ Col "x", None; Col "y", None ] }, [], false) -> ()
+                    | InsertSelect("t", [], { Projections = [ { Expression = Col "x"; Alias = None }; { Expression = Col "y"; Alias = None } ] }, [], false) -> ()
                     | other -> failtestf "expected a parenthesized InsertSelect, got %A" other
 
                 testCase "INSERT ... SELECT carries a trailing ON DUPLICATE KEY UPDATE"
@@ -1904,7 +1904,7 @@ let tests =
                     | InsertSelect(
                         "dst",
                         [ "value_id"; "parent_id" ],
-                        { Projections = [ QualifiedCol("values", "value_id"), None; QualifiedCol("options", "parent_id"), Some "parent_id" ]
+                        { Projections = [ { Expression = QualifiedCol("values", "value_id"); Alias = None }; { Expression = QualifiedCol("options", "parent_id"); Alias = Some "parent_id" } ]
                           From = Some(FromTable { Table = "source_values"; Alias = Some "values" })
                           Joins = [ { Table = FromTable { Table = "source_options"; Alias = Some "options" } } ] },
                         [ "value_id", FuncCall("VALUES", [ Col "value_id" ]); "parent_id", FuncCall("VALUES", [ Col "parent_id" ]) ],
@@ -1963,19 +1963,19 @@ let tests =
               [ testCase "PARTITION BY and ORDER BY both present"
                 <| fun _ ->
                     match parseOk "SELECT ROW_NUMBER() OVER (PARTITION BY a ORDER BY b DESC) AS rn FROM t" with
-                    | Select { Projections = [ WindowOver(WinRowNumber, OverSpec { PartitionBy = [ Col "a" ]; OrderBy = [ Col "b", Desc ]; Frame = None }), Some "rn" ] } -> ()
+                    | Select { Projections = [ { Expression = WindowOver(WinRowNumber, OverSpec { PartitionBy = [ Col "a" ]; OrderBy = [ Col "b", Desc ]; Frame = None }); Alias = Some "rn" } ] } -> ()
                     | other -> failtestf "expected a RowNumberOver projection, got %A" other
 
                 testCase "PARTITION BY with multiple columns, ORDER BY defaulting to ASC"
                 <| fun _ ->
                     match parseOk "SELECT ROW_NUMBER() OVER (PARTITION BY a, b ORDER BY c) FROM t" with
-                    | Select { Projections = [ WindowOver(WinRowNumber, OverSpec { PartitionBy = [ Col "a"; Col "b" ]; OrderBy = [ Col "c", Asc ]; Frame = None }), None ] } -> ()
+                    | Select { Projections = [ { Expression = WindowOver(WinRowNumber, OverSpec { PartitionBy = [ Col "a"; Col "b" ]; OrderBy = [ Col "c", Asc ]; Frame = None }); Alias = None } ] } -> ()
                     | other -> failtestf "expected a two-column partition key, got %A" other
 
                 testCase "OVER () with neither PARTITION BY nor ORDER BY"
                 <| fun _ ->
                     match parseOk "SELECT ROW_NUMBER() OVER () FROM t" with
-                    | Select { Projections = [ WindowOver(WinRowNumber, OverSpec { PartitionBy = []; OrderBy = []; Frame = None }), None ] } -> ()
+                    | Select { Projections = [ { Expression = WindowOver(WinRowNumber, OverSpec { PartitionBy = []; OrderBy = []; Frame = None }); Alias = None } ] } -> ()
                     | other -> failtestf "expected an empty partition/order spec, got %A" other ]
 
           testList
@@ -1983,19 +1983,19 @@ let tests =
               [ testCase "no explicit offset defaults to 1"
                 <| fun _ ->
                     match parseOk "SELECT LAG(value) OVER (PARTITION BY a ORDER BY b) AS prev FROM t" with
-                    | Select { Projections = [ WindowOver(WinLagLead(false, Col "value", None, None), OverSpec { PartitionBy = [ Col "a" ]; OrderBy = [ Col "b", Asc ]; Frame = None }), Some "prev" ] } -> ()
+                    | Select { Projections = [ { Expression = WindowOver(WinLagLead(false, Col "value", None, None), OverSpec { PartitionBy = [ Col "a" ]; OrderBy = [ Col "b", Asc ]; Frame = None }); Alias = Some "prev" } ] } -> ()
                     | other -> failtestf "expected a LagOver projection with offset 1, got %A" other
 
                 testCase "an explicit offset is parsed through"
                 <| fun _ ->
                     match parseOk "SELECT LAG(value, 2) OVER (ORDER BY b) FROM t" with
-                    | Select { Projections = [ WindowOver(WinLagLead(false, Col "value", Some(Lit(VInt 2L)), None), OverSpec { PartitionBy = []; OrderBy = [ Col "b", Asc ]; Frame = None }), None ] } -> ()
+                    | Select { Projections = [ { Expression = WindowOver(WinLagLead(false, Col "value", Some(Lit(VInt 2L)), None), OverSpec { PartitionBy = []; OrderBy = [ Col "b", Asc ]; Frame = None }); Alias = None } ] } -> ()
                     | other -> failtestf "expected offset 2, got %A" other
 
                 testCase "usable nested inside arithmetic"
                 <| fun _ ->
                     match parseOk "SELECT value - LAG(value) OVER (ORDER BY b) AS diff FROM t" with
-                    | Select { Projections = [ BinOp(Sub, Col "value", WindowOver(WinLagLead(false, Col "value", None, None), OverSpec { PartitionBy = []; OrderBy = [ Col "b", Asc ]; Frame = None })), Some "diff" ] } -> ()
+                    | Select { Projections = [ { Expression = BinOp(Sub, Col "value", WindowOver(WinLagLead(false, Col "value", None, None), OverSpec { PartitionBy = []; OrderBy = [ Col "b", Asc ]; Frame = None })); Alias = Some "diff" } ] } -> ()
                     | other -> failtestf "expected LagOver nested in a BinOp, got %A" other ]
 
           testList
@@ -2003,13 +2003,13 @@ let tests =
               [ testCase "no explicit offset leaves the offset argument absent"
                 <| fun _ ->
                     match parseOk "SELECT LEAD(value) OVER (ORDER BY id) FROM t" with
-                    | Select { Projections = [ WindowOver(WinLagLead(true, Col "value", None, None), _), None ] } -> ()
+                    | Select { Projections = [ { Expression = WindowOver(WinLagLead(true, Col "value", None, None), _); Alias = None } ] } -> ()
                     | other -> failtestf "expected a LEAD window projection, got %A" other
 
                 testCase "an explicit offset is parsed through"
                 <| fun _ ->
                     match parseOk "SELECT LEAD(value, 2) OVER (ORDER BY id) FROM t" with
-                    | Select { Projections = [ WindowOver(WinLagLead(true, Col "value", Some(Lit(VInt 2L)), None), _), None ] } -> ()
+                    | Select { Projections = [ { Expression = WindowOver(WinLagLead(true, Col "value", Some(Lit(VInt 2L)), None), _); Alias = None } ] } -> ()
                     | other -> failtestf "expected offset 2, got %A" other ]
 
           testList
@@ -2599,13 +2599,13 @@ let tests =
                 testCase "scalar subquery: (SELECT ...) used as a value"
                 <| fun _ ->
                     match parseOk "SELECT (SELECT COUNT(*) FROM t) AS c" with
-                    | Select { Projections = [ Subquery { From = Some(FromTable { Table = "t" }) }, Some "c" ] } -> ()
+                    | Select { Projections = [ { Expression = Subquery { From = Some(FromTable { Table = "t" }) }; Alias = Some "c" } ] } -> ()
                     | other -> failtestf "expected a Subquery projection, got %A" other
 
                 testCase "WITH clauses parse inside scalar and EXISTS subqueries"
                 <| fun _ ->
                     match parseOk "SELECT (WITH c AS (SELECT 1 AS n) SELECT n FROM c), EXISTS (WITH d AS (SELECT 2 AS n) SELECT n FROM d)" with
-                    | Select { Projections = [ (Subquery scalar, None); (Exists exists, None) ] } ->
+                    | Select { Projections = [ { Expression = Subquery scalar; Alias = None }; { Expression = Exists exists; Alias = None } ] } ->
                         Expect.equal (scalar.Ctes |> List.map _.CteName) [ "c" ] "scalar CTE"
                         Expect.equal (exists.Ctes |> List.map _.CteName) [ "d" ] "EXISTS CTE"
                     | other -> failtestf "expected CTE-bearing expression subqueries, got %A" other
@@ -2623,10 +2623,10 @@ let tests =
                             | _ -> false
 
                         match select.Projections with
-                        | [ Subquery scalar, None
-                            Exists exists, None
-                            InSubquery(_, inSelect), None
-                            QuantifiedComparison(_, _, _, quantified), None ] ->
+                        | [ { Expression = Subquery scalar; Alias = None }
+                            { Expression = Exists exists; Alias = None }
+                            { Expression = InSubquery(_, inSelect); Alias = None }
+                            { Expression = QuantifiedComparison(_, _, _, quantified); Alias = None } ] ->
                             Expect.isTrue
                                 ([ scalar; exists; inSelect; quantified ] |> List.forall isSetExpression)
                                 "all four subqueries wrap a set expression"
@@ -2654,7 +2654,7 @@ let tests =
                     Expect.isError (parse "SELECT recursive FROM t") "RECURSIVE cannot become a column name"
 
                     match parseOk "SELECT t.with, t.recursive FROM t" with
-                    | Select { Projections = [ (QualifiedCol("t", "with"), None); (QualifiedCol("t", "recursive"), None) ] } -> ()
+                    | Select { Projections = [ { Expression = QualifiedCol("t", "with"); Alias = None }; { Expression = QualifiedCol("t", "recursive"); Alias = None } ] } -> ()
                     | other -> failtestf "expected reserved words after a qualifier, got %A" other
 
                     match parseOk "SELECT * FROM db.with" with
@@ -2669,12 +2669,12 @@ let tests =
                         Expect.isError (parse (sprintf "SELECT 1 AS %s" name)) name
 
                     match parseOk "SELECT ROW_NUMBER() OVER () AS `rank`" with
-                    | Select { Projections = [ WindowOver(WinRowNumber, _), Some "rank" ] } -> ()
+                    | Select { Projections = [ { Expression = WindowOver(WinRowNumber, _); Alias = Some "rank" } ] } -> ()
                     | other -> failtestf "expected a quoted window alias, got %A" other
 
                     for name in [ "OFFSET"; "TRUNCATE"; "CAST"; "ANY"; "SOME"; "END" ] do
                         match parseOk (sprintf "SELECT 1 AS %s" name) with
-                        | Select { Projections = [ Lit(VInt 1L), Some alias ] } -> Expect.equal alias name name
+                        | Select { Projections = [ { Expression = Lit(VInt 1L); Alias = Some alias } ] } -> Expect.equal alias name name
                         | other -> failtestf "expected explicit alias %s, got %A" name other
 
                 testCase "IN (SELECT ...) parses as InSubquery"
@@ -2725,7 +2725,7 @@ let tests =
                 testCase "COUNT(DISTINCT x) parses to FuncCall with a Distinct-wrapped argument"
                 <| fun _ ->
                     match parseOk "SELECT COUNT(DISTINCT x) FROM t" with
-                    | Select { Projections = [ FuncCall("COUNT", [ Distinct(Col "x") ]), None ] } -> ()
+                    | Select { Projections = [ { Expression = FuncCall("COUNT", [ Distinct(Col "x") ]); Alias = None } ] } -> ()
                     | other -> failtestf "expected COUNT(DISTINCT x), got %A" other
 
                 testCase "DISTINCT inside a call MySQL's grammar doesn't allow it in is a 1064"
@@ -2752,8 +2752,8 @@ let tests =
                 testCase "GROUP_CONCAT(x SEPARATOR '-') and GROUP_CONCAT(DISTINCT x)"
                 <| fun _ ->
                     let expectedProjections =
-                        [ FuncCall("GROUP_CONCAT", [ Col "x"; Lit(VString "-") ]), None
-                          FuncCall("GROUP_CONCAT", [ Distinct(Col "y") ]), None ]
+                        [ Projection.create (FuncCall("GROUP_CONCAT", [ Col "x"; Lit(VString "-") ])) None
+                          Projection.create (FuncCall("GROUP_CONCAT", [ Distinct(Col "y") ])) None ]
 
                     match parseOk "SELECT GROUP_CONCAT(x SEPARATOR '-'), GROUP_CONCAT(DISTINCT y) FROM t" with
                     | Select { Projections = projs } -> Expect.equal projs expectedProjections "two GROUP_CONCAT shapes"
@@ -2762,7 +2762,7 @@ let tests =
                 testCase "GROUP_CONCAT(x ORDER BY y DESC SEPARATOR ',')"
                 <| fun _ ->
                     let expected =
-                        [ FuncCall("GROUP_CONCAT", [ Col "x"; OrderBy(Col "y", Desc); Lit(VString ",") ]), None ]
+                        [ Projection.create (FuncCall("GROUP_CONCAT", [ Col "x"; OrderBy(Col "y", Desc); Lit(VString ",") ])) None ]
 
                     match parseOk "SELECT GROUP_CONCAT(x ORDER BY y DESC SEPARATOR ',') FROM t" with
                     | Select { Projections = projs } -> Expect.equal projs expected "GROUP_CONCAT with an ORDER BY key"
@@ -3082,9 +3082,9 @@ let tests =
                     let variable name = { Name = name; Sql = "@" + name; PreparedType = None }
 
                     let expected =
-                        [ BinOp(Add, UserVariable(variable "x"), Lit(VInt 1L)), None
-                          SystemVariable(Some "GLOBAL", "max_connections"), None
-                          AssignUserVariable(variable "x", Lit(VInt 3L)), None ]
+                        [ Projection.create (BinOp(Add, UserVariable(variable "x"), Lit(VInt 1L))) None
+                          Projection.create (SystemVariable(Some "GLOBAL", "max_connections")) None
+                          Projection.create (AssignUserVariable(variable "x", Lit(VInt 3L))) None ]
 
                     match parse "SELECT @x + 1, @@GLOBAL.max_connections, @x := 3" with
                     | Ok(Select { Projections = projections }) -> Expect.equal projections expected "variable expressions"
@@ -3149,7 +3149,7 @@ let tests =
                 testCase "a bare at sign is MySQL's anonymous NULL variable reference"
                 <| fun _ ->
                     match parse "SELECT @, @ + 1" with
-                    | Ok(Select { Projections = [ (UserVariable first, None); (BinOp(Add, UserVariable second, Lit(VInt 1L)), None) ] }) ->
+                    | Ok(Select { Projections = [ { Expression = UserVariable first; Alias = None }; { Expression = BinOp(Add, UserVariable second, Lit(VInt 1L)); Alias = None } ] }) ->
                         Expect.equal first { Name = ""; Sql = "@"; PreparedType = None } "bare reference"
                         Expect.equal second first "nested bare reference"
                     | other -> failtestf "expected bare user-variable references, got %A" other
@@ -3157,10 +3157,10 @@ let tests =
                 testCase "quoted user-variable names parse with their MySQL escapes"
                 <| fun _ ->
                     let expected =
-                        [ UserVariable { Name = "has space"; Sql = "@`has space`"; PreparedType = None }, None
-                          UserVariable { Name = "single'quote"; Sql = "@'single''quote'"; PreparedType = None }, None
-                          UserVariable { Name = "double\"quote"; Sql = "@\"double\"\"quote\""; PreparedType = None }, None
-                          UserVariable { Name = "back`tick"; Sql = "@`back``tick`"; PreparedType = None }, None ]
+                        [ Projection.create (UserVariable { Name = "has space"; Sql = "@`has space`"; PreparedType = None }) None
+                          Projection.create (UserVariable { Name = "single'quote"; Sql = "@'single''quote'"; PreparedType = None }) None
+                          Projection.create (UserVariable { Name = "double\"quote"; Sql = "@\"double\"\"quote\""; PreparedType = None }) None
+                          Projection.create (UserVariable { Name = "back`tick"; Sql = "@`back``tick`"; PreparedType = None }) None ]
 
                     match parse "SELECT @`has space`, @'single''quote', @\"double\"\"quote\", @`back``tick`" with
                     | Ok(Select { Projections = projections }) -> Expect.equal projections expected "quoted variables"
@@ -4168,14 +4168,14 @@ let tests =
           <| fun _ ->
               for sql in [ "SELECT 1 'one'"; "SELECT 1 AS 'one'" ] do
                   match Fsdb.Parser.parse sql with
-                  | Ok(Select { Projections = [ Lit(VInt 1L), Some "one" ] }) -> ()
+                  | Ok(Select { Projections = [ { Expression = Lit(VInt 1L); Alias = Some "one" } ] }) -> ()
                   | other -> failtestf "unexpected parse for %s: %A" sql other
 
           testCase "POSITION accepts the standard IN argument separator"
           <| fun _ ->
               for sql in [ "SELECT POSITION('ood' IN 'Moodle')"; "SELECT POSITION(('ood') IN ('Moodle'))" ] do
                   match Fsdb.Parser.parse sql with
-                  | Ok(Select { Projections = [ FuncCall("POSITION", [ Lit(VString "ood"); Lit(VString "Moodle") ]), None ] }) -> ()
+                  | Ok(Select { Projections = [ { Expression = FuncCall("POSITION", [ Lit(VString "ood"); Lit(VString "Moodle") ]); Alias = None } ] }) -> ()
                   | other -> failtestf "unexpected POSITION parse for %s: %A" sql other
 
           testCase "binary introducers materialize quoted and unquoted byte literals"
@@ -4188,14 +4188,14 @@ let tests =
                     "_binary 0xabc", [| 10uy; 188uy |]
                     "_binary/*separator*/b'1'", [| 1uy |] ] do
                   match Fsdb.Parser.parse ("SELECT " + literal) with
-                  | Ok(Select { Projections = [ Lit(VBytes bytes), None ] }) -> Expect.equal bytes expected literal
+                  | Ok(Select { Projections = [ { Expression = Lit(VBytes bytes); Alias = None } ] }) -> Expect.equal bytes expected literal
                   | other -> failtestf "unexpected binary literal parse for %s: %A" literal other
 
           testCase "binary introducers require a token boundary before a byte prefix"
           <| fun _ ->
               for name in [ "_binaryX"; "_binaryb"; "_nosuch" ] do
                   match Fsdb.Parser.parse ("SELECT " + name + "'00ff'") with
-                  | Ok(Select { Projections = [ Col column, Some "00ff" ] }) -> Expect.equal column name "identifier with string alias"
+                  | Ok(Select { Projections = [ { Expression = Col column; Alias = Some "00ff" } ] }) -> Expect.equal column name "identifier with string alias"
                   | other -> failtestf "expected a column reference, got %A" other
 
           testCase "REGEXP, ANY, and SOME are reserved in expression position"

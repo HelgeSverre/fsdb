@@ -870,7 +870,7 @@ let private isStoredView store defaultDatabase qualifiedName =
 let private projectionExpressionsNamed (projections: Projection list) name =
     projections
     |> List.choose (function
-        | expression, Some alias when alias.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> Some expression
+        | { Expression = expression; Alias = Some alias } when alias.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> Some expression
         | _ -> None)
 
 let private tryProjectionExpressionNamed projections name =
@@ -879,7 +879,7 @@ let private tryProjectionExpressionNamed projections name =
 let private tryProjectionAtPosition (projections: Projection list) =
     function
     | Lit(VInt position) when position >= 1L && position <= int64 System.Int32.MaxValue ->
-        projections |> List.tryItem (int position - 1) |> Option.map fst
+        projections |> List.tryItem (int position - 1) |> Option.map _.Expression
     | _ -> None
 
 let private resolveOrderPosition (projections: Projection list) (expression: Expr) =
@@ -930,7 +930,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
     let hasWritableProjection (projections: (string * Expr * ViewColumnTarget option) list) =
         projections |> List.exists (fun (_, _, target) -> target.IsSome)
 
-    let projectedColumn rewrite targetOf (expression, alias) =
+    let projectedColumn rewrite targetOf { Expression = expression; Alias = alias } =
         let defaultName =
             match expression with
             | Col column
@@ -956,7 +956,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
         |> Map.ofList
 
     let selectExpressions (select: SelectStmt) =
-        (select.Projections |> List.map fst)
+        (select.Projections |> List.map _.Expression)
         @ (select.Where |> Option.toList)
         @ (select.Having |> Option.toList)
         @ select.GroupBy
@@ -1135,22 +1135,22 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     let expandedProjections =
                         select.Projections
-                        |> List.collect (fun (expression, alias) ->
+                        |> List.collect (fun ({ Expression = expression } as projection) ->
                             match expression with
-                            | Star None -> projectedColumns |> List.map (fun column -> Col column, None)
+                            | Star None -> projectedColumns |> List.map (fun column -> Projection.create (Col column) None)
                             | Star(Some qualifier)
                                 when sourceNames
                                      |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)) ->
-                                projectedColumns |> List.map (fun column -> Col column, None)
-                            | _ -> [ expression, alias ])
+                                projectedColumns |> List.map (fun column -> Projection.create (Col column) None)
+                            | _ -> [ projection ])
 
                     let unresolvedStar =
                         projectedColumns.IsEmpty
-                        && (select.Projections |> List.exists (fun (expression, _) -> match expression with Star _ -> true | _ -> false))
+                        && (select.Projections |> List.exists (fun { Expression = expression } -> match expression with Star _ -> true | _ -> false))
 
                     let dependentProjection =
                         expandedProjections
-                        |> List.exists (fst >> hasDependentSubquery (projectedColumns |> List.map _.ToLowerInvariant() |> Set.ofList))
+                        |> List.exists (_.Expression >> hasDependentSubquery (projectedColumns |> List.map _.ToLowerInvariant() |> Set.ofList))
 
                     let dependentPredicate =
                         underlying.IsSome
@@ -1311,7 +1311,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     let readOnlySource (stored: StoredView) projections =
                         let projectedNames =
                             projections
-                            |> List.map (fun (expression, alias) ->
+                            |> List.map (fun { Expression = expression; Alias = alias } ->
                                 alias
                                 |> Option.orElseWith (fun () ->
                                     match expression with
@@ -1451,19 +1451,19 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     let expandedProjections =
                         select.Projections
-                        |> List.collect (fun (expression, alias) ->
+                        |> List.collect (fun ({ Expression = expression } as projection) ->
                             match expression with
                             | Star None ->
                                 sources
                                 |> List.collect (fun source ->
-                                    source.Columns |> List.map (fun column -> QualifiedCol(source.Qualifier, column), None))
+                                    source.Columns |> List.map (fun column -> Projection.create (QualifiedCol(source.Qualifier, column)) None))
                             | Star(Some qualifier) ->
                                 sources
                                 |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
                                 |> Option.map (fun source ->
-                                    source.Columns |> List.map (fun column -> QualifiedCol(source.Qualifier, column), None))
-                                |> Option.defaultValue [ expression, alias ]
-                            | _ -> [ expression, alias ])
+                                    source.Columns |> List.map (fun column -> Projection.create (QualifiedCol(source.Qualifier, column)) None))
+                                |> Option.defaultValue [ projection ]
+                            | _ -> [ projection ])
 
                     let rewriteSources =
                         Expression.rewrite (function
@@ -2110,7 +2110,7 @@ and private overLabel (over: OverClause) : string =
         |> String.concat " "
         |> sprintf "(%s)"
 
-let private projectionLabel ((expression, alias): Projection) =
+let private projectionLabel ({ Expression = expression; Alias = alias }: Projection) =
     alias |> Option.defaultWith (fun () -> exprLabel expression)
 
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
@@ -2583,7 +2583,7 @@ let private scalarSubqueryMaterializes registry (select: SelectStmt) =
     || not select.Joins.IsEmpty
     || select.Having.IsSome
     || select.Rollup
-    || (select.Projections |> List.exists (fun (expression, _) ->
+    || (select.Projections |> List.exists (fun { Expression = expression } ->
         containsAggregate registry expression || not (collectWindowFuncs expression).IsEmpty))
 
 let private isIntegerType typeId =
@@ -2797,7 +2797,7 @@ and private selectProjectionColumns (store: Store) (dbName: string) (select: Sel
         | _ -> [ None ]
 
     select.Projections
-    |> List.collect (fun (expression, alias) ->
+    |> List.collect (fun { Expression = expression; Alias = alias } ->
         projectionColumns expression
         |> List.map (fun column ->
             match column, alias with
@@ -2808,7 +2808,7 @@ let private sourceForBody (body: SelectStmt) (source: ColumnSource) =
     let materialized =
         body.Limit.IsSome || body.Offset.IsSome || body.Distinct
         || not body.GroupBy.IsEmpty || body.Having.IsSome || body.Rollup
-        || body.Projections |> List.exists (fun (expression, _) ->
+        || body.Projections |> List.exists (fun { Expression = expression } ->
             containsAggregate Functions.builtins expression || not (collectWindowFuncs expression).IsEmpty)
     match source with
     | CorrelatedColumn _ -> source
@@ -2855,13 +2855,13 @@ let rec private outputColumnSourcesInScope
         let namesForQualifier qualifier =
             sources |> List.tryFind (sourceHasQualifier qualifier)
             |> Option.map namesForSource |> Option.defaultValue []
-        body.Projections |> List.collect (fun (expression, alias) ->
+        body.Projections |> List.collect (fun ({ Expression = expression } as projection) ->
             match expression with
             | Star None ->
                 FromItem.logicalSelectColumns namesForQualifier body |> Result.toOption
                 |> Option.map (List.map _.Name) |> Option.defaultValue []
             | Star(Some qualifier) -> namesForQualifier qualifier
-            | _ -> [ projectionLabel (expression, alias) ])
+            | _ -> [ projectionLabel projection ])
 
     let alignOrigins columns origins =
         if sameLength columns origins then
@@ -3005,7 +3005,7 @@ let rec private outputColumnSourcesInScope
         | QualifiedCol(qualifier, name) -> [ byQualifier qualifier name ]
         | _ -> [ None ]
 
-    select.Projections |> List.collect (fst >> originsForExpression)
+    select.Projections |> List.collect (_.Expression >> originsForExpression)
 
 let private outputColumnSources store dbName qualifiers select =
     outputColumnSourcesInScope store dbName qualifiers [] select
@@ -4096,7 +4096,7 @@ let private quantifiedEqualityMembershipResult
 
 let private subqueryProjectionOperand (select: SelectStmt) (columns: ColumnDef option list) : QuantifiedOperand =
     match select.Projections, columns with
-    | [ (Collate(_, collation), _) ], [ column ] ->
+    | [ { Expression = Collate(_, collation) } ], [ column ] ->
         { Expression = Collate(Lit VNull, collation)
           Column = column }
     | [ _ ], [ column ] ->
@@ -4109,10 +4109,10 @@ let private subqueryProjectionOperand (select: SelectStmt) (columns: ColumnDef o
 let private subqueryRowOperand (select: SelectStmt) (columns: ColumnDef option list) (values: Value[]) : RowOperand =
     let expressions =
         match select.Projections, columns with
-        | [ (Star _, _) ], columns -> List.replicate columns.Length (Lit VNull)
+        | [ { Expression = Star _ } ], columns -> List.replicate columns.Length (Lit VNull)
         | projections, columns when sameLength projections columns ->
             projections
-            |> List.map fst
+            |> List.map _.Expression
             |> List.map (function
                 | Collate(_, collation) -> Collate(Lit VNull, collation)
                 | _ -> Lit VNull)
@@ -4328,7 +4328,7 @@ and private isStatementStableSelect
               Columns = Set.union outerScope.Columns ownScope.Columns }
 
         let expressions =
-            (select.Projections |> List.map fst)
+            (select.Projections |> List.map _.Expression)
             @ (select.Joins |> List.map _.On)
             @ (select.Where |> Option.toList)
             @ select.GroupBy
@@ -5284,7 +5284,7 @@ and private possibleConditionTruths ctx expression =
 /// MySQL removes constant-true conditions before scalar reduction and LIMIT.
 and private tryReducedScalarProjection ctx (select: SelectStmt) =
     match select.Projections with
-    | [ expression, _ ] when not (scalarSubqueryMaterializes ctx.Registry select) ->
+    | [ { Expression = expression } ] when not (scalarSubqueryMaterializes ctx.Registry select) ->
         let conditionReduces =
             select.Where
             |> Option.map (fun condition -> possibleConditionTruths ctx condition = Set.singleton (Some true))
@@ -5346,7 +5346,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             | Some projection -> numericOperandDisplayMetadata projection
             | None ->
                 match select.Projections with
-                | [ projection, _ ] when isLiteralConstantExpression ctx.Registry projection ->
+                | [ { Expression = projection } ] when isLiteralConstantExpression ctx.Registry projection ->
                     numericOperandDisplayMetadata projection
                 | _ ->
                     selectProjectionColumns ctx.Store ctx.DbName select
@@ -6126,9 +6126,9 @@ and private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (pr
     projections
     |> List.collect (fun proj ->
         match proj with
-        | Star None, _ -> columns |> List.map outputFormatOfColumn
-        | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map outputFormatOfColumn
-        | expr, _ -> [ outputFormatOfExpr ctx expr ])
+        | { Expression = Star None } -> columns |> List.map outputFormatOfColumn
+        | { Expression = Star(Some qualifier) } -> columnsForQualifier ctx qualifier |> List.map outputFormatOfColumn
+        | { Expression = expr } -> [ outputFormatOfExpr ctx expr ])
 
 /// The declared fsp list must mirror projection expansion because `VDateTime`
 /// alone does not retain its declared display precision.
@@ -6171,9 +6171,9 @@ and private outputColumnWireOverridesFor
         projections
         |> List.collect (fun proj ->
             match proj with
-            | Star None, _ -> columns |> List.map overrideOf
-            | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map overrideOf
-            | expr, _ ->
+            | { Expression = Star None } -> columns |> List.map overrideOf
+            | { Expression = Star(Some qualifier) } -> columnsForQualifier ctx qualifier |> List.map overrideOf
+            | { Expression = expr } ->
                 [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
                   | Some ty -> Some ty
                   | None -> metadataOfExpr ctx expr ])
@@ -6366,7 +6366,7 @@ and private runExpressionSubquery
 
 and private isPlainCountStarSelect (registry: Registry) (select: SelectStmt) =
     match select.Projections with
-    | [ FuncCall(name, [ Star None ]), _ ] ->
+    | [ { Expression = FuncCall(name, [ Star None ]) } ] ->
         name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
         && Functions.isUnmodifiedBuiltinAggregate name registry
         && select.GroupBy.IsEmpty
@@ -6924,11 +6924,11 @@ and private describeQueryColumnsChecked
                 else Ok select
             let projectionAliases =
                 { emptyScope with
-                    LogicalColumns = select.Projections |> List.choose (fun (expression, alias) ->
+                    LogicalColumns = select.Projections |> List.choose (fun { Expression = expression; Alias = alias } ->
                         alias |> Option.map (fun name -> FromItem.SourceColumn(name, expression))) }
             let nestedQueries =
                 let expressions =
-                    (select.Projections |> List.map (fun (expression, _) -> expression, [ scope; projectionAliases ]))
+                    (select.Projections |> List.map (fun { Expression = expression } -> expression, [ scope; projectionAliases ]))
                     @ ((Option.toList select.Where @ select.GroupBy) |> List.map (fun expression -> expression, [ scope ]))
                     @ ((Option.toList select.Having @ (select.OrderBy |> List.map fst))
                        |> List.map (fun expression -> expression, [ scope; projectionAliases ]))
@@ -6941,7 +6941,7 @@ and private describeQueryColumnsChecked
                     | _ -> Ok())
 
             let references =
-                (select.Projections |> List.map (fun (expression, _) -> expression, "field list"))
+                (select.Projections |> List.map (fun { Expression = expression } -> expression, "field list"))
                 @ (select.Where |> Option.toList |> List.map (fun expression -> expression, "where clause"))
                 |> traverse (fun (expression, clause) -> validateReferences (scope :: outerScopes) clause expression)
 
@@ -7088,7 +7088,7 @@ and private describeQueryColumnsChecked
                         | _ -> computedColumn name TText true None (Some "utf8mb4_0900_ai_ci") |> describeColumn
 
                 select.Projections
-                |> List.collect (fun (expression, alias) ->
+                |> List.collect (fun ({ Expression = expression } as projection) ->
                     match expression with
                     | Star None -> descriptors
                     | Star(Some qualifier) ->
@@ -7096,7 +7096,7 @@ and private describeQueryColumnsChecked
                         |> Map.tryFind (qualifier.ToLowerInvariant())
                         |> Option.map (fst >> List.map describeColumn)
                         |> Option.defaultValue []
-                    | _ -> [ columnForExpression (projectionLabel (expression, alias)) expression ])))
+                    | _ -> [ columnForExpression (projectionLabel projection) expression ])))
 
     (match source with
      | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = [] })
@@ -8022,7 +8022,7 @@ and private tryFullTextDrivenJoinOrder
     : (SelectStmt * string) option =
     let projectionsAreScalar =
         select.Projections
-        |> List.forall (fun (expression, _) ->
+        |> List.forall (fun { Expression = expression } ->
             not (containsAggregate registry expression)
             && (collectWindowFuncs expression).IsEmpty)
 
@@ -8349,7 +8349,7 @@ and private applyJsonTableJoin
     |> Result.map (fun (joinColumns, rows, using) -> sourcesSoFar @ [ alias, joinColumns ], rows, using)
 
 and private selectJoinExpressions (select: SelectStmt) =
-    (select.Projections |> List.map fst)
+    (select.Projections |> List.map _.Expression)
     @ (select.Where |> Option.toList)
     @ select.GroupBy
     @ (select.Having |> Option.toList)
@@ -9490,13 +9490,13 @@ and private rewriteNaturalSelect
 
         let projections =
             select.Projections
-            |> List.collect (fun (expr, alias) ->
+            |> List.collect (fun ({ Expression = expr; Alias = alias } as projection) ->
                 match expr with
-                | Star None -> plan |> List.map (fun column -> column.Expression, Some column.Name)
-                | Star(Some _) -> [ expr, alias ]
+                | Star None -> plan |> List.map (fun column -> Projection.create column.Expression (Some column.Name))
+                | Star(Some _) -> [ projection ]
                 // Retain the logical name when binding to the preserved source.
-                | Col name when alias.IsNone -> [ rewriteExpr expr, Some name ]
-                | _ -> [ rewriteExpr expr, alias ])
+                | Col name when alias.IsNone -> [ { projection with Expression = rewriteExpr expr; Alias = Some name } ]
+                | _ -> [ { projection with Expression = rewriteExpr expr } ])
 
         { select with
             Projections = projections
@@ -9533,7 +9533,7 @@ and private selectOrUnionTableNames (body: SelectOrUnion) : Set<string> =
 
     and selectNames (select: SelectStmt) =
         let expressions =
-            (select.Projections |> List.map fst)
+            (select.Projections |> List.map _.Expression)
             @ (select.Joins |> List.map _.On)
             @ Option.toList select.Where
             @ select.GroupBy
@@ -9592,7 +9592,7 @@ and private referencedCtes (ctes: CommonTableExpr list) (tableNames: Set<string>
         ctes |> List.filter (fun cte -> Set.contains (cte.CteName.ToLowerInvariant()) required)
 
 and private mutationSourceQuery from joins ctes expressions : SelectStmt =
-    { Projections = expressions |> List.map (fun expression -> expression, None)
+    { Projections = expressions |> List.map (fun expression -> Projection.create expression None)
       IntoVariables = []
       IntoFile = None
       Distinct = false
@@ -9661,7 +9661,7 @@ and private tryMergeDirectView
                 | Some direct
                     when direct.Predicate |> Option.forall mergeablePredicate
                          && direct.UpdateJoins.IsEmpty
-                         && ((select.Projections |> List.map fst)
+                         && ((select.Projections |> List.map _.Expression)
                              @ (select.Where |> Option.toList)
                              @ select.GroupBy
                              @ (select.Having |> Option.toList)
@@ -9718,7 +9718,7 @@ and private tryMergeDirectView
 
                             let projections =
                                 select.Projections
-                                |> List.collect (fun (expression, alias) ->
+                                |> List.collect (fun ({ Expression = expression; Alias = alias } as projection) ->
                                     let directProjection name =
                                         let rewritten = rewriteOuter expression
                                         let inferredAlias =
@@ -9726,25 +9726,25 @@ and private tryMergeDirectView
                                             | QualifiedCol(_, column)
                                                 when not (column.Equals(name, System.StringComparison.OrdinalIgnoreCase)) -> Some name
                                             | _ -> None
-                                        rewritten, alias |> Option.orElse inferredAlias
+                                        { projection with Expression = rewritten; Alias = alias |> Option.orElse inferredAlias }
 
                                     match expression with
                                     | Star None ->
                                         outputColumns
                                         |> List.map (fun (output, column) ->
-                                            Col column,
-                                            if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output)
+                                            Projection.create (Col column)
+                                                (if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output))
                                     | Star(Some qualifier)
                                         when qualifier.Equals(viewQualifier, System.StringComparison.OrdinalIgnoreCase) ->
                                         outputColumns
                                         |> List.map (fun (output, column) ->
-                                            Col column,
-                                            if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output)
+                                            Projection.create (Col column)
+                                                (if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output))
                                     | Col name -> [ directProjection name ]
                                     | QualifiedCol(qualifier, name)
                                         when qualifier.Equals(viewQualifier, System.StringComparison.OrdinalIgnoreCase) ->
                                         [ directProjection name ]
-                                    | _ -> [ rewriteOuter expression, alias ])
+                                    | _ -> [ { projection with Expression = rewriteOuter expression } ])
 
                             let outerPredicate = select.Where |> Option.map rewriteOuter
                             let predicate =
@@ -9913,7 +9913,7 @@ and private materializeCte
         Error(Err(3573, sprintf "Recursive Common Table Expression '%s' should contain a UNION" cte.CteName))
     | UnionSelect(anchor, recursiveBranches, _, _, _) ->
         let normalizeLiteralColumns (columns: ColumnDef list) =
-            let expressions = anchor.Projections |> List.map fst
+            let expressions = anchor.Projections |> List.map _.Expression
 
             if expressions.Length <> columns.Length || (expressions |> List.exists (function Star _ -> true | _ -> false)) then
                 columns
@@ -10035,7 +10035,7 @@ and private prepareRecursiveBranch
     (outer: EvalContext option)
     (select: SelectStmt)
     : Result<RecursiveBranchPlan, QueryResult> =
-    let projectionExpressions = select.Projections |> List.map fst
+    let projectionExpressions = select.Projections |> List.map _.Expression
     let expressions = projectionExpressions @ (select.Where |> Option.toList)
 
     let hasDirectRecursiveSource =
@@ -10410,7 +10410,7 @@ and private runUnlockedSelectStmt
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
     let matchNodes =
-        (select.Projections |> List.collect (fst >> collectMatchAgainst))
+        (select.Projections |> List.collect (_.Expression >> collectMatchAgainst))
         @ (select.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
         @ (select.Having |> Option.map collectMatchAgainst |> Option.defaultValue [])
         @ (select.OrderBy |> List.collect (fst >> collectMatchAgainst))
@@ -11554,13 +11554,13 @@ and private tryPhysicalProjectionUncached
                     None
                 else
                     select.Projections
-                    |> traverse (fun (expression, alias) ->
+                    |> traverse (fun ({ Expression = expression } as projection) ->
                         match
                             directColumn expression
                             |> Option.bind (fun name ->
                                 resolveColumn input.OutputColumns name
                                 |> Result.toOption
-                                |> Option.map (fun index -> index, projectionLabel (expression, alias)))
+                                |> Option.map (fun index -> index, projectionLabel projection))
                         with
                         | Some projected -> Ok projected
                         | None -> Error())
@@ -12337,13 +12337,13 @@ and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: Selec
 
     let directBareColumn name =
         let isSimpleProjection = function
-            | Col _, None
-            | Star None, None -> true
+            | { Expression = Col _; Alias = None }
+            | { Expression = Star None; Alias = None } -> true
             | _ -> false
 
         let projectsName = function
-            | Col projection, None -> projection.Equals(name, System.StringComparison.OrdinalIgnoreCase)
-            | Star None, None -> true
+            | { Expression = Col projection; Alias = None } -> projection.Equals(name, System.StringComparison.OrdinalIgnoreCase)
+            | { Expression = Star None; Alias = None } -> true
             | _ -> false
 
         if List.forall isSimpleProjection select.Projections
@@ -12387,8 +12387,8 @@ and private tryIndexOrder
         && not select.Distinct
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
-        && not (select.Projections |> List.exists (fst >> containsAggregate registry))
-        && not (select.Projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not))
+        && not (select.Projections |> List.exists (_.Expression >> containsAggregate registry))
+        && not (select.Projections |> List.exists (_.Expression >> collectWindowFuncs >> List.isEmpty >> not))
 
     let storedRowsAreDirect =
         physicalFastPathTable store dbName tref
@@ -13064,7 +13064,7 @@ and private runUnionStmtWithOuter
             // `ORDER BY`/`LIMIT` on the combined result uses ordinary
             // alias/positional resolution and typed values rather than
             // re-parsing rendered text.
-            let projections = cols |> List.map (fun c -> Col c, None)
+            let projections = cols |> List.map (fun c -> Projection.create (Col c) None)
             let resolveOrder = resolvePositionalOrAlias projections
 
             // The combined result's own synthetic columns (name + reconciled
@@ -13128,11 +13128,11 @@ and private runUnionStmtWithOuter
 /// *` expands to every column of the row.
 and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: Projection) : Result<(string * Value) list, EvalError> =
     match proj with
-    | Star None, _ -> Ok(columns |> List.mapi (fun i column -> column.Name, readColumnValue ctx.Store column ctx.Row.[i]))
-    | Star(Some qualifier), _ -> resolveStarQualifier ctx qualifier
-    | expr, aliasOpt ->
+    | { Expression = Star None } -> Ok(columns |> List.mapi (fun i column -> column.Name, readColumnValue ctx.Store column ctx.Row.[i]))
+    | { Expression = Star(Some qualifier) } -> resolveStarQualifier ctx qualifier
+    | { Expression = expr } ->
         evalExpr ctx expr
-        |> Result.map (fun v -> [ projectionLabel (expr, aliasOpt), v ])
+        |> Result.map (fun v -> [ projectionLabel proj, v ])
 
 /// An all-NULL row that surfaces schema errors even when no data row matches.
 and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
@@ -13425,7 +13425,7 @@ and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr)
         | Col name ->
             projections
             |> List.tryPick (function
-                | expression, Some alias when equalsIgnoreCase alias name -> Some expression
+                | { Expression = expression; Alias = Some alias } when equalsIgnoreCase alias name -> Some expression
                 | _ -> None)
         | _ -> None)
     |> Option.defaultValue expr
@@ -14044,7 +14044,7 @@ and private validateOnlyFullGroupBy
             let determined = expandDetermined equalities uniqueKeys initial
 
             select.Projections
-            |> List.mapi (fun index (expr, _) -> groupingError "SELECT list" (index + 1) groupExprs determined expr)
+            |> List.mapi (fun index { Expression = expr } -> groupingError "SELECT list" (index + 1) groupExprs determined expr)
             |> traverse id
             |> Result.bind (fun _ ->
                 select.Having
@@ -14078,7 +14078,7 @@ and private tryIndexedGroupProjection
     (registry: Registry)
     (context: EvalContext)
     (groupExpressions: Expr list)
-    ((expression, _): Projection)
+    ({ Expression = expression }: Projection)
     : IndexedGroupProjection option =
     let groupValue expression =
         groupExpressions
@@ -14138,14 +14138,14 @@ and private runGroupedSelect
         let representative = representativeOf groupRows
 
         select.Projections
-        |> traverse (fun (expr, aliasOpt) ->
+        |> traverse (fun ({ Expression = expr } as projection) ->
             match expr with
             | Star None -> Ok(columns |> List.mapi (fun i c -> c.Name, representative.[i]))
             | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
             | _ ->
                 rewriteAggregates registry ctxFor groupRows (rollup expr)
                 |> Result.bind (evalExpr (ctxFor representative))
-                |> Result.map (fun v -> [ projectionLabel (expr, aliasOpt), v ]))
+                |> Result.map (fun v -> [ projectionLabel projection, v ]))
         |> Result.map List.concat
 
     let havingOk (rollup: Expr -> Expr) (groupRows: Value[] list) : Result<bool, EvalError> =
@@ -14199,7 +14199,7 @@ and private runGroupedSelect
 
     // GROUPING uses the last argument as the low bit in MySQL's rollup mask.
     let groupingCalls =
-        (select.Projections |> List.map fst)
+        (select.Projections |> List.map _.Expression)
         @ (select.OrderBy |> List.map fst)
         @ Option.toList select.Having
         |> List.collect (collectCallsNamed "GROUPING")
@@ -14493,7 +14493,7 @@ and private runGroupedWindowSelect
     | Ok groupExprs ->
 
     let aggregates =
-        (select.Projections |> List.collect (fst >> collectAggregateCalls registry))
+        (select.Projections |> List.collect (_.Expression >> collectAggregateCalls registry))
         @ (select.OrderBy |> List.collect (fst >> collectAggregateCalls registry))
 
     let leaves = (groupExprs @ aggregates) |> List.distinct
@@ -14507,7 +14507,7 @@ and private runGroupedWindowSelect
 
     let innerSelect =
         { select with
-            Projections = List.map2 (fun leaf name -> leaf, Some name) leaves leafNames
+            Projections = List.map2 (fun leaf name -> Projection.create leaf (Some name)) leaves leafNames
             Distinct = false
             OrderBy = []
             Limit = None
@@ -14526,8 +14526,10 @@ and private runGroupedWindowSelect
                 groupedMetadata
 
         // Synthetic columns must not leak into result headers.
-        let rewrite (expr: Expr, alias: string option) =
-            substituteExprs replacements expr, Some(projectionLabel (expr, alias))
+        let rewrite (projection: Projection) =
+            { projection with
+                Expression = substituteExprs replacements projection.Expression
+                Alias = Some(projectionLabel projection) }
 
         let outerSelect =
             { select with
@@ -14565,7 +14567,7 @@ and private runWindowedSelect
     // collection spans both lists — each becomes a synthetic column either
     // way, and the `select'` rewrite below substitutes both lists too.
     let windowFuncs =
-        (select.Projections |> List.collect (fst >> collectWindowFuncs))
+        (select.Projections |> List.collect (_.Expression >> collectWindowFuncs))
         @ (select.OrderBy |> List.collect (fst >> collectWindowFuncs))
         |> List.distinct
 
@@ -14579,7 +14581,7 @@ and private runWindowedSelect
     // the alias.
     let windowedAliases =
         select.Projections
-        |> List.choose (fun (expr, alias) ->
+        |> List.choose (fun { Expression = expr; Alias = alias } ->
             match alias with
             | Some a when not (collectWindowFuncs expr |> List.isEmpty) -> Some(a.ToLowerInvariant())
             | _ -> None)
@@ -14938,7 +14940,7 @@ and private runWindowedSelect
 
                 let windowAlias =
                     select.Projections
-                    |> List.tryPick (fun (expression, alias) ->
+                    |> List.tryPick (fun { Expression = expression; Alias = alias } ->
                         if expression = windowFunc then alias else None)
 
                 let matchesFinalOrder alias =
@@ -15620,13 +15622,13 @@ and private runWindowedSelect
                     |> Seq.mapi (fun index row ->
                         Array.append row (computedColumns |> List.map (fun column -> column.[index]) |> Array.ofList))
 
-            let rewriteProjection (expr: Expr, aliasOpt: string option) : (Expr * string option) list =
+            let rewriteProjection (({ Expression = expr; Alias = aliasOpt } as projection): Projection) : Projection list =
                 match expr with
-                | Star None -> columns |> List.map (fun c -> Col c.Name, None)
+                | Star None -> columns |> List.map (fun c -> Projection.create (Col c.Name) None)
                 | Star(Some qualifier) ->
                     match Map.tryFind (qualifier.ToLowerInvariant()) qualifiers with
-                    | Some(cols, _) -> cols |> List.map (fun c -> Col c.Name, None)
-                    | None -> [ expr, aliasOpt ]
+                    | Some(cols, _) -> cols |> List.map (fun c -> Projection.create (Col c.Name) None)
+                    | None -> [ projection ]
                 | _ ->
                     // A bare (unwrapped) window-function projection with no
                     // explicit alias labels itself like MySQL's function-call
@@ -15642,7 +15644,7 @@ and private runWindowedSelect
                             |> Option.map (fun _ -> exprLabel expr)
                         )
 
-                    [ substituteWindowFuncs synthetic expr, alias ]
+                    [ { projection with Expression = substituteWindowFuncs synthetic expr; Alias = alias } ]
 
             let select' =
                 { select with
@@ -16200,7 +16202,7 @@ and private runFullTextSelect
                 let streamedScoreColumn =
                     let projectionsAreScalar =
                         select.Projections
-                        |> List.forall (fun (expression, _) ->
+                        |> List.forall (fun { Expression = expression } ->
                             not (containsAggregate registry expression)
                             && (collectWindowFuncs expression).IsEmpty)
 
@@ -16309,17 +16311,17 @@ and private runFullTextSelect
                         | Error error -> error, [], []
                         | Ok select ->
 
-                            let rewriteProjection (expression, alias) =
+                            let rewriteProjection ({ Expression = expression; Alias = alias } as projection) =
                                 match expression with
                                 | Star None ->
                                     originalSources
                                     |> List.collect (fun (qualifier, columns) ->
-                                        columns |> List.map (fun column -> QualifiedCol(qualifier, column.Name), None))
+                                        columns |> List.map (fun column -> Projection.create (QualifiedCol(qualifier, column.Name)) None))
                                 | Star(Some qualifier) ->
                                     originalSources
                                     |> List.tryFind (fst >> fun source -> System.String.Equals(source, qualifier, System.StringComparison.OrdinalIgnoreCase))
-                                    |> Option.map (fun (_, columns) -> columns |> List.map (fun column -> QualifiedCol(qualifier, column.Name), None))
-                                    |> Option.defaultValue [ expression, alias ]
+                                    |> Option.map (fun (_, columns) -> columns |> List.map (fun column -> Projection.create (QualifiedCol(qualifier, column.Name)) None))
+                                    |> Option.defaultValue [ projection ]
                                 | _ ->
                                     let label =
                                         alias
@@ -16328,12 +16330,12 @@ and private runFullTextSelect
                                             |> List.tryFind ((=) expression)
                                             |> Option.map exprLabel)
 
-                                    [ sub expression, label ]
+                                    [ { projection with Expression = sub expression; Alias = label } ]
 
                             let groupsRows =
                                 not select.GroupBy.IsEmpty
                                 || (select.Having |> Option.exists (containsAggregate registry))
-                                || (select.Projections |> List.exists (fst >> collectAggregateCalls registry >> List.isEmpty >> not))
+                                || (select.Projections |> List.exists (_.Expression >> collectAggregateCalls registry >> List.isEmpty >> not))
 
                             let implicitOrder =
                                 if streamedScoreColumn.IsSome then
@@ -16390,7 +16392,7 @@ and private runSelect
     // against — real MySQL rejects it as 1096 rather than emitting a
     // resultset with zero columns, which isn't a legal text-resultset
     // packet and aborts the client's whole session.
-    if select.From.IsNone && projections |> List.exists (fst >> function Star _ -> true | _ -> false) then
+    if select.From.IsNone && projections |> List.exists (_.Expression >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), [], []
     elif
         [ select.Having; select.Where ]
@@ -16411,7 +16413,7 @@ and private runSelect
 
         Err(3593, sprintf "You cannot use the window function '%s' in this context.'" name), [], []
     elif
-        projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not)
+        projections |> List.exists (_.Expression >> collectWindowFuncs >> List.isEmpty >> not)
         || orderBy |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not)
     then
         // GROUP BY/window functions are honest barriers — every row must be
@@ -16423,9 +16425,9 @@ and private runSelect
         let grouping =
             not select.GroupBy.IsEmpty
             || (select.Having |> Option.exists (containsAggregate registry))
-            || projections |> List.exists (fst >> containsAggregate registry)
+            || projections |> List.exists (_.Expression >> containsAggregate registry)
             || orderBy |> List.exists (fst >> containsAggregate registry)
-            || projections |> List.exists (fst >> collectAggregateCalls registry >> List.isEmpty >> not)
+            || projections |> List.exists (_.Expression >> collectAggregateCalls registry >> List.isEmpty >> not)
 
         if grouping then
             runGroupedWindowSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrder select outer
@@ -16434,7 +16436,7 @@ and private runSelect
     elif
         not select.GroupBy.IsEmpty
         || (select.Having |> Option.exists (containsAggregate registry))
-        || projections |> List.exists (fst >> containsAggregate registry)
+        || projections |> List.exists (_.Expression >> containsAggregate registry)
         || orderBy |> List.exists (fst >> containsAggregate registry)
     then
         runGroupedSelect store registry dbName columns qualifiers rows groupInputOrder select outer
@@ -16452,22 +16454,22 @@ and private runSelect
             |> Map.toSeq
             |> Seq.tryPick (fun (qualifier, (sourceColumns, offset)) ->
                 if position >= offset && position < offset + sourceColumns.Length then
-                    Some(QualifiedCol(qualifier, column.Name), None)
+                    Some(Projection.create (QualifiedCol(qualifier, column.Name)) None)
                 else
                     None)
-            |> Option.defaultValue (Col column.Name, None)
+            |> Option.defaultValue (Projection.create (Col column.Name) None)
 
         projections
-        |> List.collect (fun (expression, alias) ->
+        |> List.collect (fun ({ Expression = expression } as projection) ->
             match expression with
             | Star None -> columns |> List.mapi sourceColumn
             | Star(Some qualifier) ->
                 qualifiers
                 |> Map.tryFind (qualifier.ToLowerInvariant())
                 |> Option.map (fun (sourceColumns, _) ->
-                    sourceColumns |> List.map (fun column -> QualifiedCol(qualifier, column.Name), None))
-                |> Option.defaultValue [ expression, alias ]
-            | _ -> [ expression, alias ])
+                    sourceColumns |> List.map (fun column -> Projection.create (QualifiedCol(qualifier, column.Name)) None))
+                |> Option.defaultValue [ projection ]
+            | _ -> [ projection ])
 
     let resolveOrderExpr = resolveOrderPosition orderProjections
 
@@ -16476,7 +16478,7 @@ and private runSelect
         | Col name as column ->
             let projected =
                 projections
-                |> List.choose (fun (projection, alias) ->
+                |> List.choose (fun { Expression = projection; Alias = alias } ->
                     let outputName =
                         match alias, projection with
                         | Some alias, _ -> Some alias
@@ -16496,10 +16498,10 @@ and private runSelect
         | _ -> None
 
     let directOrderExpressions =
-        let directProjection =
-            function
-            | Col _, _
-            | QualifiedCol _, _ -> true
+        let directProjection (projection: Projection) =
+            match projection with
+            | { Expression = Col _ }
+            | { Expression = QualifiedCol _ } -> true
             | _ -> false
 
         if projections |> List.forall directProjection then
@@ -17007,7 +17009,7 @@ let private insertSelectSourceReferences (assignments: (string * Expr) list) : E
             |> Set.ofList
 
         let shadowed = Set.union inherited local
-        select.Projections |> List.iter (fst >> collect shadowed)
+        select.Projections |> List.iter (_.Expression >> collect shadowed)
         select.Joins |> List.iter (fun join -> collect shadowed join.On)
         select.Where |> Option.iter (collect shadowed)
         select.GroupBy |> List.iter (collect shadowed)
@@ -17083,7 +17085,7 @@ let private prepareInsertSelectSourceBindings
 
         let grouped =
             not select.GroupBy.IsEmpty
-            || (select.Projections |> List.exists (fst >> containsAggregate registry))
+            || (select.Projections |> List.exists (_.Expression >> containsAggregate registry))
             || (select.Having |> Option.exists (containsAggregate registry))
             || (select.OrderBy |> List.exists (fst >> containsAggregate registry))
 
@@ -17092,7 +17094,7 @@ let private prepareInsertSelectSourceBindings
         | _ ->
             let hidden =
                 sourceBindings
-                |> List.mapi (fun index (reference, _) -> reference, Some(insertSelectSourceAliasPrefix + string index))
+                |> List.mapi (fun index (reference, _) -> Projection.create reference (Some(insertSelectSourceAliasPrefix + string index)))
 
             Ok({ select with Projections = select.Projections @ hidden }, sourceBindings)
 
@@ -17252,7 +17254,7 @@ let private containsSubqueryExpr (expr: Expr) : bool = not (collectSubqueries ex
 /// `explainStatement`, so the two can't drift out of sync the way a second
 /// hand-written copy of this list did (missing `GroupBy`/`OrderBy`).
 let private selectSubqueryExprs (select: SelectStmt) : Expr list =
-    (select.Projections |> List.map fst)
+    (select.Projections |> List.map _.Expression)
     @ (select.Where |> Option.toList)
     @ (select.Having |> Option.toList)
     @ select.GroupBy
@@ -18371,7 +18373,7 @@ and private selectContainsSessionVariable (select: SelectStmt) : bool =
         | FromLateral(body, _) -> selectOrUnionContainsSessionVariable body
         | FromJsonTable(source, _, _, _) -> containsSessionVariable source
 
-    (select.Projections |> List.exists (fst >> containsSessionVariable))
+    (select.Projections |> List.exists (_.Expression >> containsSessionVariable))
     || (select.From |> Option.exists fromContainsSessionVariable)
     || (select.Joins |> List.exists (fun join -> fromContainsSessionVariable join.Table || containsSessionVariable join.On))
     || (select.Where |> Option.exists containsSessionVariable)
@@ -19124,7 +19126,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | FromJsonTable(source, _, _, _) -> references source
 
     and selectReferences (select: SelectStmt) =
-        (select.Projections |> List.collect (fst >> references))
+        (select.Projections |> List.collect (_.Expression >> references))
         @ (select.From |> Option.map fromReferences |> Option.defaultValue [])
         @ (select.Joins |> List.collect (fun join -> fromReferences join.Table @ references join.On))
         @ (select.Where |> Option.map references |> Option.defaultValue [])
@@ -20781,7 +20783,7 @@ let rec executeAs
             | Some table ->
                 let decodeCheck (check: StoredCheck) =
                     match Parser.parse ("SELECT " + check.Clause) with
-                    | Ok(Select { Projections = [ expression, _ ] }) ->
+                    | Ok(Select { Projections = [ { Expression = expression } ] }) ->
                         Ok
                             { Name = None
                               Expression = expression
@@ -21414,7 +21416,7 @@ let rec executeAs
                 && select.Limit.IsNone
                 && select.Offset.IsNone
                 && select.Locking.IsEmpty
-                && not (select.Projections |> List.exists (fst >> containsAggregate registry))
+                && not (select.Projections |> List.exists (_.Expression >> containsAggregate registry))
                 && not (select.OrderBy |> List.exists (fst >> containsAggregate registry))
             | _ -> false
 
