@@ -77,8 +77,9 @@ sources, `JSON_TABLE`, expression subqueries, set operations, windows, rollups,
 and ordinary or recursive query-scoped CTEs. CTEs can lead UPDATE or DELETE and
 appear within set-operation branches.
 
-Both the SELECT modifier and table-level `STRAIGHT_JOIN` preserve written join
-order. The table form accepts ON, USING, or no condition and works in reads,
+The SELECT modifier pins the complete join order; table-level `STRAIGHT_JOIN`
+preserves its left-prefix dependencies while allowing independent inner joins
+to move earlier. The table form accepts ON, USING, or no condition and works in reads,
 joined mutations, and updatable views. Parentheses around the left FROM chain
 preserve its association and allow rendered join definitions to parse back
 ([oracle and regressions](torture/findings/2026-10-07-straight-joins.md)).
@@ -188,7 +189,7 @@ or locking retain the general SELECT pipeline.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Secondary-index access paths | ref/eq_ref/range/index-merge scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, grouping, supported unary functional compositions, compatible functional-result ranges, fully covered OR unions, and cost-effective AND intersections use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
-| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; competing access families, complete OR unions, and selective AND intersections use observed cardinalities; general expression folding, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
+| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; competing access families, complete OR unions, and selective AND intersections use observed cardinalities; local STRAIGHT_JOIN constraints permit independent selective joins to move earlier; general expression folding, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
 | Mixed-type join filters | numeric `IN` conditions can move between collation-equivalent text keys as join order changes | keeps the original comparison domain; the [controlled join-order case](torture/findings/2026-10-07-fulltext-join-bounds.md#mixed-type-in-remains-open) differs when MySQL transfers the filter to the other key, with or without MATCH | medium (result membership) | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/index_merge/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings, index unions and intersections, and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once; common correlated equality/range shapes and compatible functional probes over physical or pass-through projected sources use maintained indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |

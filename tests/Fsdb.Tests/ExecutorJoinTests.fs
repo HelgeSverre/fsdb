@@ -57,7 +57,7 @@ let tests =
                   "SELECT a.id,j.n FROM straight_left a STRAIGHT_JOIN JSON_TABLE(JSON_ARRAY(a.v),'$[*]' COLUMNS(n INT PATH '$')) j ON TRUE ORDER BY a.id"
                   [ [ Some "1"; Some "10" ]; [ Some "2"; Some "21" ] ]
 
-          testCase "inner joins reorder around unambiguous bare columns unless STRAIGHT_JOIN pins order"
+          testCase "inner joins respect global and local STRAIGHT_JOIN constraints"
           <| fun _ ->
               let store = newStore ()
               runDefault store "CREATE TABLE base_rows (id INT PRIMARY KEY, marker INT)" |> ignore
@@ -96,8 +96,16 @@ let tests =
 
               Expect.equal
                   (explainedTables (sql.Replace("JOIN large_rows", "STRAIGHT_JOIN large_rows")))
-                  [ "base_rows"; "large_rows"; "small_rows" ]
-                  "a table STRAIGHT_JOIN prevents reordering across its boundary"
+                  [ "base_rows"; "small_rows"; "large_rows" ]
+                  "the selective join may move before a straight join whose predecessor is already bound"
+
+              for constrained in
+                  [ sql.Replace("JOIN small_rows", "STRAIGHT_JOIN small_rows")
+                    sql.Replace("JOIN ", "STRAIGHT_JOIN ") ] do
+                  Expect.equal
+                      (explainedTables constrained)
+                      [ "base_rows"; "large_rows"; "small_rows" ]
+                      "a straight join waits for every source in its written left prefix"
 
               Expect.equal
                   (explainedTables (sql.Replace("SELECT marker", "SELECT *")))
@@ -119,9 +127,10 @@ let tests =
               | Err(1054, _) -> ()
               | other -> failtestf "expected a forward bare reference to remain out of scope, got %A" other
 
-              match runDefault store (sql + " ORDER BY base_rows.id") with
-              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ] ] "reordering preserves the bare-column result"
-              | other -> failtestf "expected joined rows, got %A" other
+              for query in [ sql; sql.Replace("JOIN large_rows", "STRAIGHT_JOIN large_rows"); sql.Replace("JOIN small_rows", "STRAIGHT_JOIN small_rows") ] do
+                  match runDefault store (query + " ORDER BY base_rows.id") with
+                  | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ] ] "reordering preserves the bare-column result"
+                  | other -> failtestf "expected joined rows, got %A" other
 
           testCase "join ordering recognizes composite equality probes"
           <| fun _ ->

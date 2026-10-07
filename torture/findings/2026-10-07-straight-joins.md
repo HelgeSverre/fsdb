@@ -4,10 +4,12 @@ Status: implemented.
 
 The table form `a STRAIGHT_JOIN b` carries an explicit `StraightJoin` AST kind.
 It uses inner-join matching while keeping the written left source before the
-right source. Ordinary and full-text join reordering exclude chains containing
-this kind; compatible index probes and candidate bounds remain available.
-Conservatively retaining the complete written chain leaves partial reordering
-around individual constraints within the general optimizer gap.
+right source. The physical inner-join planner records every source in the
+straight join's written left prefix as a predecessor. Independent selective
+joins may move earlier, while the constrained source waits for its entire
+prefix. The SELECT-level modifier still pins the complete order. Base-source
+reordering and outer/lateral planning remain within the general optimizer gap.
+Compatible index probes and candidate bounds remain available.
 
 MySQL 8.4.11 accepts ON, USING, and an omitted condition. Fsdb supports these
 forms for reads, joined UPDATE/DELETE, updatable views, LATERAL sources, and
@@ -36,7 +38,7 @@ with a syntax error before table-level STRAIGHT_JOIN support.
 
 The complete gate passes 2,939 tests without build warnings or errors. The
 contract lane passes 49 cases / 5,117 steps without differences at
-`20261007T103918427-74525/contracts`. A separate test-only commit gives the
+`20261007T105948551-81369/contracts`. A separate test-only commit gives the
 transaction publication race dedicated workers after the gate exposed a
 shared-thread-pool readiness timeout; the readiness and publication assertions
 remain intact.
@@ -45,3 +47,14 @@ The [mixed-type IN mismatch](2026-10-07-fulltext-join-bounds.md#mixed-type-in-re
 is a separate, unresolved difference in MySQL's plan-dependent predicate
 substitution. Accepting STRAIGHT_JOIN makes both native join orders directly
 reproducible in fsdb; it does not emulate that substitution.
+
+## Partial order constraints
+
+The [ordering oracle](../scripts/straight-join-order-oracle.py) checks early,
+late, repeated, and SELECT-level constraints. On its selective fixture, native
+MySQL moves the small source before the fan-out only when the local constraint
+permits it. Expecto verifies the planner's chosen order and result rows, while
+retaining ambiguous-name and forward-reference checks.
+
+The [targeted profile](../../benchmarks/results/ca7574bc-straight-join-order.md)
+compares the partial-order planner with the fully pinned control.

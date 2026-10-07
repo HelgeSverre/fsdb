@@ -8018,18 +8018,28 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
         not select.StraightJoin
         && select.Joins
            |> List.forall (fun join ->
-               join.Kind = InnerJoin
+               (join.Kind = InnerJoin || join.Kind = StraightJoin)
                && join.Using.IsEmpty
                && match join.Table with FromTable _ -> true | _ -> false)
         && physicalSources
            |> Option.exists (fun sources ->
-               referencesFollowWrittenScope sources
+               (sources |> List.map fst |> Set.ofList |> Set.count) = sources.Length
+               && referencesFollowWrittenScope sources
                && selectJoinExpressions select
                   |> List.forall (trySourceReferences sources >> Option.isSome))
 
     match select.From, physicalSources, eligible with
     | Some(FromTable baseTable), Some sources, true ->
         let baseQualifier = baseTable.Alias |> Option.defaultValue baseTable.Table |> _.ToLowerInvariant()
+
+        let _, straightPredecessors =
+            select.Joins
+            |> List.fold (fun (preceding, constraints) join ->
+                let name = qualifier join.Table
+                let constraints =
+                    if join.Kind = StraightJoin then Map.add name preceding constraints
+                    else constraints
+                Set.add name preceding, constraints) (Set.singleton baseQualifier, Map.empty)
 
         let tableForJoin (join: Join) =
             tableFor join.Table
@@ -8063,10 +8073,14 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
                     remaining
                     |> List.indexed
                     |> List.filter (fun (_, join) ->
-                        trySourceReferences sources join.On
-                        |> Option.exists (fun references ->
-                            references
-                            |> Set.forall (fun name -> name = qualifier join.Table || bound |> Set.contains name)))
+                        let followsStraightConstraint =
+                            Map.tryFind (qualifier join.Table) straightPredecessors
+                            |> Option.forall (fun required -> Set.isSubset required bound)
+                        followsStraightConstraint
+                        && (trySourceReferences sources join.On
+                            |> Option.exists (fun references ->
+                                references
+                                |> Set.forall (fun name -> name = qualifier join.Table || bound |> Set.contains name))))
 
                 match ready with
                 | [] -> select.Joins
