@@ -49,7 +49,29 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "empty dependent joins do not execute session side effects"
+        [ testCase "EXPLAIN validates lateral mutation sources without writing"
+          <| fun _ ->
+              let run = queryFixture
+                            [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"
+                              "CREATE TABLE b(id INT PRIMARY KEY)"
+                              "INSERT INTO a VALUES(1,0)"
+                              "INSERT INTO b VALUES(1)" ]
+              for statement in
+                  [ "UPDATE a JOIN LATERAL (SELECT a.id AS v) d ON 1 SET a.n=d.v"
+                    "DELETE a FROM a JOIN LATERAL (SELECT a.id AS v) d ON 1"
+                    "UPDATE a JOIN (b JOIN LATERAL (SELECT a.id AS v) d ON 1) ON 1 SET a.n=d.v" ] do
+                  match run ("EXPLAIN " + statement) with
+                  | ResultSet(_, rows) -> Expect.isNonEmpty rows "plan describes sources"
+                  | other -> failtestf "%s: %A" statement other
+              for statement, name, clause in
+                  [ "UPDATE a JOIN LATERAL (SELECT a.missing AS v) d ON 1 SET a.n=d.v", "a.missing", "field list"
+                    "UPDATE a JOIN (b JOIN LATERAL (SELECT a.id AS v) d ON d.v=a.id) ON 1 SET a.n=d.v", "a.id", "on clause" ] do
+                  Expect.equal (run ("EXPLAIN " + statement))
+                      (Err(1054, "Unknown column '" + name + "' in '" + clause + "'")) "scope validation"
+              Expect.equal (run "SELECT * FROM a")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "0" ] ])) "targets unchanged"
+
+          testCase "empty dependent joins do not execute session side effects"
           <| fun _ ->
               let run =
                   queryFixture

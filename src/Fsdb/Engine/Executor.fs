@@ -17960,39 +17960,14 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         | Err(code, message) -> Error(Err(code, message))
         | _ -> Ok()
 
-    /// `UPDATE`/`DELETE` have no `SelectStmt` to hand `checkSelect`, so
-    /// `exprs` (their `WHERE`, and an `UPDATE`'s `SET` right-hand sides) get
-    /// the same "evaluate against a synthetic all-NULL probe row" check the
-    /// real single-table `UPDATE`/`DELETE` paths already run before writing
-    /// anything — an unknown column is 1054 here too, not a fake plan.
-    let checkMutationWhere (fromRef: TableRef) (joins: Join list) (exprs: Expr list) : Result<unit, QueryResult> =
-        let rec resolveSource item =
-            match item with
-            | FromJoinGroup(source, innerJoins) ->
-                source :: (innerJoins |> List.map _.Table)
-                |> traverse resolveSource
-                |> Result.map List.concat
-            | FromSubquery(_, qualifier) ->
-                resolveFromSubquery store validationRegistry dbName item None
-                |> Result.map (fun (cols, _) -> [ qualifier, cols ])
-            | FromLateral _ -> Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
-            | FromJsonTable(_, _, columns, alias) ->
-                validateJsonTableAllocationBounds columns |> Result.map (fun definitions -> [ alias, definitions ])
-            | FromTable tref ->
-                resolveTableRef store validationRegistry dbName tref
-                |> Result.map (fun (cols, _) -> [ (tref.Alias |> Option.defaultValue tref.Table), cols ])
-
-        withPlanningProbe (fun () ->
-            withMetadataProbe (fun () ->
-                resolveTableRef store validationRegistry dbName fromRef
-                |> Result.bind (fun (fromCols, _) ->
-                    joins
-                    |> traverse (fun join -> resolveSource join.Table)
-                    |> Result.map (fun joinSources -> ((fromRef.Alias |> Option.defaultValue fromRef.Table), fromCols) :: List.concat joinSources))
-                |> Result.bind (fun sources ->
-                    let allCols = sources |> List.collect snd
-                    let ctx = contextFactory store validationRegistry dbName (columnIndexOf allCols) (qualifierRanges sources) None (probeRow allCols)
-                    exprs |> traverse (fun e -> evalExpr ctx e |> Result.map ignore) |> Result.map ignore |> Result.mapError Err)))
+    let checkMutationWhere (fromRef: TableRef) (joins: Join list) (expressions: Expr list) : Result<unit, QueryResult> =
+        let query = mutationSourceQuery (Some(FromTable fromRef)) joins [] expressions
+        let result, _, _ =
+            withPlanningProbe (fun () ->
+                withSourceMetadataProbe (fun () -> runSelectStmt store validationRegistry dbName query None))
+        match result with
+        | Err(code, message) -> Error(Err(code, message))
+        | _ -> Ok()
 
     match stmt with
     | Do _ -> Err(1064, "EXPLAIN does not support DO")

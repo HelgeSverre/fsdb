@@ -8,6 +8,12 @@ import subprocess
 oracle = runpy.run_path(str(pathlib.Path(__file__).with_name("fulltext-transaction-oracle.py")))
 
 
+def statement_error(client, statement):
+    result = subprocess.run([*client.process.args, "-e", "USE probe;" + statement], capture_output=True, text=True, check=False)
+    error = re.search(r"ERROR (\d+) \((\w+)\).*?: (.*)", result.stderr)
+    return (int(error[1]), error[2], error[3]) if error else None
+
+
 def verify(client, _writer):
     client.query("USE probe;CREATE TABLE a(id INT PRIMARY KEY,n INT);INSERT INTO a VALUES(1,0),(2,0),(3,0)")
     for statement, affected in [
@@ -30,9 +36,7 @@ def verify(client, _writer):
         ("UPDATE v SET id=7", "v", "UPDATE"),
         ("DELETE FROM v", "v", "DELETE"),
     ]:
-        result = subprocess.run([*client.process.args, "-e", "USE probe;" + statement], capture_output=True, text=True, check=False)
-        error = re.search(r"ERROR (\d+) \((\w+)\).*?: (.*)", result.stderr)
-        actual = (int(error[1]), error[2], error[3]) if error else None
+        actual = statement_error(client, statement)
         oracle["expect"](statement, actual, (1288, "HY000", f"The target table {target} of the {operation} is not updatable"))
 
     for statement, affected in [
@@ -43,6 +47,7 @@ def verify(client, _writer):
     oracle["expect"]("targets deleted", client.query("SELECT * FROM a"), "")
     verify_grouped(client)
     verify_empty(client)
+    verify_explain(client)
 
 
 def verify_grouped(client):
@@ -62,9 +67,7 @@ def verify_grouped(client):
     statement = "UPDATE a JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1) ON a.id=b.id SET b.n=d.v"
     oracle["expect"]("inner physical target", client.query(statement + ";SELECT ROW_COUNT();SELECT * FROM b ORDER BY id"), "1\n1\t2\n3\t0")
     statement = "UPDATE a JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON d.v=a.id) ON a.id=b.id SET a.n=1"
-    result = subprocess.run([*client.process.args, "-e", "USE probe;" + statement], capture_output=True, text=True, check=False)
-    error = re.search(r"ERROR (\d+) \((\w+)\).*?: (.*)", result.stderr)
-    actual = (int(error[1]), error[2], error[3]) if error else None
+    actual = statement_error(client, statement)
     oracle["expect"]("inner ON scope", actual, (1054, "42S22", "Unknown column 'a.id' in 'on clause'"))
     statement = "DELETE a FROM a JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1) ON a.id=b.id"
     oracle["expect"]("dependent delete", client.query(statement + ";SELECT ROW_COUNT();SELECT * FROM a ORDER BY id"), "1\n2\t9")
@@ -87,6 +90,24 @@ def verify_empty(client):
                 oracle["expect"]("no session side effects", client.query("SELECT @touches"), "0")
     oracle["expect"]("physical target unchanged", client.query("SELECT * FROM b"), "1\t0")
     oracle["expect"]("normal function execution", client.query("SELECT bump()"), "1")
+
+
+def verify_explain(client):
+    client.query("INSERT INTO a VALUES(1,0)")
+    for statement in [
+        "UPDATE a JOIN LATERAL (SELECT a.id AS v) d ON 1 SET a.n=d.v",
+        "DELETE a FROM a JOIN LATERAL (SELECT a.id AS v) d ON 1",
+        "UPDATE a JOIN (b JOIN LATERAL (SELECT a.id AS v) d ON 1) ON 1 SET a.n=d.v",
+    ]:
+        plan = client.query("EXPLAIN " + statement)
+        oracle["expect"]("nonempty plan: " + statement, bool(plan), True)
+    for statement, name, clause in [
+        ("UPDATE a JOIN LATERAL (SELECT a.missing AS v) d ON 1 SET a.n=d.v", "a.missing", "field list"),
+        ("UPDATE a JOIN (b JOIN LATERAL (SELECT a.id AS v) d ON d.v=a.id) ON 1 SET a.n=d.v", "a.id", "on clause"),
+    ]:
+        actual = statement_error(client, "EXPLAIN " + statement)
+        oracle["expect"]("EXPLAIN scope", actual, (1054, "42S22", f"Unknown column '{name}' in '{clause}'"))
+    oracle["expect"]("EXPLAIN leaves targets unchanged", client.query("SELECT * FROM a"), "1\t0")
 
 
 if __name__ == "__main__":

@@ -371,3 +371,9 @@ outer scopes. The prepared source-flags oracle covers direct and grouped
 LATERAL projections, LEFT joins, and LIMIT materialization. Correlated outputs
 retain source default flags and origin names but do not advertise physical key
 membership. The same origin classification is used by preparation and execution.
+
+EXPLAIN accepts direct and grouped LATERAL mutation sources and validates their
+references through the shared query pipeline under a non-executing planning
+probe. The mutation oracle checks acceptance, missing-column and inner-ON
+errors, and unchanged target rows. Plan costs and engine-specific iterator
+annotations remain outside this compatibility check.
