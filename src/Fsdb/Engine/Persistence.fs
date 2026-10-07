@@ -35,7 +35,8 @@ let private fullTextStopwordSourceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4
 let private fullTextWordLengthSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x49uy |] // "FSNI" (format 18)
 let private namedPartitionSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Auy |] // "FSNJ" (format 19)
 let private partitionCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Buy |] // "FSNK" (format 20)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Cuy |] // "FSNL" (format 21)
+let private partitionHintSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Cuy |] // "FSNL" (format 21)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Duy |] // "FSNM" (format 22)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -45,6 +46,7 @@ type private SnapshotFormat =
       PartitionNames: bool
       PartitionComments: bool
       PartitionHints: bool
+      PartitionTablespaces: bool
       DynamicPrivileges: bool
       ProxyPrivileges: bool
       SpatialReferences: bool
@@ -65,6 +67,7 @@ let private legacySnapshotFormat =
       PartitionNames = false
       PartitionComments = false
       PartitionHints = false
+      PartitionTablespaces = false
       DynamicPrivileges = false
       ProxyPrivileges = false
       SpatialReferences = false
@@ -128,8 +131,11 @@ let private namedPartitionSnapshotFormat =
 let private partitionCommentSnapshotFormat =
     { namedPartitionSnapshotFormat with PartitionComments = true }
 
-let private currentSnapshotFormat =
+let private partitionHintSnapshotFormat =
     { partitionCommentSnapshotFormat with PartitionHints = true }
+
+let private currentSnapshotFormat =
+    { partitionHintSnapshotFormat with PartitionTablespaces = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -138,6 +144,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = partitionHintSnapshotMagic then
+        Some partitionHintSnapshotFormat
     elif header = partitionCommentSnapshotMagic then
         Some partitionCommentSnapshotFormat
     elif header = namedPartitionSnapshotMagic then
@@ -891,6 +899,7 @@ let private encodePartitionDefinitions (format: SnapshotFormat) (w: Writer) (def
             w.WriteInt64LE definition.MaxRows
             w.WriteInt64LE definition.MinRows
             w.WriteInt32LE(definition.NodeGroup |> Option.map int |> Option.defaultValue -1)
+        if format.PartitionTablespaces then writeOptStr w definition.Tablespace
 
 let private decodePartitionDefinitions (format: SnapshotFormat) (r: #IReader) =
     List.init (r.ReadInt32LE()) (fun _ ->
@@ -903,7 +912,8 @@ let private decodePartitionDefinitions (format: SnapshotFormat) (r: #IReader) =
               if format.PartitionHints then
                   let group = r.ReadInt32LE()
                   if group < 0 then None else Some(uint16 group)
-              else None })
+              else None
+          Tablespace = if format.PartitionTablespaces then readOptStr r else None })
 
 let private encodePartitioning (format: SnapshotFormat) (w: Writer) (partitioning: HashPartitioning option) : unit =
     match partitioning with
@@ -1145,6 +1155,8 @@ let private KindSchemaChangedV10 = 0x23uy
 let private KindSchemaChangedAtV10 = 0x24uy
 let private KindSchemaChangedV11 = 0x25uy
 let private KindSchemaChangedAtV11 = 0x26uy
+let private KindSchemaChangedV12 = 0x27uy
+let private KindSchemaChangedAtV12 = 0x28uy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1320,11 +1332,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteLenEncString table
         w.WriteInt64LE nextId
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV11
+        w.WriteByte KindSchemaChangedV12
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV11
+        w.WriteByte KindSchemaChangedAtV12
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
@@ -1485,8 +1497,14 @@ let rec private decodeEventAt
         SchemaChangedAt(db, decodeStatement partitionCommentSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV11 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement currentSnapshotFormat (columnsForTable db) r)
+        SchemaChanged(db, decodeStatement partitionHintSnapshotFormat (columnsForTable db) r)
     | k when k = KindSchemaChangedAtV11 ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement partitionHintSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
+    | k when k = KindSchemaChangedV12 ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement currentSnapshotFormat (columnsForTable db) r)
+    | k when k = KindSchemaChangedAtV12 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement currentSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindXaPrepared ->

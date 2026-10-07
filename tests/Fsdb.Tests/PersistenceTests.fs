@@ -2649,12 +2649,12 @@ let tests =
               attach dir store
               let session = Fsdb.Session.create 1 store
               for sql in
-                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) ENGINE=InnoDB PARTITION BY HASH(id) (PARTITION First ENGINE=InnoDB COMMENT 'alpha',PARTITION Second COMMENT 'beta' MAX_ROWS=9223372036854775807 MIN_ROWS=10 NODEGROUP=0)"
+                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) ENGINE=InnoDB PARTITION BY HASH(id) (PARTITION First ENGINE=InnoDB COMMENT 'alpha',PARTITION Second TABLESPACE=innodb_file_per_table COMMENT 'beta' MAX_ROWS=9223372036854775807 MIN_ROWS=10 NODEGROUP=0)"
                     "INSERT INTO named_hash VALUES(0),(1),(2),(3),(4),(5)"
                     "ALTER TABLE named_hash ADD PARTITION PARTITIONS 1"
                     "ALTER TABLE named_hash COALESCE PARTITION 1"
                     "ALTER TABLE named_hash REORGANIZE PARTITION First INTO (PARTITION Renamed COMMENT 'changed')"
-                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third ENGINE=InnoDB COMMENT 'gamma' MAX_ROWS=30 MIN_ROWS=20 NODEGROUP=7)" ] do
+                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third ENGINE=InnoDB TABLESPACE=innodb_file_per_table COMMENT 'gamma' MAX_ROWS=30 MIN_ROWS=20 NODEGROUP=7)" ] do
                   match handle session sql |> snd with
                   | Err(code, message) -> failtestf "%s: %d %s" sql code message
                   | _ -> ()
@@ -2674,10 +2674,28 @@ let tests =
                       (table.Partitioning |> Option.map (fun partitioning -> partitioning.OrderedDefinitions |> List.map (fun definition -> definition.MaxRows, definition.MinRows, definition.NodeGroup)))
                       (Some [ 0L, 0L, None; System.Int64.MaxValue, 10L, Some 0us; 30L, 20L, Some 7us ])
                       "partition hints survive CREATE and ALTER replay and snapshots"
+                  Expect.equal
+                      (table.Partitioning |> Option.map (fun partitioning -> partitioning.OrderedDefinitions |> List.map _.Tablespace))
+                      (Some [ None; Some "innodb_file_per_table"; Some "innodb_file_per_table" ])
+                      "tablespace declaration ownership survives recovery"
               let recovered = load dir
               verify recovered
               snapshotNow dir recovered
               verify (load dir)
+
+          testCase "partition hint formats recover without tablespace declarations"
+          <| fun _ ->
+              let snapshot = Convert.FromBase64String "RlNOTAEAAAAEZnNkYgEAAAAJb2xkX25hbWVkCW9sZF9uYW1lZAEAAAACaWQEAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAABAgJpZAIAAAAAAQIAAAAFRmlyc3QFYWxwaGFkAAAAAAAAAAoAAAAAAAAABwAAAAZTZWNvbmQEYmV0YQAAAAAAAAAAAAAAAAAAAAD/////HkSbuH4k3wgBAAAAAAAAAAAAAAAAAAAAAAAAAKsAAAAAAAAAQq04uQ=="
+              let wal = Convert.FromBase64String "gQAAAMSMBKElBGZzZGIDCW9sZF9uYW1lZAEAAAACaWQEAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAECAmlkAgAAAAABAgAAAAVGaXJzdAVhbHBoYWQAAAAAAAAACgAAAAAAAAAHAAAABlNlY29uZARiZXRhAAAAAAAAAAAAAAAAAAAAAP////8="
+              for snapshotBytes, walBytes in [ snapshot, [||]; [||], wal ] do
+                  let dir = tempDataDir ()
+                  if snapshotBytes.Length > 0 then File.WriteAllBytes(snapshotPath dir, snapshotBytes)
+                  if walBytes.Length > 0 then File.WriteAllBytes(walPath dir, walBytes)
+                  let table = (load dir).Catalog.[defaultDatabase].[normalizeTableName "old_named"]
+                  Expect.equal
+                      (table.Partitioning |> Option.map (fun partitioning -> partitioning.OrderedDefinitions |> List.map (fun definition -> definition.Comment, definition.MaxRows, definition.MinRows, definition.NodeGroup, definition.Tablespace)))
+                      (Some [ "alpha", 100L, 10L, Some 7us, None; "beta", 0L, 0L, None, None ])
+                      "FSNL and V11 WAL preserve hints without consuming later fields"
 
           testCase "partition comment formats recover with default row hints"
           <| fun _ ->

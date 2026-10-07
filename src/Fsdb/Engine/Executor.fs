@@ -20418,7 +20418,7 @@ let rec executeAs
             |> Option.orElseWith (fun () ->
                 match requestedEngine, tableSnapshot store db table with
                 | Some engine, Ok { Partitioning = Some _ } when isRecognizedStorageEngine engine ->
-                    validateHashPartitionEngines (Some engine) [] |> validationErrorOption storageErr
+                    validateHashPartitionDefinitions (Some engine) [] |> validationErrorOption storageErr
                 | _ -> None)
         let actions =
             actions |> List.map (function

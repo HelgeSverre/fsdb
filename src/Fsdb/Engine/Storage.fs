@@ -6313,7 +6313,7 @@ let private validatePartitionDefinitions (definitions: HashPartitionDefinition l
                 check (Set.add key seen) rest
     check Set.empty definitions
 
-let validateHashPartitionEngines (tableEngine: string option) definitions =
+let validateHashPartitionDefinitions (tableEngine: string option) definitions =
     validatePartitionDefinitions definitions
     |> Result.bind (fun definitions ->
         let requested = definitions |> List.map (fun definition -> definition.RequestedEngines |> List.tryLast |> Option.map _.ToLowerInvariant())
@@ -6329,13 +6329,21 @@ let validateHashPartitionEngines (tableEngine: string option) definitions =
             Error(ExpressionError(1178, "The storage engine for the table doesn't support native partitioning"))
         else
             Ok(definitions |> List.map (fun definition -> { definition with RequestedEngines = [] })))
+    |> Result.bind (fun definitions ->
+        definitions
+        |> traverse (fun definition ->
+            match definition.Tablespace with
+            | None | Some "innodb_file_per_table" -> Ok definition
+            | Some "innodb_system" | Some "innodb_temporary" ->
+                Error(ExpressionError(1478, "InnoDB : A partitioned table is not allowed in a shared tablespace."))
+            | Some name -> Error(ExpressionError(3510, sprintf "Tablespace %s doesn't exist." name))))
 
 let prepareHashPartitioning tableEngine partitioning =
     match partitioning with
     | None -> Ok None
     | Some partitioning ->
         partitioning.Definitions |> Option.defaultValue []
-        |> validateHashPartitionEngines tableEngine
+        |> validateHashPartitionDefinitions tableEngine
         |> Result.map (fun definitions -> Some { partitioning with Definitions = partitioning.Definitions |> Option.map (fun _ -> definitions) })
 
 let createTableSeeded
@@ -7194,7 +7202,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some partitioning when uint32 added.Length > 8192u - partitioning.Count ->
             Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
         | Some partitioning ->
-            validateHashPartitionEngines (Some "InnoDB") (partitioning.OrderedDefinitions @ added)
+            validateHashPartitionDefinitions (Some "InnoDB") (partitioning.OrderedDefinitions @ added)
             |> Result.map (fun definitions -> { table with Partitioning = Some(partitioning.WithDefinitions definitions) }, None)
     | CoalesceHashPartitions count ->
         match table.Partitioning with
@@ -7231,7 +7239,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                         let first = List.head positions
                         Ok(List.take first definitions @ replacements @ List.skip (first + positions.Length) definitions)
             reorganized
-            |> Result.bind (validateHashPartitionEngines (Some "InnoDB"))
+            |> Result.bind (validateHashPartitionDefinitions (Some "InnoDB"))
             |> Result.map (fun definitions -> { table with Partitioning = Some(partitioning.WithDefinitions definitions) }, None)
     | DropPartitions _ ->
         match table.Partitioning with
@@ -7240,7 +7248,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
     | TruncatePartitions _ ->
         Error(ExpressionError(1105, "TRUNCATE PARTITION must be evaluated by the SQL executor"))
     | SetEngine engine when table.Partitioning.IsSome ->
-        validateHashPartitionEngines (Some engine) [] |> Result.map (fun _ -> table, None)
+        validateHashPartitionDefinitions (Some engine) [] |> Result.map (fun _ -> table, None)
     | SetEngine _ -> Ok(table, None)
     | SetAlterAlgorithm _
     | SetAlterLock _

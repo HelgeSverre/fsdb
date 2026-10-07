@@ -3879,13 +3879,17 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                 (match value.Definitions with
                  | None -> sprintf "PARTITIONS %d" value.Count
                  | Some definitions ->
+                     let tablespace =
+                         if definitions |> List.exists (fun definition -> definition.Tablespace.IsSome) then
+                             " TABLESPACE = `innodb_file_per_table`"
+                         else ""
                      definitions
                      |> List.map (fun definition ->
                          let comment = if definition.Comment = "" then "" else sprintf " COMMENT = '%s'" (showCreateString definition.Comment)
                          let nodeGroup = definition.NodeGroup |> Option.map (sprintf " NODEGROUP = %d") |> Option.defaultValue ""
                          let maxRows = if definition.MaxRows = 0L then "" else sprintf " MAX_ROWS = %d" definition.MaxRows
                          let minRows = if definition.MinRows = 0L then "" else sprintf " MIN_ROWS = %d" definition.MinRows
-                         "PARTITION " + backtick definition.Name + nodeGroup + maxRows + minRows + comment)
+                         "PARTITION " + backtick definition.Name + tablespace + nodeGroup + maxRows + minRows + comment)
                      |> String.concat ", "
                      |> sprintf "(%s)"))
         |> Option.defaultValue ""

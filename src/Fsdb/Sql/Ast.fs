@@ -723,7 +723,8 @@ type HashPartitionDefinition =
       RequestedEngines: string list
       MaxRows: int64
       MinRows: int64
-      NodeGroup: uint16 option }
+      NodeGroup: uint16 option
+      Tablespace: string option }
 
 module HashPartitionDefinition =
     let create name =
@@ -732,7 +733,8 @@ module HashPartitionDefinition =
           RequestedEngines = []
           MaxRows = 0L
           MinRows = 0L
-          NodeGroup = None }
+          NodeGroup = None
+          Tablespace = None }
 
 /// One `ALTER TABLE` action; a statement carries a list of these since
 /// MySQL (and Laravel) commonly comma-separates several in one `ALTER

@@ -493,8 +493,14 @@ retain their low 16 bits; 65535 denotes the default, while zero is explicit.
 Named reorganization clears omitted options, and no-list reorganization keeps
 the first partition's options. These values do not change physical storage.
 
-`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Partition
-tablespace clauses remain unsupported.
+`TABLESPACE=innodb_file_per_table` retains the declaring partition. Rendering
+shows it on every partition while any declaration survives; named
+reorganization clears omitted declarations and no-list reorganization keeps
+the first partition's declaration. Shared tablespaces return 1478, missing
+names return 3510, and repeated clauses use the last name. Declarations survive
+recovery but do not allocate separate files or change physical placement.
+
+`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal.
 
 ## Check constraints
 

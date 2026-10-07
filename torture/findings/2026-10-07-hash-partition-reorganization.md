@@ -1,8 +1,9 @@
 # HASH partition names and reorganization
 
-Status: named definitions, comments, row hints, node groups, engine validation, explicit-name addition,
-and named/no-list reorganization are covered by regressions. Other partition-option clauses and
-physical pruning remain open. The regression baseline `e9c0a7bd` rejected explicit
+Status: named definitions, comments, row hints, node groups, file-per-table
+declarations, engine validation, explicit-name addition, and named/no-list
+reorganization are covered by regressions. Physical pruning and placement
+remain open. The regression baseline `e9c0a7bd` rejected explicit
 names and both reorganization forms with 1064 / 42000.
 
 ## Oracle
@@ -45,9 +46,10 @@ partition.
 ## Implementation and validation
 
 `HashPartitioning` retains optional ordered definitions alongside its count.
-Each definition contains a name, comment, row hints, and optional node group. These definitions feed
+Each definition retains its name, comment, row hints, node group, and tablespace
+declaration. These definitions feed
 reorganization, ADD/COALESCE, selection, truncation, metadata, and rendering.
-Snapshot format FSNL and schema WAL version 11 persist them; count-only
+Snapshot format FSNM and schema WAL version 12 persist them; count-only
 records continue to synthesize `p0`…`pN`, and name-only records receive empty
 comments.
 
@@ -56,17 +58,17 @@ regression also exposed an indexed ordering path that returned the entire
 table despite `PARTITION(...)`; ordered reads, counts, and joins now verify
 the selected rows.
 
-The root gate passes 2,949 tests. Dedicated recovery tests cover named WAL and
+The root gate passes 2,951 tests. Dedicated recovery tests cover named WAL and
 snapshot recovery plus count-only V7 WAL and FSNI snapshots, and captured name-only V9 WAL and FSNJ snapshots. The native oracle
 passes. The compatibility lane passes 49 cases / 5,117 steps with zero
-differences at `20261007T121829324-63496/contracts`. The durability lane passes
-at `20261007T121849821-63699/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
+differences at `20261007T122900776-70695/contracts`. The durability lane passes
+at `20261007T122918062-70821/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
 including acknowledged commits across 12 crash restarts.
 
 ## Remaining boundary
 
-Native MySQL retains `TABLESPACE` options; fsdb still refuses these clauses.
-Physical pruning remains a separate performance gap.
+Rows still share one store. Physical partition pruning and tablespace placement
+remain unsupported; accepted declarations do not create per-partition files.
 
 ## Explicit-name additions
 
@@ -192,7 +194,7 @@ from both CREATE and ADD, alongside names, comments, and partition row selection
 
 ## Partition tablespaces
 
-Status: open. Baseline `b1153190` rejects a partition declaration of
+Status: covered by regressions. Baseline `b1153190` rejected a partition declaration of
 `TABLESPACE=innodb_file_per_table` with 1064 / 42000. The maintained
 [tablespace oracle](../scripts/hash-partition-tablespace-oracle.py) passes on
 native MySQL 8.4.11 with the disposable server's default file-per-table setup.
@@ -222,3 +224,8 @@ REORGANIZE source precedes it (1507). Otherwise a missing tablespace in ADD
 returns 3510. Rejected CREATE publishes no table; rejected ALTER preserves
 all fixture rows and existing rendering. General tablespace administration
 and physical placement remain distinct unsupported capabilities.
+
+Snapshot FSNM and schema WAL version 12 preserve the declaring partition.
+Captured FSNL and V11 WAL fixtures load existing hints and comments without
+inventing tablespace declarations. Recovery tests retain declarations introduced
+by CREATE and ADD independently of the table-wide rendered representation.

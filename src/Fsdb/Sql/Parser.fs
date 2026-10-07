@@ -2747,6 +2747,7 @@ type private HashPartitionOption =
     | PartitionMaxRows of int64
     | PartitionMinRows of int64
     | PartitionNodeGroup of uint16 option
+    | PartitionTablespace of string
 
 let private hashPartitionDefinitions =
     let rowHint =
@@ -2763,12 +2764,14 @@ let private hashPartitionDefinitions =
         <|> (keyword "MAX_ROWS" >>. opt (sym "=") >>. rowHint |>> PartitionMaxRows)
         <|> (keyword "MIN_ROWS" >>. opt (sym "=") >>. rowHint |>> PartitionMinRows)
         <|> (keyword "NODEGROUP" >>. opt (sym "=") >>. nodeGroup |>> PartitionNodeGroup)
+        <|> (keyword "TABLESPACE" >>. opt (sym "=") >>. identifier |>> PartitionTablespace)
     let applyOption (definition: HashPartitionDefinition) = function
         | PartitionComment comment -> { definition with Comment = comment }
         | PartitionEngine engine -> { definition with RequestedEngines = engine :: definition.RequestedEngines }
         | PartitionMaxRows rows -> { definition with MaxRows = rows }
         | PartitionMinRows rows -> { definition with MinRows = rows }
         | PartitionNodeGroup group -> { definition with NodeGroup = group }
+        | PartitionTablespace name -> { definition with Tablespace = Some name }
     let definition =
         keyword "PARTITION" >>. identifier .>>. many option
         |>> fun (name, options) ->

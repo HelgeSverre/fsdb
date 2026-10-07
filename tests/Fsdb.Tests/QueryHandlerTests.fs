@@ -18,7 +18,34 @@ let private (|ProcedureResult|_|) =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "HASH partition row hints and node groups survive alterations"
+        [ testCase "HASH partition tablespaces retain declaration ownership"
+          <| fun _ ->
+              for declared in [ "a"; "b" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let run sql = handle session sql |> snd
+                  let options name = "PARTITION " + name + (if name = declared then " TABLESPACE=innodb_file_per_table" else "")
+                  Expect.equal (run ("CREATE TABLE spaces(id INT) PARTITION BY HASH(id) (" + options "a" + "," + options "b" + ")")) (Affected 0UL) "file-per-table declaration accepted"
+                  let renderedCount () =
+                      match run "SHOW CREATE TABLE spaces" with
+                      | ResultSet(_, [ [ _; Some sql ] ]) -> sql.Split("TABLESPACE = `innodb_file_per_table`").Length - 1
+                      | other -> failtestf "unexpected SHOW CREATE: %A" other
+                  Expect.equal (renderedCount ()) 2 "one declaration renders on every partition"
+                  Expect.equal (run "ALTER TABLE spaces ADD PARTITION (PARTITION a TABLESPACE=missing_space)") (Err(1517, "Duplicate partition name a")) "duplicate precedes missing tablespace"
+                  Expect.equal (run ("ALTER TABLE spaces REORGANIZE PARTITION " + declared + " INTO (PARTITION renamed)")) (Affected 0UL) "replace declaring partition"
+                  Expect.equal (renderedCount ()) 0 "omitted replacement clears the sole declaration"
+                  Expect.equal (run "ALTER TABLE spaces ADD PARTITION (PARTITION c TABLESPACE=missing_space TABLESPACE=innodb_file_per_table)") (Affected 0UL) "last tablespace wins"
+                  Expect.equal (renderedCount ()) 3 "added declaration renders across table"
+                  for tablespace, code in [ "missing_space", 3510; "INNODB_FILE_PER_TABLE", 3510; "innodb_system", 1478; "innodb_temporary", 1478 ] do
+                      match run ("ALTER TABLE spaces ADD PARTITION (PARTITION bad TABLESPACE=" + tablespace + ")") with
+                      | Err(actual, _) -> Expect.equal actual code tablespace
+                      | other -> failtestf "expected tablespace error: %A" other
+                  Expect.equal (renderedCount ()) 3 "rejected alterations preserve declarations"
+                  Expect.equal (run "SELECT COUNT(*) FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='spaces' AND TABLESPACE_NAME IS NULL")
+                      (ResultSet([ "COUNT(*)" ], [ [ Some "3" ] ])) "tablespace metadata remains NULL"
+                  Expect.equal (run "ALTER TABLE spaces REORGANIZE PARTITION") (Affected 0UL) "collapse to first definition"
+                  Expect.equal (renderedCount ()) 0 "no-list discards later declarations"
+
+          testCase "HASH partition row hints and node groups survive alterations"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let run sql =

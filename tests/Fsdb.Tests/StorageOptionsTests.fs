@@ -630,7 +630,7 @@ let tests =
               Persistence.snapshotNow dir store
               let path = System.IO.Path.Combine(dir, "snapshot.fsdb")
               let bytes = System.IO.File.ReadAllBytes path
-              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNL" "rule references use the current snapshot format"
+              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNM" "rule references use the current snapshot format"
               let trailerSize, preparedCountSize = 12, 4
               let lastRuleReference = bytes.Length - trailerSize - preparedCountSize - 1
               for invalid in [ 250uy; 251uy ] do
