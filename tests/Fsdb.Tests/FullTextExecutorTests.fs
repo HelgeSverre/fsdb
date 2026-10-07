@@ -40,7 +40,38 @@ let private ids (result: QueryResult) : string list =
 let tests =
     testList
         "fulltext executor"
-        [ testCase "ngram fulltext indexes distinguish natural unions and boolean phrases"
+        [ testCase "fulltext document replacement survives transaction publication with concurrent writes"
+          <| fun _ ->
+              let table store =
+                  match tableSnapshot store defaultDatabase "docs" with
+                  | Ok table -> table
+                  | Error error -> failtestf "table snapshot: %A" error
+              for parser, original, replacement in [ "", "orchard", "cobalt"; " WITH PARSER ngram", "生日", "中文" ] do
+                  for restoreOriginal in [ false; true ] do
+                      let store = create ()
+                      run store ("CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body)" + parser + ")") |> ignore
+                      run store ($"INSERT INTO docs VALUES(1,'{original}'),(2,'{original}')") |> ignore
+                      let before = table store
+                      let rowId id (table: Table) =
+                          table.RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt id) |> fst
+                      let firstId, secondId = rowId 1L before, rowId 2L before
+                      let baseCatalog, branch = beginTransactionSnapshotWithBase store
+                      run branch ($"UPDATE docs SET body='{replacement}' WHERE id=1") |> ignore
+                      if restoreOriginal then
+                          run branch ($"UPDATE docs SET body='{original}' WHERE id=1") |> ignore
+                      let pending = table branch
+                      run store ($"UPDATE docs SET body='{replacement}' WHERE id=2") |> ignore
+                      let concurrent = table store
+                      commitCatalogInto store baseCatalog branch
+                      let committed = table store
+                      Expect.isTrue (sameDocument firstId pending.FullTextIndexes.["ft"] committed.FullTextIndexes.["ft"]) "publication retains the branch document"
+                      Expect.isFalse (sameDocument firstId before.FullTextIndexes.["ft"] committed.FullTextIndexes.["ft"]) "restoring field values does not restore document identity"
+                      Expect.isTrue (sameDocument secondId concurrent.FullTextIndexes.["ft"] committed.FullTextIndexes.["ft"]) "concurrent documents retain their identity"
+                      let term = if restoreOriginal then original else replacement
+                      let expected = if restoreOriginal then [ "1" ] else [ "1"; "2" ]
+                      Expect.equal (ids (run store ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id"))) expected "published postings match the merged rows"
+
+          testCase "ngram fulltext indexes distinguish natural unions and boolean phrases"
           <| fun _ ->
               let store = create ()
               Expect.equal

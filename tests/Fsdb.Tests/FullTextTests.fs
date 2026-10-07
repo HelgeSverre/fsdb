@@ -23,7 +23,19 @@ let private closeTo (expected: float) (actual: float) (label: string) =
 let tests =
     testList
         "fulltext"
-        [ testCase "read visibility retains committed term frequencies for word and ngram scores"
+        [ testCase "document merging rebases inserted identities without replacing concurrent postings"
+          <| fun _ ->
+              let baseline = buildIndexWith defaultCollation [ 1, "orchard"; 2, "cobalt" ]
+              let branch = baseline |> removeDocument 1 |> addDocument 3 "meadow"
+              let concurrent = baseline |> addDocument 3 "forest"
+              let merged = mergeDocuments (Map.ofList [ 3, 4 ]) baseline branch concurrent
+              Expect.isEmpty (naturalScores merged "orchard") "the branch deletion is published"
+              Expect.equal (naturalScores merged "meadow" |> Map.keys |> Seq.toList) [ 4 ] "the inserted document uses its rebased row ID"
+              Expect.equal (naturalScores merged "forest" |> Map.keys |> Seq.toList) [ 3 ] "the concurrent insert retains its postings"
+              Expect.isTrue (sameDocument 2 baseline merged) "unchanged document identity survives"
+              Expect.isTrue (sameDocument 3 concurrent merged) "concurrent document identity survives"
+
+          testCase "read visibility retains committed term frequencies for word and ngram scores"
           <| fun _ ->
               for tokenizer, term, other in [ Words, "orchard", "cobalt"; Ngrams 2, "生日", "中文" ] do
                   let index = buildIndexWithTokenizer tokenizer defaultCollation [ 1, term; 2, term; 3, other ]

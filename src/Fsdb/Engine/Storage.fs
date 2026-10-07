@@ -3167,6 +3167,14 @@ let private publishRowsWithDocumentTokenizers tokenizerFor (before: Table) (afte
 let private publishRows before after =
     publishRowsWithDocumentTokenizers (fun _ _ tokenizer -> tokenizer) before after
 
+let private mergeFullTextDocuments sourceRowIds (baseline: Table) (source: Table) (target: Table) =
+    let targetRowIds = sourceRowIds |> Map.toSeq |> Seq.map (fun (targetId, sourceId) -> sourceId, targetId) |> Map.ofSeq
+    let indexes =
+        target.FullTextIndexes
+        |> Map.map (fun name index ->
+            FullText.mergeDocuments targetRowIds baseline.FullTextIndexes.[name] source.FullTextIndexes.[name] index)
+    { target with FullTextIndexes = indexes }
+
 let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
     let conflict () = raise (LockWaitTimeout dbName)
     let rows = liveTable.RowsArray.ToBuilder()
@@ -3226,6 +3234,7 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
             UniqueIndex = uniqueIndex
             SecondaryIndex = secondaryIndex
             SecondaryOrder = secondaryOrder }
+    |> mergeFullTextDocuments sourceRowIds baseTable batchTable
 
 let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
     let conflict () = raise (LockWaitTimeout dbName)
@@ -9197,6 +9206,7 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
                     UniqueIndex = index
                     SecondaryIndex = secondaryIndex
                     SecondaryOrder = secondaryOrder }
+            |> mergeFullTextDocuments Map.empty baseTable batchTable
 
         Map.add tableKey mergedTable liveDb
     | _ -> conflict ()

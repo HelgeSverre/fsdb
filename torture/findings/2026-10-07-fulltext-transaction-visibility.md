@@ -101,23 +101,32 @@ Savepoint restoration and no-op/non-full-text updates must retain the correct
 document identity. Predicates and projected MATCH expressions must use the same
 read model, including MATCH used by writes and joined sources.
 
-Publication must preserve document replacement even when final row values equal
+Publication now preserves document replacement even when final row values equal
 the transaction's base values. `RowStore.ChangesFrom` deliberately omits equal
-values; `mergeRows` consumes that delta and updates full-text postings from field
-changes. A generation change therefore needs its own publication path when a
-transaction merges with concurrent writes. The direct catalog publication path
-already retains the branch's index objects. This is a code-level constraint on
-the pending fix, not an implemented visibility guarantee.
+values, so full-text publication compares document identity separately. Both the
+point-update and general row-merge paths transfer changed branch documents,
+including their tokenization, while retaining concurrent documents. Inserted
+documents follow rebased row IDs. The direct catalog publication path already
+retains the branch's index objects.
+
+Regressions cover word and ngram replacements with changed or restored text,
+concurrent writes, deletion, and inserted-row rebasing. The identity comparison
+scans a changed index's document maps; unchanged maps return immediately. Runtime
+read visibility is still unimplemented.
 
 ## Verification
 
 The maintained native oracle passes on MySQL 8.4.11. Separate disposable-server
 comparisons against fsdb's Debug executable reproduced the differences above.
-`just check` passes all 2,874 tests with no build warnings or errors, including
-three read-view regressions. After disk space became available, the native
+`just check` passes all 2,876 tests with no build warnings or errors, including
+read-view and publication regressions. After disk space became available, the native
 natural-phrase oracle and all 47 contracts (5,007 steps) passed with no differences:
-`torture/artifacts/runs/20261007T043051269-71408/contracts`.
+`torture/artifacts/runs/20261007T043753394-72255/contracts`.
 The extended transaction oracle also passes, including restored-text document
 replacement under REPEATABLE READ and READ COMMITTED.
 The scoring-view foundation is implemented; transaction document visibility is
 not yet connected. No known-gap suppression is included.
+
+The durability lane also passes with 12 crash restarts and all 50 acknowledged
+commits recovered:
+`torture/artifacts/runs/20261007T043836663-72334/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

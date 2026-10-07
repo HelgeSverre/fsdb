@@ -248,11 +248,10 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
             Postings = postings
             PrefixPostings = prefixPostings }
 
-let internal addDocumentFieldsWith tokenizer (id: 'id) (texts: string list) (index: Index<'id>) : Index<'id> =
+let private addDocumentData id (document: Document) (index: Index<'id>) =
     let index = removeDocument id index
-    // Phrase positions retain tokens omitted from ngram postings.
-    let fields = texts |> List.map (tokensWith tokenizer index.Collation) |> List.toArray
-    let tokens = Array.concat fields
+    let tokenizer = document.Tokenizer
+    let tokens = Array.concat document.Fields
     let postingTokens =
         match tokenizer with
         | Words -> tokens
@@ -279,9 +278,32 @@ let internal addDocumentFieldsWith tokenizer (id: 'id) (texts: string list) (ind
             index.PrefixPostings
 
     { index with
-        Documents = Map.add id { Fields = fields; Tokenizer = tokenizer } index.Documents
+        Documents = Map.add id document index.Documents
         Postings = postings
         PrefixPostings = prefixPostings }
+
+let internal addDocumentFieldsWith tokenizer id texts (index: Index<'id>) =
+    // Phrase positions retain tokens omitted from ngram postings.
+    let fields = texts |> List.map (tokensWith tokenizer index.Collation) |> List.toArray
+    addDocumentData id { Fields = fields; Tokenizer = tokenizer } index
+
+let internal sameDocument id (left: Index<'id>) (right: Index<'id>) =
+    match Map.tryFind id left.Documents, Map.tryFind id right.Documents with
+    | Some left, Some right -> obj.ReferenceEquals(left, right)
+    | _ -> false
+
+let internal mergeDocuments sourceRowIds (baseline: Index<'id>) (source: Index<'id>) (target: Index<'id>) =
+    if obj.ReferenceEquals(baseline.Documents, source.Documents) then target
+    else
+        let targetId sourceId = Map.tryFind sourceId sourceRowIds |> Option.defaultValue sourceId
+        let ids = Set.union (baseline.Documents |> Map.keys |> Set.ofSeq) (source.Documents |> Map.keys |> Set.ofSeq)
+        (target, ids)
+        ||> Set.fold (fun target id ->
+            if sameDocument id baseline source then target
+            else
+                match Map.tryFind id source.Documents with
+                | Some document -> addDocumentData (targetId id) document target
+                | None -> removeDocument (targetId id) target)
 
 let addDocumentFields id texts (index: Index<'id>) =
     addDocumentFieldsWith index.Tokenizer id texts index
