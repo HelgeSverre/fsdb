@@ -1,9 +1,9 @@
 # Full-text stopword configuration
 
-Status: open. Fsdb uses the built-in stopword list unconditionally. Native
-MySQL 8.4.11 exposes `innodb_ft_enable_stopword` globally and per session, both
-enabled by default. The query and index lifetime rules need to be implemented
-together; accepting SET alone would not provide the requested behavior.
+Status: implemented for GLOBAL/SESSION `innodb_ft_enable_stopword` and the
+maintained word/ngram DDL matrix. The setting defaults to ON. Indexes retain their
+captured policy across later session changes, writes, WAL replay, and snapshots.
+Custom stopword tables and startup-option parsing remain open.
 
 Run the [native oracle](../scripts/fulltext-stopword-oracle.py) with `mysqld`,
 `mysql`, and `mysqladmin` on PATH:
@@ -28,7 +28,9 @@ connection then switches the session setting to the opposite value.
 | Drop and add the same index in one ALTER | Retains the original stopword behavior |
 | Drop the index, then add it in a separate ALTER | Adopts the new behavior |
 | Rebuild with ENGINE=InnoDB | Adopts the new behavior |
-| Add a second full-text index over a populated new column | Both indexes adopt the new behavior in this case |
+| TRUNCATE, then insert | Adopts the new behavior |
+| Add a column | Refreshes the existing full-text policy |
+| Add a second full-text index on an existing column | Both indexes retain the table's existing policy |
 
 The oracle checks both ON-to-OFF and OFF-to-ON transitions. Under OFF, searches
 retrieve the tested stopword-containing text. Under ON, they return no rows.
@@ -45,9 +47,16 @@ removal and seed selection, preserving the rules used to build stored postings.
 
 Focused tests cover word and ngram searches, optimized dictionary paths, writes,
 removal, prefix maintenance, and retained minimum word length. The native oracle
-also verifies natural-language and query-expansion behavior. Production storage
-constructors still select the built-in policy; session settings, DDL policy
-selection, and WAL configuration context have not yet been connected.
+also verifies natural-language and query-expansion behavior. QueryHandler derives
+the creation/rebuild setting from session variables before each statement.
+Storage preserves existing policies for ordinary writes and metadata-only
+changes, while the tested physical rebuilds adopt the current setting.
+
+WAL tag `0x1B` captures disabled stopword filtering around schema events. The
+wrapper composes with historical ngram-size context and is stripped from public
+commit observers. Legacy schema events retain enabled filtering. Recovery tests
+cover both WAL-only and checkpointed histories, including disabled stopwords
+combined with a non-default ngram size. Older binaries cannot replay this tag.
 
 Snapshot format 14 (`FSNE`) stores one policy byte per full-text index in index
 definition order, including indexes without rows. Recovery combines that policy
@@ -57,23 +66,19 @@ format-13 writer verifies that `FSND` loads with built-in stopwords and retains
 its ngram postings. Earlier formats remain readable; older binaries cannot read
 `FSNE` snapshots.
 
-The effective filtering policy must be retained with the index state and used by
-both writes and queries. DDL must preserve or replace that state according to the
-observed operation, and WAL/snapshot recovery must reconstruct the same searchable
-postings. Existing historical ngram-tokenizer handling provides a related model,
-but its preservation rules must not be assumed to cover stopword configuration.
-
-Custom stopword tables, global-setting inheritance, persistence across reopening,
-and additional ALTER variants have not yet been probed by this oracle. Runtime
-configuration remains open; no known-gap suppression is included.
+Regressions verify GLOBAL values seed new sessions without changing existing
+sessions, reject invalid boolean values, and retain policy across reopening.
+Custom stopword tables and additional ALTER variants remain outside the verified
+matrix. No known-gap suppression is included.
 
 ## Verification
 
-The native stopword oracle passes. `just check` passes all 2,885 tests without
+The stopword matrix passes on native MySQL 8.4.11 and fsdb. `just check` passes
+all 2,888 tests without
 build warnings or errors. The natural-phrase oracle and all 47 contracts
 (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T051057405-76759/contracts`.
+`torture/artifacts/runs/20261007T052602082-78878/contracts`.
 
-The durability lane passes with 12 crash restarts and all 67 acknowledged commits
+The durability lane passes with 12 crash restarts and all 63 acknowledged commits
 recovered, including checkpoint, WAL-tail, and torn-tail checks:
-`torture/artifacts/runs/20261007T051145109-76815/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T052444717-78773/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

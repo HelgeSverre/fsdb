@@ -38,17 +38,29 @@ def verify(client, _other):
             client.query(f"INSERT INTO probe.docs VALUES(5,'{term} cobalt')")
             expect("later insert retains policy", client.query(matches(term)),
                    "NULL" if enabled == "ON" else "4,5")
-            client.query("ALTER TABLE probe.docs ADD COLUMN other TEXT;UPDATE probe.docs SET other=body;"
-                         f"ALTER TABLE probe.docs ADD FULLTEXT KEY other_ft(other){parser}")
+            client.query("ALTER TABLE probe.docs ADD COLUMN other TEXT;UPDATE probe.docs SET other=body")
+            expect("adding a column refreshes the existing policy", client.query(matches(term)),
+                   "4,5" if enabled == "ON" else "NULL")
+            client.query(f"ALTER TABLE probe.docs ADD FULLTEXT KEY other_ft(other){parser}")
             expect("second index adopts current policy", client.query(matches(term, "other")),
                    "4,5" if enabled == "ON" else "NULL")
-            expect("adding an index also refreshes the existing index", client.query(matches(term)),
+            expect("existing index retains the refreshed policy", client.query(matches(term)),
                    "4,5" if enabled == "ON" else "NULL")
+
+            client.query("SET SESSION innodb_ft_enable_stopword=" + enabled)
+            setup(client, parser=parser)
+            client.query("ALTER TABLE probe.docs ADD COLUMN other TEXT;"
+                         f"INSERT INTO probe.docs VALUES(4,'{term} orchard','{term} orchard')")
+            client.query("SET SESSION innodb_ft_enable_stopword=" + opposite)
+            client.query(f"ALTER TABLE probe.docs ADD FULLTEXT KEY other_ft(other){parser}")
+            expect("new index on existing column inherits policy", client.query(matches(term, "other")), initial)
+            expect("original index policy remains unchanged", client.query(matches(term)), initial)
 
             for label, ddl, expected in [
                 ("combined drop/add", f"ALTER TABLE probe.docs DROP INDEX ft,ADD FULLTEXT KEY ft(body){parser}", initial),
                 ("separate drop/add", f"ALTER TABLE probe.docs DROP INDEX ft;ALTER TABLE probe.docs ADD FULLTEXT KEY ft(body){parser}", replacement),
                 ("engine rebuild", "ALTER TABLE probe.docs ENGINE=InnoDB", replacement),
+                ("truncate", f"TRUNCATE TABLE probe.docs;INSERT INTO probe.docs VALUES(4,'{term} orchard')", replacement),
             ]:
                 seed()
                 client.query(ddl)

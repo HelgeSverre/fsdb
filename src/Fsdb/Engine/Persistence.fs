@@ -1052,6 +1052,8 @@ let private KindRowsUpdatedById = 0x17uy
 let private KindRowsDeletedById = 0x18uy
 let private KindXaPreparedWithLocks = 0x19uy
 let private KindWithNgramTokenSize = 0x1Auy
+[<Literal>]
+let private KindWithStopwordFiltering = 0x1Buy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -1119,6 +1121,10 @@ let private decodeRowBin (r: #IReader) : Value[] =
 
 let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
     match event with
+    | WithStopwordFiltering(enabled, event) ->
+        w.WriteByte KindWithStopwordFiltering
+        writeBool w enabled
+        encodeEvent w event
     | WithNgramTokenSize(size, event) ->
         if size < 1 || size > 10 then invalidArg "size" "Invalid WAL ngram token size"
         w.WriteByte KindWithNgramTokenSize
@@ -1221,6 +1227,9 @@ let rec private decodeEventAt
     let str () = r.ReadLenEncString() |> Option.defaultValue ""
 
     match r.ReadByte() with
+    | k when k = KindWithStopwordFiltering ->
+        let enabled = readBool r
+        WithStopwordFiltering(enabled, decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
     | k when k = KindWithNgramTokenSize ->
         let size = int (r.ReadByte())
         if size < 1 || size > 10 then failwith "Persistence: invalid WAL ngram token size"
@@ -1422,6 +1431,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         failwith "Persistence: transaction nesting exceeds the apply limit"
 
     match event with
+    | WithStopwordFiltering(enabled, event) ->
+        applyEventAt (depth + 1) { store with FullTextStopwordsEnabled = enabled } event
     | WithNgramTokenSize(size, event) ->
         applyEventAt (depth + 1) { store with NgramTokenSize = size } event
     | RowsInserted(db, table, rows) ->

@@ -352,6 +352,7 @@ let private numericSystemVariables =
           "group_concat_max_len"
           "interactive_timeout"
           "innodb_buffer_pool_size"
+          "innodb_ft_enable_stopword"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
           "ngram_token_size"
@@ -1575,7 +1576,7 @@ let private systemSetAction
         match TimeZones.resolve session.Store value with
         | Some zone -> Ok(SetVarAction(name, Some(Temporal.sqlTimeZoneText zone), isGlobal), sideEffects)
         | None -> Error(Err(1298, sprintf "Unknown or incorrect time zone: '%s'" value))
-    | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" ->
+    | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" || name = "innodb_ft_enable_stopword" ->
         normalizeOnOff name value
         |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
     | Ok(value, sideEffects) when name = "session_track_transaction_info" ->
@@ -2998,6 +2999,11 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
         // mode value from the session before each statement.
         sessionValue session "sql_mode"
         |> Option.iter (setSqlMode store)
+        store.FullTextStopwordsEnabled <-
+            match sessionValue session "innodb_ft_enable_stopword" with
+            | Some("OFF" | "0") -> false
+            | _ -> true
+
 
         let registry = registryFor session
 
@@ -3472,6 +3478,8 @@ let rec private filterTemporaryEvent keys event =
     match event with
     | WithNgramTokenSize(size, inner) ->
         filterTemporaryEvent keys inner |> Option.map (fun retained -> WithNgramTokenSize(size, retained))
+    | WithStopwordFiltering(enabled, inner) ->
+        filterTemporaryEvent keys inner |> Option.map (fun retained -> WithStopwordFiltering(enabled, retained))
     | RowsInserted(db, table, _)
     | RowsUpdated(db, table, _)
     | RowsDeleted(db, table, _)

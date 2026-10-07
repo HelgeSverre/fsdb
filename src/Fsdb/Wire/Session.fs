@@ -97,6 +97,7 @@ let defaultVariables: Map<string, string option> =
           "mandatory_roles", ""
           "innodb_buffer_pool_size", "134217728"
           "innodb_file_per_table", "ON"
+          "innodb_ft_enable_stopword", "ON"
           "innodb_ft_max_token_size", "84"
           "innodb_ft_min_token_size", "3"
           "ngram_token_size", string FullText.ngramTokenSize

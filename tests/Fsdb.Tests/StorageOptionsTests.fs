@@ -13,7 +13,66 @@ let private rows = function
 
 let tests =
     testList "storage options"
-        [ testCase "snapshots preserve fulltext stopword policies for empty and populated indexes"
+        [ testCase "stopword settings survive WAL and snapshot recovery and follow index rebuilds"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  for parser, term, size in [ "", "the", 2; " WITH PARSER ngram", "ab", 2; " WITH PARSER ngram", "abc", 3 ] do
+                      let dir = TestSupport.directory "stopword-setting"
+                      let openDb () = Db.create () |> Db.withNgramTokenSize size |> Db.withDataDir dir
+                      let initial = openDb ()
+                      let connection = Db.connect initial
+                      Expect.equal (connection.Query "SET SESSION innodb_ft_enable_stopword=OFF") (Affected 0UL) "disable stopwords"
+                      Expect.equal (connection.Query ("CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body)" + parser + ")")) (Affected 0UL) "create disabled index"
+                      connection.Query ($"INSERT INTO docs VALUES(1,'{term}'),(2,'zzzz')") |> ignore
+                      connection.Query "SET SESSION innodb_ft_enable_stopword=ON" |> ignore
+                      connection.Query ($"INSERT INTO docs VALUES(3,'{term}')") |> ignore
+                      let query = $"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id"
+                      let matches = [ [ Some "1" ]; [ Some "3" ] ]
+                      Expect.equal (connection.Query query |> rows) matches "later session setting does not change index policy"
+                      if checkpoint then Persistence.snapshotNow dir initial.Store
+                      let recovered = openDb ()
+                      let connection = Db.connect recovered
+                      Expect.equal (connection.Query query |> rows) matches "saved index policy survives recovery"
+                      connection.Query ($"ALTER TABLE docs DROP INDEX ft,ADD FULLTEXT KEY ft(body){parser}") |> ignore
+                      Expect.equal (connection.Query query |> rows) matches "combined drop/add retains policy"
+                      connection.Query "ALTER TABLE docs DROP INDEX ft" |> ignore
+                      connection.Query ($"ALTER TABLE docs ADD FULLTEXT KEY ft(body){parser}") |> ignore
+                      Expect.isEmpty (connection.Query query |> rows) "separate drop/add adopts current policy"
+                      connection.Query "SET SESSION innodb_ft_enable_stopword=OFF" |> ignore
+                      connection.Query "ALTER TABLE docs ENGINE=InnoDB" |> ignore
+                      Expect.equal (connection.Query query |> rows) matches "physical rebuild adopts disabled policy"
+                      let reopened = openDb () |> Db.connect
+                      Expect.equal (reopened.Query query |> rows) matches "rebuild policy survives replay"
+
+          testCase "new fulltext indexes inherit existing table stopword policy"
+          <| fun _ ->
+              for initial, current, expected in [ "ON", "OFF", []; "OFF", "ON", [ [ Some "1" ] ] ] do
+                  let db = Db.create ()
+                  let connection = Db.connect db
+                  connection.Query ($"SET SESSION innodb_ft_enable_stopword={initial}") |> ignore
+                  connection.Query "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,other TEXT,FULLTEXT KEY first_ft(body))" |> ignore
+                  connection.Query "INSERT INTO docs VALUES(1,'the','the'),(2,'zzzz','zzzz')" |> ignore
+                  connection.Query ($"SET SESSION innodb_ft_enable_stopword={current}") |> ignore
+                  connection.Query "ALTER TABLE docs ADD FULLTEXT KEY second_ft(other)" |> ignore
+                  for column in [ "body"; "other" ] do
+                      Expect.equal
+                          (connection.Query ($"SELECT id FROM docs WHERE MATCH({column}) AGAINST('the' IN BOOLEAN MODE) ORDER BY id") |> rows)
+                          expected
+                          "adding an index does not refresh a pre-existing fulltext table policy"
+
+          testCase "global stopword settings seed new sessions without changing existing ones"
+          <| fun _ ->
+              let db = Db.create ()
+              let original = Db.connect db
+              Expect.equal (original.Query "SET GLOBAL innodb_ft_enable_stopword=OFF") (Affected 0UL) "global assignment"
+              let newer = Db.connect db
+              Expect.equal (original.Query "SELECT @@SESSION.innodb_ft_enable_stopword,@@GLOBAL.innodb_ft_enable_stopword" |> rows) [ [ Some "1"; Some "0" ] ] "existing session retains its setting"
+              Expect.equal (newer.Query "SELECT @@SESSION.innodb_ft_enable_stopword" |> rows) [ [ Some "0" ] ] "new session inherits OFF"
+              match newer.Query "SET SESSION innodb_ft_enable_stopword=2" with
+              | Err(1231, _) -> ()
+              | result -> failtestf "invalid boolean setting: %A" result
+
+          testCase "snapshots preserve fulltext stopword policies for empty and populated indexes"
           <| fun _ ->
               let run = TestSupport.Sql.executeDefault
               for populated in [ false; true ] do
