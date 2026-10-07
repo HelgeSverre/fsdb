@@ -11,16 +11,20 @@ type StopwordTables =
       ServerTable: string option }
 
 type Settings =
-    { FullTextWordLengths: WordLengths
+    { FullTextQueryExpansionLimit: int
+      FullTextWordLengths: WordLengths
       NgramTokenSize: int
       FullTextStopwordsEnabled: bool
       FullTextStopwordTables: StopwordTables }
 
 let defaults =
-    { FullTextWordLengths = defaultWordLengths
+    { FullTextQueryExpansionLimit = 20
+      FullTextWordLengths = defaultWordLengths
       NgramTokenSize = 2
       FullTextStopwordsEnabled = true
       FullTextStopwordTables = { UserTable = None; ServerTable = None } }
+
+let internal normalizeQueryExpansionLimit size = int (max 0L (min 1000L size))
 
 let internal normalizeMinimumWordLength size = int (max 0L (min 16L size))
 let internal normalizeMaximumWordLength size = int (max 10L (min 84L size))
@@ -64,6 +68,13 @@ let fromEntries (entries: OptionFile.Entry list) =
                 { settings with FullTextWordLengths = lengths }, remaining, errors
             | None ->
                 let error = sprintf "%s:%d: %s requires an unsigned size with an optional K, M, G, T, P or E suffix" entry.Source entry.Line name
+                settings, remaining, error :: errors
+        | "ft_query_expansion_limit" ->
+            match entry.Value |> Option.bind OptionFile.tryParseUnsignedSize with
+            | Some size ->
+                { settings with FullTextQueryExpansionLimit = int (min 1000UL size) }, remaining, errors
+            | None ->
+                let error = sprintf "%s:%d: ft_query_expansion_limit requires an unsigned size with an optional K, M, G, T, P or E suffix" entry.Source entry.Line
                 settings, remaining, error :: errors
         | "ngram_token_size" ->
             match entry.Value |> Option.bind OptionFile.tryParseSize with

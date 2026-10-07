@@ -49,8 +49,16 @@ let withDataDir (dataDir: string) (db: Db) : Db =
     configureFullTextStopwordTables
         { UserTable = Session.tryGlobalVariable db.Store "innodb_ft_user_stopword_table" |> Option.flatten
           ServerTable = Session.tryGlobalVariable db.Store "innodb_ft_server_stopword_table" |> Option.flatten } store
+    Session.tryGlobalVariable db.Store "ft_query_expansion_limit"
+    |> Option.iter (Session.setGlobalVariable store "ft_query_expansion_limit")
     Persistence.attach dataDir store
     { db with Store = store; DataDir = Some dataDir }
+
+/// Reports the startup expansion limit; InnoDB-style search does not use the MyISAM seed cap.
+let withFullTextQueryExpansionLimit (limit: int) (db: Db) : Db =
+    let limit = StorageOptions.normalizeQueryExpansionLimit (int64 limit)
+    Session.setGlobalVariable db.Store "ft_query_expansion_limit" (Some(string limit))
+    db
 
 /// Selects word lengths before opening sessions; existing postings retain their original bounds.
 let withFullTextWordLengths (lengths: StorageOptions.WordLengths) (db: Db) : Db =

@@ -1,7 +1,8 @@
 # InnoDB query expansion uses every first-pass match
 
 Status: fixed. Fsdb expands from all matching seed documents. It does not apply
-MyISAM's `ft_query_expansion_limit` to its InnoDB-style search engine.
+MyISAM's `ft_query_expansion_limit` to its InnoDB-style search engine. Startup
+configuration and variable reporting also match the verified native cases.
 
 ## Native evidence
 
@@ -51,14 +52,34 @@ Larger seed sets require reading more documents than the old cutoff allowed.
 The implementation keeps the existing straightforward token collection; no
 performance claim is inferred from removing the sort.
 
-The server still reports the default GLOBAL/read-only expansion variable;
-nondefault startup reporting and ordinary word-length settings remain open.
-MyISAM storage-engine behavior remains outside fsdb's InnoDB-shaped store.
+The CLI, option files, and `Db.withFullTextQueryExpansionLimit` configure the
+reported value, defaulting to 20 and clamping to 0–1000. Unsigned startup
+parsing accepts MySQL's size suffixes and clamps negative spellings to zero;
+unrecognized suffixes and overflow fail. Command-line assignments follow
+option-file assignments, and the last assignment wins.
+
+`@@ft_query_expansion_limit`, its GLOBAL form, and both SHOW scopes report the
+configured value. The SESSION expression fails with error 1238. Both SESSION
+and GLOBAL SET assignments also fail with error 1238, SQLSTATE HY000: read-only
+validation precedes assignment-scope validation for this variable.
+
+The value is isolated per database instance, survives either order of the
+configuration and data-directory builders, and resets at restart unless
+configured again. It does not enter WAL records or snapshots and does not
+change query expansion. MyISAM storage-engine behavior remains outside fsdb's
+InnoDB-shaped store. Ordinary-word settings are covered by the
+[word-length oracle](2026-10-07-fulltext-word-lengths.md).
 
 ## Verification
 
-`just check` passes all 2,920 tests with no build warnings or errors. The native
-seed-limit oracle and natural-phrase oracle pass. All 48 compatibility contracts
-pass 5,015 steps without differences, including the new text/prepared membership
-and relevance checks:
-`torture/artifacts/runs/20261007T084425916-12318/contracts`.
+`just check` passes all 2,933 tests with no build warnings or errors. The native
+seed-limit oracle verifies startup clamping, read-only scope errors, and the
+distinct InnoDB/MyISAM expansion behavior. Executable checks cover accepted and
+rejected options, both CLI assignment forms, option-file precedence, repeated
+flags, default reset, help/version output, and all 50 InnoDB matches even at
+limit zero.
+
+All 49 compatibility contracts pass 5,117 steps without differences, including
+variable reporting and scope errors alongside text/prepared membership and
+relevance checks:
+`torture/artifacts/runs/20261007T094131462-51480/contracts`.

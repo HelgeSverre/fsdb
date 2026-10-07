@@ -101,7 +101,7 @@ let defaultVariables: Map<string, string option> =
           "innodb_ft_max_token_size", "84"
           "innodb_ft_min_token_size", "3"
           "ngram_token_size", string FullText.ngramTokenSize
-          "ft_query_expansion_limit", "20"
+          "ft_query_expansion_limit", string StorageOptions.defaults.FullTextQueryExpansionLimit
           "read_only", "OFF"
           "restrict_fk_on_non_standard_key", "ON"
           "sql_generate_invisible_primary_key", "OFF" ]

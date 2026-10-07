@@ -2745,7 +2745,13 @@ module ContractCatalog =
                "INSERT INTO expansion_seeds VALUES" + values
                "ANALYZE TABLE expansion_seeds" |]
           Steps =
-            [| for index, sql in
+            [| Contract.query "reported-limit" "SELECT @@ft_query_expansion_limit,@@GLOBAL.ft_query_expansion_limit"
+               Contract.query "global-limit" "SHOW GLOBAL VARIABLES LIKE 'ft_query_expansion_limit'"
+               Contract.query "session-show-limit" "SHOW SESSION VARIABLES LIKE 'ft_query_expansion_limit'"
+               Contract.query "session-read-limit" "SELECT @@SESSION.ft_query_expansion_limit" |> Contract.fails 1238 "HY000"
+               Contract.execute "session-set-limit" "SET SESSION ft_query_expansion_limit=1" |> Contract.fails 1238 "HY000"
+               Contract.execute "global-set-limit" "SET GLOBAL ft_query_expansion_limit=1" |> Contract.fails 1238 "HY000"
+               for index, sql in
                    [ "SELECT id FROM expansion_seeds WHERE " + score + " ORDER BY id"
                      "SELECT id FROM expansion_seeds WHERE id=125 AND " + score
                      "SELECT id FROM expansion_seeds WHERE id>=121 AND " + score + " ORDER BY id"

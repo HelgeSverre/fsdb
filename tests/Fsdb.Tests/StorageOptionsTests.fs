@@ -655,6 +655,54 @@ let tests =
                   [ [ Some "生日快乐" ] ]
                   "historical tokenizer data still decodes"
 
+          testCase "expansion limit startup follows MySQL bounds and precedence"
+          <| fun _ ->
+              for value, expected in [ "-1", 0; "0", 0; "20", 20; "1000", 1000; "1001", 1000; "1K", 1000; "64MB", 1000; "-abc", 0; "18446744073709551615", 1000 ] do
+                  Expect.equal
+                      (StorageOptions.fromEntries [ entry "ft-query-expansion-limit" (Some value) ])
+                      (Ok({ StorageOptions.defaults with FullTextQueryExpansionLimit = expected }, [])) value
+              let other = entry "max_allowed_packet" (Some "64M")
+              Expect.equal
+                  (StorageOptions.fromEntries [ entry "ft_query_expansion_limit" (Some "0"); other; entry "LOOSE-FT-QUERY-EXPANSION-LIMIT" (Some "100") ])
+                  (Ok({ StorageOptions.defaults with FullTextQueryExpansionLimit = 100 }, [ other ])) "last assignment wins"
+              for value in [ None; Some ""; Some "abc"; Some "16E" ] do
+                  match StorageOptions.fromEntries [ entry "ft_query_expansion_limit" value ] with
+                  | Error message -> Expect.stringContains message "test.cnf:7" "invalid values identify their source"
+                  | Ok _ -> failtestf "accepted %A" value
+              for arguments in [ [| "--ft-query-expansion-limit=0" |]; [| "--ft-query-expansion-limit"; "0" |] ] do
+                  Expect.equal ((Program.parseArguments arguments).GetResult Program.Ft_Query_Expansion_Limit) "0" "CLI forms"
+
+          testCase "expansion limit reports startup metadata without restricting InnoDB seeds"
+          <| fun _ ->
+              for configureFirst in [ false; true ] do
+                  for value, expected in [ -1, 0; 0, 0; 20, 20; 2000, 1000 ] do
+                      let dir = TestSupport.directory "expansion-limit"
+                      let configure = Db.withFullTextQueryExpansionLimit value
+                      let db =
+                          if configureFirst then Db.create () |> configure |> Db.withDataDir dir
+                          else Db.create () |> Db.withDataDir dir |> configure
+                      let connection = Db.connect db
+                      Expect.equal (connection.Query "SELECT @@ft_query_expansion_limit,@@GLOBAL.ft_query_expansion_limit" |> rows)
+                          [ [ Some(string expected); Some(string expected) ] ] "startup value survives builder order"
+                      for scope in [ "GLOBAL"; "SESSION" ] do
+                          Expect.equal (connection.Query ($"SHOW {scope} VARIABLES LIKE 'ft_query_expansion_limit'") |> rows)
+                              [ [ Some "ft_query_expansion_limit"; Some(string expected) ] ] "SHOW reports the global-only value"
+                      for sql, code in
+                          [ "SELECT @@SESSION.ft_query_expansion_limit", 1238
+                            "SET SESSION ft_query_expansion_limit=1", 1238
+                            "SET GLOBAL ft_query_expansion_limit=1", 1238 ] do
+                          match connection.Query sql |> errorInfo with
+                          | Some error -> Expect.equal (error.Code, error.State) (code, "HY000") sql
+                          | None -> failtestf "accepted %s" sql
+                      connection.Query "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))" |> TestSupport.Sql.expectOk <| "create"
+                      connection.Query "INSERT INTO docs VALUES(1,'orchard cobalt'),(2,'cobalt'),(3,'zzzz')" |> TestSupport.Sql.expectOk <| "seed"
+                      Expect.equal (connection.Query "SELECT id FROM docs WHERE MATCH(body) AGAINST('orchard' WITH QUERY EXPANSION) ORDER BY id" |> rows)
+                          [ [ Some "1" ]; [ Some "2" ] ] "even limit zero preserves InnoDB expansion"
+                      Persistence.snapshotNow dir db.Store
+                      let restarted = Db.create () |> Db.withDataDir dir |> Db.connect
+                      Expect.equal (restarted.Query "SELECT @@ft_query_expansion_limit" |> rows) [ [ Some "20" ] ] "startup metadata is not persisted"
+                      Expect.equal ((Db.create () |> Db.connect).Query "SELECT @@ft_query_expansion_limit" |> rows) [ [ Some "20" ] ] "another store retains defaults"
+
           testCase "word length CLI accepts spaced and equals assignments"
           <| fun _ ->
               for arguments in

@@ -1783,7 +1783,7 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
             )
         )
     | SetVarAction(name, _, isGlobal)
-        when readOnlySystemVariables.Contains name && (isGlobal || name = "ngram_token_size") ->
+        when readOnlySystemVariables.Contains name && (isGlobal || name = "ngram_token_size" || name = "ft_query_expansion_limit") ->
         Error(Err(1238, sprintf "Variable '%s' is a read only variable" name))
     | SetVarAction("session_track_system_variables", Some value, _)
         when Limits.trackedSystemVariablesExceedLimit value ->

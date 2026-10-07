@@ -96,7 +96,7 @@ fall into a few groups:
 | Concern | Options |
 |---|---|
 | Listener | `--listen`, `--port` / `-p` |
-| Storage | `--data-dir`, `--ngram-token-size`, `--innodb-ft-min-token-size`, `--innodb-ft-max-token-size`, `--innodb-ft-enable-stopword`, `--innodb-ft-user-stopword-table`, `--innodb-ft-server-stopword-table` |
+| Storage | `--data-dir`, `--ngram-token-size`, `--innodb-ft-min-token-size`, `--innodb-ft-max-token-size`, `--ft-query-expansion-limit`, `--innodb-ft-enable-stopword`, `--innodb-ft-user-stopword-table`, `--innodb-ft-server-stopword-table` |
 | Option files | `--defaults-file` |
 | TLS | `--ssl-cert`, `--ssl-key`, `--ssl-ca`, `--require-secure-transport` |
 | Server files | `--secure-file-priv` |
@@ -136,6 +136,17 @@ recovery. New text and rebuilt indexes use the current bounds. Exact lookups
 ignore the minimum but honor the maximum; Boolean prefixes can still reach
 older long words. Query expansion extracts seed words using the current bounds.
 Ngram indexes use their own token size.
+
+### Query expansion limit
+
+`--ft-query-expansion-limit 0` (or `ft_query_expansion_limit=0` in an option
+file) configures the reported GLOBAL, read-only value. The default is 20;
+values clamp to 0–1000. Command-line assignments override option files, and
+embedded hosts can call `Db.withFullTextQueryExpansionLimit` before connecting.
+The value resets at restart unless configured again.
+
+Like MySQL InnoDB, fsdb expands from every matching seed regardless of this
+setting. The limit controls MyISAM search in MySQL, not InnoDB search.
 
 ### Full-text stopwords
 
