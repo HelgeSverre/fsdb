@@ -26,6 +26,10 @@ let create () : Db =
       DataDir = None
       Transport = ServerOptions.defaults }
 
+let private configureFullTextStopwords enabled (store: Storage.Store) =
+    store.FullTextStopwordsEnabled <- enabled
+    Session.setGlobalVariable store "innodb_ft_enable_stopword" (Some(if enabled then "ON" else "OFF"))
+
 /// Opts into durability under `dataDir`. Loads whatever
 /// state is already there (a snapshot plus any WAL entries after it, or
 /// nothing for a fresh directory) and subscribes the result to keep writing
@@ -35,6 +39,8 @@ let create () : Db =
 let withDataDir (dataDir: string) (db: Db) : Db =
     let store = Persistence.load dataDir
     Storage.configureNgramTokenSize db.Store.NgramTokenSize store
+    let stopwordsEnabled = Session.tryGlobalVariable db.Store "innodb_ft_enable_stopword" <> Some(Some "OFF")
+    configureFullTextStopwords stopwordsEnabled store
     Persistence.attach dataDir store
     { db with Store = store; DataDir = Some dataDir }
 
@@ -42,6 +48,12 @@ let withDataDir (dataDir: string) (db: Db) : Db =
 /// Existing postings retain their original tokenizer until the index is rebuilt.
 let withNgramTokenSize (size: int) (db: Db) : Db =
     Storage.configureNgramTokenSize (StorageOptions.normalizeNgramTokenSize (int64 size)) db.Store
+    db
+
+/// Selects the initial full-text stopword setting before opening sessions.
+/// Existing indexes retain their captured policy until rebuilt.
+let withFullTextStopwords (enabled: bool) (db: Db) : Db =
+    configureFullTextStopwords enabled db.Store
     db
 
 /// Routes fsdb's diagnostic output (connection drops, WAL replay warnings,

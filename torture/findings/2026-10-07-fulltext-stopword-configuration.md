@@ -3,7 +3,7 @@
 Status: implemented for GLOBAL/SESSION `innodb_ft_enable_stopword` and the
 maintained word/ngram DDL matrix. The setting defaults to ON. Indexes retain their
 captured policy across later session changes, writes, WAL replay, and snapshots.
-Custom stopword tables and startup-option parsing remain open.
+Startup options seed both variable scopes. Custom stopword tables remain open.
 
 Run the [native oracle](../scripts/fulltext-stopword-oracle.py) with `mysqld`,
 `mysql`, and `mysqladmin` on PATH:
@@ -71,14 +71,35 @@ sessions, reject invalid boolean values, and retain policy across reopening.
 Custom stopword tables and additional ALTER variants remain outside the verified
 matrix. No known-gap suppression is included.
 
+## Startup configuration
+
+The [startup oracle](../scripts/fulltext-stopword-startup-oracle.py) checks native
+MySQL 8.4.11 option parsing and restarts against the same data directory. Bare
+`--innodb-ft-enable-stopword`, `1`, `ON`, and `TRUE` enable filtering; other tested
+explicit values, including `2`, `-1`, an empty string, and `yes`, disable it.
+Values are case-insensitive but quoted whitespace is significant. The `skip-`
+and `disable-` prefixes force OFF; `enable-` forces ON, regardless of the supplied
+value. Later options win.
+
+Fsdb accepts these startup options and option-file entries. Command-line options
+follow file entries. `Db.withFullTextStopwords` initializes the GLOBAL value used
+by new sessions and works before or after `Db.withDataDir`. Restarting with ON
+preserves an existing disabled index's searchable stopwords, while a newly
+created index uses ON; both native MySQL and fsdb cover this distinction.
+
 ## Verification
 
-The stopword matrix passes on native MySQL 8.4.11 and fsdb. `just check` passes
-all 2,888 tests without
-build warnings or errors. The natural-phrase oracle and all 47 contracts
-(5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T052602082-78878/contracts`.
+The startup oracle passes its parsing matrix and OFF/ON/2 restart sequence.
+Fsdb command-line smoke checks pass option-file defaults, overriding CLI values,
+bare options, both alias orders, and the forced enable/disable prefixes, while
+checking new and recovered full-text indexes. `--help` and `--version` succeed.
 
-The durability lane passes with 12 crash restarts and all 63 acknowledged commits
+
+The stopword matrix passes on native MySQL 8.4.11 and fsdb. `just check` passes
+all 2,891 tests without build warnings or errors. The natural-phrase oracle and all 47 contracts
+(5,007 steps) pass without differences:
+`torture/artifacts/runs/20261007T053856429-80585/contracts`.
+
+The runtime-setting durability validation passed with 12 crash restarts and all 63 acknowledged commits
 recovered, including checkpoint, WAL-tail, and torn-tail checks:
 `torture/artifacts/runs/20261007T052444717-78773/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

@@ -96,7 +96,7 @@ fall into a few groups:
 | Concern | Options |
 |---|---|
 | Listener | `--listen`, `--port` / `-p` |
-| Storage | `--data-dir`, `--ngram-token-size` |
+| Storage | `--data-dir`, `--ngram-token-size`, `--innodb-ft-enable-stopword` |
 | Option files | `--defaults-file` |
 | TLS | `--ssl-cert`, `--ssl-key`, `--ssl-ca`, `--require-secure-transport` |
 | Server files | `--secure-file-priv` |
@@ -120,6 +120,23 @@ rebuild the index at the current size. Common metadata ALTER operations, includi
 renames through MODIFY/CHANGE, preserve postings. Physical changes such as
 nullability, collation, column reordering, and VARCHAR length-prefix expansion
 rebuild them at the current token size.
+
+### Full-text stopwords
+
+`--innodb-ft-enable-stopword=OFF` (or `innodb_ft_enable_stopword=OFF` in an
+option file) disables built-in stopword filtering for new full-text indexes.
+The default is ON. A bare option enables filtering; `--skip-innodb-ft-enable-stopword`
+disables it. Command-line values override option files, and the last stopword
+option wins. MySQL startup parsing enables filtering for `1`, `ON`, or `TRUE`
+(case-insensitive); other explicit values disable it. SQL `SET` validates values
+more strictly.
+
+The startup value seeds GLOBAL and SESSION `innodb_ft_enable_stopword`.
+Embedded hosts can use `Db.withFullTextStopwords false` before opening connections.
+Existing indexes retain their captured policy across session changes and restart;
+new indexes and physical rebuilds use the current setting. Adding another full-text
+index to an existing full-text table inherits that table's policy. Custom stopword
+tables are not supported.
 
 ### Option files
 

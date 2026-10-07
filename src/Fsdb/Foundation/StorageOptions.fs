@@ -1,8 +1,12 @@
 module Fsdb.StorageOptions
 
-type Settings = { NgramTokenSize: int }
+type Settings =
+    { NgramTokenSize: int
+      FullTextStopwordsEnabled: bool }
 
-let defaults = { NgramTokenSize = 2 }
+let defaults =
+    { NgramTokenSize = 2
+      FullTextStopwordsEnabled = true }
 
 let internal normalizeNgramTokenSize size = int (max 1L (min 10L size))
 
@@ -12,16 +16,27 @@ let fromEntries (entries: OptionFile.Entry list) =
         let name = OptionFile.normalizeName entry.Name
         let name = if name.StartsWith "loose_" then name.Substring 6 else name
 
-        if name <> "ngram_token_size" then
-            settings, entry :: remaining, errors
-        else
+        let stopwords enabled = { settings with FullTextStopwordsEnabled = enabled }, remaining, errors
+
+        match name with
+        | "innodb_ft_enable_stopword" ->
+            // MySQL startup booleans treat unrecognized values as false, unlike SET.
+            let enabled =
+                match entry.Value |> Option.map (fun value -> value.ToLowerInvariant()) with
+                | None | Some "1" | Some "on" | Some "true" -> true
+                | _ -> false
+            stopwords enabled
+        | "skip_innodb_ft_enable_stopword" | "disable_innodb_ft_enable_stopword" -> stopwords false
+        | "enable_innodb_ft_enable_stopword" -> stopwords true
+        | "ngram_token_size" ->
             match entry.Value |> Option.bind OptionFile.tryParseSize with
-            | Some size -> { NgramTokenSize = normalizeNgramTokenSize size }, remaining, errors
+            | Some size -> { settings with NgramTokenSize = normalizeNgramTokenSize size }, remaining, errors
             | None ->
                 let error =
                     sprintf "%s:%d: ngram_token_size requires an integer, optionally suffixed K, M or G" entry.Source entry.Line
 
                 settings, remaining, error :: errors
+        | _ -> settings, entry :: remaining, errors
 
     let settings, remaining, errors = List.fold folder (defaults, [], []) entries
 

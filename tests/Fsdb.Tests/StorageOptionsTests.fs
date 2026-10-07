@@ -13,7 +13,58 @@ let private rows = function
 
 let tests =
     testList "storage options"
-        [ testCase "stopword settings survive WAL and snapshot recovery and follow index rebuilds"
+        [ testCase "stopword startup values follow MySQL boolean parsing"
+          <| fun _ ->
+              for value, enabled in
+                  [ None, true; Some "ON", true; Some "TrUe", true; Some "1", true
+                    Some "OFF", false; Some "false", false; Some "0", false
+                    Some "2", false; Some "-1", false; Some "", false
+                    Some "yes", false; Some "01", false; Some " ON ", false ] do
+                  Expect.equal
+                      (StorageOptions.fromEntries [ entry "innodb-ft-enable-stopword" value ])
+                      (Ok({ StorageOptions.defaults with FullTextStopwordsEnabled = enabled }, []))
+                      (sprintf "startup value %A" value)
+
+          testCase "stopword startup aliases and precedence preserve other storage settings"
+          <| fun _ ->
+              for name, enabled in
+                  [ "skip_innodb_ft_enable_stopword", false
+                    "disable_innodb_ft_enable_stopword", false
+                    "enable_innodb_ft_enable_stopword", true ] do
+                  let other = entry "max_allowed_packet" (Some "64M")
+                  let entries =
+                      [ entry "innodb_ft_enable_stopword" (Some "OFF")
+                        entry ("LOOSE-" + name) (Some "ON")
+                        entry "ngram_token_size" (Some "3"); other ]
+                  Expect.equal
+                      (StorageOptions.fromEntries entries)
+                      (Ok({ NgramTokenSize = 3; FullTextStopwordsEnabled = enabled }, [ other ]))
+                      name
+
+          testCase "startup stopword settings survive builder order without reinterpreting saved indexes"
+          <| fun _ ->
+              for beforePersistence in [ false; true ] do
+                  let dir = TestSupport.directory "stopword-startup"
+                  let openDb enabled =
+                      if beforePersistence then
+                          Db.create () |> Db.withFullTextStopwords enabled |> Db.withDataDir dir
+                      else
+                          Db.create () |> Db.withDataDir dir |> Db.withFullTextStopwords enabled
+                  let initial = openDb false
+                  let connection = Db.connect initial
+                  Expect.equal (connection.Query "SELECT @@GLOBAL.innodb_ft_enable_stopword,@@SESSION.innodb_ft_enable_stopword" |> rows) [ [ Some "0"; Some "0" ] ] "startup seeds both scopes"
+                  connection.Query "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body))" |> ignore
+                  connection.Query "INSERT INTO docs VALUES(1,'the'),(2,'zzzz')" |> ignore
+                  Persistence.snapshotNow dir initial.Store
+                  let recovered = openDb true |> Db.connect
+                  let query = "SELECT id FROM docs WHERE MATCH(body) AGAINST('the' IN BOOLEAN MODE) ORDER BY id"
+                  Expect.equal (recovered.Query "SELECT @@GLOBAL.innodb_ft_enable_stopword,@@SESSION.innodb_ft_enable_stopword" |> rows) [ [ Some "1"; Some "1" ] ] "restart uses current startup setting"
+                  Expect.equal (recovered.Query query |> rows) [ [ Some "1" ] ] "loaded postings keep old policy"
+                  recovered.Query "ALTER TABLE docs ENGINE=InnoDB" |> ignore
+                  Expect.isEmpty (recovered.Query query |> rows) "rebuild adopts new startup setting"
+                  Expect.equal (Db.create () |> Db.connect |> fun fresh -> fresh.Query "SELECT @@innodb_ft_enable_stopword" |> rows) [ [ Some "1" ] ] "other stores retain default"
+
+          testCase "stopword settings survive WAL and snapshot recovery and follow index rebuilds"
           <| fun _ ->
               for checkpoint in [ false; true ] do
                   for parser, term, size in [ "", "the", 2; " WITH PARSER ngram", "ab", 2; " WITH PARSER ngram", "abc", 3 ] do
@@ -124,7 +175,7 @@ let tests =
               for value, expected in [ "-1", 1; "0", 1; "1", 1; "2", 2; "3", 3; "10", 10; "11", 10; "3k", 10; "4294967296", 10 ] do
                   Expect.equal
                       (StorageOptions.fromEntries [ entry "ngram-token-size" (Some value) ])
-                      (Ok({ NgramTokenSize = expected }, []))
+                      (Ok({ StorageOptions.defaults with NgramTokenSize = expected }, []))
                       value
 
           testCase "ngram startup rejects missing and malformed integers with source location"
@@ -139,7 +190,7 @@ let tests =
               let other = entry "max_allowed_packet" (Some "64M")
               Expect.equal
                   (StorageOptions.fromEntries [ entry "ngram_token_size" (Some "1"); other; entry "LOOSE-NGRAM-TOKEN-SIZE" (Some "3") ])
-                  (Ok({ NgramTokenSize = 3 }, [ other ]))
+                  (Ok({ StorageOptions.defaults with NgramTokenSize = 3 }, [ other ]))
                   "normalized loose spelling and command-line precedence"
 
           testCase "ngram startup settings and reported variables are isolated per database"

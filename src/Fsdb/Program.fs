@@ -10,6 +10,10 @@ type Arguments =
     | Data_Dir of path: string
     | Defaults_File of path: string
     | Ngram_Token_Size of size: string
+    | [<EqualsAssignment>] Innodb_Ft_Enable_Stopword of enabled: string option
+    | [<EqualsAssignment>] Skip_Innodb_Ft_Enable_Stopword of ignored: string option
+    | [<EqualsAssignment>] Disable_Innodb_Ft_Enable_Stopword of ignored: string option
+    | [<EqualsAssignment>] Enable_Innodb_Ft_Enable_Stopword of ignored: string option
     | Ssl_Cert of path: string
     | Ssl_Key of path: string
     | Ssl_Ca of path: string
@@ -29,6 +33,10 @@ type Arguments =
             | Data_Dir _ -> "persist trusted server state here (WAL + snapshots); omit for in-memory"
             | Defaults_File _ -> "read server settings from a my.cnf-style file's [mysqld] section"
             | Ngram_Token_Size _ -> "ngram token size, clamped to 1–10 (default 2)"
+            | Innodb_Ft_Enable_Stopword _ -> "initial full-text stopword filtering (default ON); accepts =ON or =OFF"
+            | Skip_Innodb_Ft_Enable_Stopword _
+            | Disable_Innodb_Ft_Enable_Stopword _ -> "disable initial full-text stopword filtering"
+            | Enable_Innodb_Ft_Enable_Stopword _ -> "enable initial full-text stopword filtering"
             | Ssl_Cert _ -> "PEM server certificate for TLS"
             | Ssl_Key _ -> "PEM private key for TLS"
             | Ssl_Ca _ -> "PEM certificate authorities trusted for TLS clients"
@@ -83,7 +91,14 @@ let main argv =
                   Line = 1 }
 
             let commandLineEntries =
-                [ match results.TryGetResult Ngram_Token_Size with
+                [ for argument in results.GetAllResults() do
+                      match argument with
+                      | Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "innodb_ft_enable_stopword" value
+                      | Skip_Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "skip_innodb_ft_enable_stopword" value
+                      | Disable_Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "disable_innodb_ft_enable_stopword" value
+                      | Enable_Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "enable_innodb_ft_enable_stopword" value
+                      | _ -> ()
+                  match results.TryGetResult Ngram_Token_Size with
                   | Some size -> yield commandLineEntry "ngram_token_size" (Some size)
                   | None -> ()
                   match results.TryGetResult Ssl_Cert with
@@ -134,7 +149,10 @@ let main argv =
         | Ok(options, storageOptions), Some address ->
             let port = results.GetResult(Port, defaultValue = 3307)
 
-            let db = Db.create () |> Db.withNgramTokenSize storageOptions.NgramTokenSize
+            let db =
+                Db.create ()
+                |> Db.withNgramTokenSize storageOptions.NgramTokenSize
+                |> Db.withFullTextStopwords storageOptions.FullTextStopwordsEnabled
 
             let db =
                 match results.TryGetResult Data_Dir with
