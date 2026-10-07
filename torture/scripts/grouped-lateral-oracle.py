@@ -1,6 +1,7 @@
 """Verify grouped dependent sources on disposable native MySQL 8.4.11."""
 
 import pathlib
+import re
 import runpy
 import subprocess
 
@@ -20,6 +21,29 @@ def verify(client, _writer):
     invalid = "SELECT x.id FROM a JOIN (SELECT a.id AS id) x ON 1"
     result = subprocess.run([*client.process.args, "-e", "USE probe;" + invalid], capture_output=True, text=True, check=False)
     oracle["expect"]("ordinary sibling dependency", "ERROR 1109 (42S02)" in result.stderr, True)
+    for query, code, state, message in [
+        ("SELECT a.id", 1109, "42S02", "Unknown table 'a' in field list"),
+        ("SELECT 1 WHERE a.id=1", 1109, "42S02", "Unknown table 'a' in where clause"),
+        ("SELECT 1 ORDER BY a.id", 1109, "42S02", "Unknown table 'a' in order clause"),
+        ("SELECT 1 GROUP BY a.id", 1109, "42S02", "Unknown table 'a' in group statement"),
+        ("SELECT 1 HAVING a.id=1", 1054, "42S22", "Unknown column 'a.id' in 'having clause'"),
+        ("SELECT x.id FROM a", 1054, "42S22", "Unknown column 'x.id' in 'field list'"),
+        ("SELECT x.id FROM (SELECT a.id AS id) x", 1109, "42S02", "Unknown table 'a' in field list"),
+        ("SELECT x.id FROM a JOIN (SELECT a.id AS id) x ON 1", 1109, "42S02", "Unknown table 'a' in field list"),
+        ("SELECT x.id FROM a JOIN (SELECT z.id AS id) x ON 1", 1109, "42S02", "Unknown table 'z' in field list"),
+        ("SELECT x.id FROM a JOIN LATERAL (SELECT z.id AS id) x ON 1", 1054, "42S22", "Unknown column 'z.id' in 'field list'"),
+        ("SELECT x.id FROM a JOIN (SELECT a.id AS id FROM b) x ON 1", 1054, "42S22", "Unknown column 'a.id' in 'field list'"),
+        ("SELECT (SELECT z.id) FROM a", 1054, "42S22", "Unknown column 'z.id' in 'field list'"),
+        ("SELECT (SELECT a.id)", 1054, "42S22", "Unknown column 'a.id' in 'field list'"),
+        ("SELECT * FROM LATERAL (SELECT a.id) d", 1054, "42S22", "Unknown column 'a.id' in 'field list'"),
+        ("SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.id) d ON 1", 1054, "42S22", "Unknown column 'a.id' in 'field list'"),
+        ("SELECT x.id FROM a JOIN (SELECT id) x ON 1", 1054, "42S22", "Unknown column 'id' in 'field list'"),
+    ]:
+        for statement in [query, "PREPARE scope_check FROM '" + query + "'"]:
+            result = subprocess.run([*client.process.args, "-e", "USE probe;" + statement], capture_output=True, text=True, check=False)
+            error = re.search(r"ERROR (\d+) \((\w+)\).*?: (.*)", result.stderr)
+            actual = (int(error[1]), error[2], error[3]) if error else None
+            oracle["expect"](statement, actual, (code, state, message))
     for source, first_row in [
         ("b JOIN LATERAL (SELECT b.id+1 AS v) d ON 1", "1\t1\t2"),
         ("b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1", "1\t1\t2"),

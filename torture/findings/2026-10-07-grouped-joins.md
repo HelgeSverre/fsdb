@@ -381,10 +381,18 @@ annotations remain outside this compatibility check.
 Derived tables nested inside scalar or LATERAL queries retain their enclosing
 query context, including derived JOIN operands. Independent sources keep their
 statement memoization. Ordinary derived tables still reject same-query sibling
-references; the native oracle reports 1109 for that invalid form, while fsdb's
-1054 diagnostic remains a difference.
+references with MySQL's 1109 diagnostic when the inner query has no visible
+source or enclosing scope. Queries with a source or enclosing scope report
+1054 for missing columns, including leading and RIGHT LATERAL sources. Execution,
+SQL PREPARE, and binary preparation share the scope distinction.
 
 Additional native metadata fixtures retain the source default flag through
 materialized preceding sources, chained LATERAL projections, GROUP BY, and
 DISTINCT. Materialization alone does not clear a correlated output's default
 flag.
+
+Qualified-reference diagnostics retain their clause in WHERE, ORDER BY,
+GROUP BY, and HAVING. Error 1109 carries SQLSTATE 42S02; HAVING uses 1054 even
+without source tables. Prepared validation checks qualified references in the
+ordering and grouping clauses without treating bare projection aliases as
+source-column references.

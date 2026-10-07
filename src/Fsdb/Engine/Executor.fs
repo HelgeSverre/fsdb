@@ -1732,6 +1732,7 @@ type private Clause =
     | OnClause
     | OrderClause
     | GroupStatement
+    | HavingClause
     | TableFunctionArgument
 
 let private clauseLabel =
@@ -1741,10 +1742,17 @@ let private clauseLabel =
     | OnClause -> "on clause"
     | OrderClause -> "order clause"
     | GroupStatement -> "group statement"
+    | HavingClause -> "having clause"
     | TableFunctionArgument -> "a table function argument"
 
 let private unknownColumnIn clause name : EvalError =
     1054, sprintf "Unknown column '%s' in '%s'" name (clauseLabel clause)
+
+let private unknownQualifiedReference hasScope clause qualifier name : EvalError =
+    if hasScope || clause = "having clause" then
+        1054, sprintf "Unknown column '%s.%s' in '%s'" qualifier name clause
+    else
+        1109, sprintf "Unknown table '%s' in %s" qualifier clause
 
 let private unknownColumn name = unknownColumnIn FieldList name
 
@@ -2354,7 +2362,7 @@ let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, Eva
 
 /// The `QualifiedCol` counterpart of `resolveCol` — same outer-context
 /// fallback, checked against `ctx.Qualifiers` instead of `ctx.ColumnIndex`.
-let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: string) : Result<Value, EvalError> =
+let private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: string) : Result<Value, EvalError> =
     let scope = triggerRowScope.Value
     match table.ToLowerInvariant(), scope with
     | ("old" | "new"), Some images ->
@@ -2370,19 +2378,19 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
             | None -> Error(unknownColumnIn ctx.Clause (sprintf "%s.%s" table col))
         | None -> Error(unknownColumnIn ctx.Clause (sprintf "%s.%s" table col))
     | _ ->
-        let localColumn =
-            Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers
-            |> Option.bind (fun (columns, offset) ->
-                columns
-                |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, col, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.map (fun index -> columns.[index], offset + index))
-
-        match localColumn with
-        | Some(column, index) -> Ok(readColumnValue ctx.Store column ctx.Row.[index])
+        let rec lookup (context: EvalContext) =
+            let localColumn =
+                Map.tryFind (table.ToLowerInvariant()) context.Qualifiers
+                |> Option.bind (fun (columns, offset) ->
+                    columns
+                    |> List.tryFindIndex (fun column -> equalsIgnoreCase column.Name col)
+                    |> Option.map (fun index -> readColumnValue context.Store columns.[index] context.Row.[offset + index]))
+            localColumn |> Option.orElseWith (fun () -> context.Outer |> Option.bind lookup)
+        match lookup ctx with
+        | Some value -> Ok value
         | None ->
-            match ctx.Outer with
-            | Some parent -> resolveQualifiedCol { parent with Clause = ctx.Clause } table col
-            | None -> Error(unknownColumnIn ctx.Clause (sprintf "%s.%s" table col))
+            unknownQualifiedReference (not ctx.Qualifiers.IsEmpty || ctx.Outer.IsSome) (clauseLabel ctx.Clause) table col
+            |> Error
 
 let private tryDirectColumnForExpr (ctx: EvalContext) (expr: Expr) : (int * ColumnDef) option =
     match expr with
@@ -6719,24 +6727,32 @@ and private describeQueryColumnsChecked
         { Sources = left.Sources @ right.Sources
           LogicalColumns = left.LogicalColumns @ right.LogicalColumns }
 
-    let rec resolveReference (scopes: DescribedJoinScope list) clause (qualifier, name) =
+    let resolveReference (scopes: DescribedJoinScope list) clause (qualifier, name) =
         let label = qualifier |> Option.map (fun qualifier -> qualifier + "." + name) |> Option.defaultValue name
-        match scopes with
-        | [] -> Error(InvalidDescription(Err(1054, sprintf "Unknown column '%s' in '%s'" label clause)))
-        | scope :: outer ->
-            let matches =
-                match qualifier with
-                | None -> scope.LogicalColumns |> List.filter (fun column -> equalsIgnoreCase name column.Name) |> List.length
-                | Some qualifier ->
-                    scope.Sources
-                    |> List.filter (fst >> equalsIgnoreCase qualifier)
-                    |> List.collect snd
-                    |> List.filter (fun descriptor -> equalsIgnoreCase name descriptor.Column.Name)
-                    |> List.length
-            match matches with
-            | 0 -> resolveReference outer clause (qualifier, name)
-            | 1 -> Ok()
-            | _ -> Error(InvalidDescription(Err(1052, sprintf "Column '%s' in %s is ambiguous" label clause)))
+        let missing =
+            match qualifier with
+            | Some qualifier ->
+                let hasScope = match scopes with [ scope ] -> not scope.Sources.IsEmpty | _ -> true
+                unknownQualifiedReference hasScope clause qualifier name
+            | None -> 1054, sprintf "Unknown column '%s' in '%s'" label clause
+        let rec resolve scopes =
+            match scopes with
+            | [] -> Error(InvalidDescription(Err missing))
+            | scope :: outer ->
+                let matches =
+                    match qualifier with
+                    | None -> scope.LogicalColumns |> List.filter (fun column -> equalsIgnoreCase name column.Name) |> List.length
+                    | Some qualifier ->
+                        scope.Sources
+                        |> List.filter (fst >> equalsIgnoreCase qualifier)
+                        |> List.collect snd
+                        |> List.filter (fun descriptor -> equalsIgnoreCase name descriptor.Column.Name)
+                        |> List.length
+                match matches with
+                | 0 -> resolve outer
+                | 1 -> Ok()
+                | _ -> Error(InvalidDescription(Err(1052, sprintf "Column '%s' in %s is ambiguous" label clause)))
+        resolve scopes
 
     let validateReferences scopes clause expression =
         validateReferencesWith (resolveReference scopes clause) expression
@@ -6917,7 +6933,17 @@ and private describeQueryColumnsChecked
                 @ (select.Where |> Option.toList |> List.map (fun expression -> expression, "where clause"))
                 |> traverse (fun (expression, clause) -> validateReferences (scope :: outerScopes) clause expression)
 
+            let qualifiedClauseReferences =
+                (select.GroupBy |> List.map (fun expression -> expression, "group statement"))
+                @ (select.Having |> Option.toList |> List.map (fun expression -> expression, "having clause"))
+                @ (select.OrderBy |> List.map (fun (expression, _) -> expression, "order clause"))
+                |> traverse (fun (expression, clause) ->
+                    validateReferencesWith (function
+                        | Some _, _ as reference -> resolveReference (scope :: outerScopes) clause reference
+                        | None, _ -> Ok()) expression)
+
             references
+            |> Result.bind (fun _ -> qualifiedClauseReferences)
             |> Result.bind (fun _ -> nestedQueries)
             |> Result.bind (fun _ -> rewritten |> Result.mapError InvalidDescription)
             |> Result.map (fun select ->
@@ -7537,8 +7563,11 @@ and private resolveFromSubquery
         |> Result.map (fun source -> source.Columns, List.ofSeq source.Rows)
     | FromTable _
     | FromJsonTable _ -> resolveFromItem store registry dbName item
-    | FromSubquery(body, _)
-    | FromLateral(body, _) -> resolveRelationBody store registry dbName [] body outer
+    | FromSubquery(body, _) -> resolveRelationBody store registry dbName [] body outer
+    | FromLateral(body, _) ->
+        let enclosing =
+            outer |> Option.orElseWith (fun () -> Some(contextFactory store registry dbName Map.empty Map.empty None [||]))
+        resolveRelationBody store registry dbName [] body enclosing
 
 and private resolveRelationBody store registry dbName columnNames body outer : Result<ColumnDef list * Value[] list, QueryResult> =
     let columnNamesAreValid =
@@ -8153,7 +8182,7 @@ and private applyLateralJoin
     (body: SelectOrUnion)
     (alias: string)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
-    let runBody outer = resolveRelationBody store registry dbName [] body outer
+    let runBody outer = resolveFromSubquery store registry dbName (FromLateral(body, alias)) outer
 
     let matchBody leftRows (bodyColumns, bodyRows) =
         let source =
@@ -14114,7 +14143,7 @@ and private runGroupedSelect
             resolveHavingRef columnIndex select.Projections h
             |> Result.map rollup
             |> Result.bind (rewriteAggregates registry ctxFor groupRows)
-            |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = GroupStatement })
+            |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = HavingClause })
             |> Result.map (fun v -> truthy v = Some true)
 
     let orderKeysOf (rollup: Expr -> Expr) (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<(Value * Collation.Collation option) list, EvalError> =
@@ -14215,7 +14244,7 @@ and private runGroupedSelect
         withMetadataProbe (fun () ->
             withSuppressedVariableAssignments (fun () ->
                 matches probe
-                |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr probeContext) |> Result.map ignore)
+                |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr { probeContext with Clause = GroupStatement }) |> Result.map ignore)
                 |> Result.bind (fun _ -> havingOk probeRewrite [])
                 |> Result.bind (fun _ -> projectGroup probeRewrite [])
                 |> Result.bind (fun probeProjected ->
@@ -16489,7 +16518,7 @@ and private runSelect
             else
                 match select.Having with
                 | None -> Ok true
-                | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true))
+                | Some expr -> evalExpr { ctxFor row with Clause = HavingClause } expr |> Result.map (fun v -> truthy v = Some true))
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections

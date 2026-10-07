@@ -33,7 +33,38 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "JSON_TABLE preparation validates argument references in lateral scope"
+        [ testCase "qualified reference diagnostics distinguish isolated and enclosing scopes"
+          <| fun _ ->
+              let session = relationNameSession ()
+              for sql, code, message in
+                  [ "SELECT a.id", 1109, "Unknown table 'a' in field list"
+                    "SELECT 1 WHERE a.id=1", 1109, "Unknown table 'a' in where clause"
+                    "SELECT 1 ORDER BY a.id", 1109, "Unknown table 'a' in order clause"
+                    "SELECT 1 GROUP BY a.id", 1109, "Unknown table 'a' in group statement"
+                    "SELECT 1 HAVING a.id=1", 1054, "Unknown column 'a.id' in 'having clause'"
+                    "SELECT x.id FROM a", 1054, "Unknown column 'x.id' in 'field list'"
+                    "SELECT x.id FROM (SELECT a.id AS id) x", 1109, "Unknown table 'a' in field list"
+                    "SELECT x.id FROM a JOIN (SELECT a.id AS id) x ON 1", 1109, "Unknown table 'a' in field list"
+                    "SELECT x.id FROM a JOIN (SELECT z.id AS id) x ON 1", 1109, "Unknown table 'z' in field list"
+                    "SELECT x.id FROM a JOIN LATERAL (SELECT z.id AS id) x ON 1", 1054, "Unknown column 'z.id' in 'field list'"
+                    "SELECT x.id FROM a JOIN (SELECT a.id AS id FROM b) x ON 1", 1054, "Unknown column 'a.id' in 'field list'"
+                    "SELECT (SELECT z.id) FROM a", 1054, "Unknown column 'z.id' in 'field list'"
+                    "SELECT (SELECT a.id)", 1054, "Unknown column 'a.id' in 'field list'"
+                    "SELECT * FROM LATERAL (SELECT a.id) d", 1054, "Unknown column 'a.id' in 'field list'"
+                    "SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.id) d ON 1", 1054, "Unknown column 'a.id' in 'field list'"
+                    "SELECT x.id FROM a JOIN (SELECT id) x ON 1", 1054, "Unknown column 'id' in 'field list'" ] do
+                  let result = handle session sql |> snd
+                  Expect.equal result (Err(code, message)) sql
+                  match errorInfo result with
+                  | Some error -> Expect.equal error.State (if code = 1109 then "42S02" else "42S22") "native SQLSTATE"
+                  | _ -> failtest "expected an error"
+                  match prepareStatementForSession session sql with
+                  | Error error -> Expect.equal error (code, message) ("prepare: " + sql)
+                  | other -> failtestf "expected binding failure: %A" other
+                  Expect.equal (handle session ("PREPARE scope_check FROM '" + sql + "'") |> snd)
+                      (Err(code, message)) ("SQL prepare: " + sql)
+
+          testCase "JSON_TABLE preparation validates argument references in lateral scope"
           <| fun _ ->
               let session = relationNameSession ()
               for sql, code, message in

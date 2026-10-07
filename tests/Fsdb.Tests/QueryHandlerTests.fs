@@ -63,9 +63,8 @@ let tests =
                     "SELECT d.id FROM a JOIN (b JOIN LATERAL (SELECT x.id FROM (SELECT a.id AS id) x) d ON 1) ON 1 ORDER BY a.id" ] do
                   Expect.equal (run query)
                       (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) query
-              match run "SELECT x.id FROM a JOIN (SELECT a.id AS id) x ON 1" with
-              | Err _ -> ()
-              | other -> failtestf "ordinary derived source cannot see a sibling: %A" other
+              Expect.equal (run "SELECT x.id FROM a JOIN (SELECT a.id AS id) x ON 1")
+                  (Err(1109, "Unknown table 'a' in field list")) "ordinary derived source cannot see a sibling"
 
           testCase "EXPLAIN validates lateral mutation sources without writing"
           <| fun _ ->
