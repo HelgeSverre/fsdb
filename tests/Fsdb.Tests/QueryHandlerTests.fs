@@ -18,7 +18,59 @@ let private (|ProcedureResult|_|) =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "SELECT 1 returns a single row with column name '1'"
+        [ testCase "HASH partition engines preserve defaults and validation precedence"
+          <| fun _ ->
+              for tableEngine, first, second, expected in
+                  [ "", "", "", None
+                    "", "InnoDB", "", Some 1497
+                    "", "InnoDB", "InnoDB", None
+                    "", "MyISAM", "MyISAM", Some 1178
+                    "ENGINE=InnoDB", "InnoDB", "", None
+                    "ENGINE=InnoDB", "MyISAM", "MyISAM", Some 1497
+                    "ENGINE=MyISAM", "", "", Some 1178
+                    "ENGINE=MyISAM", "InnoDB", "InnoDB", Some 1497
+                    "", "unknown_engine", "InnoDB", Some 1286
+                    "ENGINE=InnoDB", "unknown_engine ENGINE=InnoDB", "", Some 1286
+                    "ENGINE=InnoDB", "MyISAM ENGINE=InnoDB", "", None ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let engine value = if value = "" then "" else " ENGINE=" + value
+                  let sql = sprintf "CREATE TABLE p(id INT) %s PARTITION BY HASH(id) (PARTITION a%s,PARTITION b%s)" tableEngine (engine first) (engine second)
+                  let session, result = handle session sql
+                  match expected, result with
+                  | None, Affected 0UL -> ()
+                  | Some expected, Err(actual, _) -> Expect.equal actual expected sql
+                  | _ -> failtestf "%s: expected %A, got %A" sql expected result
+                  let _, count = handle session "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='p'"
+                  Expect.equal count (ResultSet([ "COUNT(*)" ], [ [ Some(if expected.IsNone then "1" else "0") ] ])) "rejected CREATE publishes no table"
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE p(id INT) PARTITION BY HASH(id) PARTITIONS 2"
+              for action, expected in
+                  [ "ADD PARTITION (PARTITION c ENGINE=InnoDB)", None
+                    "ADD PARTITION (PARTITION d ENGINE=MyISAM)", Some 1497
+                    "ADD PARTITION (PARTITION p0 ENGINE=MyISAM)", Some 1517
+                    "ADD PARTITION (PARTITION p0 ENGINE=unknown_engine)", Some 1286
+                    "REORGANIZE PARTITION missing INTO (PARTITION d ENGINE=MyISAM)", Some 1507
+                    "REORGANIZE PARTITION p0 INTO (PARTITION d ENGINE=InnoDB)", None
+                    "ENGINE=MyISAM", Some 1178 ] do
+                  match expected, (handle session ("ALTER TABLE p " + action) |> snd) with
+                  | None, Affected 0UL -> ()
+                  | Some expected, Err(actual, _) -> Expect.equal actual expected action
+                  | _, result -> failtestf "%s: got %A" action result
+              let session, _ = handle session "SET sql_mode=''"
+              let session, result = handle session "CREATE TABLE substituted(id INT) PARTITION BY HASH(id) (PARTITION a ENGINE=unknown_engine,PARTITION b)"
+              Expect.equal result (Affected 0UL) "unknown engine substitution preserves implicit defaults"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1286 ] "one substitution warning"
+              let session, result = handle session "ALTER TABLE p ENGINE=unknown_engine"
+              Expect.equal result (Affected 0UL) "an unknown ALTER engine retains InnoDB"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1286 ] "ALTER substitution warning"
+              let session, result = handle session "CREATE TABLE table_substitution(id INT) ENGINE=unknown_engine PARTITION BY HASH(id) (PARTITION a ENGINE=InnoDB,PARTITION b)"
+              Expect.equal result (Affected 0UL) "substituted table engine remains an explicit default"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1286; 1266 ] "table-engine substitution diagnostics"
+              match handle session "CREATE TABLE incompatible_substitution(id INT) ENGINE=unknown_engine PARTITION BY HASH(id) (PARTITION a ENGINE=MyISAM,PARTITION b ENGINE=MyISAM)" |> snd with
+              | Err(1497, _) -> ()
+              | other -> failtestf "expected conflict with substituted table engine, got %A" other
+
+          testCase "SELECT 1 returns a single row with column name '1'"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 

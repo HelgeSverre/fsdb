@@ -6313,6 +6313,31 @@ let private validatePartitionDefinitions (definitions: HashPartitionDefinition l
                 check (Set.add key seen) rest
     check Set.empty definitions
 
+let validateHashPartitionEngines (tableEngine: string option) definitions =
+    validatePartitionDefinitions definitions
+    |> Result.bind (fun definitions ->
+        let requested = definitions |> List.map (fun definition -> definition.RequestedEngines |> List.tryLast |> Option.map _.ToLowerInvariant())
+        let tableEngine = tableEngine |> Option.map _.ToLowerInvariant()
+        let mixed =
+            match tableEngine with
+            | Some engine -> requested |> List.exists (Option.exists ((<>) engine))
+            | None -> (Set.ofList requested).Count > 1
+        let engine = tableEngine |> Option.orElseWith (fun () -> requested |> List.tryPick id) |> Option.defaultValue "innodb"
+        if mixed then
+            Error(ExpressionError(1497, "The mix of handlers in the partitions is not allowed in this version of MySQL"))
+        elif engine <> "innodb" then
+            Error(ExpressionError(1178, "The storage engine for the table doesn't support native partitioning"))
+        else
+            Ok(definitions |> List.map (fun definition -> { definition with RequestedEngines = [] })))
+
+let prepareHashPartitioning tableEngine partitioning =
+    match partitioning with
+    | None -> Ok None
+    | Some partitioning ->
+        partitioning.Definitions |> Option.defaultValue []
+        |> validateHashPartitionEngines tableEngine
+        |> Result.map (fun definitions -> Some { partitioning with Definitions = partitioning.Definitions |> Option.map (fun _ -> definitions) })
+
 let createTableSeeded
     (store: Store)
     (dbName: string)
@@ -7155,7 +7180,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some partitioning when count > 8192u - partitioning.Count ->
             Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
         | Some partitioning ->
-            let added = [ for index in partitioning.Count .. partitioning.Count + count - 1u -> { Name = sprintf "p%d" index; Comment = "" } ]
+            let added = [ for index in partitioning.Count .. partitioning.Count + count - 1u -> { Name = sprintf "p%d" index; Comment = ""; RequestedEngines = [] } ]
             validatePartitionDefinitions (partitioning.OrderedDefinitions @ added)
             |> Result.map (fun definitions ->
                 let resized =
@@ -7169,7 +7194,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some partitioning when uint32 added.Length > 8192u - partitioning.Count ->
             Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
         | Some partitioning ->
-            validatePartitionDefinitions (partitioning.OrderedDefinitions @ added)
+            validateHashPartitionEngines (Some "InnoDB") (partitioning.OrderedDefinitions @ added)
             |> Result.map (fun definitions -> { table with Partitioning = Some(partitioning.WithDefinitions definitions) }, None)
     | CoalesceHashPartitions count ->
         match table.Partitioning with
@@ -7206,7 +7231,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                         let first = List.head positions
                         Ok(List.take first definitions @ replacements @ List.skip (first + positions.Length) definitions)
             reorganized
-            |> Result.bind validatePartitionDefinitions
+            |> Result.bind (validateHashPartitionEngines (Some "InnoDB"))
             |> Result.map (fun definitions -> { table with Partitioning = Some(partitioning.WithDefinitions definitions) }, None)
     | DropPartitions _ ->
         match table.Partitioning with
@@ -7214,6 +7239,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some _ -> Error(ExpressionError(1512, "DROP PARTITION can only be used on RANGE/LIST partitions"))
     | TruncatePartitions _ ->
         Error(ExpressionError(1105, "TRUNCATE PARTITION must be evaluated by the SQL executor"))
+    | SetEngine engine when table.Partitioning.IsSome ->
+        validateHashPartitionEngines (Some engine) [] |> Result.map (fun _ -> table, None)
     | SetEngine _ -> Ok(table, None)
     | SetAlterAlgorithm _
     | SetAlterLock _

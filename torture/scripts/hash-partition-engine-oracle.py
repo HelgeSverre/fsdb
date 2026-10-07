@@ -78,6 +78,9 @@ def verify(client, _writer):
         ("REORGANIZE PARTITION p0 INTO (PARTITION c ENGINE=InnoDB)", None, "c,p1"),
         ("REORGANIZE PARTITION p0 INTO (PARTITION c ENGINE=MyISAM)", mixed, "p0,p1"),
         ("REORGANIZE PARTITION missing INTO (PARTITION c ENGINE=MyISAM)", (1507, "HY000"), "p0,p1"),
+        ("ENGINE=InnoDB", None, "p0,p1"),
+        ("ENGINE=MyISAM", unsupported, "p0,p1"),
+        ("ENGINE=unknown_engine", unknown, "p0,p1"),
     ]:
         client.query(
             "DROP TABLE IF EXISTS probe.h;CREATE TABLE probe.h(id INT) ENGINE=InnoDB "
@@ -89,6 +92,37 @@ def verify(client, _writer):
             "FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='h'"
         ), expected_names)
         expect("preserved rows", client.query("SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.h"), "0,1,2,3,4,5")
+
+
+    for mode in ["NO_ENGINE_SUBSTITUTION", ""]:
+        for requests, has_unknown in [
+            ("ENGINE=unknown_engine ENGINE=InnoDB", True),
+            ("ENGINE=MyISAM ENGINE=InnoDB", False),
+            ("ENGINE=InnoDB ENGINE=unknown_engine", True),
+        ]:
+            client.query("DROP TABLE IF EXISTS probe.h")
+            sql = ("CREATE TABLE h(id INT) ENGINE=InnoDB PARTITION BY HASH(id) "
+                   f"(PARTITION a {requests},PARTITION b)")
+            error = unknown if has_unknown and mode else None
+            warnings = execute(client, sql, error, mode=mode)
+            if error is None:
+                expect("repeated-engine diagnostics", warnings,
+                       "Warning\t1286\tUnknown storage engine 'unknown_engine'" if has_unknown else "")
+    expect("permissive ALTER substitution", execute(client, "ALTER TABLE h ENGINE=unknown_engine", mode=""),
+           "Warning\t1286\tUnknown storage engine 'unknown_engine'")
+
+
+    for declarations, error in [
+        ("PARTITION a,PARTITION b", None),
+        ("PARTITION a ENGINE=InnoDB,PARTITION b", None),
+        ("PARTITION a ENGINE=MyISAM,PARTITION b ENGINE=MyISAM", mixed),
+    ]:
+        client.query("DROP TABLE IF EXISTS probe.h")
+        warnings = execute(client, "CREATE TABLE h(id INT) ENGINE=unknown_engine PARTITION BY HASH(id) (" + declarations + ")", error, mode="")
+        if error is None:
+            expect("substituted table engine", warnings,
+                   "Warning\t1286\tUnknown storage engine 'unknown_engine'\n"
+                   "Warning\t1266\tUsing storage engine InnoDB for table 'h'")
 
 
 if __name__ == "__main__":

@@ -481,9 +481,14 @@ comment, clearing it when omitted; no-list reorganization keeps the first
 partition's comment. Metadata, rendered definitions, and recovery preserve
 these values. Older name-only files load with empty comments.
 
-`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Other partition
-options, including engine, row hints, node group, and tablespace clauses,
-remain unsupported.
+`ENGINE` clauses on CREATE, ADD, and REORGANIZE accept compatible InnoDB
+requests and validate explicit versus inferred defaults. Mixed engines return
+1497; nonpartitionable engines return 1178. Unknown engines follow
+`NO_ENGINE_SUBSTITUTION`, including substitution warnings. ALTER cannot change
+a partitioned table to a nonpartitionable engine.
+
+`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Partition row
+hints, node group, and tablespace clauses remain unsupported.
 
 ## Check constraints
 

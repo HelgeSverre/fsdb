@@ -1,7 +1,7 @@
 # HASH partition names and reorganization
 
-Status: named definitions, comments, explicit-name addition, and named/no-list
-reorganization are covered by regressions. Other partition-option clauses and
+Status: named definitions, comments, engine validation, explicit-name addition,
+and named/no-list reorganization are covered by regressions. Other partition-option clauses and
 physical pruning remain open. The regression baseline `e9c0a7bd` rejected explicit
 names and both reorganization forms with 1064 / 42000.
 
@@ -56,21 +56,18 @@ regression also exposed an indexed ordering path that returned the entire
 table despite `PARTITION(...)`; ordered reads, counts, and joins now verify
 the selected rows.
 
-The root gate passes 2,946 tests. Dedicated recovery tests cover named WAL and
+The root gate passes 2,947 tests. Dedicated recovery tests cover named WAL and
 snapshot recovery plus count-only V7 WAL and FSNI snapshots, and captured name-only V9 WAL and FSNJ snapshots. The native oracle
 passes. The compatibility lane passes 49 cases / 5,117 steps with zero
-differences at `20261007T114129623-28985/contracts`. The durability lane passes
-at `20261007T114158381-29254/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
+differences at `20261007T120955700-55629/contracts`. The durability lane passes
+at `20261007T121015817-55796/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
 including acknowledged commits across 12 crash restarts.
 
 ## Remaining boundary
 
 Native MySQL retains `MAX_ROWS`, `MIN_ROWS`, `NODEGROUP`, and `TABLESPACE`
-options; fsdb still refuses these clauses, along with explicit engine clauses.
-A native definition with only its first partition specifying `ENGINE=InnoDB`
-and no table-level engine returned 1497 / HY000; unknown engine names returned
-1286 / 42000. Engine options therefore require validation rather than silent
-acceptance. Physical pruning remains a separate performance gap.
+options; fsdb still refuses these clauses. Physical pruning remains a separate
+performance gap.
 
 ## Explicit-name additions
 
@@ -105,8 +102,8 @@ rendering and parsing, and comment recovery from both WAL and snapshots.
 
 ## Partition engine validation
 
-Status: open. At `264305d9`, fsdb rejects the engine clauses emitted by native
-`SHOW CREATE TABLE` with 1064 / 42000. It also accepts
+Status: covered by regressions. At baseline `264305d9`, fsdb rejected the engine clauses emitted by native
+`SHOW CREATE TABLE` with 1064 / 42000. It also accepted
 `CREATE TABLE h(id INT) ENGINE=MyISAM PARTITION BY HASH(id) PARTITIONS 2`,
 which native MySQL rejects with 1178 / 42000.
 
@@ -148,5 +145,13 @@ returns 1286 when substitution is disabled.
 
 The oracle verifies that rejected CREATE statements publish no table, and
 that rejected alterations preserve partition names and all six fixture rows.
-These are compatibility contracts for the engine implementation; they do not
-indicate that fsdb supports these clauses yet.
+Repeated ENGINE clauses resolve in source order: an unknown earlier request
+still raises 1286 with substitution disabled, even if followed by InnoDB.
+With substitution enabled, an unknown table-level engine produces warnings
+1286 and 1266 and supplies an explicit InnoDB default. An unknown partition
+engine instead remains implicit after warning 1286. ALTER ENGINE=MyISAM on a
+partitioned table returns 1178; permissive unknown ALTER engines retain InnoDB.
+
+Engine requests are transient syntax. Validation clears them before schema
+publication, and accepted partitions use InnoDB. WAL and snapshot recovery
+retain names and comments without changing the persistence format.

@@ -1573,6 +1573,35 @@ let private validateAlterEngine (store: Store) tableName =
         Diagnostics.warning 1286 (sprintf "Unknown storage engine '%s'" engine)
         None
 
+let private resolvePartitionEngineRequests (store: Store) (definitions: HashPartitionDefinition list) =
+    let resolve engine =
+        if isRecognizedStorageEngine engine || equalsIgnoreCase engine "performance_schema" then Ok(Some engine)
+        elif store.ExecutionSettings.SqlMode.NoEngineSubstitution then
+            Error(Err(1286, sprintf "Unknown storage engine '%s'" engine))
+        else
+            Diagnostics.warning 1286 (sprintf "Unknown storage engine '%s'" engine)
+            Ok None
+    definitions
+    |> traverse (fun definition ->
+        definition.RequestedEngines
+        |> traverse resolve
+        |> Result.map (fun engines ->
+            { definition with RequestedEngines = engines |> List.tryLast |> Option.flatten |> Option.toList }))
+
+let private resolvePartitioningEngineRequests store partitioning =
+    match partitioning with
+    | Some({ Definitions = Some definitions } as partitioning) ->
+        resolvePartitionEngineRequests store definitions
+        |> Result.map (fun definitions -> Some { partitioning with Definitions = Some definitions })
+    | _ -> Ok partitioning
+
+let private resolvePartitionActionEngines store actions =
+    actions |> traverse (function
+        | AddNamedHashPartitions definitions -> resolvePartitionEngineRequests store definitions |> Result.map AddNamedHashPartitions
+        | ReorganizeHashPartitions(Some(selected, definitions)) ->
+            resolvePartitionEngineRequests store definitions |> Result.map (fun definitions -> ReorganizeHashPartitions(Some(selected, definitions)))
+        | action -> Ok action)
+
 let private validateCreateDirectories (store: Store) tableName (table: CreateTableSpec) =
     match table.DataDirectory, table.IndexDirectory with
     | None, None -> None
@@ -20262,12 +20291,17 @@ let rec executeAs
         match validateCreateEngine store name table.RequestedEngine with
         | Some error -> ids, error
         | None ->
-            match tryStoredView store db name with
-            | Some _ when table.IfNotExists ->
+            let table, partitionEngineError =
+                match resolvePartitioningEngineRequests store table.Partitioning with
+                | Ok partitioning -> { table with Partitioning = partitioning }, None
+                | Error error -> table, Some error
+            match partitionEngineError, tryStoredView store db name with
+            | Some error, _ -> ids, error
+            | None, Some _ when table.IfNotExists ->
                 noteTableExists name
                 ids, Affected 0UL
-            | Some _ -> ids, storageErr (TableExists name)
-            | None ->
+            | None, Some _ -> ids, storageErr (TableExists name)
+            | None, None ->
                 let alreadyExists = scan store db name |> Result.isOk
 
                 if alreadyExists && table.IfNotExists then
@@ -20283,9 +20317,12 @@ let rec executeAs
                           validateIndexExpressions registry table.Columns table.Indexes |> validationErrorOption storageErr ]
                         |> List.tryPick id
 
-                    match error with
-                    | Some error -> ids, error
-                    | None ->
+                    let tableEngine = table.RequestedEngine |> Option.map (fun engine -> if isRecognizedStorageEngine engine then engine else "InnoDB")
+                    let partitioning = prepareHashPartitioning tableEngine table.Partitioning
+                    match error, partitioning with
+                    | Some error, _ -> ids, error
+                    | None, Error error -> ids, storageErr error
+                    | None, Ok partitioning ->
                         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
                         Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
@@ -20301,7 +20338,7 @@ let rec executeAs
                                 table.Collation
                                 table.AutoIncrementSeed
                                 table.Comment
-                                table.Partitioning
+                                partitioning
                             |> Result.bind (fun () -> storeCheckDefinitions snapshot registry db name table.Columns table.Checks)
                             |> Result.bind (fun () -> validateCheckForeignKeys snapshot db name table.ForeignKeys)
 
@@ -20359,6 +20396,10 @@ let rec executeAs
                 ids, Affected 0UL
 
     | AlterTable(table, actions) ->
+        let actions, partitionEngineError =
+            match resolvePartitionActionEngines store actions with
+            | Ok actions -> actions, None
+            | Error error -> actions, Some error
         let db, table = splitQualified dbName table
         let executionOptionError =
             match scan store db table with
@@ -20372,7 +20413,17 @@ let rec executeAs
                 | _ -> None)
             |> List.tryLast
 
-        let engineError = validateAlterEngine store table requestedEngine
+        let engineError =
+            validateAlterEngine store table requestedEngine
+            |> Option.orElseWith (fun () ->
+                match requestedEngine, tableSnapshot store db table with
+                | Some engine, Ok { Partitioning = Some _ } when isRecognizedStorageEngine engine ->
+                    validateHashPartitionEngines (Some engine) [] |> validationErrorOption storageErr
+                | _ -> None)
+        let actions =
+            actions |> List.map (function
+                | SetEngine engine when not (isRecognizedStorageEngine engine) && not store.ExecutionSettings.SqlMode.NoEngineSubstitution -> SetEngine "InnoDB"
+                | action -> action)
 
         let addedColumns =
             actions
@@ -20383,7 +20434,8 @@ let rec executeAs
                 | _ -> None)
 
         let error =
-            [ executionOptionError
+            [ partitionEngineError
+              executionOptionError
               engineError
               rejectUnsafeGeneratedExpressions registry addedColumns
               rejectUnsafeFunctionalDefaults registry addedColumns ]

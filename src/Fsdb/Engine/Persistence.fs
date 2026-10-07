@@ -873,6 +873,7 @@ let private decodeColumnPosition (r: #IReader) : ColumnPosition =
     | 0x02uy -> PositionFirst
     | _ -> PositionAfter(readStr r)
 
+/// Engine requests are validated before publication; stored partitions use InnoDB.
 let private encodePartitionDefinitions (format: SnapshotFormat) (w: Writer) (definitions: HashPartitionDefinition list) =
     w.WriteInt32LE definitions.Length
     for definition in definitions do
@@ -882,7 +883,8 @@ let private encodePartitionDefinitions (format: SnapshotFormat) (w: Writer) (def
 let private decodePartitionDefinitions (format: SnapshotFormat) (r: #IReader) =
     List.init (r.ReadInt32LE()) (fun _ ->
         { Name = readStr r
-          Comment = if format.PartitionComments then readStr r else "" })
+          Comment = if format.PartitionComments then readStr r else ""
+          RequestedEngines = [] })
 
 let private encodePartitioning (format: SnapshotFormat) (w: Writer) (partitioning: HashPartitioning option) : unit =
     match partitioning with

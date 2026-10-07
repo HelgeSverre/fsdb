@@ -2649,12 +2649,12 @@ let tests =
               attach dir store
               let session = Fsdb.Session.create 1 store
               for sql in
-                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) PARTITION BY HASH(id) (PARTITION First COMMENT 'alpha',PARTITION Second COMMENT 'beta')"
+                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) ENGINE=InnoDB PARTITION BY HASH(id) (PARTITION First ENGINE=InnoDB COMMENT 'alpha',PARTITION Second COMMENT 'beta')"
                     "INSERT INTO named_hash VALUES(0),(1),(2),(3),(4),(5)"
                     "ALTER TABLE named_hash ADD PARTITION PARTITIONS 1"
                     "ALTER TABLE named_hash COALESCE PARTITION 1"
                     "ALTER TABLE named_hash REORGANIZE PARTITION First INTO (PARTITION Renamed COMMENT 'changed')"
-                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third COMMENT 'gamma')" ] do
+                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third ENGINE=InnoDB COMMENT 'gamma')" ] do
                   match handle session sql |> snd with
                   | Err(code, message) -> failtestf "%s: %d %s" sql code message
                   | _ -> ()

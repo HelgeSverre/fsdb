@@ -2741,11 +2741,20 @@ module private ParsedTableOptions =
         | TablePartitioning value -> { options with Partitioning = Some value }
         | IgnoredTableOption -> options
 
+type private HashPartitionOption =
+    | PartitionComment of string
+    | PartitionEngine of string
+
 let private hashPartitionDefinitions =
+    let option =
+        (keyword "COMMENT" >>. opt (sym "=") >>. stringLit |>> (toText >> Option.defaultValue "" >> PartitionComment))
+        <|> (keyword "ENGINE" >>. opt (sym "=") >>. identOrString |>> PartitionEngine)
     let definition =
-        keyword "PARTITION" >>. identifier
-        .>>. many (keyword "COMMENT" >>. opt (sym "=") >>. stringLit |>> (toText >> Option.defaultValue ""))
-        |>> fun (name, comments) -> { Name = name; Comment = comments |> List.tryLast |> Option.defaultValue "" }
+        keyword "PARTITION" >>. identifier .>>. many option
+        |>> fun (name, options) ->
+            { Name = name
+              Comment = options |> List.choose (function PartitionComment comment -> Some comment | _ -> None) |> List.tryLast |> Option.defaultValue ""
+              RequestedEngines = options |> List.choose (function PartitionEngine engine -> Some engine | _ -> None) }
     between (sym "(") (sym ")") (sepBy1 definition (sym ","))
 
 let private hashPartitionOption: Parser<TableOption, unit> =
