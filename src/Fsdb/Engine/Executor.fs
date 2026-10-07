@@ -9074,30 +9074,24 @@ and private applyMutationJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
+    (scope: JoinEvaluationScope)
     (sourceOverrides: MutationSourceOverrides)
     ((sourcesSoFar, rowsSoFar): MutationSource list * (Value[] option list * Value[]) list)
     (leftOperand: FromItem option)
     (join: Join)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
     match join.Table with
+    | FromJoinGroup _ when
+        join.Kind <> RightJoin && join.Kind <> NaturalRightJoin
+        && groupReferencesPreceding store dbName (sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)) join.Table ->
+        let prepare outer =
+            prepareMutationJoinSource store registry dbName { scope with LateralOuter = Some outer } sourceOverrides join.Table
+        applyDependentMutationJoin store registry dbName scope (sourcesSoFar, rowsSoFar) leftOperand join prepare
     | FromLateral(_, qualifier) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
-        let sourceColumns = sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)
-        let columns = sourceColumns |> List.collect snd
-        let contextFor = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sourceColumns) None
-        let prepare row =
-            resolveFromSubquery store registry dbName join.Table (Some(contextFor row))
+        let prepare outer =
+            resolveFromSubquery store registry dbName join.Table (Some outer)
             |> Result.map (mutationDerivedSource qualifier)
-        let matchRows rows = applyPreparedMutationJoin store registry dbName (sourcesSoFar, rows) leftOperand join
-        let matchRow ((_, flat) as row) = prepare flat |> Result.bind (matchRows [ row ])
-
-        match rowsSoFar with
-        | [] -> prepare (probeRow columns) |> Result.bind (matchRows [])
-        | first :: rest ->
-            matchRow first
-            |> Result.bind (fun (sources, firstRows) ->
-                rest
-                |> traverse matchRow
-                |> Result.map (fun remaining -> sources, firstRows @ (remaining |> List.collect snd)))
+        applyDependentMutationJoin store registry dbName scope (sourcesSoFar, rowsSoFar) leftOperand join prepare
     | FromJsonTable(source, path, columns, alias) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
         let sourceColumns = sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)
 
@@ -9105,7 +9099,7 @@ and private applyMutationJoin
             store
             registry
             dbName
-            (joinEvaluationScope None)
+            scope
             sourceColumns
             rowsSoFar
             snd
@@ -9123,25 +9117,44 @@ and private applyMutationJoin
                   Columns = joinColumns } ],
             List.ofSeq rows)
     | source ->
-        prepareMutationJoinSource store registry dbName sourceOverrides source
-        |> Result.bind (applyPreparedMutationJoin store registry dbName (sourcesSoFar, rowsSoFar) leftOperand join)
+        prepareMutationJoinSource store registry dbName scope sourceOverrides source
+        |> Result.bind (applyPreparedMutationJoin store registry dbName scope (sourcesSoFar, rowsSoFar) leftOperand join)
+
+and private applyDependentMutationJoin
+    store registry dbName scope
+    ((sources, rows): MutationSource list * (Value[] option list * Value[]) list)
+    leftOperand join prepare =
+    let sourceColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
+    let columns = sourceColumns |> List.collect snd
+    let contextFor = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sourceColumns) scope.LateralOuter
+    let matchRows rows = applyPreparedMutationJoin store registry dbName scope (sources, rows) leftOperand join
+    let matchRow ((_, flat) as row) = prepare (contextFor flat) |> Result.bind (matchRows [ row ])
+    match rows with
+    | [] -> prepare (contextFor (probeRow columns)) |> Result.bind (matchRows [])
+    | first :: rest ->
+        matchRow first
+        |> Result.bind (fun (combinedSources, firstRows) ->
+            rest
+            |> traverse matchRow
+            |> Result.map (fun remaining -> combinedSources, firstRows @ (remaining |> List.collect snd)))
 
 and private prepareMutationJoinSource
     (store: Store)
     (registry: Registry)
     (dbName: string)
+    (scope: JoinEvaluationScope)
     (sourceOverrides: MutationSourceOverrides)
     (source: FromItem)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
     match source with
     | FromJoinGroup(baseSource, joins) ->
         let baseJoin = { Kind = CrossJoin; Table = baseSource; On = Lit(VInt 1L); Using = [] }
-        let initial = applyMutationJoin store registry dbName sourceOverrides ([], [ [], [||] ]) None baseJoin
+        let initial = applyMutationJoin store registry dbName scope sourceOverrides ([], [ [], [||] ]) None baseJoin
         joins
         |> List.fold
             (fun state innerJoin ->
                 state |> Result.bind (fun (rows, leftOperand) ->
-                    applyMutationJoin store registry dbName sourceOverrides rows (Some leftOperand) innerJoin
+                    applyMutationJoin store registry dbName scope sourceOverrides rows (Some leftOperand) innerJoin
                     |> Result.map (fun rows -> rows, FromJoinGroup(leftOperand, [ innerJoin ]))))
             (initial |> Result.map (fun rows -> rows, baseSource))
         |> Result.map fst
@@ -9158,16 +9171,21 @@ and private prepareMutationJoinSource
         |> Result.map (fun (columns, rows, identityOf) ->
             [ { Qualifier = qualifier; PhysicalTable = Some tableRef; Columns = columns } ],
             rows |> List.map (fun row -> [ identityOf row ], row))
-    | FromSubquery(_, qualifier)
-    | FromLateral(_, qualifier)
     | FromJsonTable(_, _, _, qualifier) ->
-        resolveFromSubquery store registry dbName source None
+        prepareJoinSource store registry dbName scope Map.empty Map.empty source
+        |> Result.map (fun prepared -> mutationDerivedSource qualifier (prepared.Columns, List.ofSeq prepared.Rows))
+    | FromLateral(_, qualifier) ->
+        resolveFromSubquery store registry dbName source scope.LateralOuter
+        |> Result.map (mutationDerivedSource qualifier)
+    | FromSubquery(_, qualifier) ->
+        resolveFromSubquery store registry dbName source scope.QueryOuter
         |> Result.map (mutationDerivedSource qualifier)
 
 and private applyPreparedMutationJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
+    (scope: JoinEvaluationScope)
     ((sourcesSoFar, rowsSoFar): MutationSource list * (Value[] option list * Value[]) list)
     (leftOperand: FromItem option)
     (join: Join)
@@ -9182,7 +9200,7 @@ and private applyPreparedMutationJoin
     let rightFlatPadding = Array.create joinColumns.Length VNull
     let leftIdentityPadding = List.replicate sourcesSoFar.Length None
 
-    let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers None
+    let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers scope.QueryOuter
 
     let leftIndexed = rowsSoFar |> List.indexed
     let rightIndexed = rightRows |> List.indexed
@@ -9320,7 +9338,7 @@ and private runMutationJoin
         |> List.fold
             (fun acc join ->
                 acc |> Result.bind (fun (state, leftOperand) ->
-                    applyMutationJoin store registry dbName sourceOverrides state (Some leftOperand) join
+                    applyMutationJoin store registry dbName (joinEvaluationScope None) sourceOverrides state (Some leftOperand) join
                     |> Result.map (fun state -> state, FromJoinGroup(leftOperand, [ join ]))))
             (Ok(initial, FromTable from))
         |> Result.map fst

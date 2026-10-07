@@ -49,7 +49,41 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "lateral mutation sources preserve target identities"
+        [ testCase "grouped mutation dependencies preserve scope and target identities"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"
+                        "CREATE TABLE b(id INT PRIMARY KEY,n INT)"
+                        "INSERT INTO a VALUES(1,0),(2,0)"
+                        "INSERT INTO b VALUES(1,0),(3,0)" ]
+              for source, value in
+                  [ "b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1", "2"
+                    "b JOIN JSON_TABLE(JSON_ARRAY(a.id+b.id),'$[*]' COLUMNS(v INT PATH '$')) d ON 1", "2"
+                    "LATERAL (SELECT a.id AS v) d JOIN b ON d.v=b.id", "1"
+                    "JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(v INT PATH '$')) d JOIN b ON d.v=b.id", "1"
+                    "b RIGHT JOIN LATERAL (SELECT a.id AS v) d ON b.id=d.v", "1"
+                    "b RIGHT JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(v INT PATH '$')) d ON b.id=d.v", "1" ] do
+                  run "UPDATE a SET n=0" |> ignore
+                  let sql = "UPDATE a LEFT JOIN (" + source + ") ON a.id=b.id SET a.n=COALESCE(d.v,9)"
+                  Expect.equal (run sql) (Affected 2UL) sql
+                  Expect.equal (run "SELECT * FROM a ORDER BY id")
+                      (ResultSet([ "id"; "n" ], [ [ Some "1"; Some value ]; [ Some "2"; Some "9" ] ])) "outer target and padding"
+              Expect.equal
+                  (run "UPDATE a JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1) ON a.id=b.id SET b.n=d.v")
+                  (Affected 1UL) "inner physical target"
+              Expect.equal (run "SELECT * FROM b ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "2" ]; [ Some "3"; Some "0" ] ])) "inner identities retained"
+              Expect.equal
+                  (run "UPDATE a JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON d.v=a.id) ON a.id=b.id SET a.n=1")
+                  (Err(1054, "Unknown column 'a.id' in 'on clause'")) "inner ON cannot see preceding outer operands"
+              Expect.equal
+                  (run "DELETE a FROM a JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1) ON a.id=b.id")
+                  (Affected 1UL) "dependent delete"
+              Expect.equal (run "SELECT * FROM a ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "2"; Some "9" ] ])) "unmatched target survives"
+
+          testCase "lateral mutation sources preserve target identities"
           <| fun _ ->
               let run = queryFixture [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"; "INSERT INTO a VALUES(1,0),(2,0),(3,0)" ]
               for sql, affected in

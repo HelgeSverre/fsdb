@@ -352,4 +352,10 @@ matching, independent RIGHT sources, and duplicate lateral matches. Source
 preparation feeds the shared mutation matcher, retaining physical target
 identities and updating each target once. Lateral outputs have no writable
 identity. Read-only source and view diagnostics use MySQL's 1288 wording.
-Nested dependencies across grouped mutation operands remain uncovered.
+Grouped LATERAL and JSON_TABLE mutation sources receive preceding operand
+values, including leading dependent sources and inner RIGHT joins. The oracle
+checks LEFT padding, updates to outer and inner physical targets, and dependent
+DELETE. The inner ON clause retains its local scope and rejects references to
+preceding outer operands. Direct and grouped dependencies share per-row source
+preparation while the mutation matcher retains physical target identities.
+Broader correlated-source combinations and prepared metadata edges remain.
