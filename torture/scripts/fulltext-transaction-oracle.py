@@ -78,6 +78,8 @@ def own_writes(client):
             ("insert commit", f"INSERT INTO probe.docs VALUES(4,'{old} gold')", "COMMIT", "1,2,3,4\n1,2\n3\n1,2,4\n3"),
             ("update rollback", f"UPDATE probe.docs SET body='{new} orange' WHERE id=1", "ROLLBACK", "1,2,3\n2\n3\n1,2\n3"),
             ("update same term", f"UPDATE probe.docs SET body='{old} orange' WHERE id=1", "ROLLBACK", "1,2,3\n2\n3\n1,2\n3"),
+            ("restore original text rollback", f"UPDATE probe.docs SET body='{new} orange' WHERE id=1;UPDATE probe.docs SET body='{old} red' WHERE id=1", "ROLLBACK", "1,2,3\n2\n3\n1,2\n3"),
+            ("restore original text commit", f"UPDATE probe.docs SET body='{new} orange' WHERE id=1;UPDATE probe.docs SET body='{old} red' WHERE id=1", "COMMIT", "1,2,3\n2\n3\n1,2\n3"),
             ("update commit", f"UPDATE probe.docs SET body='{new} orange' WHERE id=1", "COMMIT", "1,2,3\n2\n3\n2\n1,3"),
             ("delete rollback", "DELETE FROM probe.docs WHERE id=1", "ROLLBACK", "2,3\n2\n3\n1,2\n3"),
         ]:
@@ -120,6 +122,7 @@ def concurrent_writes(reader, writer):
             ("insert", "INSERT INTO probe.docs VALUES(4,'orchard gold')", "1,2,3\n1,2\n3", "1,2,3,4\n1,2,4\n3"),
             ("update", "UPDATE probe.docs SET body='cobalt orange' WHERE id=1", "1,2,3\n2\n3", "1,2,3\n2\n1,3"),
             ("delete", "DELETE FROM probe.docs WHERE id=1", "1,2,3\n2\n3", "2,3\n2\n3"),
+            ("restored text", "START TRANSACTION;UPDATE probe.docs SET body='cobalt orange' WHERE id=1;UPDATE probe.docs SET body='orchard red' WHERE id=1;COMMIT", "1,2,3\n2\n3", "1,2,3\n1,2\n3"),
         ]:
             setup(writer)
             reader.query("SET TRANSACTION ISOLATION LEVEL " + isolation + ";START TRANSACTION;" + ordinary)
@@ -127,7 +130,7 @@ def concurrent_writes(reader, writer):
             actual = reader.query(ordinary + ";" + matches("orchard") + ";" + matches("cobalt"))
             expect(isolation + " concurrent " + name, actual,
                    repeatable if isolation == "REPEATABLE READ" else committed)
-            expected_body = "orchard red" if isolation == "REPEATABLE READ" or name == "insert" else "cobalt orange" if name == "update" else "NULL"
+            expected_body = "orchard red" if isolation == "REPEATABLE READ" or name in ["insert", "restored text"] else "cobalt orange" if name == "update" else "NULL"
             expect(isolation + " ordinary row after " + name,
                    reader.query("SELECT (SELECT body FROM probe.docs WHERE id=1)"), expected_body)
             reader.query("ROLLBACK")

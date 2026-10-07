@@ -32,6 +32,12 @@ even though ordinary predicates can retrieve that row. Commit makes the new text
 searchable. Full rollback and rollback to a savepoint restore the old postings.
 The same membership results hold for the ngram terms `生日` and `中文`.
 
+Changing the text and then assigning its original value does not restore the old
+full-text document. Both word and ngram probes remain unsearchable within that
+transaction; commit publishes a searchable replacement, while rollback restores
+the original document. This differs from assigning `body=body` without an earlier
+text change.
+
 Updating one full-text column also hides the row from a second full-text index
 over another column until commit. An update to an unrelated, non-full-text column
 does not hide the row. Document visibility therefore cannot be modeled as an
@@ -50,6 +56,11 @@ connection then commits a mutation:
 | Insert row 4 containing orchard | 1,2,3 | 1,2 | 3 |
 | Change row 1 to cobalt | 1,2,3 | 2 | 3 |
 | Delete row 1 | 1,2,3 | 2 | 3 |
+
+A writer that changes row 1's text and restores its original value before commit
+also hides that row from the older REPEATABLE READ reader's MATCH results. READ
+COMMITTED matches the replacement. Both readers retrieve the same original body
+text in this case, so comparing field values cannot determine document visibility.
 
 fsdb incorrectly retains row 1's orchard match in the update and delete cases.
 MySQL combines snapshot row visibility with the lifetime of the committed
@@ -90,13 +101,23 @@ Savepoint restoration and no-op/non-full-text updates must retain the correct
 document identity. Predicates and projected MATCH expressions must use the same
 read model, including MATCH used by writes and joined sources.
 
+Publication must preserve document replacement even when final row values equal
+the transaction's base values. `RowStore.ChangesFrom` deliberately omits equal
+values; `mergeRows` consumes that delta and updates full-text postings from field
+changes. A generation change therefore needs its own publication path when a
+transaction merges with concurrent writes. The direct catalog publication path
+already retains the branch's index objects. This is a code-level constraint on
+the pending fix, not an implemented visibility guarantee.
+
 ## Verification
 
 The maintained native oracle passes on MySQL 8.4.11. Separate disposable-server
 comparisons against fsdb's Debug executable reproduced the differences above.
 `just check` passes all 2,874 tests with no build warnings or errors, including
-three read-view regressions. The follow-up native contract run could not start:
-MySQL initialization exhausted available disk space, including on a retry with
-64 MiB redo capacity. No new differential result is claimed for this foundation.
+three read-view regressions. After disk space became available, the native
+natural-phrase oracle and all 47 contracts (5,007 steps) passed with no differences:
+`torture/artifacts/runs/20261007T043051269-71408/contracts`.
+The extended transaction oracle also passes, including restored-text document
+replacement under REPEATABLE READ and READ COMMITTED.
 The scoring-view foundation is implemented; transaction document visibility is
 not yet connected. No known-gap suppression is included.
