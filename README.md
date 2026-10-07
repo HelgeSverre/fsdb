@@ -1,3 +1,5 @@
+![fsdb — F# under the hood. MySQL on the wire.](art/header.png)
+
 # fsdb
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
