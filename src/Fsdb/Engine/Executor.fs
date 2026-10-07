@@ -8275,6 +8275,49 @@ and private alignPreparedRows
             prepared :> Value[] seq, id
     | _ -> rows, id
 
+and private prepareJoinSource
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (outer: EvalContext option)
+    (sourceOverrides: JoinSourceOverrides)
+    (sourcePredicates: Map<string, Expr>)
+    (item: FromItem)
+    : Result<ResolvedJoinSource, QueryResult> =
+    let joinQualifier = fromItemQualifier item
+    let qualifier = joinQualifier.ToLowerInvariant()
+
+    match Map.tryFind qualifier sourceOverrides with
+    | Some source -> Ok(source.Columns, source.Rows, source.PhysicalTable)
+    | None ->
+        match item with
+        | FromTable tableRef ->
+            tryPhysicalTableRef store dbName tableRef
+            |> Result.bind (function
+                | Some table -> Ok(table.Columns, table.RowsArray :> Value[] seq, Some table)
+                | None ->
+                    resolveFromItem store registry dbName item
+                    |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None))
+        | _ ->
+            resolveFromItem store registry dbName item
+            |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
+
+    |> Result.bind (fun (columns, rows, physicalTable) ->
+        let predicate = Map.tryFind qualifier sourcePredicates
+        let rows =
+            if Map.containsKey qualifier sourceOverrides then
+                rows
+            else
+                narrowPhysicalSourceRows store registry item physicalTable predicate rows
+
+        prepareVirtualRows store registry dbName joinQualifier columns rows
+        |> Result.bind (fun rows ->
+            match predicate with
+            | None -> Ok { Columns = columns; Rows = rows; PhysicalTable = physicalTable }
+            | Some predicate ->
+                filterSourceRows store registry dbName outer joinQualifier columns predicate rows
+                |> Result.map (fun rows -> { Columns = columns; Rows = rows; PhysicalTable = None })))
+
 /// Compatible equi-keys use a hash join; other predicates use lazy nested
 /// loops. Row indices distinguish duplicate-valued rows when padding outer
 /// joins.
@@ -8292,43 +8335,11 @@ and private applyResolvedJoin
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     let joinQualifier = fromItemQualifier join.Table
 
-    let joinSource =
-        let qualifier = joinQualifier.ToLowerInvariant()
-
-        match Map.tryFind qualifier sourceOverrides with
-        | Some source -> Ok(source.Columns, source.Rows, source.PhysicalTable)
-        | None ->
-            match join.Table with
-            | FromTable tableRef ->
-                tryPhysicalTableRef store dbName tableRef
-                |> Result.bind (function
-                    | Some table -> Ok(table.Columns, table.RowsArray :> Value[] seq, Some table)
-                    | None ->
-                        resolveFromItem store registry dbName join.Table
-                        |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None))
-            | _ ->
-                resolveFromItem store registry dbName join.Table
-                |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
-
-        |> Result.bind (fun (columns, rows, physicalTable) ->
-            let predicate = Map.tryFind qualifier sourcePredicates
-            let rows =
-                if Map.containsKey qualifier sourceOverrides then
-                    rows
-                else
-                    narrowPhysicalSourceRows store registry join.Table physicalTable predicate rows
-
-            prepareVirtualRows store registry dbName joinQualifier columns rows
-            |> Result.bind (fun rows ->
-                match predicate with
-                | None -> Ok(columns, rows, physicalTable)
-                | Some predicate ->
-                    filterSourceRows store registry dbName outer joinQualifier columns predicate rows
-                    |> Result.map (fun rows -> columns, rows, None)))
+    let joinSource = prepareJoinSource store registry dbName outer sourceOverrides sourcePredicates join.Table
 
     match joinSource with
     | Error e -> Error e
-    | Ok(joinColumns, joinRows, physicalTable) ->
+    | Ok { Columns = joinColumns; Rows = joinRows; PhysicalTable = physicalTable } ->
         let newSources = sourcesSoFar @ [ joinQualifier, joinColumns ]
         let qualifiers = qualifierRanges newSources
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
