@@ -14565,6 +14565,36 @@ and private runWindowedSelect
                     let _, highs = boundsFor group
                     highs.[pos]
 
+                let searchableRangePartitions =
+                    Dictionary<WindowRow[], bool>(HashIdentity.Reference)
+
+                let canSearchRangePartition group current =
+                    match searchableRangePartitions.TryGetValue group with
+                    | true, searchable -> searchable
+                    | false, _ ->
+                        let comparable other =
+                            match current, other with
+                            | _, VNull -> true
+                            | (VInt _ | VUInt _ | VDecimal _), (VInt _ | VUInt _ | VDecimal _) -> true
+                            | VDouble _, VDouble value -> rangeKeyOf (VDouble value) |> Option.isSome
+                            | (VDate _ | VDateTime _), (VDate _ | VDateTime _) -> true
+                            | VTime _, VTime _ -> true
+                            | _ -> false
+
+                        // Mixed exact/approximate comparisons need not define a monotone threshold.
+                        let searchable =
+                            group |> Array.forall (fun (_, (_, keys, _)) -> keys |> List.forall (fst >> comparable))
+                        searchableRangePartitions.Add(group, searchable)
+                        searchable
+
+                let firstRangePosition length predicate =
+                    let mutable low = 0
+                    let mutable high = length
+                    while low < high do
+                        let middle = low + (high - low) / 2
+                        if predicate middle then high <- middle else low <- middle + 1
+                    low
+
                 let rangeBounds group pos startBound endBound =
                     let selfKey = ordKeyAt group pos |> List.tryHead |> Option.map fst
 
@@ -14686,31 +14716,53 @@ and private runWindowedSelect
                             boundary endBound
                             |> Result.mapError (failure startValue true)
                             |> Result.map (fun endValue ->
-                                let within other =
-                                    let endsBefore =
+                                if canSearchRangePartition group current then
+                                    let compareAt index boundary =
+                                        let value = ordKeyAt group index |> List.head |> fst
+                                        let compared =
+                                            match value with
+                                            | VNull -> -1
+                                            | value -> compareRangeValues value boundary
+                                        if descending then -compared else compared
+
+                                    let low =
+                                        startValue
+                                        |> Option.map (fun value -> firstRangePosition group.Length (fun index -> compareAt index value >= 0))
+                                        |> Option.defaultValue 0
+                                    let high =
                                         endValue
-                                        |> Option.forall (fun finish ->
-                                            let compared = compareRangeValues other finish
-                                            if descending then compared >= 0 else compared <= 0)
+                                        |> Option.map (fun value -> firstRangePosition group.Length (fun index -> compareAt index value > 0) - 1)
+                                        |> Option.defaultValue (group.Length - 1)
 
-                                    startsAfter startValue other && endsBefore
+                                    if low <= high then low, high
+                                    elif startBound = UnboundedPreceding then 0, -1
+                                    else pos, pos - 1
+                                else
+                                    let within other =
+                                        let endsBefore =
+                                            endValue
+                                            |> Option.forall (fun finish ->
+                                                let compared = compareRangeValues other finish
+                                                if descending then compared >= 0 else compared <= 0)
 
-                                let inFrame =
-                                    group
-                                    |> Array.map (fun (_, (_, key, _)) ->
-                                        key
-                                        |> List.tryHead
-                                        |> Option.map fst
-                                        |> Option.exists (function
-                                            | VNull ->
-                                                (startBound = UnboundedPreceding && not descending)
-                                                || (endBound = UnboundedFollowing && descending)
-                                            | value -> within value))
+                                        startsAfter startValue other && endsBefore
 
-                                match inFrame |> Array.tryFindIndex id, inFrame |> Array.tryFindIndexBack id with
-                                | Some low, Some high -> low, high
-                                | _ when startBound = UnboundedPreceding -> 0, -1
-                                | _ -> pos, pos - 1))
+                                    let inFrame =
+                                        group
+                                        |> Array.map (fun (_, (_, key, _)) ->
+                                            key
+                                            |> List.tryHead
+                                            |> Option.map fst
+                                            |> Option.exists (function
+                                                | VNull ->
+                                                    (startBound = UnboundedPreceding && not descending)
+                                                    || (endBound = UnboundedFollowing && descending)
+                                                | value -> within value))
+
+                                    match inFrame |> Array.tryFindIndex id, inFrame |> Array.tryFindIndexBack id with
+                                    | Some low, Some high -> low, high
+                                    | _ when startBound = UnboundedPreceding -> 0, -1
+                                    | _ -> pos, pos - 1))
 
                 // [lo, hi] row indexes (inclusive; `hi < lo` means an empty
                 // frame) this row's frame covers within its partition.

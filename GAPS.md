@@ -639,9 +639,12 @@ Smaller-size controls exceed the repeatability threshold under competing host
 load, so its raw timings do not establish a regression or speedup.
 
 The [post-compatibility comparison](benchmarks/results/10d2a1d8-windows.md)
-retains the same priorities: offset RANGE boundary scans and stored-function
-inputs. It includes a saved fsdb baseline and alternating target order, but
-large control drift still limits the results to exploratory measurements.
+provides a saved fsdb baseline with alternating target order. The subsequent
+[RANGE boundary search measurements](benchmarks/results/range-boundary-search.md)
+show a large reduction from replacing partition scans with binary searches
+for compatible key domains. Mixed domains retain the scan fallback. Stored-function
+inputs and remaining aggregate/expression overhead are still profiling targets;
+control drift limits claims about smaller timing differences.
 
 Unless an artifact header says otherwise, the linked planner profiles compare
 native in-memory fsdb with native durable MySQL. They expose query-shape and
