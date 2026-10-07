@@ -263,6 +263,32 @@ let private termScoresWithin (candidateIds: Set<'id> option) (index: Index<'id>)
 
 let private termScores index term = termScoresWithin None index term
 
+let private exactPhraseMatches (doc: Token[]) (words: Token[]) =
+    if words.Length = 0 then
+        false
+    else
+        seq { 0 .. doc.Length - words.Length }
+        |> Seq.exists (fun start ->
+            words
+            |> Array.indexed
+            |> Array.forall (fun (offset, word) -> doc.[start + offset].Key = word.Key))
+
+let private phraseCandidates (index: Index<'id>) (words: Token[]) =
+    words
+    // InnoDB omits short terms and stopwords from postings but retains their
+    // positions after the first searchable word in a phrase.
+    |> Array.filter (isSearchable index.Tokenizer)
+    |> Array.distinctBy _.Key
+    |> Array.map (fun word ->
+        index.Postings
+        |> Map.tryFind word.Key
+        |> Option.map (Map.keys >> Set.ofSeq)
+        |> Option.defaultValue Set.empty)
+    |> Array.sortBy _.Count
+    |> function
+        | [||] -> Set.empty
+        | sets -> sets |> Array.reduce Set.intersect
+
 // ---------------------------------------------------------------------------
 // Natural language mode.
 // ---------------------------------------------------------------------------
@@ -283,8 +309,7 @@ let private naturalTerms (index: Index<'id>) (query: string) : string[] =
     |> Array.map _.Key
     |> Array.distinct
 
-/// Element-wise sum of every term's per-doc contribution — the natural and
-/// query-expansion modes are both exactly this over different term sets.
+/// Sum of independent terms' per-document contributions.
 /// Accumulates into one result map rather than retaining one map per term,
 /// so peak memory stays O(rows), not
 /// O(terms × rows) for a query with many distinct terms.
@@ -304,13 +329,91 @@ let private sumTermScoresWithin (candidateIds: Set<'id> option) (index: Index<'i
                     scores)
             (termScoresWithin candidateIds index terms.[0])
 
-let private sumTermScores index terms = sumTermScoresWithin None index terms
+type private NaturalClause =
+    | NaturalWord of key: string
+    | NaturalPhrase of Token[]
+
+let private naturalWordClauses (index: Index<'id>) (query: string) =
+    let words text = tokensWith Words index.Collation text
+    let plain text = words text |> Array.filter (isSearchable Words) |> Array.map (fun word -> NaturalWord word.Key)
+    let clauses = ResizeArray<NaturalClause>()
+    let mutable start = 0
+    while start < query.Length do
+        let opening = query.IndexOf('"', start)
+        let closing = if opening < 0 then -1 else query.IndexOf('"', opening + 1)
+        if closing < 0 then
+            clauses.AddRange(plain (query.Substring start))
+            start <- query.Length
+        else
+            clauses.AddRange(plain (query.Substring(start, opening - start)))
+            words (query.Substring(opening + 1, closing - opening - 1))
+            |> Array.skipWhile (isSearchable Words >> not)
+            |> NaturalPhrase
+            |> clauses.Add
+            start <- closing + 1
+    clauses.ToArray()
+
+let private naturalClauseKeys = function
+    | NaturalWord key -> [| key |]
+    | NaturalPhrase words -> words |> Array.filter (isSearchable Words) |> Array.map _.Key
+
+let private needsNaturalWordEvaluation (index: Index<'id>) (query: string) =
+    match index.Tokenizer with
+    | Ngrams _ -> false
+    | Words ->
+        if query.Contains '"' then true
+        else
+            let terms = queryTokens index query |> Array.filter (isSearchable Words)
+            terms.Length <> (terms |> Array.distinctBy _.Key).Length
+
+/// Matching terms retain their row sets separately from query occurrence counts.
+/// Repeated query words increase MySQL's document frequency, not a row's TF.
+let private naturalWordMatches candidateIds (index: Index<'id>) clauses =
+    let occurrences =
+        clauses |> Array.collect naturalClauseKeys |> Array.countBy id |> Map.ofArray
+    let documents =
+        clauses
+        |> Array.fold (fun matches clause ->
+            let ids =
+                match clause with
+                | NaturalWord key ->
+                    index.Postings |> Map.tryFind key
+                    |> Option.map (Map.keys >> Set.ofSeq) |> Option.defaultValue Set.empty
+                | NaturalPhrase words ->
+                    phraseCandidates index words
+                    |> Set.filter (fun id ->
+                        index.Documents.[id] |> Array.exists (fun field -> exactPhraseMatches field words))
+            let ids = candidateIds |> Option.map (Set.intersect ids) |> Option.defaultValue ids
+            if ids.IsEmpty then matches
+            else
+                naturalClauseKeys clause
+                |> Array.fold (fun matches key ->
+                    Map.change key (fun previous ->
+                        Some(Set.union ids (Option.defaultValue Set.empty previous))) matches) matches) Map.empty
+    occurrences, documents
+
+let private scoreNaturalWordMatches (index: Index<'id>) occurrences documents =
+    documents
+    |> Map.fold (fun scores key ids ->
+        let rows = index.Postings.[key]
+        let frequency = float rows.Count * float (Map.find key occurrences)
+        let weight = max (abs (log10 (float index.Documents.Count / frequency))) idfFloor
+        ids |> Set.fold (fun scores id ->
+            let contribution = float rows.[id] * weight * weight
+            Map.change id (fun current -> Some(contribution + Option.defaultValue 0.0 current)) scores) scores) Map.empty
+
+let private naturalScoresWithinOption candidateIds (index: Index<'id>) query =
+    if needsNaturalWordEvaluation index query then
+        let occurrences, documents = naturalWordMatches candidateIds index (naturalWordClauses index query)
+        scoreNaturalWordMatches index occurrences documents
+    else
+        sumTermScoresWithin candidateIds index (naturalTerms index query)
 
 let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
-    sumTermScores index (naturalTerms index query)
+    naturalScoresWithinOption None index query
 
 let internal naturalScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) : Map<'id, float> =
-    sumTermScoresWithin (Some candidateIds) index (naturalTerms index query)
+    naturalScoresWithinOption (Some candidateIds) index query
 
 let internal tryNaturalSingleTermScoresDictionaryWithin
     (candidateIds: Set<'id> option)
@@ -318,7 +421,7 @@ let internal tryNaturalSingleTermScoresDictionaryWithin
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
     match naturalTerms index query with
-    | [| term |] ->
+    | [| term |] when not (needsNaturalWordEvaluation index query) ->
         match Map.tryFind term index.Postings with
         | None -> Collections.Generic.Dictionary() |> Some
         | Some rows ->
@@ -538,16 +641,6 @@ let private parseBooleanQuery tokenizer (collation: Collation) (query: string) :
 
     nodes 0 false
 
-let private exactPhraseMatches (doc: Token[]) (words: Token[]) =
-    if words.Length = 0 then
-        false
-    else
-        seq { 0 .. doc.Length - words.Length }
-        |> Seq.exists (fun start ->
-            words
-            |> Array.indexed
-            |> Array.forall (fun (offset, word) -> doc.[start + offset].Key = word.Key))
-
 let private proximityMatches (doc: Token[]) (words: Token[]) distance =
     let required = words |> Array.map _.Key |> Set.ofArray
 
@@ -607,22 +700,6 @@ let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'va
         candidates
         |> Seq.choose (fun id -> Map.tryFind id scores |> Option.map (fun score -> id, score))
         |> Map.ofSeq
-
-let private phraseCandidates (index: Index<'id>) (words: Token[]) =
-    words
-    // InnoDB omits short terms and stopwords from postings but retains their
-    // positions after the first searchable word in a phrase.
-    |> Array.filter (isSearchable index.Tokenizer)
-    |> Array.distinctBy _.Key
-    |> Array.map (fun word ->
-        index.Postings
-        |> Map.tryFind word.Key
-        |> Option.map (Map.keys >> Set.ofSeq)
-        |> Option.defaultValue Set.empty)
-    |> Array.sortBy _.Count
-    |> function
-        | [||] -> Set.empty
-        | sets -> sets |> Array.reduce Set.intersect
 
 let private booleanCandidates (results: (BoolOp * Map<'id, float>) list) : seq<'id> =
     let required =
@@ -899,9 +976,20 @@ let private expansionScoresWithinOption candidateIds (index: Index<'id>) (query:
         |> Array.filter (isSearchable index.Tokenizer)
         |> Array.map _.Key
 
-    Array.append (naturalTerms index query) seedTerms
-    |> Array.distinct
-    |> sumTermScoresWithin candidateIds index
+    if needsNaturalWordEvaluation index query then
+        let clauses = naturalWordClauses index query
+        let _, matched = naturalWordMatches None index clauses
+        // Only terms that contributed to the first pass are already searched.
+        let expansion =
+            seedTerms |> Array.distinct
+            |> Array.filter (fun key -> not (Map.containsKey key matched))
+            |> Array.map NaturalWord
+        let occurrences, documents = naturalWordMatches candidateIds index (Array.append clauses expansion)
+        scoreNaturalWordMatches index occurrences documents
+    else
+        Array.append (naturalTerms index query) seedTerms
+        |> Array.distinct
+        |> sumTermScoresWithin candidateIds index
 
 let expansionScores (index: Index<'id>) (query: string) : Map<'id, float> =
     expansionScoresWithinOption None index query

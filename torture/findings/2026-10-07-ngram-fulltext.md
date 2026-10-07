@@ -34,8 +34,8 @@ matches in the birthday corpus, while `"a 生日"` matches birthday documents.
 Exact phrases stay within one indexed column. Ngram phrases ignore the
 proximity suffix, including `@100`. Ordinary word-parser proximity searches
 can span columns. Row-wide term counts still determine relevance.
-The separate [natural-language word-phrase gap](2026-10-07-fulltext-natural-phrases.md)
-remains open.
+Natural-language word phrases have separate
+[oracle evidence](2026-10-07-fulltext-natural-phrases.md).
 
 `@@ngram_token_size` and its GLOBAL form report 2. The SESSION read and both
 SESSION and GLOBAL assignments produce MySQL's error 1238 / HY000. Explicit

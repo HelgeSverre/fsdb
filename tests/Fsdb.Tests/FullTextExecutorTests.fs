@@ -122,6 +122,34 @@ let tests =
                   if parser = "" then
                       Expect.equal (ids (run store (query " @100"))) [ "1"; "2"; "5" ] "word proximity can cross fields"
 
+          testCase "natural-language phrases preserve words and column boundaries"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE docs(id INT PRIMARY KEY,a TEXT,b TEXT,FULLTEXT(a,b))" |> ignore
+              run store "INSERT INTO docs VALUES(1,'mysql','security'),(2,'mysql security',''),(3,'mysqlsecurity',NULL),(4,'my','sql'),(5,'sql','mysql security'),(6,'mysql extra security',''),(7,'security mysql',''),(8,'database',''),(9,'mysql the security',''),(10,'mysql x security','')" |> ignore
+              for term, natural, expanded in
+                  [ "\"mysql security\"", [ "2"; "5" ], [ "2"; "4"; "5" ]
+                    "\"mysql security\" database", [ "2"; "5"; "8" ], [ "2"; "4"; "5"; "8" ]
+                    "\"mysql security\" \"security mysql\"", [ "2"; "5"; "7" ], [ "2"; "4"; "5"; "7" ]
+                    "\"mysql the security\"", [ "9" ], [ "9" ]
+                    "\"mysql x security\"", [ "10" ], [ "10" ]
+                    "\"mysql mysql\"", [], [] ] do
+                  for mode, expected in [ "IN NATURAL LANGUAGE MODE", natural; "WITH QUERY EXPANSION", expanded ] do
+                      let sql = sprintf "SELECT id FROM docs WHERE MATCH(a,b) AGAINST('%s' %s) ORDER BY id" term mode
+                      Expect.equal (ids (run store sql)) expected sql
+
+              for term, row, expected in
+                  [ "\"mysql security\"", 2, 0.04798923433
+                    "\"mysql security\" mysql", 1, 0.02135340311
+                    "\"mysql security\" mysql", 2, 0.04534801841
+                    "mysql mysql", 1, 0.02135340311
+                    "\"mysql security\" \"mysql security\"", 2, 0.04270680621 ] do
+                  let sql = sprintf "SELECT MATCH(a,b) AGAINST('%s') FROM docs WHERE id=%d" term row
+                  match run store sql with
+                  | ResultSet(_, [ [ Some score ] ]) ->
+                      Expect.isTrue (abs (float score - expected) < 0.000001) sql
+                  | other -> failtestf "expected phrase relevance, got %A" other
+
           testCase "ngram indexes maintain postings through DDL and rollback"
           <| fun _ ->
               for definition in

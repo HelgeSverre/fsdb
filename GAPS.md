@@ -490,6 +490,12 @@ only touched rows. Phrase and proximity conditions intersect their word
 postings, retain per-word relevance, and check candidate documents with
 ordered matching or a linear sliding window.
 
+Natural-language word queries preserve quoted phrases within each indexed
+column, including internal short words and stopwords. Mixed terms and phrases
+are alternatives; repeated query words retain MySQL's relevance calculation.
+Query expansion preserves phrase conditions while adding seed terms
+([oracle evidence](torture/findings/2026-10-07-fulltext-natural-phrases.md)).
+
 The grouped evaluator begins with the smallest required child and probes the
 other required children; without one, only positive children seed candidates.
 Bounded AND/OR predicate trees intersect or union MATCH candidates before
@@ -504,7 +510,6 @@ before evaluating joins, predicates, and assignments.
 |---|---|---|---|---|
 | MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, indexed `IN`, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; cross-source inference and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
 | Tunables | innodb_ft_min_token_size, innodb_ft_max_token_size, ft_query_expansion_limit, stopword tables, enable/disable | the three numeric defaults are exposed with MySQL's GLOBAL/read-only scope and drive `FullText` at 3 / 84 / 20; `INNODB_FT_DEFAULT_STOPWORD` exposes the exact duplicate-preserving built-in list, while custom stopword tables and enable/disable behavior remain absent | low | divergence/refusal |
-| Natural-language phrases | the default word parser enforces quoted phrases within an indexed column | quoted words currently score as independent natural-language terms ([reproduction](torture/findings/2026-10-07-fulltext-natural-phrases.md)); boolean exact phrases retain column boundaries | medium | divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | default-size ngram DDL, search modes, stopword and phrase boundaries, mutation, and recovery are implemented; startup token-size configuration and MeCab remain open ([oracle and regressions](torture/findings/2026-10-07-ngram-fulltext.md)) | medium (for CJK) | partial |
 
 ## 12. Wire protocol and prepared statements

@@ -2659,6 +2659,26 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS aggregate_warning_input" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private naturalPhrases =
+        { Name = "natural-fulltext-phrases"
+          Setup =
+            [| "CREATE TABLE natural_phrases(id INT PRIMARY KEY,a TEXT,b TEXT,FULLTEXT(a,b))"
+               "INSERT INTO natural_phrases VALUES(1,'mysql','security'),(2,'mysql security',''),(3,'mysqlsecurity',NULL),(4,'my','sql'),(5,'sql','mysql security'),(6,'mysql extra security',''),(7,'security mysql',''),(8,'database',''),(9,'mysql the security',''),(10,'mysql x security','')" |]
+          Steps =
+            [| for modeIndex, mode in [ "IN NATURAL LANGUAGE MODE"; "WITH QUERY EXPANSION" ] |> List.indexed do
+                   for termIndex, term in
+                       [ "\"mysql security\""; "\"mysql security\" database"; "mysql \"security database\""; "\"mysql security\" \"security mysql\""; "\"mysql the security\""; "\"the mysql\""; "\"mysql x security\""; "\"mysql mysql\""; "\"mysql security"; "mysql security\""; "\"mysql security\" @100"; "mysql mysql"; "\"mysql\" mysql"; "\"mysql security\" mysql mysql"; "\"mysql security\" \"mysql security\" \"mysql security\""; "\"mysql mysql\" mysql"; "\"security database\" mysql"; "\"mysql security\" security" ] |> List.indexed do
+                       let name = sprintf "phrase-%d-%d" modeIndex termIndex
+                       let against = sprintf "MATCH(a,b) AGAINST('%s' %s)" term mode
+                       let matches = sprintf "SELECT id FROM natural_phrases WHERE %s ORDER BY id" against
+                       let scores = sprintf "SELECT id,CAST(%s AS DECIMAL(12,5)) AS relevance FROM natural_phrases ORDER BY id" against
+                       Contract.query (name + "-text") matches
+                       Contract.preparedQuery (name + "-binary") matches [||]
+                       Contract.query (name + "-scores-text") scores
+                       Contract.preparedQuery (name + "-scores-binary") scores [||] |]
+          Cleanup = [| "DROP TABLE IF EXISTS natural_phrases" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private ngramFullText =
         { Name = "ngram-fulltext"
           Setup =
@@ -3037,6 +3057,7 @@ module ContractCatalog =
            volatileWindowInputs
            storedFunctionSet
            ngramFullText
+           naturalPhrases
            temporalNumericConversion
            roundingPrecisionDescriptors
            integralRoundingDescriptors
