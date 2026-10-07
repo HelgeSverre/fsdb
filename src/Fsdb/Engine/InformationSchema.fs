@@ -2129,7 +2129,7 @@ let private partitionsColumns =
 let private partitionsRows (catalog: Catalog) : Value[] list =
     allTables catalog
     |> List.collect (fun (dbName, t) ->
-        let row partitionName ordinal methodName expression rowCount =
+        let row partitionName ordinal methodName expression comment rowCount =
             [| vs "def"
                vs dbName
                vs t.OriginalName
@@ -2152,12 +2152,12 @@ let private partitionsRows (catalog: Catalog) : Value[] list =
                VNull
                VNull
                VNull
-               vs ""
-               vs ""
+               vs comment
+               vs (if partitionName = VNull then "" else "default")
                VNull |]
 
         match t.Partitioning with
-        | None -> [ row VNull VNull VNull VNull t.RowsArray.Length ]
+        | None -> [ row VNull VNull VNull VNull "" t.RowsArray.Length ]
         | Some partitioning ->
             let counts = Array.zeroCreate<int> (int partitioning.Count)
 
@@ -2172,12 +2172,13 @@ let private partitionsRows (catalog: Catalog) : Value[] list =
                 | Error _ -> ()
             | _ -> ()
 
-            [ for index, name in List.indexed partitioning.OrderedNames ->
+            [ for index, definition in List.indexed partitioning.OrderedDefinitions ->
                   row
-                      (vs name)
+                      (vs definition.Name)
                       (vi (int index + 1))
                       (vs (if partitioning.Linear then "LINEAR HASH" else "HASH"))
                       (vs (exprToSql partitioning.Expression))
+                      definition.Comment
                       counts.[int index] ])
 
 // ---------------------------------------------------------------------------
@@ -3874,9 +3875,15 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                 "\nPARTITION BY %sHASH (%s)\n%s"
                 (if value.Linear then "LINEAR " else "")
                 (exprToSql value.Expression)
-                (match value.Names with
+                (match value.Definitions with
                  | None -> sprintf "PARTITIONS %d" value.Count
-                 | Some names -> names |> List.map (fun name -> "PARTITION " + backtick name) |> String.concat ", " |> sprintf "(%s)"))
+                 | Some definitions ->
+                     definitions
+                     |> List.map (fun definition ->
+                         let comment = if definition.Comment = "" then "" else sprintf " COMMENT = '%s'" (showCreateString definition.Comment)
+                         "PARTITION " + backtick definition.Name + comment)
+                     |> String.concat ", "
+                     |> sprintf "(%s)"))
         |> Option.defaultValue ""
 
     sprintf

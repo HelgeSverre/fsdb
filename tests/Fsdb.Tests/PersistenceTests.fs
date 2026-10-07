@@ -2649,12 +2649,12 @@ let tests =
               attach dir store
               let session = Fsdb.Session.create 1 store
               for sql in
-                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) PARTITION BY HASH(id) (PARTITION First,PARTITION Second)"
+                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) PARTITION BY HASH(id) (PARTITION First COMMENT 'alpha',PARTITION Second COMMENT 'beta')"
                     "INSERT INTO named_hash VALUES(0),(1),(2),(3),(4),(5)"
                     "ALTER TABLE named_hash ADD PARTITION PARTITIONS 1"
                     "ALTER TABLE named_hash COALESCE PARTITION 1"
-                    "ALTER TABLE named_hash REORGANIZE PARTITION First INTO (PARTITION Renamed)"
-                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third)" ] do
+                    "ALTER TABLE named_hash REORGANIZE PARTITION First INTO (PARTITION Renamed COMMENT 'changed')"
+                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third COMMENT 'gamma')" ] do
                   match handle session sql |> snd with
                   | Err(code, message) -> failtestf "%s: %d %s" sql code message
                   | _ -> ()
@@ -2666,10 +2666,29 @@ let tests =
                       "renamed partition follows the expanded row mapping"
                   let table = recovered.Catalog.[defaultDatabase].[normalizeTableName "named_hash"]
                   Expect.equal (table.Partitioning |> Option.map _.OrderedNames) (Some [ "Renamed"; "Second"; "Third" ]) "ordered names survive"
+                  Expect.equal
+                      (table.Partitioning |> Option.map (fun partitioning -> partitioning.OrderedDefinitions |> List.map _.Comment))
+                      (Some [ "changed"; "beta"; "gamma" ])
+                      "partition comments survive replay and snapshots"
               let recovered = load dir
               verify recovered
               snapshotNow dir recovered
               verify (load dir)
+
+          testCase "name-only partition formats recover with empty comments"
+          <| fun _ ->
+              // Captured from 801006f2 before partition comments were encoded.
+              let snapshot = Convert.FromBase64String "RlNOSgEAAAAEZnNkYgEAAAAJb2xkX25hbWVkCW9sZF9uYW1lZAEAAAACaWQEAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAABAgJpZAIAAAAAAQIAAAAFRmlyc3QGU2Vjb25k+C78vHck3wgBAAAAAAAAAAAAAAAAAAAAAAAAAHgAAAAAAAAALestNQ=="
+              let wal = Convert.FromBase64String "TgAAAC6bRlEhBGZzZGIDCW9sZF9uYW1lZAEAAAACaWQEAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAECAmlkAgAAAAABAgAAAAVGaXJzdAZTZWNvbmQ="
+              for snapshotBytes, walBytes in [ snapshot, [||]; [||], wal ] do
+                  let dir = tempDataDir ()
+                  if snapshotBytes.Length > 0 then File.WriteAllBytes(snapshotPath dir, snapshotBytes)
+                  if walBytes.Length > 0 then File.WriteAllBytes(walPath dir, walBytes)
+                  let table = (load dir).Catalog.[defaultDatabase].[normalizeTableName "old_named"]
+                  Expect.equal
+                      (table.Partitioning |> Option.map (fun partitioning -> partitioning.OrderedDefinitions |> List.map (fun definition -> definition.Name, definition.Comment)))
+                      (Some [ "First", ""; "Second", "" ])
+                      "name-only definitions retain order without consuming later metadata"
 
           testCase "count-only HASH partition WAL records remain readable"
           <| fun _ ->

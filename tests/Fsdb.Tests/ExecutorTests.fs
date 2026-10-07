@@ -153,6 +153,41 @@ let tests =
                         | other -> failtestf "expected partition metadata, got %A" other
                         Expect.equal (runDefault store "ALTER TABLE p ADD PARTITION (PARTITION Fourth,PARTITION Fifth)") (Affected 0UL) "multiple explicit names append atomically"
 
+                testCase "HASH partition comments follow definition replacement"
+                <| fun _ ->
+                    let store = newStore ()
+                    let execute sql =
+                        match runDefault store sql with
+                        | Err(code, message) -> failtestf "%d: %s" code message
+                        | result -> result
+                    let comments expected =
+                        match execute "SELECT PARTITION_NAME,PARTITION_COMMENT,NODEGROUP FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='p' ORDER BY PARTITION_ORDINAL_POSITION" with
+                        | ResultSet(_, rows) -> Expect.equal rows expected "partition definitions"
+                        | other -> failtestf "expected partition metadata, got %A" other
+                    let row name comment = [ Some name; Some comment; Some "default" ]
+                    execute "CREATE TABLE p(id INT) PARTITION BY HASH(id) (PARTITION First COMMENT 'alpha',PARTITION Second COMMENT='beta')" |> ignore
+                    execute "ALTER TABLE p ADD PARTITION (PARTITION Third COMMENT 'gamma')" |> ignore
+                    comments [ row "First" "alpha"; row "Second" "beta"; row "Third" "gamma" ]
+                    execute "ALTER TABLE p COALESCE PARTITION 1" |> ignore
+                    execute "ALTER TABLE p REORGANIZE PARTITION First INTO (PARTITION Renamed)" |> ignore
+                    comments [ row "Renamed" ""; row "Second" "beta" ]
+                    execute "ALTER TABLE p REORGANIZE PARTITION Renamed INTO (PARTITION Renamed COMMENT 'old' COMMENT 'can''t lose this')" |> ignore
+                    execute "ALTER TABLE p REORGANIZE PARTITION" |> ignore
+                    comments [ row "Renamed" "can't lose this" ]
+                    match Fsdb.InformationSchema.showCreateTable store.Catalog defaultDatabase "p" with
+                    | Ok(_, [ [ _; Some ddl ] ]) ->
+                        execute (ddl.Replace("CREATE TABLE `p`", "CREATE TABLE `restored`")) |> ignore
+                        match execute "SELECT PARTITION_COMMENT FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='restored'" with
+                        | ResultSet(_, rows) -> Expect.equal rows [ [ Some "can't lose this" ] ] "rendered comments parse back"
+                        | other -> failtestf "expected restored comment, got %A" other
+                    | other -> failtestf "expected rendered definition, got %A" other
+                    let boundary = String.replicate 1024 "é"
+                    execute ("ALTER TABLE p ADD PARTITION (PARTITION boundary COMMENT '" + boundary + "')") |> ignore
+                    match runDefault store ("ALTER TABLE p REORGANIZE PARTITION Renamed INTO (PARTITION rejected COMMENT '" + boundary + "é')") with
+                    | Err(1793, _) -> ()
+                    | other -> failtestf "expected comment character limit, got %A" other
+                    comments [ row "Renamed" "can't lose this"; row "boundary" boundary ]
+
                 testCase "HASH reorganization validates contiguous names and preserves rows"
                 <| fun _ ->
                     for method in [ "HASH"; "LINEAR HASH" ] do

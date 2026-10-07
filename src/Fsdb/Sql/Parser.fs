@@ -2741,8 +2741,12 @@ module private ParsedTableOptions =
         | TablePartitioning value -> { options with Partitioning = Some value }
         | IgnoredTableOption -> options
 
-let private hashPartitionNames =
-    between (sym "(") (sym ")") (sepBy1 (keyword "PARTITION" >>. identifier) (sym ","))
+let private hashPartitionDefinitions =
+    let definition =
+        keyword "PARTITION" >>. identifier
+        .>>. many (keyword "COMMENT" >>. opt (sym "=") >>. stringLit |>> (toText >> Option.defaultValue ""))
+        |>> fun (name, comments) -> { Name = name; Comment = comments |> List.tryLast |> Option.defaultValue "" }
+    between (sym "(") (sym ")") (sepBy1 definition (sym ","))
 
 let private hashPartitionOption: Parser<TableOption, unit> =
     keyword "PARTITION"
@@ -2750,12 +2754,12 @@ let private hashPartitionOption: Parser<TableOption, unit> =
     >>. (opt (keyword "LINEAR") .>> keyword "HASH")
     .>>. between (sym "(") (sym ")") expr
     .>>. opt (keyword "PARTITIONS" >>. (puint64 .>> ws))
-    .>>. opt hashPartitionNames
-    >>= fun (((linear, expression), count), names) ->
-        match count, names with
-        | Some count, Some names when count <> uint64 names.Length -> fail "Wrong number of partitions defined, mismatch with previous setting"
+    .>>. opt hashPartitionDefinitions
+    >>= fun (((linear, expression), count), definitions) ->
+        match count, definitions with
+        | Some count, Some definitions when count <> uint64 definitions.Length -> fail "Wrong number of partitions defined, mismatch with previous setting"
         | _ ->
-            match count |> Option.defaultWith (fun () -> names |> Option.map (List.length >> uint64) |> Option.defaultValue 1UL) with
+            match count |> Option.defaultWith (fun () -> definitions |> Option.map (List.length >> uint64) |> Option.defaultValue 1UL) with
             | 0UL -> fail "the number of partitions must be positive"
             | value when value > uint64 UInt32.MaxValue -> fail "the number of partitions is too large"
             | value ->
@@ -2763,7 +2767,7 @@ let private hashPartitionOption: Parser<TableOption, unit> =
                     TablePartitioning
                         { Expression = expression
                           Count = uint32 value
-                          Names = names
+                          Definitions = definitions
                           Linear = linear.IsSome }
                 )
 
@@ -3180,10 +3184,10 @@ let private alterHashPartitions: Parser<AlterAction, unit> =
             | value -> preturn (uint32 value)
 
     (attempt (keyword "ADD" >>. keyword "PARTITION")
-     >>. ((keyword "PARTITIONS" >>. count |>> AddHashPartitions) <|> (hashPartitionNames |>> AddNamedHashPartitions)))
+     >>. ((keyword "PARTITIONS" >>. count |>> AddHashPartitions) <|> (hashPartitionDefinitions |>> AddNamedHashPartitions)))
     <|> (attempt (keyword "COALESCE" >>. keyword "PARTITION") >>. count |>> CoalesceHashPartitions)
     <|> (attempt (keyword "REORGANIZE" >>. keyword "PARTITION")
-         >>. opt (sepBy1 identifier (sym ",") .>> keyword "INTO" .>>. hashPartitionNames)
+         >>. opt (sepBy1 identifier (sym ",") .>> keyword "INTO" .>>. hashPartitionDefinitions)
          |>> ReorganizeHashPartitions)
     <|> (attempt (keyword "DROP" >>. keyword "PARTITION") >>. sepBy1 identifier (sym ",") |>> DropPartitions)
     <|> (attempt (keyword "TRUNCATE" >>. keyword "PARTITION")

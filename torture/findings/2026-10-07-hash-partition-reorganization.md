@@ -1,7 +1,7 @@
 # HASH partition names and reorganization
 
-Status: named definitions, explicit-name addition, and named/no-list
-reorganization are covered by regressions. Partition-option clauses and
+Status: named definitions, comments, explicit-name addition, and named/no-list
+reorganization are covered by regressions. Other partition-option clauses and
 physical pruning remain open. The regression baseline `e9c0a7bd` rejected explicit
 names and both reorganization forms with 1064 / 42000.
 
@@ -44,27 +44,33 @@ partition.
 
 ## Implementation and validation
 
-`HashPartitioning` retains optional ordered names alongside its count. The
-same names feed reorganization, ADD/COALESCE, selection, truncation, metadata,
-and rendering. Snapshot format FSNJ and schema WAL version 9 persist them;
-count-only snapshots and WAL records continue to synthesize `p0`…`pN`.
+`HashPartitioning` retains optional ordered definitions alongside its count.
+Each definition contains a name and comment. These definitions feed
+reorganization, ADD/COALESCE, selection, truncation, metadata, and rendering.
+Snapshot format FSNK and schema WAL version 10 persist them; count-only
+records continue to synthesize `p0`…`pN`, and name-only records receive empty
+comments.
 
 Partition-qualified sources retain the partition-aware read path. The failing
 regression also exposed an indexed ordering path that returned the entire
 table despite `PARTITION(...)`; ordered reads, counts, and joins now verify
 the selected rows.
 
-The root gate passes 2,944 tests. Dedicated recovery tests cover named WAL and
-snapshot recovery plus count-only V7 WAL and FSNI snapshots. The native oracle
+The root gate passes 2,946 tests. Dedicated recovery tests cover named WAL and
+snapshot recovery plus count-only V7 WAL and FSNI snapshots, and captured name-only V9 WAL and FSNJ snapshots. The native oracle
 passes. The compatibility lane passes 49 cases / 5,117 steps with zero
-differences at `20261007T113119060-18198/contracts`. The durability lane passes
-at `20261007T113138610-18520/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
+differences at `20261007T114129623-28985/contracts`. The durability lane passes
+at `20261007T114158381-29254/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
 including acknowledged commits across 12 crash restarts.
 
 ## Remaining boundary
 
-Native MySQL accepts partition options such as `COMMENT 'x'`; fsdb still
-refuses these clauses. Physical pruning remains a separate performance gap.
+Native MySQL retains `MAX_ROWS`, `MIN_ROWS`, `NODEGROUP`, and `TABLESPACE`
+options; fsdb still refuses these clauses, along with explicit engine clauses.
+A native definition with only its first partition specifying `ENGINE=InnoDB`
+and no table-level engine returned 1497 / HY000; unknown engine names returned
+1286 / 42000. Engine options therefore require validation rather than silent
+acceptance. Physical pruning remains a separate performance gap.
 
 ## Explicit-name additions
 
@@ -79,5 +85,19 @@ For rows 0 through 5, expanding two partitions to three puts rows 2 and 5 in
 `Third` under HASH, but only row 2 under LINEAR HASH. Both methods put row 2
 there after expanding to four partitions. The maintained oracle checks these
 row mappings and verifies that no-list reorganization retains the first name
-and every row. Older WAL versions remain readable; snapshots retain format
-FSNJ because the stored partition representation is unchanged.
+and every row. Older name-only WAL and snapshot formats remain readable.
+
+
+## Partition comments
+
+The baseline `801006f2` rejected comment clauses. The native oracle verifies
+CREATE and ADD comments, preservation through COALESCE, clearing an omitted
+comment in named reorganization, last-clause precedence for repeated COMMENT,
+and preservation of the first comment through no-list reorganization.
+`NODEGROUP` reports `default` for ordinary HASH partitions and an empty string
+for an unpartitioned table.
+
+The length limit is 1,024 characters: 1,024 ASCII characters or 1,024 copies
+of `é` succeed, while 1,025 fail with 1793 / HY000. Regression coverage includes
+an overlong alteration leaving existing definitions unchanged, quoted-comment
+rendering and parsing, and comment recovery from both WAL and snapshots.

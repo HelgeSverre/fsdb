@@ -6300,16 +6300,18 @@ let private validateTableComment (tableName: string) (comment: string) =
     else
         Ok comment
 
-let private validatePartitionNames names =
+let private validatePartitionDefinitions (definitions: HashPartitionDefinition list) =
     let rec check seen = function
-        | [] -> Ok names
-        | (name: string) :: rest ->
-            let key = name.ToLowerInvariant()
+        | [] -> Ok definitions
+        | (definition: HashPartitionDefinition) :: rest ->
+            let key = definition.Name.ToLowerInvariant()
             if Set.contains key seen then
-                Error(ExpressionError(1517, sprintf "Duplicate partition name %s" name))
+                Error(ExpressionError(1517, sprintf "Duplicate partition name %s" definition.Name))
+            elif definition.Comment.EnumerateRunes() |> Seq.length > 1024 then
+                Error(ExpressionError(1793, sprintf "Comment for table partition '%s' is too long (max = 1024)" definition.Name))
             else
                 check (Set.add key seen) rest
-    check Set.empty names
+    check Set.empty definitions
 
 let createTableSeeded
     (store: Store)
@@ -6358,7 +6360,7 @@ let createTableSeeded
         match partitioning with
         | Some value when value.Count = 0u -> Error(ExpressionError(1504, "Number of partitions = 0 is not an allowed value"))
         | Some value when value.Count > 8192u -> Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
-        | Some value when value.Names |> Option.exists (fun names -> uint32 names.Length <> value.Count) ->
+        | Some value when value.Definitions |> Option.exists (fun definitions -> uint32 definitions.Length <> value.Count) ->
             Error(ExpressionError(1064, "Wrong number of partitions defined, mismatch with previous setting"))
         | Some { Expression = Col name }
         | Some { Expression = QualifiedCol(_, name) } ->
@@ -6379,8 +6381,8 @@ let createTableSeeded
     let result =
         match partitioningCheck |> Result.bind (fun () ->
             partitioning
-            |> Option.bind _.Names
-            |> Option.map (validatePartitionNames >> Result.map ignore)
+            |> Option.bind _.Definitions
+            |> Option.map (validatePartitionDefinitions >> Result.map ignore)
             |> Option.defaultValue (Ok())) with
         | Error error -> Error error
         | Ok() ->
@@ -7153,13 +7155,13 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some partitioning when count > 8192u - partitioning.Count ->
             Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
         | Some partitioning ->
-            let added = [ for index in partitioning.Count .. partitioning.Count + count - 1u -> sprintf "p%d" index ]
-            validatePartitionNames (partitioning.OrderedNames @ added)
-            |> Result.map (fun names ->
+            let added = [ for index in partitioning.Count .. partitioning.Count + count - 1u -> { Name = sprintf "p%d" index; Comment = "" } ]
+            validatePartitionDefinitions (partitioning.OrderedDefinitions @ added)
+            |> Result.map (fun definitions ->
                 let resized =
-                    match partitioning.Names with
+                    match partitioning.Definitions with
                     | None -> { partitioning with Count = partitioning.Count + count }
-                    | Some _ -> partitioning.WithNames names
+                    | Some _ -> partitioning.WithDefinitions definitions
                 { table with Partitioning = Some resized }, None)
     | AddNamedHashPartitions added ->
         match table.Partitioning with
@@ -7167,8 +7169,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some partitioning when uint32 added.Length > 8192u - partitioning.Count ->
             Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
         | Some partitioning ->
-            validatePartitionNames (partitioning.OrderedNames @ added)
-            |> Result.map (fun names -> { table with Partitioning = Some(partitioning.WithNames names) }, None)
+            validatePartitionDefinitions (partitioning.OrderedDefinitions @ added)
+            |> Result.map (fun definitions -> { table with Partitioning = Some(partitioning.WithDefinitions definitions) }, None)
     | CoalesceHashPartitions count ->
         match table.Partitioning with
         | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
@@ -7176,24 +7178,24 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
             Error(ExpressionError(1508, "Cannot remove all partitions, use DROP TABLE instead"))
         | Some partitioning ->
             let resized =
-                match partitioning.Names with
+                match partitioning.Definitions with
                 | None -> { partitioning with Count = partitioning.Count - count }
-                | Some names -> partitioning.WithNames (List.take (int (partitioning.Count - count)) names)
+                | Some definitions -> partitioning.WithDefinitions (List.take (int (partitioning.Count - count)) definitions)
             Ok({ table with Partitioning = Some resized }, None)
     | ReorganizeHashPartitions replacement ->
         match table.Partitioning with
         | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
         | Some partitioning ->
-            let names = partitioning.OrderedNames
+            let definitions = partitioning.OrderedDefinitions
             let reorganized =
                 match replacement with
-                | None -> Ok [ List.head names ]
+                | None -> Ok [ List.head definitions ]
                 | Some(selected, replacements) ->
                     let selectedKeys = selected |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList
                     let positions =
-                        names
+                        definitions
                         |> List.indexed
-                        |> List.choose (fun (index, name) -> if Set.contains (name.ToLowerInvariant()) selectedKeys then Some index else None)
+                        |> List.choose (fun (index, definition) -> if Set.contains (definition.Name.ToLowerInvariant()) selectedKeys then Some index else None)
                     if positions.IsEmpty || positions.Length <> selected.Length then
                         Error(ExpressionError(1507, "Error in list of partitions to REORGANIZE"))
                     elif replacements.Length <> selected.Length then
@@ -7202,10 +7204,10 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                         Error(ExpressionError(1519, "When reorganizing a set of partitions they must be in consecutive order"))
                     else
                         let first = List.head positions
-                        Ok(List.take first names @ replacements @ List.skip (first + positions.Length) names)
+                        Ok(List.take first definitions @ replacements @ List.skip (first + positions.Length) definitions)
             reorganized
-            |> Result.bind validatePartitionNames
-            |> Result.map (fun names -> { table with Partitioning = Some(partitioning.WithNames names) }, None)
+            |> Result.bind validatePartitionDefinitions
+            |> Result.map (fun definitions -> { table with Partitioning = Some(partitioning.WithDefinitions definitions) }, None)
     | DropPartitions _ ->
         match table.Partitioning with
         | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))

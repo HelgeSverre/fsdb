@@ -33,7 +33,8 @@ let private fullTextDocumentRulesSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x46
 let private fullTextCustomStopwordSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x47uy |] // "FSNG" (format 16)
 let private fullTextStopwordSourceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x48uy |] // "FSNH" (format 17)
 let private fullTextWordLengthSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x49uy |] // "FSNI" (format 18)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Auy |] // "FSNJ" (format 19)
+let private namedPartitionSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Auy |] // "FSNJ" (format 19)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Buy |] // "FSNK" (format 20)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -41,6 +42,7 @@ type private SnapshotFormat =
       NumericDisplays: bool
       Partitions: bool
       PartitionNames: bool
+      PartitionComments: bool
       DynamicPrivileges: bool
       ProxyPrivileges: bool
       SpatialReferences: bool
@@ -59,6 +61,7 @@ let private legacySnapshotFormat =
       NumericDisplays = false
       Partitions = false
       PartitionNames = false
+      PartitionComments = false
       DynamicPrivileges = false
       ProxyPrivileges = false
       SpatialReferences = false
@@ -116,8 +119,11 @@ let private fullTextDocumentRulesSnapshotFormat =
 let private fullTextStopwordSourceSnapshotFormat =
     { fullTextDocumentRulesSnapshotFormat with FullTextStopwordSources = true }
 
-let private currentSnapshotFormat =
+let private namedPartitionSnapshotFormat =
     { fullTextStopwordSourceSnapshotFormat with PartitionNames = true }
+
+let private currentSnapshotFormat =
+    { namedPartitionSnapshotFormat with PartitionComments = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -126,6 +132,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = namedPartitionSnapshotMagic then
+        Some namedPartitionSnapshotFormat
     elif header = fullTextWordLengthSnapshotMagic || header = fullTextStopwordSourceSnapshotMagic then
         Some fullTextStopwordSourceSnapshotFormat
     elif header = fullTextDocumentRulesSnapshotMagic || header = fullTextCustomStopwordSnapshotMagic then
@@ -865,6 +873,17 @@ let private decodeColumnPosition (r: #IReader) : ColumnPosition =
     | 0x02uy -> PositionFirst
     | _ -> PositionAfter(readStr r)
 
+let private encodePartitionDefinitions (format: SnapshotFormat) (w: Writer) (definitions: HashPartitionDefinition list) =
+    w.WriteInt32LE definitions.Length
+    for definition in definitions do
+        writeStr w definition.Name
+        if format.PartitionComments then writeStr w definition.Comment
+
+let private decodePartitionDefinitions (format: SnapshotFormat) (r: #IReader) =
+    List.init (r.ReadInt32LE()) (fun _ ->
+        { Name = readStr r
+          Comment = if format.PartitionComments then readStr r else "" })
+
 let private encodePartitioning (format: SnapshotFormat) (w: Writer) (partitioning: HashPartitioning option) : unit =
     match partitioning with
     | None -> w.WriteByte 0uy
@@ -874,8 +893,8 @@ let private encodePartitioning (format: SnapshotFormat) (w: Writer) (partitionin
         w.WriteInt32LE(int32 value.Count)
         writeBool w value.Linear
         if format.PartitionNames then
-            writeBool w value.Names.IsSome
-            value.Names |> Option.iter (writeStrList w)
+            writeBool w value.Definitions.IsSome
+            value.Definitions |> Option.iter (encodePartitionDefinitions format w)
 
 let private decodePartitioning (format: SnapshotFormat) (r: #IReader) : HashPartitioning option =
     if r.ReadByte() = 0uy then
@@ -885,7 +904,7 @@ let private decodePartitioning (format: SnapshotFormat) (r: #IReader) : HashPart
             { Expression = decodeExpr r
               Count = uint32 (r.ReadInt32LE())
               Linear = readBool r
-              Names = if format.PartitionNames && readBool r then Some(readStrList r) else None }
+              Definitions = if format.PartitionNames && readBool r then Some(decodePartitionDefinitions format r) else None }
 
 let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterAction) : unit =
     match a with
@@ -918,11 +937,11 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | AddHashPartitions count when format.Partitions -> w.WriteByte 0x13uy; w.WriteInt32LE(int32 count)
     | CoalesceHashPartitions count when format.Partitions -> w.WriteByte 0x14uy; w.WriteInt32LE(int32 count)
     | SetAlterAlgorithm AlgorithmCopy -> w.WriteByte 0x15uy
-    | AddNamedHashPartitions names when format.PartitionNames -> w.WriteByte 0x17uy; writeStrList w names
+    | AddNamedHashPartitions definitions when format.PartitionNames -> w.WriteByte 0x17uy; encodePartitionDefinitions format w definitions
     | ReorganizeHashPartitions replacement when format.PartitionNames ->
         w.WriteByte 0x16uy
         writeBool w replacement.IsSome
-        replacement |> Option.iter (fun (selected, names) -> writeStrList w selected; writeStrList w names)
+        replacement |> Option.iter (fun (selected, definitions) -> writeStrList w selected; encodePartitionDefinitions format w definitions)
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _
@@ -963,9 +982,9 @@ let private decodeAlterAction (format: SnapshotFormat) (columnNames: Set<string>
     | 0x13uy when format.Partitions -> AddHashPartitions(uint32 (r.ReadInt32LE()))
     | 0x14uy when format.Partitions -> CoalesceHashPartitions(uint32 (r.ReadInt32LE()))
     | 0x15uy -> SetAlterAlgorithm AlgorithmCopy
-    | 0x17uy when format.PartitionNames -> AddNamedHashPartitions(readStrList r)
+    | 0x17uy when format.PartitionNames -> AddNamedHashPartitions(decodePartitionDefinitions format r)
     | 0x16uy when format.PartitionNames ->
-        ReorganizeHashPartitions(if readBool r then Some(readStrList r, readStrList r) else None)
+        ReorganizeHashPartitions(if readBool r then Some(readStrList r, decodePartitionDefinitions format r) else None)
     | _ -> AddPrimaryKey(readStrList r |> List.map (decodeIndexColumn format columnNames))
 
 let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) : unit =
@@ -1101,6 +1120,8 @@ let private KindSchemaChangedV8 = 0x1Fuy
 let private KindSchemaChangedAtV8 = 0x20uy
 let private KindSchemaChangedV9 = 0x21uy
 let private KindSchemaChangedAtV9 = 0x22uy
+let private KindSchemaChangedV10 = 0x23uy
+let private KindSchemaChangedAtV10 = 0x24uy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1276,11 +1297,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteLenEncString table
         w.WriteInt64LE nextId
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV9
+        w.WriteByte KindSchemaChangedV10
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV9
+        w.WriteByte KindSchemaChangedAtV10
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
@@ -1429,8 +1450,14 @@ let rec private decodeEventAt
         SchemaChangedAt(db, decodeStatement fullTextStopwordSourceSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV8 || k = KindSchemaChangedV9 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement currentSnapshotFormat (columnsForTable db) r)
+        SchemaChanged(db, decodeStatement namedPartitionSnapshotFormat (columnsForTable db) r)
     | k when k = KindSchemaChangedAtV8 || k = KindSchemaChangedAtV9 ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement namedPartitionSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
+    | k when k = KindSchemaChangedV10 ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement currentSnapshotFormat (columnsForTable db) r)
+    | k when k = KindSchemaChangedAtV10 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement currentSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindXaPrepared ->

@@ -475,8 +475,15 @@ partition pruning or separate storage. `ANALYZE`, `CHECK`, `OPTIMIZE`, and
 rows. `TRUNCATE PARTITION` removes rows from named partitions without firing
 DELETE triggers and preserves the table's AUTO_INCREMENT counter.
 
-`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Per-partition
-options such as comments remain unsupported.
+`COMMENT` clauses on CREATE, ADD, and REORGANIZE definitions retain up to
+1,024 characters, including multibyte text. Named reorganization replaces the
+comment, clearing it when omitted; no-list reorganization keeps the first
+partition's comment. Metadata, rendered definitions, and recovery preserve
+these values. Older name-only files load with empty comments.
+
+`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Other partition
+options, including engine, row hints, node group, and tablespace clauses,
+remain unsupported.
 
 ## Check constraints
 
