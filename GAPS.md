@@ -388,8 +388,9 @@ incrementally. Older image-only WAL and snapshot formats remain readable.
 Group commit, ordered checkpoint barriers, lock-step rotation, shutdown
 rotation, decode-depth limits, generated-expression codecs, and durable XA
 records share the same persistence path. XA records retain logical lock claims
-so startup can rebuild their row/key ownership. Checkpoint rotation waits for
-prepared XA branches so their recovery base remains in the WAL.
+so startup can rebuild their row/key ownership. Snapshots include prepared
+branches' recovery bases, events, and lock claims, so checkpoint rotation can
+truncate the WAL while branches remain prepared.
 
 The durability campaign forces repeated automatic rotations, appends a
 WAL-only commit, crashes the server, and verifies the recovered transaction
@@ -398,6 +399,7 @@ sets before and after a graceful snapshot restart.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Durability default | durable unless configured otherwise | in-memory unless `--data-dir` passed; process death loses everything | medium (deployment) | divergence |
+| Prepared XA ngram recovery | MySQL 8.4.11 can commit a recovered row without restoring its pending ngram posting | fsdb preserves recorded document tokenizers and postings through live commit, WAL replay, and snapshots ([oracle and regression](torture/findings/2026-10-07-ngram-xa-recovery.md)) | low (edge-case parity) | divergence |
 | Space reclamation | purge threads reclaim deleted rows | Delete-heavy tables compact immutable row roots after at least 256 tombstones occupy one quarter of physical slots; reclamation is foreground and occasionally scans one table root | low | divergence |
 
 ## 9. Views and triggers

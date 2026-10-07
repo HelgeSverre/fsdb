@@ -1854,6 +1854,66 @@ let tests =
               snapshotNow dir recovered
               load dir |> verify
 
+          testCase "prepared XA ngram publication agrees with recovery after size changes"
+          <| fun _ ->
+              let scenarios =
+                  [ for preparedSize, currentSize in [ 2, 3; 3, 2 ] do
+                        for checkpoint in [ false; true ] do
+                            for updateExisting in [ false; true ] do
+                                yield preparedSize, currentSize, checkpoint, updateExisting ]
+              for preparedSize, currentSize, checkpoint, updateExisting in scenarios do
+                  let context = sprintf "size %d -> %d, checkpoint=%b, update=%b" preparedSize currentSize checkpoint updateExisting
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  configureNgramTokenSize preparedSize store
+                  attach dir store
+                  let execute session sql =
+                      let next, result = handle session sql
+                      TestSupport.Sql.expectOk result (context + ": " + sql)
+                      next
+                  let session = Fsdb.Session.create 1 store
+                  let session = execute session "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram,FULLTEXT KEY words(body))"
+                  let session = execute session "INSERT INTO docs VALUES(1,'生日快乐')"
+                  let insert = "INSERT INTO docs VALUES(2,'中文检索')"
+                  let session = if updateExisting then execute session insert else session
+                  let session = execute session "XA START 'ngram'"
+                  let session = if updateExisting then session else execute session insert
+                  let session = execute session "UPDATE docs SET body='生日快乐' WHERE id=2"
+                  let session = execute session "XA END 'ngram'"
+                  execute session "XA PREPARE 'ngram'" |> ignore
+                  if checkpoint then snapshotNow dir store
+                  let recover () =
+                      let recovered = load dir
+                      configureNgramTokenSize currentSize recovered
+                      recovered
+                  let recovered = recover ()
+                  attach dir recovered
+                  let session = Fsdb.Session.create 2 recovered
+                  let session = execute session "INSERT INTO docs VALUES(3,'生日快乐')"
+                  let session = execute session "XA COMMIT 'ngram'"
+                  execute session "INSERT INTO docs VALUES(4,'生日快乐')" |> ignore
+                  let verify (store: Store) =
+                      let table = store.Catalog.[defaultDatabase].["docs"]
+                      let index = table.FullTextIndexes.["ft"]
+                      let secondId = table.RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt 2L) |> fst
+                      Expect.equal (Fsdb.FullText.documentTokenizer secondId index) (Some(Fsdb.FullText.Ngrams preparedSize)) context
+                      Expect.equal (Fsdb.FullText.activeTokenizer index) (Fsdb.FullText.Ngrams currentSize) context
+                      Expect.equal (Fsdb.FullText.documentTokenizer secondId table.FullTextIndexes.["words"]) (Some Fsdb.FullText.Words) context
+                      let matches size =
+                          let term = if size = 3 then "生日快" else "生日"
+                          let queryIndex = Fsdb.FullText.withTokenizer (Fsdb.FullText.Ngrams size) index
+                          Fsdb.FullText.naturalScores queryIndex term
+                          |> Map.keys
+                          |> Seq.map (fun rowId -> table.RowsArray.TryFind rowId |> Option.get |> Array.head)
+                          |> Seq.sort |> Seq.toList
+                      Expect.equal (matches currentSize) [ VInt 3L; VInt 4L ] context
+                      Expect.equal (matches preparedSize) [ VInt 1L; VInt 2L ] context
+                  verify recovered
+                  let replayed = recover ()
+                  verify replayed
+                  snapshotNow dir replayed
+                  recover () |> verify
+
           testCase "WAL retains the ngram tokenizer used by committed writes"
           <| fun _ ->
               let dir = tempDataDir ()

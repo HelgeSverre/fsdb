@@ -211,7 +211,7 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
             Postings = postings
             PrefixPostings = prefixPostings }
 
-let private addDocumentFieldsWith tokenizer (id: 'id) (texts: string list) (index: Index<'id>) : Index<'id> =
+let internal addDocumentFieldsWith tokenizer (id: 'id) (texts: string list) (index: Index<'id>) : Index<'id> =
     let index = removeDocument id index
     // Phrase positions retain tokens omitted from ngram postings.
     let fields = texts |> List.map (tokensWith tokenizer index.Collation) |> List.toArray

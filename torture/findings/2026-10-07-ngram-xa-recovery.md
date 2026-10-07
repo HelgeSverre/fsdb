@@ -1,6 +1,6 @@
 # Prepared XA ngram recovery
 
-Status: oracle captured; fsdb cross-size prepared-XA recovery remains open.
+Status: fsdb tokenizer consistency fixed; MySQL recovery divergence documented.
 
 The [native MySQL 8.4.11 oracle](../scripts/ngram-xa-oracle.py) compares a
 restart at token size 2 with a restart from size 2 to size 3. It uses private
@@ -46,18 +46,33 @@ prepared XA commits have a separate observable limitation in this MySQL
 version. A missing posting cannot identify which tokenizer would have been
 used if the posting had survived recovery.
 
-fsdb still needs an explicit invariant and regression for live prepared-XA
-commit, subsequent WAL replay, and snapshot replay across startup-size
-changes. Its prepared branch retains historical indexing context in durable
-events; publication must not accidentally use a different context merely
-because the live store now has a different active tokenizer. The native
-oracle does not establish an expectation that historical prepared content
-remains searchable in MySQL, and this limitation must not be silently treated
-as proof of fsdb parity.
+fsdb preserves the indexing tokenizer recorded by each prepared document.
+Publishing branch rows uses their historical tokenizers while retaining the
+live index's active tokenizer for queries and future writes. If a concurrent
+insert occupies a branch's private row identity, publication maps the new row
+identity back to the source document when reading its tokenizer.
+
+The regression first found different natural-language results after live XA
+commit and WAL recovery. It covers both 2-to-3 and 3-to-2 transitions, prepared
+branches recovered from WAL or snapshots, inserted and updated documents,
+concurrent inserts that reassign private row identities, ordinary word indexes,
+subsequent writes, and a snapshot of the recovered committed state.
+
+Recovered prepared documents remain indexed in fsdb. This differs from the
+observed MySQL 8.4.11 posting loss. The consistency fix preserves fsdb's
+recorded indexing context; it does not establish parity with that limitation.
+Public startup-option integration remains open.
 
 ## Verification
 
-On 2026-10-07, `just check` passes 2,864 tests with no build warnings or errors.
+On 2026-10-07, `just check` passes 2,865 tests with no build warnings or errors.
+All 47 compatibility cases and 5,007 differential steps pass. Manifest:
+`torture/artifacts/runs/20261007T030424544-56822/contracts/manifest.json`.
+The durability lane with seed 101, four workers, 100 operations per worker,
+eight requested restarts, and checkpoint interval 16 passes all 12 crash checks.
+Artifact:
+`torture/artifacts/runs/20261007T030512176-56966/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+
 Both maintained scenarios pass against native MySQL 8.4.11.
 Controls cover commits without restart, detached prepared transactions,
 prepared recovery, row visibility, full-text visibility, ANALYZE, a fresh

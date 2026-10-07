@@ -2930,6 +2930,13 @@ let internal restoreFullTextIndexes (tokenizers: Map<string, Map<RowId, FullText
         tokenizers |> Map.tryFind name |> Option.bind (Map.tryFind rowId) |> Option.defaultValue fallback
     buildFullTextIndexes tokenizerFor table
 
+let private documentTokenizerFrom (source: Table) sourceRowIds indexName rowId fallback =
+    let sourceRowId = sourceRowIds |> Map.tryFind rowId |> Option.defaultValue rowId
+    source.FullTextIndexes
+    |> Map.tryFind indexName
+    |> Option.bind (FullText.documentTokenizer sourceRowId)
+    |> Option.defaultValue fallback
+
 let private rebuildSpatialIndexes (table: Table) : SpatialIndexes =
     spatialKeyGroups table
     |> List.map (fun group ->
@@ -3094,7 +3101,7 @@ let private reindexRow
 
     uniqueIndex, secondaryIndex, secondaryOrder
 
-let private publishRows (before: Table) (after: Table) : Table =
+let private publishRowsWithDocumentTokenizers tokenizerFor (before: Table) (after: Table) : Table =
     let compactedRows = after.RowsArray.CompactIfNeeded()
 
     let after =
@@ -3105,7 +3112,7 @@ let private publishRows (before: Table) (after: Table) : Table =
 
     if before.Indexes <> after.Indexes || before.Columns <> after.Columns then
         { after with
-            FullTextIndexes = rebuildFullTextIndexes after
+            FullTextIndexes = buildFullTextIndexes tokenizerFor after
             SpatialIndexes = rebuildSpatialIndexes after }
     else
         let changes = after.RowsArray.ChangesFrom before.RowsArray |> Array.ofSeq
@@ -3125,7 +3132,10 @@ let private publishRows (before: Table) (after: Table) : Table =
                         else
                             index
                             |> fun current -> removed |> Option.fold (fun current _ -> FullText.removeDocument rowId current) current
-                            |> fun current -> added |> Option.fold (fun current row -> FullText.addDocumentFields rowId (fullTextFields group.Indices row) current) current
+                            |> fun current ->
+                                added |> Option.fold (fun current row ->
+                                    let tokenizer = tokenizerFor group.Name rowId (FullText.activeTokenizer current)
+                                    FullText.addDocumentFieldsWith tokenizer rowId (fullTextFields group.Indices row) current) current
 
                     let index = changes |> Array.fold update (Map.find group.Name indexes)
                     Map.add group.Name index indexes)
@@ -3154,6 +3164,9 @@ let private publishRows (before: Table) (after: Table) : Table =
             FullTextIndexes = indexes
             SpatialIndexes = spatialIndexes }
 
+let private publishRows before after =
+    publishRowsWithDocumentTokenizers (fun _ _ tokenizer -> tokenizer) before after
+
 let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
     let conflict () = raise (LockWaitTimeout dbName)
     let rows = liveTable.RowsArray.ToBuilder()
@@ -3162,6 +3175,7 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
     let mutable uniqueIndex = liveTable.UniqueIndex
     let mutable secondaryIndex = liveTable.SecondaryIndex
     let mutable secondaryOrder = liveTable.SecondaryOrder
+    let mutable sourceRowIds = Map.empty
 
     let collides rowId row =
         uniqueGroups
@@ -3195,15 +3209,17 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
                     publish (Some(rowId, baseRow)) None
             | _ -> conflict ()
         | None, Some row ->
-            let rowId = rows.Add row
+            let addedId = rows.Add row
 
-            if collides rowId row then
+            if collides addedId row then
                 conflict ()
 
-            publish None (Some(rowId, row))
+            if addedId <> rowId && not batchTable.FullTextIndexes.IsEmpty then
+                sourceRowIds <- Map.add addedId rowId sourceRowIds
+            publish None (Some(addedId, row))
         | None, None -> ()
 
-    publishRows liveTable
+    publishRowsWithDocumentTokenizers (documentTokenizerFrom batchTable sourceRowIds) liveTable
         { liveTable with
             RowsArray = rows.DrainToImmutable()
             NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId
@@ -9087,7 +9103,7 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
             | _ -> conflict ()
 
         let mergedTable =
-            publishRows liveTable
+            publishRowsWithDocumentTokenizers (documentTokenizerFrom batchTable Map.empty) liveTable
                 { liveTable with
                     RowsArray = rows.DrainToImmutable()
                     NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId
