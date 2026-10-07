@@ -213,6 +213,7 @@ let private inferParameters
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
             | Cast(_, TTime _) -> Some(ColumnWire.parameterMetadataOfType(TDateTime 6))
             | Cast(_, ty) -> Some(ColumnWire.parameterMetadataOfType ty)
+            | BinaryCast inner
             | Collate(inner, _)
             | Distinct inner
             | OrderBy(inner, _) -> loop inner

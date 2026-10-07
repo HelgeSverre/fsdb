@@ -1576,8 +1576,7 @@ let private castTargetType: Parser<ColumnType, unit> =
 
 /// `CAST(x AS CHAR CHARACTER SET cs)` — strings are Unicode internally, so
 /// the charset is parsed and dropped, except `binary`, which MySQL defines
-/// as equivalent to `CAST(x AS BINARY)` and lands as a `binary` collation
-/// tag so comparisons turn byte-wise.
+/// as equivalent to `CAST(x AS BINARY)` and retains as a binary conversion.
 let private castCharsetClause: Parser<string, unit> =
     (keyword "CHARACTER" >>. keyword "SET" >>. identifier) <|> (keyword "CHARSET" >>. identifier)
 
@@ -1591,7 +1590,7 @@ let private castExpr: Parser<Expr, unit> =
         let cast = Cast(e, target)
 
         match charset with
-        | Some cs when cs.ToLowerInvariant() = "binary" -> Collate(cast, "binary")
+        | Some cs when cs.ToLowerInvariant() = "binary" -> BinaryCast cast
         | _ -> cast
 
 let private existsExpr: Parser<Expr, unit> =
@@ -2129,7 +2128,7 @@ let private collateTerm: Parser<Expr, unit> =
             | None -> fail (sprintf "Unknown collation '%s'" name)
 
     // BINARY is a conversion; postfix COLLATE annotations retain their nesting.
-    ((attempt (keyword "BINARY" >>. jsonArrowAtom) |>> fun e -> Collate(e, "binary"))
+    ((attempt (keyword "BINARY" >>. jsonArrowAtom) |>> BinaryCast)
      <|> jsonArrowAtom)
     .>>. many explicitCollation
     |>> fun (expression, names) -> List.fold (fun value name -> Collate(value, name)) expression names

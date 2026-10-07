@@ -200,6 +200,8 @@ type Expr =
     /// expression resolves under (see `Executor.resolvedCollation`).
     /// Evaluated against the collation registry at parse time.
     | Collate of Expr * collation: string
+    /// Binary conversion retains its identity independently of explicit COLLATE annotations.
+    | BinaryCast of Expr
     /// `SELECT *` (`None`) / `SELECT t.*` (`Some "t"`) — the qualifier
     /// matters once there's a `JOIN` in scope: `Executor.evalProjection`
     /// expands `t.*` to just `t`'s own columns via `EvalContext.Qualifiers`,

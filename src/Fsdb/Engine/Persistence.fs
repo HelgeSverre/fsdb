@@ -484,6 +484,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     | Distinct e -> w.WriteByte 0x11uy; encodeExpr w e
     | OrderBy(e, d) -> w.WriteByte 0x12uy; encodeExpr w e; encodeDirection w d
     | Cast(e, t) -> w.WriteByte 0x13uy; encodeExpr w e; encodeColumnType w t
+    | BinaryCast e -> w.WriteByte 0x1Auy; encodeExpr w e
     | Collate(e, name) -> w.WriteByte 0x14uy; encodeExpr w e; writeStr w name
     | Star q -> w.WriteByte 0x15uy; writeOptStr w q
     | Case(subject, whens, elseBranch) ->
@@ -554,6 +555,7 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
     | 0x11uy -> Distinct(nested ())
     | 0x12uy -> OrderBy(nested (), decodeDirection r)
     | 0x13uy -> Cast(nested (), decodeColumnType r)
+    | 0x1Auy -> BinaryCast(nested ())
     | 0x14uy -> Collate(nested (), readStr r)
     | 0x15uy -> Star(readOptStr r)
     | 0x16uy ->

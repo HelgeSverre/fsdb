@@ -2,6 +2,12 @@ module Fsdb.Sql.Expression
 
 open Fsdb.Ast
 
+/// A wrapper that supplies a collation independently of its operand.
+let (|CollationOverride|_|) = function
+    | Collate(value, name) -> Some(value, name)
+    | BinaryCast value -> Some(value, "binary")
+    | _ -> None
+
 let (|NamedConstant|_|) = function
     | FuncCall(name, [ LiteralValue value; _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) ->
         let text =
@@ -65,6 +71,7 @@ let children =
     | Distinct expression
     | OrderBy(expression, _)
     | Cast(expression, _)
+    | BinaryCast expression
     | Collate(expression, _) -> [ expression ]
     | Like(value, pattern, _, _)
     | Regexp(value, pattern) -> [ value; pattern ]
@@ -227,6 +234,7 @@ let mapChildren (mapper: Expr -> Expr) =
     | Distinct expression -> Distinct(mapper expression)
     | OrderBy(expression, direction) -> OrderBy(mapper expression, direction)
     | Cast(expression, columnType) -> Cast(mapper expression, columnType)
+    | BinaryCast expression -> BinaryCast(mapper expression)
     | Collate(expression, collation) -> Collate(mapper expression, collation)
     | QuantifiedComparison(value, operator, quantifier, select) ->
         QuantifiedComparison(mapper value, operator, quantifier, select)

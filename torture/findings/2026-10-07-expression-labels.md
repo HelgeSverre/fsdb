@@ -73,6 +73,11 @@ for invalid NAME_CONST argument shapes and 1382/HY000 for a NULL name.
 
 ## Remaining literal COLLATE charset validation
 
+Binary conversions have a distinct AST node from explicit COLLATE annotations.
+Expression rewriting, SQL rendering, and WAL/snapshot recovery preserve that
+identity, allowing validation to distinguish a conversion from a requested
+collation without changing the current evaluation rules.
+
 `SELECT NAME_CONST(1,NULL COLLATE utf8mb4_bin)` still returns NULL rather than
 1253/42000. This is a general expression-validation gap: native MySQL also
 rejects `NULL COLLATE utf8mb4_bin`, binary literals with that collation, and

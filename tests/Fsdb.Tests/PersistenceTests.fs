@@ -2376,6 +2376,27 @@ let tests =
                   let _, result = handle session "SELECT calculated FROM literal_generated"
                   Expect.equal result (ResultSet([ "calculated" ], [ [ Some "3" ] ])) "literal origin survives recovery"
 
+          testCase "generated binary casts survive WAL and snapshot recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let session = Fsdb.Session.create 1 store
+                  let _, created = handle session "CREATE TABLE binary_generated(source VARCHAR(10),converted VARBINARY(10) GENERATED ALWAYS AS (BINARY source) STORED)"
+                  Expect.equal created (Affected 0UL) "the binary conversion is persisted"
+                  if checkpoint then snapshotNow dir store
+                  let reloaded = load dir
+                  let session = Fsdb.Session.create 2 reloaded
+                  let session, inserted = handle session "INSERT INTO binary_generated(source) VALUES('x')"
+                  Expect.equal inserted (Affected 1UL) "the recovered expression executes"
+                  Expect.equal (handle session "SELECT converted FROM binary_generated" |> snd)
+                      (ResultSet([ "converted" ], [ [ Some "x" ] ])) "recovery preserves values"
+                  match scan reloaded defaultDatabase "binary_generated" with
+                  | Ok(columns, _) ->
+                      Expect.equal (columns |> List.last |> _.Generated) (Some(BinaryCast(Col "source"), Stored)) "recovery preserves conversion identity"
+                  | Error error -> failtestf "expected recovered generated column: %A" error
+
           testCase "generated unary negation survives WAL and snapshot recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do

@@ -199,6 +199,7 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
     | Cast(value, TBigInt true) -> sprintf "cast(%s as unsigned)" (render value)
     | Cast(value, TBigInt false) -> sprintf "cast(%s as signed)" (render value)
     | Cast(value, target) -> sprintf "cast(%s as %s)" (render value) (columnType target)
+    | BinaryCast value -> sprintf "binary (%s)" (render value)
     | Collate(value, collation) -> sprintf "(%s collate %s)" (render value) collation
     | Star qualifier -> (qualifier |> Option.map (identifier >> fun value -> value + ".") |> Option.defaultValue "") + "*"
     | Exists select ->

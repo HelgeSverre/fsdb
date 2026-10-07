@@ -7,6 +7,9 @@ import subprocess
 
 oracle = runpy.run_path(str(pathlib.Path(__file__).with_name("fulltext-transaction-oracle.py")))
 cases = [
+    ("SELECT BINARY 'x'", "BINARY 'x'\nx\n"),
+    ("SELECT BINARY 'a' = 'A'", "BINARY 'a' = 'A'\n0\n"),
+    ("SELECT CAST('x' AS CHAR CHARACTER SET binary)", "CAST('x' AS CHAR CHARACTER SET binary)\nx\n"),
     ("SELECT 'a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci", "'a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci\na\n"),
     ("SELECT 'a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci = 'A'", "'a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci = 'A'\n1\n"),
     ("SELECT COLLATION('a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci)", "COLLATION('a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci)\nutf8mb4_general_ci\n"),

@@ -70,7 +70,20 @@ let private mkSelect
 let tests =
     testList
         "parser"
-        [ testList
+        [ testCase "binary casts remain distinct from explicit binary collations"
+          <| fun _ ->
+              Expect.notEqual (parseOk "SELECT BINARY value") (parseOk "SELECT value COLLATE 'binary'")
+                  "conversion and collation annotation require distinct validation"
+              let converted = BinaryCast(Col "value")
+              let rewritten = Expression.rewrite (function Col "value" -> Some(Lit(VString "x")) | _ -> None) converted
+              Expect.equal rewritten (BinaryCast(Lit(VString "x"))) "rewriting retains conversion identity"
+              Expect.equal (Fsdb.Parser.parseExpression (SqlText.expression converted)) (Ok converted) "rendering retains conversion identity"
+              match parseOk "SELECT CAST(value AS CHAR CHARACTER SET binary)" with
+              | Select { Projections = [ { Expression = BinaryCast(Cast(Col "value", _)) } ] } -> ()
+              | statement -> failtestf "expected a binary charset conversion, got %A" statement
+
+
+          testList
               "expression traversal"
               [ testCase "walks window arguments, ordering, and frame bounds in encounter order"
                 <| fun _ ->

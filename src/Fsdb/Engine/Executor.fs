@@ -1050,7 +1050,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     | Distinct value
                     | OrderBy(value, _)
                     | Cast(value, _)
-                    | Collate(value, _)
+                    | Expression.CollationOverride(value, _)
                     | AssignUserVariable(_, value) -> simplePredicate value
                     | In(value, candidates) -> simplePredicate value && candidates |> List.forall simplePredicate
                     | Between(value, lower, upper) -> simplePredicate value && simplePredicate lower && simplePredicate upper
@@ -2038,7 +2038,7 @@ let rec internal exprLabel (expr: Expr) : string =
         sprintf "%s %s %s (...)" (expressionLabelFragment e) (opSymbol op) quantifierName
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (expressionLabelFragment e) (expressionLabelFragment lo) (expressionLabelFragment hi)
     | Cast(e, _) -> sprintf "cast(%s as ...)" (expressionLabelFragment e)
-    | Collate(e, _) -> exprLabel e
+    | BinaryCast e | Collate(e, _) -> exprLabel e
     | Distinct e -> sprintf "distinct %s" (expressionLabelFragment e)
     | OrderBy(e, _) -> exprLabel e
     | Case _ -> "case"
@@ -2513,7 +2513,7 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
 let rec private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
     match expr with
     | RuntimeExpression inner -> sourceCharset ctx inner
-    | Collate(_, name) -> Collation.charsetOfCollation name
+    | Expression.CollationOverride(_, name) -> Collation.charsetOfCollation name
     | Cast(value, _) -> sourceCharset ctx value
     | NamedFunction "CONVERT" [ _; Lit(VString charset) ] ->
         Charset.canonicalName charset
@@ -2788,7 +2788,7 @@ and private selectProjectionColumns (store: Store) (dbName: string) (select: Sel
             | Some [ column ] -> projectionColumns column.Expression
             | _ -> [ None ]
         | QualifiedCol(qualifier, name) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> columnFor name |> List.singleton
-        | Collate(value, collation) ->
+        | Expression.CollationOverride(value, collation) ->
             projectionColumns value
             |> List.map (Option.map (fun column -> { column with Collation = Some collation; Charset = None }))
         | _ -> [ None ]
@@ -3182,7 +3182,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
 
     match expression with
     | RuntimeExpression inner -> expressionCollation ctx inner
-    | Collate(_, name) ->
+    | Expression.CollationOverride(_, name) ->
         named name 0
     | Lit(VBinaryLiteral _)
     | Lit(VBytes _)
@@ -3303,10 +3303,10 @@ let private regexCollation (ctx: EvalContext) (functionName: string) (subjectExp
     | false, true -> Error(3995, sprintf "Character set '%s' cannot be used in conjunction with 'binary' in call to %s." subjectCollation.Name functionName)
     | false, false ->
         match subjectExpr, patternExpr with
-        | Collate(_, left), Collate(_, right) when not (left.Equals(right, System.StringComparison.OrdinalIgnoreCase)) ->
+        | Expression.CollationOverride(_, left), Expression.CollationOverride(_, right) when not (left.Equals(right, System.StringComparison.OrdinalIgnoreCase)) ->
             Error(1267, sprintf "Illegal mix of collations (%s,EXPLICIT) and (%s,EXPLICIT) for operation '%s'" left right functionName)
-        | Collate(_, _), _ -> Ok subjectCollation
-        | _, Collate(_, _) -> Ok patternCollation
+        | Expression.CollationOverride(_, _), _ -> Ok subjectCollation
+        | _, Expression.CollationOverride(_, _) -> Ok patternCollation
         | _ -> Ok subjectCollation
 
 /// A group/distinct/partition key normalized to collation equality: string
@@ -3406,7 +3406,7 @@ let private canPushIntoSource (qualifier: string) =
         | IsFalse expression -> eligible expression
         | Between(value, lower, upper) -> eligible value && eligible lower && eligible upper
         | In(value, candidates) -> eligible value && List.forall eligible candidates
-        | Collate(expression, _) -> eligible expression
+        | Expression.CollationOverride(expression, _) -> eligible expression
         | _ -> false
 
     eligible
@@ -3831,7 +3831,7 @@ let private resolvedComparisonCollation
     (column: ColumnDef option)
     : Collation.Collation option =
     match expression with
-    | Collate _ -> resolvedCollation ctx expression
+    | Expression.CollationOverride _ -> resolvedCollation ctx expression
     | _ ->
         column
         |> Option.bind (collationOfColumn ctx)
@@ -3857,7 +3857,7 @@ let private collationOperand
 
     let coercibility =
         match expression, column with
-        | Collate _, _ -> 0
+        | Expression.CollationOverride _, _ -> 0
         | _, Some column when collationOfColumn ctx column |> Option.isSome -> 2
         | _ -> coercibilityOfExpr ctx expression
 
@@ -4093,6 +4093,9 @@ let private quantifiedEqualityMembershipResult
 
 let private subqueryProjectionOperand (select: SelectStmt) (columns: ColumnDef option list) : QuantifiedOperand =
     match select.Projections, columns with
+    | [ { Expression = BinaryCast _ } ], [ column ] ->
+        { Expression = BinaryCast(Lit VNull)
+          Column = column }
     | [ { Expression = Collate(_, collation) } ], [ column ] ->
         { Expression = Collate(Lit VNull, collation)
           Column = column }
@@ -4111,6 +4114,7 @@ let private subqueryRowOperand (select: SelectStmt) (columns: ColumnDef option l
             projections
             |> List.map _.Expression
             |> List.map (function
+                | BinaryCast _ -> BinaryCast(Lit VNull)
                 | Collate(_, collation) -> Collate(Lit VNull, collation)
                 | _ -> Lit VNull)
         | _ -> List.replicate values.Length (Lit VNull)
@@ -4301,7 +4305,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
     | Distinct value
     | OrderBy(value, _)
     | Cast(value, _)
-    | Collate(value, _) -> isStatementStableExpr store registry dbName scope value
+    | BinaryCast value | Collate(value, _) -> isStatementStableExpr store registry dbName scope value
     | Like(value, pattern, _, _)
     | Regexp(value, pattern) -> every [ value; pattern ]
     | In(value, candidates) -> every (value :: candidates)
@@ -5037,7 +5041,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Diagnostics.EvaluationError(code, message) -> Error(code, message)))
     // `expr COLLATE name` evaluates as its inner expression — the tag
     // only steers which collation comparisons resolve under.
-    | Collate(e, _) -> eval e
+    | BinaryCast e | Collate(e, _) -> eval e
     | Cast(e, ((TChar _ | TVarchar _ | TBinary _ | TVarBinary _) as ty))
         when (tryColumnDefForExpr ctx e |> Option.bind _.NumericDisplay |> Option.exists _.ZeroFill)
              || (let format = outputFormatOfExpr ctx e
@@ -5209,7 +5213,7 @@ and private isLiteralConstantExpression registry expression =
     match expression with
     | Lit _ | ApproximateLiteral _ -> true
     | Neg _ | Not _ | IsNull _ | IsNotNull _ | IsTrue _ | IsFalse _
-    | BinOp _ | Cast _ | Collate _ | Like _ | Between _ | In _ | Case _ ->
+    | BinOp _ | Cast _ | Expression.CollationOverride _ | Like _ | Between _ | In _ | Case _ ->
         Expression.children expression |> List.forall closed
     | FuncCall(name, arguments) ->
         let audited =
@@ -5290,6 +5294,10 @@ and private tryReducedScalarProjection ctx (select: SelectStmt) =
     | _ -> None
 
 and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
+    let withCollation inner collation =
+        metadataOfExpr ctx inner
+        |> Option.map (fun metadata -> { metadata with CollationId = metadataCollationId collation })
+
     let simple typeId =
         let columnLength =
             if typeId = TypeTiny then 4u
@@ -5584,7 +5592,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
 
     let rec characterBound expression =
         match expression with
-        | Collate(value, _) -> characterBound value
+        | Expression.CollationOverride(value, _) -> characterBound value
         | Lit(VString text) -> text.EnumerateRunes() |> Seq.length
         | Lit(VBinaryLiteral bytes)
         | Lit(VBytes bytes) -> bytes.Length
@@ -5613,7 +5621,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             let bytesPerCharacter = if charset.StartsWith("utf8", System.StringComparison.Ordinal) then 4 else 1
             let isBinaryCollation =
                 match source with
-                | Collate(_, name) -> name.EndsWith("_bin", System.StringComparison.Ordinal)
+                | Expression.CollationOverride(_, name) -> name.EndsWith("_bin", System.StringComparison.Ordinal)
                 | _ ->
                     tryColumnDefForExpr ctx source
                     |> Option.exists (fun column ->
@@ -5819,11 +5827,8 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         |> Option.filter (hasMetadataFlag NotNullFlag)
         |> Option.map (fun _ -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
         |> Option.orElse (Some metadata)
-    | Collate(inner, collation) ->
-        metadataOfExpr ctx inner
-        |> Option.map (fun metadata ->
-            { metadata with
-                CollationId = metadataCollationId collation })
+    | BinaryCast inner -> withCollation inner "binary"
+    | Collate(inner, collation) -> withCollation inner collation
     | Distinct inner
     | OrderBy(inner, _) -> metadataOfExpr ctx inner
     | NamedFunction "DEFAULT" [ argument ] ->
@@ -9635,7 +9640,7 @@ and private tryMergeDirectView
         | Distinct value
         | OrderBy(value, _)
         | Cast(value, _)
-        | Collate(value, _) -> mergeablePredicate value
+        | Expression.CollationOverride(value, _) -> mergeablePredicate value
         | In(value, candidates) -> mergeablePredicate value && candidates |> List.forall mergeablePredicate
         | Between(value, lower, upper) ->
             mergeablePredicate value && mergeablePredicate lower && mergeablePredicate upper
@@ -10636,7 +10641,7 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let rec isSafe = function
         | Lit _ | ApproximateLiteral _ -> true
         | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafe left && isSafe right
-        | Collate(expression, _) -> isSafe expression
+        | Expression.CollationOverride(expression, _) -> isSafe expression
         | FuncCall(name, arguments)
             when FunctionalIndex.tryBuiltin name |> Option.isSome
                  && Functions.isUnmodifiedBuiltinScalar name registry ->
@@ -13393,6 +13398,7 @@ and private rewriteAggregates
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
+    | BinaryCast e -> sub e |> Result.map BinaryCast
     | Collate(e, name) -> sub e |> Result.map (fun e' -> Collate(e', name))
     | Case(subject, whens, elseBranch) ->
         let subOpt = function
@@ -13469,6 +13475,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
+    | BinaryCast e -> sub e |> Result.map BinaryCast
     | Collate(e, name) -> sub e |> Result.map (fun e' -> Collate(e', name))
     | Case(subject, whens, elseBranch) ->
         let subOpt =
@@ -19100,7 +19107,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | Distinct expression
         | OrderBy(expression, _)
         | Cast(expression, _)
-        | Collate(expression, _)
+        | Expression.CollationOverride(expression, _)
         | AssignUserVariable(_, expression) -> references expression
         | In(expression, candidates) -> references expression @ (candidates |> List.collect references)
         | Between(expression, lower, upper) -> references expression @ references lower @ references upper
