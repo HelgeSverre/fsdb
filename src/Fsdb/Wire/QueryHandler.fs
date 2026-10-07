@@ -3109,7 +3109,8 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
         let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
             try
                 DynamicScope.withValue storedFunctionSession (Some session) (fun () ->
-                    Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView)
+                    Executor.withCommittedFullTextStore session.Store (fun () ->
+                        Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView))
             finally
                 if startedDynamicWriteRebase then
                     dynamicWriteBase <- Storage.finishDynamicWriteRebase store

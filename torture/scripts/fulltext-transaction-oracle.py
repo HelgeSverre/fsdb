@@ -104,6 +104,15 @@ def own_writes(client):
             f"UPDATE probe.docs SET body='{new} orange' WHERE id=1;"
             + matches(old) + ";ROLLBACK TO s;" + matches(old) + ";ROLLBACK"), "2\n1,2")
 
+        for name, change, expected in [
+            ("update predicate", f"UPDATE probe.docs SET id=id+10 WHERE MATCH(body) AGAINST('{old}' IN BOOLEAN MODE)", "1,3,12"),
+            ("delete predicate", f"DELETE FROM probe.docs WHERE MATCH(body) AGAINST('{new}' IN BOOLEAN MODE)", "1,2"),
+        ]:
+            setup(client, old, new, parser)
+            expect(label + " " + name, client.query(
+                f"START TRANSACTION;UPDATE probe.docs SET body='{new} orange' WHERE id=1;"
+                + change + ";SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.docs;ROLLBACK"), expected)
+
         client.query("ALTER TABLE probe.docs ADD COLUMN other TEXT, ADD COLUMN extra INT DEFAULT 0;"
                      "UPDATE probe.docs SET other=IF(id=1,'forest','ocean');"
                      "ALTER TABLE probe.docs ADD FULLTEXT KEY other_ft(other)")

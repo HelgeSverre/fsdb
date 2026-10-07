@@ -1,8 +1,10 @@
 # Full-text transaction visibility
 
-Status: open. Native MySQL 8.4.11 and fsdb revision `7a8a5528` disagree on
-pending writes and superseded full-text documents in repeatable-read snapshots.
-Both word and ngram indexes are affected.
+Status: partial. The maintained word/ngram visibility matrix now agrees with
+native MySQL 8.4.11, including pending writes, projected scores, savepoints,
+cross-index updates, write predicates, and concurrent reads. Relevance population
+statistics remain open. The original observations below compare MySQL with fsdb
+revision `7a8a5528`; they explain the behavior the regressions preserve.
 
 The [native oracle](../scripts/fulltext-transaction-oracle.py) starts a disposable
 socket-only MySQL server and checks membership, projected MATCH results, rollback,
@@ -19,7 +21,7 @@ Seed three rows: `(1, 'orchard red')`, `(2, 'orchard blue')`, and
 `(3, 'cobalt green')`, with a FULLTEXT index on the text column. Each case starts
 from this committed state and uses boolean MATCH queries.
 
-| Transaction operation | Ordinary row IDs | MySQL orchard matches | MySQL cobalt matches | fsdb difference |
+| Transaction operation | Ordinary row IDs | MySQL orchard matches | MySQL cobalt matches | Baseline fsdb difference |
 |---|---|---|---|---|
 | Insert `(4, 'orchard gold')` | 1,2,3,4 | 1,2 | 3 | orchard also finds 4 |
 | Change row 1 to `cobalt orange` | 1,2,3 | 2 | 3 | cobalt also finds 1 |
@@ -62,7 +64,7 @@ also hides that row from the older REPEATABLE READ reader's MATCH results. READ
 COMMITTED matches the replacement. Both readers retrieve the same original body
 text in this case, so comparing field values cannot determine document visibility.
 
-fsdb incorrectly retains row 1's orchard match in the update and delete cases.
+The baseline incorrectly retained row 1's orchard match in the update and delete cases.
 MySQL combines snapshot row visibility with the lifetime of the committed
 full-text document: retaining an ordinary historical row does not retain its
 superseded full-text posting. READ COMMITTED sees the newly committed row set and
@@ -82,24 +84,23 @@ exploratory runs, so these are diagnostic samples rather than stable numeric
 fixtures; the maintained oracle asserts visibility and zero pending-row
 projections. Numeric parity needs controlled validation alongside the read model.
 
-`fullTextScoresForTable` creates a `FullText.ReadView` from the table's index and
-uses shared view-based scoring for natural, boolean, and expansion modes. A view
+`fullTextScoresForTable` creates a `FullText.ReadView` from the committed table's
+index and uses shared view-based scoring for natural, boolean, and expansion modes. A view
 can restrict document visibility and supply its scoring population without
 changing the write index or its term frequencies. Expansion excludes hidden seed
 documents while still allowing visible seeds outside a final predicate's row set.
 Focused regressions cover these rules and both optimized dictionary paths.
 
-The executor still creates its view from the private transaction index, so the
-runtime gap remains open. `publishRowsWithDocumentTokenizers` maintains each index
-independently when its indexed fields change. Ordinary snapshot/rebase behavior
-lives in QueryHandler.
+QueryHandler supplies the committed store for statement execution. The executor
+keeps a row searchable only while its snapshot documents still share identity
+with the committed documents across all its full-text indexes. This applies to
+projected MATCH, predicates, query expansion seeds, and MATCH used by UPDATE or
+DELETE. Physical sources carry their owning database through joined queries.
+The private write indexes remain complete for commit, XA publication, and recovery.
 
-The fix needs to distinguish the ordinary row snapshot, committed full-text
-document identity across indexes, and the corpus used for relevance. The private
-write indexes must remain complete for commit, XA publication, and durability.
-Savepoint restoration and no-op/non-full-text updates must retain the correct
-document identity. Predicates and projected MATCH expressions must use the same
-read model, including MATCH used by writes and joined sources.
+The view currently uses the committed corpus's document count. MySQL's relevance
+population can include pending row-count changes, so numeric parity remains open.
+No score-population policy is inferred from the unstable exploratory samples.
 
 Publication now preserves document replacement even when final row values equal
 the transaction's base values. `RowStore.ChangesFrom` deliberately omits equal
@@ -111,22 +112,21 @@ retains the branch's index objects.
 
 Regressions cover word and ngram replacements with changed or restored text,
 concurrent writes, deletion, and inserted-row rebasing. The identity comparison
-scans a changed index's document maps; unchanged maps return immediately. Runtime
-read visibility is still unimplemented.
+scans a changed index's document maps; unchanged maps return immediately. Read visibility compares snapshot documents with these retained identities.
 
 ## Verification
 
 The maintained native oracle passes on MySQL 8.4.11. Separate disposable-server
 comparisons against fsdb's Debug executable reproduced the differences above.
-`just check` passes all 2,876 tests with no build warnings or errors, including
-read-view and publication regressions. After disk space became available, the native
+`just check` passes all 2,881 tests with no build warnings or errors, including
+read-view, publication, and transaction-visibility regressions. After disk space became available, the native
 natural-phrase oracle and all 47 contracts (5,007 steps) passed with no differences:
-`torture/artifacts/runs/20261007T043753394-72255/contracts`.
-The extended transaction oracle also passes, including restored-text document
-replacement under REPEATABLE READ and READ COMMITTED.
-The scoring-view foundation is implemented; transaction document visibility is
-not yet connected. No known-gap suppression is included.
+`torture/artifacts/runs/20261007T044523330-73434/contracts`.
+The extended transaction oracle passes on both MySQL 8.4.11 and fsdb's Debug
+server, including restored-text document replacement under REPEATABLE READ and
+READ COMMITTED, READ UNCOMMITTED pending writes, and UPDATE/DELETE predicates.
+No known-gap suppression is included.
 
-The durability lane also passes with 12 crash restarts and all 50 acknowledged
-commits recovered:
+The publication foundation passed the durability lane with 12 crash restarts
+and all 50 acknowledged commits recovered:
 `torture/artifacts/runs/20261007T043836663-72334/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

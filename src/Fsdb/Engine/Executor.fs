@@ -284,7 +284,8 @@ type private FullTextPredicatePlan =
       ProbePredicate: Expr }
 
 type private FullTextPhysicalSource =
-    { Qualifier: string
+    { Database: string
+      Qualifier: string
       Item: FromItem
       Table: Table }
 
@@ -549,6 +550,7 @@ let private directOnlyRestriction = System.Threading.AsyncLocal<string option>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
+let private committedFullTextStore = System.Threading.AsyncLocal<Store option>()
 let private lockingReadStore = System.Threading.AsyncLocal<(unit -> Store) option>()
 let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
 
@@ -609,6 +611,9 @@ let internal currentDirectOnlyRestriction () = directOnlyRestriction.Value
 
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
     DynamicScope.withValue triggerRowScope (Some scope) body
+
+let internal withCommittedFullTextStore store body =
+    DynamicScope.withValue committedFullTextStore (Some store) body
 
 let withLockingReadStore (store: unit -> Store) (timeout: System.TimeSpan) (body: unit -> 'a) : 'a =
     DynamicScope.withValue lockingReadStore (Some store) (fun () ->
@@ -15120,10 +15125,32 @@ and private runWindowedSelect
             runSelect store registry dbName extendedColumns extendedQualifiers extendedRows ArbitraryGroupRows select' outer
 
 and private fullTextScoresForTable
+    (dbName: string)
     (table: Table)
     (candidateIds: Set<RowId> option)
     (matchNodes: Expr list)
     =
+    let scoringTable, visibleIds =
+        match committedFullTextStore.Value with
+        | None -> table, None
+        | Some store ->
+            match tableSnapshot store dbName table.OriginalName with
+            | Ok committed when obj.ReferenceEquals(table.FullTextIndexes, committed.FullTextIndexes) -> committed, None
+            | Ok committed ->
+                let visible =
+                    table.RowsArray.Indexed
+                    |> Seq.choose (fun (rowId, _) ->
+                        let unchanged =
+                            table.FullTextIndexes
+                            |> Map.forall (fun name index ->
+                                committed.FullTextIndexes
+                                |> Map.tryFind name
+                                |> Option.exists (FullText.sameDocument rowId index))
+                        if unchanged then Some rowId else None)
+                    |> Set.ofSeq
+                committed, Some visible
+            | Error _ -> table, Some Set.empty
+
     let indexColumns =
         table.Indexes
         |> List.filter (fun index -> index.Kind.IsFullText && index.Visible)
@@ -15138,7 +15165,15 @@ and private fullTextScoresForTable
 
             match indexColumns |> List.tryFind (snd >> (=) columns), Value.toText queryValue with
             | Some(index, _), Some queryText ->
-                let view = Map.find index.Name table.FullTextIndexes |> FullText.readView
+                let view =
+                    scoringTable.FullTextIndexes
+                    |> Map.tryFind index.Name
+                    |> Option.map FullText.readView
+                    |> Option.defaultWith (fun () ->
+                        FullText.readView table.FullTextIndexes.[index.Name]
+                        |> FullText.restrictReadView Set.empty)
+                    |> fun view ->
+                        visibleIds |> Option.fold (fun view ids -> FullText.restrictReadView ids view) view
                 let scores =
                     match mode with
                     | NaturalLanguage ->
@@ -15211,6 +15246,7 @@ and private fullTextCandidateIds (candidates: FullTextCandidates) : RowId seq =
     | CombinedCandidates candidates -> Set.toSeq candidates
 
 and private fullTextPredicatePlan
+    (dbName: string)
     (table: Table)
     (candidateIds: Set<RowId> option)
     (predicate: Expr)
@@ -15220,7 +15256,7 @@ and private fullTextPredicatePlan
     if matchNodes.IsEmpty then
         Ok None
     else
-        fullTextScoresForTable table candidateIds matchNodes
+        fullTextScoresForTable dbName table candidateIds matchNodes
         |> Result.map (fun computed ->
             let rewrite scoreFor =
                 computed
@@ -15248,7 +15284,8 @@ and private fullTextPhysicalSources (store: Store) (dbName: string) (sourceItems
             tryPhysicalTableRef store dbName tableRef
             |> Result.map (
                 Option.map (fun table ->
-                    { Qualifier = fromItemQualifier item
+                    { Database = tableRef.Database |> Option.defaultValue dbName
+                      Qualifier = fromItemQualifier item
                       Item = item
                       Table = table })
             )
@@ -15347,7 +15384,7 @@ and private fullTextMutationSources
                     if nodes.IsEmpty then
                         Ok None
                     else
-                        fullTextScoresForTable source.Table None nodes
+                        fullTextScoresForTable source.Database source.Table None nodes
                         |> Result.mapError (fun (code, message) -> Err(code, message))
                         |> Result.map (fun computed ->
                             let synthetic = fullTextSyntheticColumns matchNodes computed
@@ -15454,7 +15491,7 @@ and private runFullTextSelect
                             physicalCandidates
                             |> Option.map (snd >> List.map fst >> Set.ofList)
 
-                        fullTextScoresForTable source.Table candidateIds nodes
+                        fullTextScoresForTable source.Database source.Table candidateIds nodes
                         |> Result.mapError (fun (code, message) -> Err(code, message))
                         |> Result.map (fun computed ->
                             let synthetic = fullTextSyntheticColumns matchNodes computed
@@ -21484,7 +21521,7 @@ let rec executeAs
 
         let fullTextPlanResult =
             match tableRoot, updateStmt.Where with
-            | Some table, Some predicate -> fullTextPredicatePlan table physicalCandidateIds predicate
+            | Some table, Some predicate -> fullTextPredicatePlan db table physicalCandidateIds predicate
             | _ -> Ok None
 
         let fullTextPlan = fullTextPlanResult |> Result.defaultValue None
@@ -21910,7 +21947,7 @@ let rec executeAs
 
         let fullTextPlanResult =
             match tableRoot, deleteStmt.Where with
-            | Some table, Some predicate -> fullTextPredicatePlan table physicalCandidateIds predicate
+            | Some table, Some predicate -> fullTextPredicatePlan db table physicalCandidateIds predicate
             | _ -> Ok None
 
         let fullTextPlan = fullTextPlanResult |> Result.defaultValue None

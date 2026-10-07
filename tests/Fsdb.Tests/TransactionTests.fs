@@ -13,7 +13,115 @@ open Fsdb.QueryHandler
 let tests =
     testList
         "Transactions"
-        [ testCase "BEGIN defers the private catalog until the first database statement"
+        [ testCase "fulltext transaction reads exclude pending document replacements"
+          <| fun _ ->
+              for parser, oldTerm, newTerm in [ "", "orchard", "cobalt"; " WITH PARSER ngram", "生日", "中文" ] do
+                  for mutation in [ $"INSERT INTO docs VALUES(4,'{oldTerm}')"; $"UPDATE docs SET body='{newTerm}' WHERE id=1"; $"UPDATE docs SET body='{oldTerm} changed' WHERE id=1" ] do
+                      let store = Fsdb.Storage.create ()
+                      let mutable session = create 1 store
+                      let query sql =
+                          let next, result = handle session sql
+                          session <- next
+                          result
+                      query ("CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body)" + parser + ")") |> ignore
+                      query ($"INSERT INTO docs VALUES(1,'{oldTerm}'),(2,'{oldTerm}'),(3,'{newTerm}')") |> ignore
+                      query "BEGIN" |> ignore
+                      query "SAVEPOINT original" |> ignore
+                      query mutation |> ignore
+                      let expected = if mutation.StartsWith "INSERT" then [ [ Some "1" ]; [ Some "2" ] ] else [ [ Some "2" ] ]
+                      for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE"; "WITH QUERY EXPANSION" ] do
+                          match query ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('{oldTerm}' {mode}) ORDER BY id") with
+                          | ResultSet(_, rows) -> Expect.equal rows expected (mutation + " " + mode)
+                          | other -> failtestf "MATCH query: %A" other
+                      query "ROLLBACK TO original" |> ignore
+                      match query ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('{oldTerm}' IN BOOLEAN MODE) ORDER BY id") with
+                      | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "savepoint restores documents"
+                      | other -> failtestf "MATCH after rollback: %A" other
+                      query "ROLLBACK" |> ignore
+
+          testCase "repeatable read fulltext excludes concurrently replaced documents"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable writer = create 1 store
+              let write sql =
+                  let next, result = handle writer sql
+                  writer <- next
+                  result
+              write "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body))" |> ignore
+              write "INSERT INTO docs VALUES(1,'orchard'),(2,'orchard'),(3,'cobalt')" |> ignore
+              let reader, _ = handle (create 2 store) "BEGIN"
+              let reader, _ = handle reader "SELECT * FROM docs"
+              write "UPDATE docs SET body='cobalt' WHERE id=1" |> ignore
+              match handle reader "SELECT id FROM docs WHERE MATCH(body) AGAINST('orchard' IN BOOLEAN MODE) ORDER BY id" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ] ] "old rows cannot retain superseded postings"
+              | other -> failtestf "MATCH after concurrent update: %A" other
+              handle reader "ROLLBACK" |> ignore
+
+          testCase "fulltext projections share document visibility across indexes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = create 1 store
+              let query sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              query "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,other TEXT,extra INT,FULLTEXT KEY ft(body),FULLTEXT KEY other_ft(other))" |> ignore
+              query "INSERT INTO docs VALUES(1,'orchard','forest',0),(2,'orchard','ocean',0),(3,'cobalt','ocean',0)" |> ignore
+              query "BEGIN" |> ignore
+              for mutation, expected in
+                  [ "UPDATE docs SET extra=1 WHERE id=1", "1"
+                    "UPDATE docs SET body=body WHERE id=1", "1"
+                    "UPDATE docs SET body='cobalt' WHERE id=1", "0"
+                    "UPDATE docs SET body='orchard' WHERE id=1", "0" ] do
+                  query mutation |> ignore
+                  match query "SELECT MATCH(other) AGAINST('forest' IN BOOLEAN MODE)>0 FROM docs WHERE id=1" with
+                  | ResultSet(_, rows) -> Expect.equal rows [ [ Some expected ] ] mutation
+                  | other -> failtestf "MATCH projection: %A" other
+              query "ROLLBACK" |> ignore
+
+          testCase "read uncommitted fulltext excludes another connection's pending text"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable writer = create 1 store
+              let write sql =
+                  let next, result = handle writer sql
+                  writer <- next
+                  result
+              write "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body))" |> ignore
+              write "INSERT INTO docs VALUES(1,'orchard'),(2,'orchard'),(3,'cobalt')" |> ignore
+              write "BEGIN" |> ignore
+              write "UPDATE docs SET body='cobalt' WHERE id=1" |> ignore
+              let reader, _ = handle (create 2 store) "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let reader, _ = handle reader "BEGIN"
+              match handle reader "SELECT body,MATCH(body) AGAINST('orchard' IN BOOLEAN MODE)>0,MATCH(body) AGAINST('cobalt' IN BOOLEAN MODE)>0 FROM docs WHERE id=1" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "cobalt"; Some "0"; Some "0" ] ] "ordinary pending text has no searchable document"
+              | other -> failtestf "dirty-read MATCH: %A" other
+              handle reader "ROLLBACK" |> ignore
+              write "ROLLBACK" |> ignore
+
+          testCase "fulltext write predicates exclude pending document replacements"
+          <| fun _ ->
+              for parser, oldTerm, newTerm in [ "", "orchard", "cobalt"; " WITH PARSER ngram", "生日", "中文" ] do
+                  for mutation, expected in
+                      [ $"UPDATE docs SET id=id+10 WHERE MATCH(body) AGAINST('{oldTerm}' IN BOOLEAN MODE)", [ "1"; "3"; "12" ]
+                        $"DELETE FROM docs WHERE MATCH(body) AGAINST('{newTerm}' IN BOOLEAN MODE)", [ "1"; "2" ] ] do
+                      let store = Fsdb.Storage.create ()
+                      let mutable session = create 1 store
+                      let query sql =
+                          let next, result = handle session sql
+                          session <- next
+                          result
+                      query ("CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body)" + parser + ")") |> ignore
+                      query ($"INSERT INTO docs VALUES(1,'{oldTerm}'),(2,'{oldTerm}'),(3,'{newTerm}')") |> ignore
+                      query "BEGIN" |> ignore
+                      query ($"UPDATE docs SET body='{newTerm} orange' WHERE id=1") |> ignore
+                      query mutation |> ignore
+                      match query "SELECT id FROM docs ORDER BY id" with
+                      | ResultSet(_, rows) -> Expect.equal rows (expected |> List.map (fun id -> [ Some id ])) mutation
+                      | other -> failtestf "rows after MATCH mutation: %A" other
+                      query "ROLLBACK" |> ignore
+
+          testCase "BEGIN defers the private catalog until the first database statement"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
