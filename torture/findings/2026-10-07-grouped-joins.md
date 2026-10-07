@@ -304,3 +304,8 @@ LEFT LATERAL joins apply ON to candidate rows before deciding whether to emit
 NULL padding. The oracle and regression cover false and NULL conditions, an
 empty lateral body with a false condition, and a condition matching only one
 preceding row. Padding bypasses ON, preserving every unmatched left row.
+
+LATERAL uses the shared prepared-source join matcher for ON, USING, NATURAL,
+and left-outer matching. Native fixtures cover merged stars for USING and
+NATURAL joins, including empty dependent results under LEFT JOIN. Independent
+RIGHT LATERAL joins are accepted by MySQL but remain refused by fsdb.

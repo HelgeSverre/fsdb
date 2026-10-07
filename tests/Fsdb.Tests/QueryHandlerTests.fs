@@ -49,7 +49,18 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "lateral left joins pad after ON matching"
+        [ testCase "lateral joins use shared USING and NATURAL matching"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              for join in
+                  [ "JOIN LATERAL (SELECT a.id AS id) d USING(id)"
+                    "LEFT JOIN LATERAL (SELECT a.id AS id WHERE a.id=1) d USING(id)"
+                    "NATURAL JOIN LATERAL (SELECT a.id AS id) d"
+                    "NATURAL LEFT JOIN LATERAL (SELECT a.id AS id WHERE a.id=1) d" ] do
+                  let sql = "SELECT * FROM a " + join + " ORDER BY id"
+                  Expect.equal (run sql) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) sql
+
+          testCase "lateral left joins pad after ON matching"
           <| fun _ ->
               let run = groupedJoinQuery ()
               for body, condition, firstValue in

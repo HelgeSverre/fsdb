@@ -25,6 +25,14 @@ def verify(client, _writer):
     ]:
         query = "SELECT a.id,b.id,d.v FROM a LEFT JOIN (" + source + ") ON 1 ORDER BY a.id"
         oracle["expect"](source, client.query(query), "1\t1\t1\n2\tNULL\tNULL")
+    for join in [
+        "JOIN LATERAL (SELECT a.id AS id) d USING(id)",
+        "LEFT JOIN LATERAL (SELECT a.id AS id WHERE a.id=1) d USING(id)",
+        "NATURAL JOIN LATERAL (SELECT a.id AS id) d",
+        "NATURAL LEFT JOIN LATERAL (SELECT a.id AS id WHERE a.id=1) d",
+    ]:
+        query = "SELECT * FROM a " + join + " ORDER BY id"
+        oracle["expect"](query, client.query(query), "1\n2")
     for body, condition, first_value in [
         ("SELECT a.id AS v", "0", "NULL"),
         ("SELECT a.id AS v WHERE 0", "0", "NULL"),
