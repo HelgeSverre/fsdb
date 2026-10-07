@@ -33,7 +33,27 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "prepared direct columns retain native source flags through aliases"
+        [ testCase "right lateral preparation excludes only the left operand"
+          <| fun _ ->
+              let session = relationNameSession ()
+              for sql, expected in
+                  [ "SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.id AS id) d ON 1", Some "a.id"
+                    "SELECT a.id,d.v FROM a JOIN (b RIGHT JOIN LATERAL (SELECT b.id AS v) d ON 1) ON 1", Some "b.id"
+                    "SELECT a.id,d.v FROM a JOIN (b RIGHT JOIN LATERAL (SELECT a.id AS v) d ON 1) ON 1", None
+                    "SELECT a.id,(SELECT d.v FROM b RIGHT JOIN LATERAL (SELECT a.id AS v) d ON 1) FROM a", None ] do
+                  match prepareStatementForSession session sql, expected with
+                  | Error(1054, message), Some name ->
+                      Expect.equal message ("Unknown column '" + name + "' in 'field list'") sql
+                  | Ok _, None -> ()
+                  | actual, _ -> failtestf "unexpected preparation for %s: %A" sql actual
+                  let _, result = handle session ("PREPARE right_lateral FROM '" + sql + "'")
+                  match result, expected with
+                  | Err(1054, message), Some name ->
+                      Expect.equal message ("Unknown column '" + name + "' in 'field list'") sql
+                  | Affected 0UL, None -> ()
+                  | actual, _ -> failtestf "unexpected SQL PREPARE for %s: %A" sql actual
+
+          testCase "prepared direct columns retain native source flags through aliases"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               for sql in [ "CREATE TABLE t(id INT PRIMARY KEY AUTO_INCREMENT,u INT NOT NULL UNIQUE,k INT NOT NULL,KEY(k))"; "CREATE TABLE a(id INT PRIMARY KEY)" ] do

@@ -63,6 +63,9 @@ let tests =
               Expect.equal
                   (run "SELECT a.id,(SELECT d.v FROM (SELECT 1 AS n) b RIGHT JOIN LATERAL (SELECT a.id AS v) d ON 1) AS v FROM a ORDER BY a.id")
                   (ResultSet([ "id"; "v" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ])) "enclosing query remains visible"
+              Expect.equal
+                  (run "SELECT a.id,d.v FROM a JOIN ((SELECT 1 AS id) b RIGHT JOIN LATERAL (SELECT a.id AS v) d ON 1) ON 1 ORDER BY a.id")
+                  (ResultSet([ "id"; "v" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ])) "preceding group sibling remains visible"
               match run "SELECT * FROM a RIGHT JOIN LATERAL (SELECT a.id AS id) d ON 1" with
               | Err(1054, _) -> ()
               | other -> failtestf "left dependency must be rejected: %A" other

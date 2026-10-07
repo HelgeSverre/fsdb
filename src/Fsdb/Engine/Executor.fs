@@ -6760,7 +6760,10 @@ and private describeQueryColumnsChecked
             joins
             |> List.fold (fun state join ->
                 state |> Result.bind (fun left ->
-                    let lateralScope = appendScopes preceding left
+                    let lateralScope =
+                        match join.Kind with
+                        | RightJoin | NaturalRightJoin -> preceding
+                        | _ -> appendScopes preceding left
                     describeJoinSource seen dbName ctes outerScopes lateralScope join.Table
                     |> Result.bind (fun right ->
                         let onScope = appendScopes left right
@@ -8103,7 +8106,7 @@ and private applyLateralJoin
     match join.Kind with
     | RightJoin | NaturalRightJoin ->
         // The preserved source cannot depend on the operand it null-extends.
-        runBody scope.QueryOuter
+        runBody scope.LateralOuter
         |> Result.bind (matchBody rowsSoFar)
         |> Result.map asSequence
     | InnerJoin | StraightJoin | CrossJoin | LeftJoin | NaturalJoin | NaturalLeftJoin ->
