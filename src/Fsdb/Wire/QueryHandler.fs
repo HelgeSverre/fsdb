@@ -1127,7 +1127,7 @@ let private resolveUserSetRhs
     | Some value -> Ok(value, userVariables)
     | None ->
         match Parser.parseExpressionWithOptions options rhs with
-        | Error _ -> Error(syntaxError sql)
+        | Error detail -> Error(parserError sql detail)
         | Ok expression ->
             let variables = expressionVariablesFor session userVariables
 
@@ -1936,20 +1936,22 @@ let private tryParsePreparedVariableSet options sql =
 
     splitSetAssignments options sql
     |> Result.toOption
-    |> Option.bind (fun fragments ->
+    |> Option.map (fun fragments ->
         let clauses = fragments |> List.map parseClause
-        if clauses |> List.exists Option.isNone then None
+        if clauses |> List.exists Option.isNone then Ok None
         else
             let clauses = clauses |> List.choose id
             let expressions = clauses |> List.map (snd >> Option.defaultValue "NULL")
             parseSetExpressions options expressions
-            |> Option.map (fun expressions ->
+            |> Result.map (fun expressions ->
                 List.zip clauses expressions
                 |> List.map (fun ((clause, source), expression) ->
                     match clause with
                     | AssignVariable assignment ->
                         AssignVariable { assignment with Expression = source |> Option.map (fun _ -> expression) }
-                    | SetNames _ -> clause)))
+                    | SetNames _ -> clause)
+                |> Some))
+    |> Option.defaultValue (Ok None)
 
 let private handleMixedSet (session: Session) (sql: string) : Session * QueryResult =
     let options = parserOptionsForSession session
@@ -5104,10 +5106,14 @@ let private prepareStatementWithOptions
         match probe with
         | Some SetVar ->
             match tryParsePreparedVariableSet options command with
-            | Some assignments ->
+            | Ok(Some assignments) ->
                 let statement, count = renumberPlaceholders (SetVariables assignments)
                 Result.Ok(Some statement, count)
-            | None -> Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
+            | Ok None -> Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
+            | Error detail ->
+                match parserError sql detail with
+                | Err(code, message) -> Error(code, message)
+                | _ -> Error(1064, "syntax error")
         | _ -> Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
     else
         match Parser.parseWithOptions options sql with

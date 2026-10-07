@@ -1894,13 +1894,16 @@ let private parenthesizedLiteral parser =
 let private nameConstNameSyntax =
     parenthesizedLiteral ((attempt temporalLit >>% ()) <|> (introducedStringLit >>% ()) <|> (literalValue >>% ()))
 
+let private collationName =
+    identifier <|> (stringLit |>> function VString name -> name | _ -> "")
+
 let private nameConstValueSyntax =
     let literal =
         parenthesizedLiteral (
             notFollowedBy (keyword "TRUE" <|> keyword "FALSE")
             >>. ((introducedStringLit >>% ()) <|> (literalValue >>% ())))
     parenthesizedLiteral (
-        attempt (literal .>> keyword "COLLATE" .>> identifier)
+        attempt (literal .>> keyword "COLLATE" .>> collationName)
         <|> (sym "-" >>. literal)
         <|> literal)
 
@@ -2118,18 +2121,18 @@ let private arithExpr = opp.ExpressionParser
 /// registry here; the tag rides the `Collate` AST node into `Executor`,
 /// where comparisons resolve it.
 let private collateTerm: Parser<Expr, unit> =
-    // `BINARY x` prefix — MySQL's shorthand for a byte-wise comparison cast,
-    // expressed as the `binary` collation tag on the operand.
+    let explicitCollation =
+        keyword "COLLATE" >>. collationName
+        >>= fun name ->
+            match Collation.tryFind name with
+            | Some _ -> preturn name
+            | None -> fail (sprintf "Unknown collation '%s'" name)
+
+    // BINARY is a conversion; postfix COLLATE annotations retain their nesting.
     ((attempt (keyword "BINARY" >>. jsonArrowAtom) |>> fun e -> Collate(e, "binary"))
      <|> jsonArrowAtom)
-    .>>. opt (keyword "COLLATE" >>. (identifier <|> (stringLit |>> (function VString name -> name | _ -> ""))))
-    >>= fun (e, nameOpt) ->
-        match nameOpt with
-        | None -> preturn e
-        | Some name ->
-            match Collation.tryFind name with
-            | Some _ -> preturn (Collate(e, name))
-            | None -> fail (sprintf "Unknown collation '%s'" name)
+    .>>. many explicitCollation
+    |>> fun (expression, names) -> List.fold (fun value name -> Collate(value, name)) expression names
 
 opp.TermParser <- collateTerm
 let private singlePipeBoundary = notFollowedBy (pchar '|') >>. ws
@@ -5698,8 +5701,9 @@ let splitSetAssignmentsWithOptions (options: ParserOptions) (sql: string) : Resu
 /// Parses assignment expressions together so parameter positions span the whole SET.
 let parseSetExpressionsWithOptions options (expressions: string list) =
     match parseWithOptions options ("DO " + String.concat "\n," expressions) with
-    | Result.Ok(Do parsed) when expressions.Length = parsed.Length -> Some parsed
-    | _ -> None
+    | Result.Ok(Do parsed) when expressions.Length = parsed.Length -> Result.Ok parsed
+    | Result.Error message -> Result.Error message
+    | _ -> Result.Error "Invalid SET expressions"
 
 let tryParseUserVariableSetWithOptions options sql =
     splitSetAssignmentsWithOptions options sql
@@ -5715,6 +5719,7 @@ let tryParseUserVariableSetWithOptions options sql =
     |> Option.bind (fun assignments ->
         let targets, expressions = List.unzip assignments
         parseSetExpressionsWithOptions options expressions
+        |> Result.toOption
         |> Option.map (List.zip targets))
 
 let parseUserVariableTarget (sql: string) : Result<UserVariableRef, string> =

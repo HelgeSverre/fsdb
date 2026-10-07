@@ -33,7 +33,29 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "NAME_CONST validates argument syntax before execution and prepare"
+        [ testCase "COLLATE chains and SET retain native argument diagnostics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET @x=7" |> fst
+              for sql, code, message in
+                  [ "SELECT NAME_CONST(1,'x' COLLATE utf8mb4_bin COLLATE utf8mb4_bin)", 1210, "Incorrect arguments to NAME_CONST"
+                    "SET @x=NAME_CONST(1+1,2)", 1210, "Incorrect arguments to NAME_CONST"
+                    "SET sql_mode=NAME_CONST(1+1,'')", 1210, "Incorrect arguments to NAME_CONST"
+                    "SET @x=NAME_CONST(NULL,2)", 1382, "The 'NAME_CONST' syntax is reserved for purposes internal to the MySQL server" ] do
+                  Expect.equal (handle session sql |> snd) (Err(code, message)) sql
+                  Expect.equal (prepareStatementForSession session sql) (Error(code, message)) ("prepare: " + sql)
+              Expect.equal (handle session "SELECT @x" |> snd) (ResultSet([ "@x" ], [ [ Some "7" ] ])) "failed SET preserves variables"
+              for expression, label, value in
+                  [ "'a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci", "'a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci", Some "a"
+                    "'a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci = 'A'", "'a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci = 'A'", Some "1"
+                    "COLLATION('a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci)", "COLLATION('a' COLLATE utf8mb4_bin COLLATE utf8mb4_general_ci)", Some "utf8mb4_general_ci"
+                    "NAME_CONST(1,'x' COLLATE 'utf8mb4_bin')", "1", Some "x"
+                    "NAME_CONST(1,NULL COLLATE 'binary')", "1", None ] do
+                  let sql = "SELECT " + expression
+                  Expect.equal (handle session sql |> snd) (ResultSet([ label ], [ [ value ] ])) sql
+                  Expect.isOk (prepareStatementForSession session sql) ("prepare: " + sql)
+
+          testCase "NAME_CONST validates argument syntax before execution and prepare"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let incorrect = "Incorrect arguments to NAME_CONST"

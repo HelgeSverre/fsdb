@@ -2,7 +2,7 @@
 
 Status: fixed for the audited naming cases. Parsed projections retain source
 names through execution, prepared binding, metadata inference, and view rendering.
-`NAME_CONST` argument validation remains a separate compatibility gap.
+Literal COLLATE charset validation remains a separate compatibility gap.
 
 The maintained [expression-label oracle](../scripts/expression-label-oracle.py)
 checks column headers and values against a disposable native MySQL 8.4.11
@@ -65,10 +65,22 @@ branches, empty-result queries, views, and stored definitions. Wrong arity
 produces 1582/42000. Parsing and definition validation share the diagnostic
 mapping.
 
-Remaining cases from the broader comparison:
+Repeated COLLATE clauses retain their nesting and the outer annotation governs
+comparison and metadata. NAME_CONST rejects a repeated wrapper with 1210/HY000,
+while a single quoted collation name is accepted. SET preserves the expression
+parser's diagnostic for both direct execution and PREPARE, including 1210/HY000
+for invalid NAME_CONST argument shapes and 1382/HY000 for a NULL name.
 
-| Statement | MySQL | fsdb |
-|---|---|---|
-| `SELECT NAME_CONST(1,'x' COLLATE utf8mb4_bin COLLATE utf8mb4_bin)` | 1210/HY000 | 1064/42000; the expression grammar accepts only one COLLATE |
-| `SELECT NAME_CONST(1,NULL COLLATE utf8mb4_bin)` | 1253/42000 | NULL result; NULL charset validation is absent |
-| `SET @x=NAME_CONST(1+1,2)` | 1210/HY000 | 1064/42000; SET discards expression parser diagnostics |
+## Remaining literal COLLATE charset validation
+
+`SELECT NAME_CONST(1,NULL COLLATE utf8mb4_bin)` still returns NULL rather than
+1253/42000. This is a general expression-validation gap: native MySQL also
+rejects `NULL COLLATE utf8mb4_bin`, binary literals with that collation, and
+`'a' COLLATE 'binary'` in a utf8mb4 connection. The argument oracle retains
+these native controls.
+
+Validation order matters. An invalid NAME_CONST shape, such as
+`NAME_CONST(1+1,NULL COLLATE utf8mb4_bin)`, produces 1210/HY000; with a literal
+NULL name and the same value, the charset error takes precedence over the
+1382 NULL-name error. A shared expression-validation step must preserve those
+boundaries, including unused branches and PREPARE.
