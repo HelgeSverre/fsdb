@@ -28,7 +28,8 @@ def verify(client, _writer):
     oracle["expect"]("stored targets", client.query("SELECT * FROM a ORDER BY id"), "1\t7\n2\t8")
 
     client.query("CREATE TABLE b(id INT);CREATE TABLE t(id INT,j JSON);INSERT INTO t VALUES(1,'[1]')")
-    for query, expected in [
+    argument_cases = [
+        ("UPDATE a JOIN JSON_TABLE(JSON_ARRAY(a.missing),'$[*]' COLUMNS(v INT PATH '$')) j ON 1 SET a.id=0", (1054, "42S22", "Unknown column 'a.missing' in 'a table function argument'")),
         ("SELECT jt.x FROM t,JSON_TABLE(nope.j,'$[*]' COLUMNS(x INT PATH '$')) jt", (1054, "42S22", "Unknown column 'nope.j' in 'a table function argument'")),
         ("SELECT jt.x FROM t,JSON_TABLE(COALESCE(nope.j,t.j),'$[*]' COLUMNS(x INT PATH '$')) jt", (1054, "42S22", "Unknown column 'nope.j' in 'a table function argument'")),
         ("SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(a.missing),'$[*]' COLUMNS(v INT PATH '$')) j ON 1", (1054, "42S22", "Unknown column 'a.missing' in 'a table function argument'")),
@@ -38,14 +39,22 @@ def verify(client, _writer):
         ("SELECT * FROM JSON_TABLE(JSON_ARRAY(b.id),'$[*]' COLUMNS(v INT PATH '$')) j JOIN b ON 1", (1109, "42S02", "Unknown table 'b' in a table function argument")),
         ("SELECT * FROM a JOIN b ON 1 JOIN JSON_TABLE(JSON_ARRAY(id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1", (1052, "23000", "Column 'id' in a table function argument is ambiguous")),
         ("SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1", None),
-    ]:
-        for statement in [query, "PREPARE json_source FROM '" + query.replace("'", "''") + "'"]:
-            result = subprocess.run([*client.process.args, "-e", "USE probe;" + statement], capture_output=True, text=True, check=False)
-            error = re.search(r"ERROR (\d+) \((\w+)\).*?: (.*)", result.stderr)
-            actual = (int(error[1]), error[2], error[3]) if error else None
-            if expected is None:
-                oracle["expect"]("valid preceding reference", result.returncode, 0)
-            oracle["expect"](statement, actual, expected)
+    ]
+    for populated in [True, False]:
+        if not populated:
+            client.query("DELETE FROM a")
+        for query, expected in argument_cases:
+            for statement in [query, "PREPARE json_source FROM '" + query.replace("'", "''") + "'"]:
+                result = subprocess.run([*client.process.args, "-e", "USE probe;" + statement], capture_output=True, text=True, check=False)
+                error = re.search(r"ERROR (\d+) \((\w+)\).*?: (.*)", result.stderr)
+                actual = (int(error[1]), error[2], error[3]) if error else None
+                if expected is None:
+                    oracle["expect"]("valid preceding reference", result.returncode, 0)
+                oracle["expect"](statement, actual, expected)
+    client.query("SET @touches=0")
+    query = "SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(@touches:=@touches+1,a.id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1"
+    oracle["expect"]("valid empty input", client.query(query), "")
+    oracle["expect"]("argument is not evaluated for empty input", client.query("SELECT @touches"), "0")
 
 
 if __name__ == "__main__":

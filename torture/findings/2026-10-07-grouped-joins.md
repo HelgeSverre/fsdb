@@ -337,3 +337,9 @@ columns in a visible preceding scope from qualified references with no visible
 source: those report 1054/1052 and 1109 respectively. Runtime lookup retains the
 table-function clause through outer scopes. Fixtures cover direct references,
 nested COALESCE arguments, forward references, and excluded RIGHT operands.
+
+Direct JSON_TABLE argument references are bound before row expansion, so an
+empty preceding input does not suppress missing-column errors in reads or
+updates. Preparation and execution share the reference traversal. The native
+fixture repeats argument diagnostics with populated and empty input and checks
+that a valid empty-input argument leaves a user-variable counter unchanged.

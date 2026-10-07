@@ -49,7 +49,21 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "JSON_TABLE natural and right joins share read and mutation rules"
+        [ testCase "JSON_TABLE validates empty-input references without evaluating arguments"
+          <| fun _ ->
+              let run = queryFixture [ "CREATE TABLE a(id INT)"; "SET @touches=0" ]
+              for reference in [ "a.missing"; "x.id" ] do
+                  let sql = "SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(" + reference + "),'$[*]' COLUMNS(v INT PATH '$')) j ON 1"
+                  Expect.equal (run sql) (Err(1054, "Unknown column '" + reference + "' in 'a table function argument'")) sql
+              Expect.equal
+                  (run "UPDATE a JOIN JSON_TABLE(JSON_ARRAY(a.missing),'$[*]' COLUMNS(v INT PATH '$')) j ON 1 SET a.id=0")
+                  (Err(1054, "Unknown column 'a.missing' in 'a table function argument'")) "empty mutation still binds its source"
+              Expect.equal
+                  (run "SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(@touches:=@touches+1,a.id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1")
+                  (ResultSet([ "id"; "v" ], [])) "valid empty result"
+              Expect.equal (run "SELECT @touches") (ResultSet([ "@touches" ], [ [ Some "0" ] ])) "binding does not evaluate arguments"
+
+          testCase "JSON_TABLE natural and right joins share read and mutation rules"
           <| fun _ ->
               let run =
                   queryFixture

@@ -1742,6 +1742,14 @@ let private unknownColumnIn clause name : EvalError =
 
 let private unknownColumn name = unknownColumnIn FieldList name
 
+let private validateReferencesWith resolve expression =
+    Expression.collect (function
+        | Col name -> Some(None, name)
+        | QualifiedCol(qualifier, name) -> Some(Some qualifier, name)
+        | _ -> None) expression
+    |> traverse resolve
+    |> Result.map ignore
+
 /// Aggregate-call recognition: a `FuncCall` whose name is registered as an
 /// aggregate on `registry` (see `Functions.Registry.Aggregates`) rather than
 /// a hardcoded name set here — the `registerAggregate` extension point is
@@ -6693,14 +6701,6 @@ and private describeQueryColumnsChecked
             | 1 -> Ok()
             | _ -> Error(InvalidDescription(Err(1052, sprintf "Column '%s' in %s is ambiguous" label clause)))
 
-    let validateReferencesWith resolve expression =
-        Expression.collect (function
-            | Col name -> Some(None, name)
-            | QualifiedCol(qualifier, name) -> Some(Some qualifier, name)
-            | _ -> None) expression
-        |> traverse resolve
-        |> Result.map ignore
-
     let validateReferences scopes clause expression =
         validateReferencesWith (resolveReference scopes clause) expression
 
@@ -8176,27 +8176,25 @@ and private expandJsonTableJoinRows
             | NaturalJoin | NaturalLeftJoin -> naturalCommonNames combinedColumnsSoFar joinColumns
             | _ -> join.Using
 
-        resolvedJoinCondition sourcesSoFar [ alias, joinColumns ] leftOperand join
-        |> Result.bind (fun effectiveOn ->
-            let rec hasSourceScope (ctx: EvalContext) =
-                not ctx.Qualifiers.IsEmpty
-                || (ctx.Outer |> Option.exists hasSourceScope)
+        let rec hasSourceScope (ctx: EvalContext) =
+            not ctx.Qualifiers.IsEmpty
+            || (ctx.Outer |> Option.exists hasSourceScope)
 
+        let argumentContext row = { leftCtxFor row with Clause = TableFunctionArgument }
+        let probe = argumentContext (probeRow combinedColumnsSoFar)
+        let resolveArgumentReference = function
+            | Some qualifier, _ when not (hasSourceScope probe) ->
+                Error(1109, sprintf "Unknown table '%s' in a table function argument" qualifier)
+            | Some qualifier, name -> resolveQualifiedCol probe qualifier name
+            | None, name -> resolveCol probe name
+
+        validateReferencesWith resolveArgumentReference source
+        |> Result.mapError Err
+        |> Result.bind (fun () -> resolvedJoinCondition sourcesSoFar [ alias, joinColumns ] leftOperand join)
+        |> Result.bind (fun effectiveOn ->
             let expandLeft (row: 'Row) : Result<'Result list, QueryResult> =
                 let left = flatRow row
-                let leftCtx = { leftCtxFor left with Clause = TableFunctionArgument }
-
-                let sourceResult =
-                    match evalExpr leftCtx source with
-                    | Error(1054, message) ->
-                        let missingQualifier = Regex.Match(message, @"^Unknown column '([^.']+)\.")
-
-                        if missingQualifier.Success && not (hasSourceScope leftCtx) then
-                            let qualifier = missingQualifier.Groups.[1].Value
-                            Error(1109, sprintf "Unknown table '%s' in a table function argument" qualifier)
-                        else
-                            Error(1054, message)
-                    | result -> result
+                let sourceResult = evalExpr (argumentContext left) source
 
                 match sourceResult with
                 | Error(code, message) -> Error(Err(code, message))
