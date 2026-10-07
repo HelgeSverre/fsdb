@@ -930,14 +930,14 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
     let hasWritableProjection (projections: (string * Expr * ViewColumnTarget option) list) =
         projections |> List.exists (fun (_, _, target) -> target.IsSome)
 
-    let projectedColumn rewrite targetOf { Expression = expression; Alias = alias } =
+    let projectedColumn rewrite targetOf ({ Expression = expression; Alias = alias } as projection) =
         let defaultName =
             match expression with
             | Col column
             | QualifiedCol(_, column) -> column
             | _ -> InformationSchema.exprToSql expression
 
-        alias |> Option.defaultValue defaultName, rewrite expression, targetOf expression
+        alias |> Option.orElse projection.SourceName |> Option.defaultValue defaultName, rewrite expression, targetOf expression
 
     let expressionsByOutput outputNames projected =
         List.map2
@@ -1311,8 +1311,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     let readOnlySource (stored: StoredView) projections =
                         let projectedNames =
                             projections
-                            |> List.map (fun { Expression = expression; Alias = alias } ->
+                            |> List.map (fun ({ Expression = expression; Alias = alias } as projection) ->
                                 alias
+                                |> Option.orElse projection.SourceName
                                 |> Option.orElseWith (fun () ->
                                     match expression with
                                     | Col column
@@ -2110,8 +2111,7 @@ and private overLabel (over: OverClause) : string =
         |> String.concat " "
         |> sprintf "(%s)"
 
-let private projectionLabel ({ Expression = expression; Alias = alias }: Projection) =
-    alias |> Option.defaultWith (fun () -> exprLabel expression)
+let private projectionLabel = Projection.name exprLabel
 
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 
@@ -15630,14 +15630,10 @@ and private runWindowedSelect
                     | Some(cols, _) -> cols |> List.map (fun c -> Projection.create (Col c.Name) None)
                     | None -> [ projection ]
                 | _ ->
-                    // A bare (unwrapped) window-function projection with no
-                    // explicit alias labels itself like MySQL's function-call
-                    // headers (`lead(v) over ()`), never the internal
-                    // `__fsdb_window_N__` synthetic column name — anything
-                    // wrapping one falls through to `runSelect`'s ordinary
-                    // unaliased-label handling instead.
+                    // Synthetic columns retain the original projection name.
                     let alias =
                         aliasOpt
+                        |> Option.orElse projection.SourceName
                         |> Option.orElse (
                             synthetic
                             |> List.tryFind (fun (wf, _) -> wf = expr)
@@ -16325,6 +16321,7 @@ and private runFullTextSelect
                                 | _ ->
                                     let label =
                                         alias
+                                        |> Option.orElse projection.SourceName
                                         |> Option.orElse (
                                             matchNodes
                                             |> List.tryFind ((=) expression)

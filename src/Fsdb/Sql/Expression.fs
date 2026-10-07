@@ -239,7 +239,7 @@ let rewrite (replace: Expr -> Expr option) (expression: Expr) : Expr =
 
 type private RewriteRules =
     { Replace: Expr -> Expr option
-      ProjectionName: Expr -> string option }
+      Projection: Projection -> Projection }
 
 /// Rewrites an expression and every expression inside its subqueries.
 let rec private rewriteTreeWith (rules: RewriteRules) (expression: Expr) : Expr =
@@ -294,10 +294,9 @@ and private rewriteSelect rules (select: SelectStmt) =
     { select with
         Projections =
             select.Projections
-            |> List.map (fun projection ->
-                let expression, alias = projection.Expression, projection.Alias
-                let name = alias |> Option.orElseWith (fun () -> rules.ProjectionName expression)
-                { projection with Expression = rewriteTreeWith rules expression; Alias = name })
+            |> List.map (fun original ->
+                let projection = rules.Projection original
+                { projection with Expression = rewriteTreeWith rules projection.Expression })
         From = Option.map (rewriteFromItem rules) select.From
         Joins = List.map (rewriteJoin rules) select.Joins
         Where = Option.map (rewriteTreeWith rules) select.Where
@@ -391,19 +390,28 @@ let rec private rewriteStatementWith rules =
 
 /// Rewrites expressions without changing projection aliases.
 let rewriteTree replace expression =
-    rewriteTreeWith { Replace = replace; ProjectionName = fun _ -> None } expression
+    rewriteTreeWith { Replace = replace; Projection = id } expression
 
 /// Rewrites every expression inside a SELECT, including nested query bodies.
 let rewriteSelectExpressions replace select =
-    rewriteSelect { Replace = replace; ProjectionName = fun _ -> None } select
+    rewriteSelect { Replace = replace; Projection = id } select
 
 /// Rewrites every executable expression position in a statement.
 let rewriteStatement replace statement =
-    rewriteStatementWith { Replace = replace; ProjectionName = fun _ -> None } statement
+    rewriteStatementWith { Replace = replace; Projection = id } statement
 
 /// Names unaliased projections from their original expressions before rewriting.
 let rewriteStatementWithProjectionNames projectionName replace statement =
-    rewriteStatementWith { Replace = replace; ProjectionName = projectionName } statement
+    let retainName (projection: Projection) =
+        let alias =
+            projection.Alias |> Option.orElseWith (fun () ->
+                if projection.SourceName.IsSome then None else projectionName projection.Expression)
+        { projection with Alias = alias }
+    rewriteStatementWith { Replace = replace; Projection = retainName } statement
+
+/// Maps projections throughout a statement, including nested query bodies.
+let mapStatementProjections map statement =
+    rewriteStatementWith { Replace = (fun _ -> None); Projection = map } statement
 
 let iterStatement visit statement =
     statement

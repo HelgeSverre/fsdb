@@ -435,7 +435,9 @@ and CheckConstraintDef =
 /// A `SELECT` projection: the expression and its optional `AS alias`.
 and Projection =
     { Expression: Expr
-      Alias: string option }
+      Alias: string option
+      /// The parsed output name, retained independently of expression rewrites.
+      SourceName: string option }
 
 and SelectOutfileOptions =
     { CharacterSet: string option
@@ -649,7 +651,12 @@ and SelectStmt =
 
 module Projection =
     let create expression alias : Projection =
-        { Expression = expression; Alias = alias }
+        { Expression = expression; Alias = alias; SourceName = None }
+
+    let name fallback (projection: Projection) =
+        projection.Alias
+        |> Option.orElse projection.SourceName
+        |> Option.defaultWith (fun () -> fallback projection.Expression)
 
 module FromItem =
     let (|Qualified|Grouped|) = function

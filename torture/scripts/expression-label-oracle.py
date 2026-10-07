@@ -55,6 +55,34 @@ def verify(client, _writer):
         ("SET sql_mode='HIGH_NOT_PRECEDENCE'; SELECT not 1 = 0", "not 1 = 0", "1"),
         ("SET sql_mode=''; SELECT 1 /*!80000 + 2 */", "1  + 2", "3"),
     ]
+    source_boundaries.extend([
+        ("SELECT NAME_CONST(1,2),_latin1'é',_binary X'41'", "1\tÃ©\t_binary X'41'", "2\tÃ©\tA"),
+        ("SELECT 001,(001),1.00,+1,-1,-(1),((-1)),true,false,null",
+         "001\t001\t1.00\t1\t-1\t-(1)\t((-1))\ttrue\tfalse\tNULL",
+         "1\t1\t1.00\t1\t-1\t-1\t-1\t1\t0\tNULL"),
+        ("SELECT 0x41,X'41',b'01',_binary'a',_utf8mb4'a',N'a'",
+         "0x41\tX'41'\tb'01'\ta\ta\ta", "A\tA\t\x01\ta\ta\ta"),
+        ("SELECT ' a ', 'a' COLLATE utf8mb4_bin, _utf8mb4'a' 'b', N'a' 'b'",
+         "a \t'a' COLLATE utf8mb4_bin\ta\ta", " a \ta\tab\tab"),
+        ('SET sql_mode=\'ANSI_QUOTES\';SELECT "x`y"+1, 1+2 FROM (SELECT 1 AS `x``y`) a',
+         '"x`y"+1\t1+2', "2\t3"),
+        ('SET sql_mode=\'ANSI_QUOTES\';SELECT "x""y"+1, 1+2 FROM (SELECT 1 AS `x"y`) a',
+         '"x""y"+1\t1+2', "2\t3"),
+        ("SELECT SUM(id)+row_number() OVER () FROM (SELECT 1 AS id) a", "SUM(id)+row_number() OVER ()", "2"),
+        ("SELECT concat('a','b') AS '',concat('a','b')", "\tconcat('a','b')", "ab\tab"),
+        ("SELECT * FROM (SELECT concat('a','b')) d", "concat('a','b')", "ab"),
+        ("SET @counter=0;SELECT @counter := @counter + 1", "@counter := @counter + 1", "1"),
+        ('SET @`HAS, COMMA`=3,@"DOUBLE-NAME"=1;SELECT @\'sp ace\' := @`HAS, COMMA` + @"DOUBLE-NAME"',
+         '@\'sp ace\' := @`HAS, COMMA` + @"DOUBLE-NAME"', "4"),
+    ])
+    client.query("CREATE VIEW labels AS SELECT concat('a','b'),1+2")
+    expect_result("SELECT * FROM labels", "concat('a','b')\t1+2", "ab\t3")
+    expect_result("SELECT `concat('a','b')`,`1+2` FROM labels", "concat('a','b')\t1+2", "ab\t3")
+    client.query("CREATE TABLE w(id INT,v INT);INSERT INTO w VALUES(1,10),(2,20)")
+    client.query("CREATE TABLE ft(title TEXT,body TEXT,FULLTEXT(title,body));INSERT INTO ft VALUES('Other','Other')")
+    expect_result("SELECT LEAD(v) OVER (ORDER BY id) FROM w", "LEAD(v) OVER (ORDER BY id)", "20\nNULL")
+    expect_result("SELECT LAG(v) OVER (ORDER BY id) FROM w", "LAG(v) OVER (ORDER BY id)", "NULL\n10")
+    expect_result("SELECT MATCH (title,body) AGAINST ('Tutorial') FROM ft", "MATCH (title,body) AGAINST ('Tutorial')", "0")
     for query, label, value in source_boundaries:
         expect_result(query, label, value)
 

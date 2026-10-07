@@ -6,6 +6,13 @@ open Fsdb.Value
 open Fsdb.Parser
 open Fsdb.Sql
 
+// Syntax assertions exclude source names; output-name regressions inspect unmodified parses.
+let private syntaxOnly =
+    Result.map (Expression.mapStatementProjections (fun projection -> { projection with SourceName = None }))
+
+let private parse sql = Fsdb.Parser.parse sql |> syntaxOnly
+let private parseWithOptions options sql = Fsdb.Parser.parseWithOptions options sql |> syntaxOnly
+
 /// Parses `sql` and fails the test with the parse error if it doesn't
 /// succeed, so every happy-path test reads as a plain AST comparison.
 let private parseOk (sql: string) : Statement =
@@ -177,7 +184,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM information_schema.tables AS t")
                         (Select
-                            { Projections = [ { Expression = Star None; Alias = None } ]
+                            { Projections = [ { Expression = Star None; Alias = None; SourceName = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false
@@ -202,7 +209,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM t x")
                         (Select
-                            { Projections = [ { Expression = Star None; Alias = None } ]
+                            { Projections = [ { Expression = Star None; Alias = None; SourceName = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false
@@ -1845,7 +1852,7 @@ let tests =
                         (InsertSelect(
                             "t",
                             [ "a"; "b" ],
-                            { Projections = [ { Expression = col "x"; Alias = None }; { Expression = col "y"; Alias = None } ]
+                            { Projections = [ { Expression = col "x"; Alias = None; SourceName = None }; { Expression = col "y"; Alias = None; SourceName = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false

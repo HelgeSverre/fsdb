@@ -93,7 +93,7 @@ let tests =
               | other -> failtestf "expected quoted variables to read back, got %A" other
 
               match handle session "SELECT @'sp ace' := @`HAS, COMMA` + @\"DOUBLE-NAME\"" with
-              | updated, ResultSet([ "@'sp ace':=@`HAS, COMMA` + @\"DOUBLE-NAME\"" ], [ [ Some "4" ] ]) ->
+              | updated, ResultSet([ "@'sp ace' := @`HAS, COMMA` + @\"DOUBLE-NAME\"" ], [ [ Some "4" ] ]) ->
                   Expect.equal updated.UserVariables.["sp ace"] (VInt 4L) "assignment uses quoted references"
               | _, other -> failtestf "expected quoted variables in an assignment expression, got %A" other
 
@@ -188,7 +188,7 @@ let tests =
               let session, result = handle session "SELECT @counter := @counter + 1"
 
               match result with
-              | ResultSet([ "@counter:=@counter + 1" ], [ [ Some "1" ] ]) -> ()
+              | ResultSet([ "@counter := @counter + 1" ], [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected assignment result, got %A" other
 
               match handle session "SELECT @counter" |> snd with

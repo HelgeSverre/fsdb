@@ -1,7 +1,8 @@
 # Unaliased expression source labels
 
-Status: partial. Common nested literal and qualifier labels match, but source
-spelling is not retained in the projection AST.
+Status: partial. Parsed projections retain source names through execution,
+prepared binding, metadata inference, and view rendering. Numeric `NAME_CONST`
+names and introduced hexadecimal binary names still diverge.
 
 The maintained [expression-label oracle](../scripts/expression-label-oracle.py)
 checks column headers and values against a disposable native MySQL 8.4.11
@@ -25,9 +26,23 @@ retains `'a'||'b'`, `ANSI_QUOTES` retains `"x" + 1`, and
 `HIGH_NOT_PRECEDENCE` retains lowercase `not` in `not 1 = 0`.
 An executable version comment in `1 /*!80000 + 2 */` produces `1  + 2`.
 
-Capturing the entire text consumed by the expression parser is insufficient:
-trailing comments must be excluded, literals have separate naming rules, and
-SQL-mode preprocessing can replace the original spelling. Projection naming
-must preserve these distinctions through expression rewrites, prepared binding,
-and metadata inference. The native-only boundary cases above describe the
-remaining contract; they do not establish fsdb parity.
+Projection records retain names independently of aliases and expression rewrites.
+Source positions account for length changes made by SQL-mode preprocessing.
+The SQL source scanner excludes trailing trivia while retaining interior
+comments. Literal names preserve numeric, boolean, and binary spelling;
+redundant parentheses around positive literals are removed. Adjacent quoted
+strings concatenate as values and retain the first string's name. Leading
+whitespace is removed from string names, independently of the value.
+
+Execution and prepared-metadata regressions cover the table above, SQL-mode
+length changes, grouped window rewrites, derived sources, and explicit aliases.
+The maintained oracle also checks user-variable, window, and full-text names.
+
+Remaining native-verified differences:
+
+| Projection | MySQL name | fsdb name |
+|---|---|---|
+| `NAME_CONST(1,2)` | `1` | `NAME_CONST(1,2)` |
+| `_binary X'41'` | `_binary X'41'` | `A` |
+
+The `_latin1'é'` control retains the decoded name `Ã©` on both engines.

@@ -37,67 +37,64 @@ let defaultOptions: ParserOptions =
       RealAsFloat = false
       NoBackslashEscapes = false }
 
+type private SqlSourcePart = Character | Quoted | OpenParenthesis | CloseParenthesis
+
+let inline private visitSqlSourceParts
+    (options: ParserOptions)
+    (text: string)
+    first
+    finish
+    ([<InlineIfLambda>] visit: int -> SqlSourcePart -> int -> int -> bool)
+    =
+    let mutable index = first
+    let mutable depth = 0
+    let mutable running = true
+    while running && index < finish do
+        let start = index
+        match text.[index] with
+        | '\'' | '"' | '`' as delimiter ->
+            let backslashEscapes =
+                not options.NoBackslashEscapes && delimiter <> '`'
+                && not (delimiter = '"' && options.AnsiQuotes)
+            index <- index + 1
+            let mutable closed = false
+            while index < finish && not closed do
+                if backslashEscapes && text.[index] = '\\' then
+                    index <- min finish (index + 2)
+                elif text.[index] = delimiter && index + 1 < finish && text.[index + 1] = delimiter then
+                    index <- index + 2
+                elif text.[index] = delimiter then
+                    index <- index + 1
+                    closed <- true
+                else index <- index + 1
+            running <- visit depth Quoted start index
+        | '#' ->
+            while index < finish && text.[index] <> '\r' && text.[index] <> '\n' do index <- index + 1
+        | '-' when index + 1 < finish && text.[index + 1] = '-'
+                   && (index + 2 = finish || Char.IsWhiteSpace text.[index + 2]) ->
+            while index < finish && text.[index] <> '\r' && text.[index] <> '\n' do index <- index + 1
+        | '/' when index + 1 < finish && text.[index + 1] = '*' ->
+            let closeAt = text.IndexOf("*/", index + 2, StringComparison.Ordinal)
+            index <- if closeAt < 0 then finish else min finish (closeAt + 2)
+        | '(' ->
+            index <- index + 1
+            running <- visit depth OpenParenthesis start index
+            depth <- depth + 1
+        | ')' ->
+            index <- index + 1
+            depth <- max 0 (depth - 1)
+            running <- visit depth CloseParenthesis start index
+        | _ ->
+            index <- index + 1
+            running <- visit depth Character start index
+
 let inline private visitTopLevelCharactersWithOptions
     (options: ParserOptions)
     (text: string)
     ([<InlineIfLambda>] visit: int -> bool)
     : unit =
-    let mutable index = 0
-    let mutable depth = 0
-    let mutable quote = None
-    let mutable blockComment = false
-    let mutable lineComment = false
-    let mutable running = true
-
-    while running && index < text.Length do
-        if blockComment then
-            if text.[index] = '*' && index + 1 < text.Length && text.[index + 1] = '/' then
-                blockComment <- false
-                index <- index + 2
-            else
-                index <- index + 1
-        elif lineComment then
-            if text.[index] = '\r' || text.[index] = '\n' then
-                lineComment <- false
-
-            index <- index + 1
-        else
-            match quote with
-            | Some delimiter when not options.NoBackslashEscapes && delimiter <> '`' && text.[index] = '\\' ->
-                index <- min text.Length (index + 2)
-            | Some delimiter when text.[index] = delimiter && index + 1 < text.Length && text.[index + 1] = delimiter ->
-                index <- index + 2
-            | Some delimiter when text.[index] = delimiter ->
-                quote <- None
-                index <- index + 1
-            | Some _ -> index <- index + 1
-            | None when text.[index] = '\'' || text.[index] = '"' || text.[index] = '`' ->
-                quote <- Some text.[index]
-                index <- index + 1
-            | None when text.[index] = '#' ->
-                lineComment <- true
-                index <- index + 1
-            | None when
-                text.[index] = '-'
-                && index + 2 < text.Length
-                && text.[index + 1] = '-'
-                && Char.IsWhiteSpace text.[index + 2]
-                ->
-                lineComment <- true
-                index <- index + 2
-            | None when text.[index] = '/' && index + 1 < text.Length && text.[index + 1] = '*' ->
-                blockComment <- true
-                index <- index + 2
-            | None when text.[index] = '(' ->
-                depth <- depth + 1
-                index <- index + 1
-            | None when text.[index] = ')' ->
-                depth <- max 0 (depth - 1)
-                index <- index + 1
-            | None when depth = 0 ->
-                running <- visit index
-                index <- index + 1
-            | None -> index <- index + 1
+    visitSqlSourceParts options text 0 text.Length (fun depth part first _ ->
+        if depth = 0 && part = Character then visit first else true)
 
 let private topLevelCommaSeparatedWithOptions (options: ParserOptions) rejectEmpty (text: string) : string list * bool =
     let parts = ResizeArray<string>()
@@ -173,6 +170,8 @@ let trySplitTopLevelKeywordWithOptions
 type private ParserState =
     { Options: ParserOptions
       StoredProgramSyntax: bool
+      SourceText: string
+      SourceOffsets: (int * int) array
       mutable ExpressionDepth: int
       mutable PlaceholderCount: int }
 
@@ -768,6 +767,13 @@ let private quoted (quote: char) : Parser<Value, unit> =
 
 let private stringLit: Parser<Value, unit> = quoted '\'' <|> quoted '"'
 
+/// Adjacent string tokens form one literal before projection aliases are parsed.
+let private concatenatedStringLit =
+    pipe2 stringLit (many stringLit) (fun first rest ->
+        match rest with
+        | [] -> first
+        | _ -> (first :: rest) |> List.map (toText >> Option.defaultValue "") |> String.concat "" |> VString)
+
 /// MySQL's `_charset'text'` introducer — labels the literal's
 /// client-encoded (hence UTF-8) bytes with the named charset *without*
 /// converting them, verified against 8.4: `_latin1'é'` reads back as the
@@ -787,7 +793,7 @@ let private introducedStringLit: Parser<Expr, unit> =
         )
 
     introducer
-    .>>. stringLit
+    .>>. concatenatedStringLit
     >>= fun (charset, v) ->
         let text =
             match v with
@@ -852,7 +858,7 @@ let private introducedBinaryLit: Parser<Value, unit> =
     |>> Value.materialize
 
 let private nationalStringLit: Parser<Value, unit> =
-    attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>. stringLit
+    attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>. concatenatedStringLit
 
 let private literalValue: Parser<Value, unit> =
     choice
@@ -861,7 +867,7 @@ let private literalValue: Parser<Value, unit> =
           numberLit
           hexBytesLit
           nationalStringLit
-          stringLit
+          concatenatedStringLit
           keyword "NULL" >>% VNull
           keyword "TRUE" >>% VInt 1L
           keyword "FALSE" >>% VInt 0L ]
@@ -1985,7 +1991,7 @@ let private matchAgainstAtom: Parser<Expr, unit> =
     // `expr` would swallow the `IN NATURAL LANGUAGE MODE` modifier as an
     // `IN (...)` comparison.
     let againstArg =
-        choice [ stringLit |>> Lit; numberExpr; placeholderAtom; identifier |>> Col ]
+        choice [ concatenatedStringLit |>> Lit; numberExpr; placeholderAtom; identifier |>> Col ]
 
     (keyword "MATCH" >>. sym "(" >>. sepBy1 matchColumn (sym ",") .>> sym ")"
      .>> keyword "AGAINST"
@@ -2017,7 +2023,7 @@ let private atom: Parser<Expr, unit> =
           hexBytesLit |>> Lit
           nationalStringLit |>> Lit
           introducedStringLit
-          stringLit |>> Lit
+          concatenatedStringLit |>> Lit
           keyword "NULL" >>% Lit VNull
           keyword "TRUE" >>% Lit(VInt 1L)
           keyword "FALSE" >>% Lit(VInt 0L)
@@ -3519,7 +3525,71 @@ let private projectionAlias: Parser<string option, unit> =
     let implicitName = identifier <|> stringName
     (attempt (keyword "AS" >>. explicitName) |>> Some) <|> (attempt implicitName |>> Some) <|> preturn None
 
-let private projection: Parser<Projection, unit> = pipe2 expr projectionAlias Projection.create
+let private sourcePosition (state: ParserState) position =
+    let mutable low = 0
+    let mutable high = state.SourceOffsets.Length - 1
+    while low <= high do
+        let middle = low + (high - low) / 2
+        let boundary, _ = state.SourceOffsets.[middle]
+        if boundary <= position then low <- middle + 1 else high <- middle - 1
+    position + (if high < 0 then 0 else snd state.SourceOffsets.[high])
+
+/// Interior comments belong to expression names; trailing trivia does not.
+let private projectionSourceBounds (state: ParserState) first finish =
+    let first, finish = sourcePosition state first, sourcePosition state finish
+    let mutable tokenEnd = first
+    let mutable quotedTokens = 0
+    visitSqlSourceParts state.Options state.SourceText first finish (fun _ part start finish ->
+        if part <> Character || not (Char.IsWhiteSpace state.SourceText.[start]) then tokenEnd <- finish
+        if part = Quoted then quotedTokens <- quotedTokens + 1
+        true)
+    first, tokenEnd, quotedTokens
+
+let private literalSourcePrefix = skipMany (sym "(" <|> sym "+")
+
+let private firstStringSourceName source =
+    let introducer =
+        (attempt (pchar '_' >>. many1Satisfy isIdentChar .>> ws) >>% ())
+        <|> (attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>% ())
+    match run (literalSourcePrefix >>. optional introducer >>. stringLit) source with
+    | Success(VString text, _, _) -> Some(text.TrimStart())
+    | _ -> None
+
+let private literalSourceName source =
+    let quotedBinary =
+        anyOf "xXbB" >>. pchar '\'' >>. skipManyTill anyChar (pchar '\'')
+    let token =
+        (numberLiteral numberFormat "number" |>> _.String)
+        <|> withSkippedString (fun text _ -> text) quotedBinary
+        <|> withSkippedString (fun text _ -> text) (pstringCI "TRUE" <|> pstringCI "FALSE")
+    // A folded negative literal still has an expression-shaped name, including parentheses.
+    match run (literalSourcePrefix >>. ((followedBy (pchar '-') >>% source) <|> token)) source with
+    | Success(name, _, _) -> Some name
+    | _ -> None
+
+let private projectionSourceName state expression first finish =
+    let first, finish, quotedTokens = projectionSourceBounds state first finish
+    let source () = state.SourceText.Substring(first, finish - first)
+    match expression with
+    | Lit(VString text) ->
+        if quotedTokens > 1 then firstStringSourceName (source ())
+        else
+            let name = text.TrimStart()
+            if name = text then None else Some name
+    | Lit VNull | Col _ | QualifiedCol _ | Star _ -> None
+    | Lit(VBytes _) ->
+        let source = source ()
+        literalSourceName source |> Option.orElseWith (fun () -> firstStringSourceName source)
+    | Lit _ | ApproximateLiteral _ -> literalSourceName (source ())
+    | FuncCall(name, [ Lit(VString _); _ ]) when name.Equals("NAME_CONST", StringComparison.OrdinalIgnoreCase) -> None
+    | _ -> Some(source ())
+
+let private projection: Parser<Projection, unit> =
+    pipe3 getPosition expr getPosition (fun first expression finish ->
+        { Projection.create expression None with
+            SourceName = projectionSourceName (parserState ()) expression (int first.Index) (int finish.Index) })
+    .>>. projectionAlias
+    |>> fun (projection, alias) -> { projection with Alias = alias }
 
 let private orderKey: Parser<OrderKey, unit> =
     (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc)))
@@ -4923,11 +4993,12 @@ statementRef.Value <-
 /// touching quoted text or ordinary comments. ANSI double-quoted identifiers
 /// become backticks, while concatenating pipes become one private
 /// high-precedence operator token understood by the expression parser.
-let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string =
+let private rewriteSqlForOptions (options: ParserOptions) (sql: string) =
     if not options.AnsiQuotes && not options.PipesAsConcat && not options.HighNotPrecedence then
-        sql
+        sql, [||]
     else
         let output = Text.StringBuilder(sql.Length)
+        let offsets = ResizeArray<int * int>()
         let mutable index = 0
 
         let copyQuoted (quote: char) =
@@ -4987,6 +5058,7 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
             output.Append(if word.Equals("NOT", StringComparison.OrdinalIgnoreCase) then "NOT" else word) |> ignore
 
         while index < sql.Length do
+            let previousOffset = index - output.Length
             match sql.[index] with
             | '\''
             | '`' as quote -> copyQuoted quote
@@ -5008,7 +5080,10 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
                 output.Append current |> ignore
                 index <- index + 1
 
-        output.ToString()
+            let offset = index - output.Length
+            if offset <> previousOffset then offsets.Add(output.Length, offset)
+
+        output.ToString(), offsets.ToArray()
 
 let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Result<'value, string> =
     try
@@ -5026,14 +5101,18 @@ let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Res
         Result.Error ex.Message
 
 let private withParserState storedProgramSyntax (options: ParserOptions) (sql: string) parse =
+    let source = expandVersionComments options sql
+    let rewritten, offsets = rewriteSqlForOptions options source
     let state =
         { Options = options
           StoredProgramSyntax = storedProgramSyntax
+          SourceText = source
+          SourceOffsets = offsets
           ExpressionDepth = 0
           PlaceholderCount = 0 }
 
     DynamicScope.withThreadValue currentState (Some state) (fun () ->
-        sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse)
+        parse rewritten)
 
 let private withStatementParserState options sql parse =
     withParserState false options sql parse

@@ -33,7 +33,73 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "expression labels retain nested literal quotes and qualifiers"
+        [ testCase "projection labels preserve source spelling and SQL modes"
+          <| fun _ ->
+              for mode, sql, label, value in
+                  [ "", "SELECT concat('a','b')", "concat('a','b')", "ab"
+                    "", "SELECT  1  +  2   ", "1  +  2", "3"
+                    "", "SELECT (1 + 2)", "(1 + 2)", "3"
+                    "", "SELECT 1 /* middle */ + 2 /* tail */", "1 /* middle */ + 2", "3"
+                    "", "SELECT /* leading */ 1 + 2", "1 + 2", "3"
+                    "", "SELECT ((1))", "1", "1"
+                    "", "SELECT 'a' 'b'", "a", "ab"
+                    "", "SELECT CAST(1 AS CHAR)", "CAST(1 AS CHAR)", "1"
+                    "", "SELECT CASE WHEN 1 THEN 'a' ELSE 'b' END", "CASE WHEN 1 THEN 'a' ELSE 'b' END", "a"
+                    "PIPES_AS_CONCAT", "SELECT 'a'||'b'", "'a'||'b'", "ab"
+                    "ANSI_QUOTES", "SELECT \"x\" + 1 FROM (SELECT 1 AS x) a", "\"x\" + 1", "2"
+                    "HIGH_NOT_PRECEDENCE", "SELECT not 1 = 0", "not 1 = 0", "1"
+                    "", "SELECT 1 /*!80000 + 2 */", "1  + 2", "3" ] do
+                  let session, _ = handle (create 1 (Fsdb.Storage.create ())) ("SET sql_mode='" + mode + "'")
+                  Expect.equal (handle session sql |> snd) (ResultSet([ label ], [ [ Some value ] ])) sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map _.Name) [ label ] ("prepared label: " + sql)
+
+          testCase "literal projection names retain spelling and decoded string boundaries"
+          <| fun _ ->
+              for sql, labels, values in
+                  [ "SELECT 001,(001),1.00,+1,-1,-(1),((-1)),true,false,null",
+                    [ "001"; "001"; "1.00"; "1"; "-1"; "-(1)"; "((-1))"; "true"; "false"; "NULL" ],
+                    [ Some "1"; Some "1"; Some "1.00"; Some "1"; Some "-1"; Some "-1"; Some "-1"; Some "1"; Some "0"; None ]
+                    "SELECT 0x41,X'41',b'01',_binary'a',_utf8mb4'a',N'a'",
+                    [ "0x41"; "X'41'"; "b'01'"; "a"; "a"; "a" ],
+                    [ Some "A"; Some "A"; Some "\u0001"; Some "a"; Some "a"; Some "a" ]
+                    "SELECT ' a ', 'a' COLLATE utf8mb4_bin, _utf8mb4'a' 'b', N'a' 'b'",
+                    [ "a "; "'a' COLLATE utf8mb4_bin"; "a"; "a" ],
+                    [ Some " a "; Some "a"; Some "ab"; Some "ab" ] ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  Expect.equal (handle session sql |> snd) (ResultSet(labels, [ values ])) sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map _.Name) labels ("prepared label: " + sql)
+
+          testCase "source labels survive length-changing syntax and query rewrites"
+          <| fun _ ->
+              for mode, sql, labels, values in
+                  [ "ANSI_QUOTES", "SELECT \"x`y\"+1, 1+2 FROM (SELECT 1 AS `x``y`) a", [ "\"x`y\"+1"; "1+2" ], [ "2"; "3" ]
+                    "ANSI_QUOTES", "SELECT \"x\"\"y\"+1, 1+2 FROM (SELECT 1 AS `x\"y`) a", [ "\"x\"\"y\"+1"; "1+2" ], [ "2"; "3" ]
+                    "", "SELECT SUM(id)+row_number() OVER () FROM (SELECT 1 AS id) a", [ "SUM(id)+row_number() OVER ()" ], [ "2" ]
+                    "", "SELECT concat('a','b') AS '',concat('a','b')", [ ""; "concat('a','b')" ], [ "ab"; "ab" ]
+                    "", "SELECT * FROM (SELECT concat('a','b')) d", [ "concat('a','b')" ], [ "ab" ] ] do
+                  let session, _ = handle (create 1 (Fsdb.Storage.create ())) ("SET sql_mode='" + mode + "'")
+                  Expect.equal (handle session sql |> snd) (ResultSet(labels, [ List.map Some values ])) sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map _.Name) labels ("prepared label: " + sql)
+
+          testCase "stored view names retain source spelling after rendering"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              Expect.equal (handle session "CREATE VIEW labels AS SELECT concat('a','b'),1+2" |> snd)
+                  (Affected 0UL) "create view"
+              for sql in [ "SELECT * FROM labels"; "SELECT `concat('a','b')`,`1+2` FROM labels" ] do
+                  Expect.equal (handle session sql |> snd)
+                      (ResultSet([ "concat('a','b')"; "1+2" ], [ [ Some "ab"; Some "3" ] ])) sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map _.Name) [ "concat('a','b')"; "1+2" ] "prepared view names"
+
+          testCase "expression labels retain nested literal quotes and qualifiers"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               handle session "CREATE TABLE a(id INT)" |> ignore
@@ -576,6 +642,7 @@ let tests =
               for sql, names in
                   [ "SELECT ?, ABS(?), ? + 1", [ "?"; "ABS(?)"; "? + 1" ]
                     "SELECT CONCAT(?, 'b')", [ "CONCAT(?, 'b')" ]
+                    "SELECT concat(?,'b')", [ "concat(?,'b')" ]
                     "SELECT d.`?` FROM (SELECT ?) d", [ "?" ]
                     "WITH c AS (SELECT ?) SELECT * FROM c", [ "?" ]
                     "SELECT ? UNION ALL SELECT ?", [ "?" ]

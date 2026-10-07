@@ -360,7 +360,7 @@ let tests =
 
               match run store "SELECT MATCH (title,body) AGAINST ('Tutorial') FROM articles WHERE id = 2" with
               | ResultSet([ label ], [ [ Some "0" ] ]) ->
-                  Expect.stringContains label "match (title,body) against" "MySQL-style header label"
+                  Expect.equal label "MATCH (title,body) AGAINST ('Tutorial')" "original expression header"
               | other -> failtestf "expected the zero score, got %A" other
 
           testCase "SELECT * never leaks the synthetic score column"

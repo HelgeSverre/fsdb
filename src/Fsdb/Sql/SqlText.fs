@@ -400,13 +400,13 @@ and private renderJoinChain options context source sourceJoins =
 
     joined, sources
 
-and private renderProjection (options: ViewRenderOptions) (context: ViewContext) ({ Expression = expr; Alias = alias }: Projection) : string * string =
+and private renderProjection (options: ViewRenderOptions) (context: ViewContext) (({ Expression = expr; Alias = alias } as projection): Projection) : string * string =
     let rendered = renderViewExpression options context expr
 
     match expr, alias with
     | Star _, None -> rendered, "*"
     | _ ->
-        let name = alias |> Option.defaultValue (expressionName expr rendered)
+        let name = Projection.name (fun expression -> expressionName expression rendered) projection
         rendered + " AS " + identifier name, name
 
 and private expandProjections (context: ViewContext) (projections: Projection list) : Projection list =
@@ -465,14 +465,10 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
                         match cte.Body with
                         | PlainSelect body ->
                             body.Projections
-                            |> List.map (fun { Expression = expr; Alias = alias } ->
-                                alias
-                                |> Option.defaultValue (expressionName expr (renderViewExpression options context expr)))
+                            |> List.map (Projection.name (fun expr -> expressionName expr (renderViewExpression options context expr)))
                         | UnionSelect(first, _, _, _, _) ->
                             first.Projections
-                            |> List.map (fun { Expression = expr; Alias = alias } ->
-                                alias
-                                |> Option.defaultValue (expressionName expr (renderViewExpression options context expr)))
+                            |> List.map (Projection.name (fun expr -> expressionName expr (renderViewExpression options context expr)))
                     else
                         cte.CteColumns
 

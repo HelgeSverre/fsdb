@@ -1817,6 +1817,7 @@ let private applyResolvedPrivileges store grantor name host resolved target with
 let private projectionName (projection: Projection) =
     match projection with
     | { Alias = Some alias } -> Some alias
+    | { SourceName = Some name } -> Some name
     | { Expression = Col name; Alias = None } -> Some name
     | { Expression = QualifiedCol(_, name); Alias = None } -> Some name
     | _ -> None

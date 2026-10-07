@@ -5545,12 +5545,12 @@ let tests =
                     runDefault store "INSERT INTO t VALUES (1, 10), (2, 20)" |> ignore
 
                     match runDefault store "SELECT LEAD(v) OVER (ORDER BY id) FROM t" with
-                    | ResultSet([ "lead(v) over (order by id)" ], _) -> ()
-                    | other -> failtestf "expected the column header 'lead(v) over (order by id)', got %A" other
+                    | ResultSet([ "LEAD(v) OVER (ORDER BY id)" ], _) -> ()
+                    | other -> failtestf "expected the column header 'LEAD(v) OVER (ORDER BY id)', got %A" other
 
                     match runDefault store "SELECT LAG(v) OVER (ORDER BY id) FROM t" with
-                    | ResultSet([ "lag(v) over (order by id)" ], _) -> ()
-                    | other -> failtestf "expected the column header 'lag(v) over (order by id)', got %A" other
+                    | ResultSet([ "LAG(v) OVER (ORDER BY id)" ], _) -> ()
+                    | other -> failtestf "expected the column header 'LAG(v) OVER (ORDER BY id)', got %A" other
 
                 testCase "a window function in ORDER BY alone (not in the SELECT list) sorts by it, NULLs first"
                 <| fun _ ->
@@ -7401,7 +7401,7 @@ let tests =
                                 store
                                 registry
                                 (sprintf
-                                    "SELECT r.id, (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) FROM requested_names AS r ORDER BY r.id"
+                                    "SELECT r.id, (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) AS matches FROM requested_names AS r ORDER BY r.id"
                                     table)
 
                         result, calls
@@ -7413,7 +7413,7 @@ let tests =
                     Expect.equal
                         indexed
                         (ResultSet(
-                            [ "id"; "(...)" ],
+                            [ "id"; "matches" ],
                             [ [ Some "1"; Some "2" ]
                               [ Some "2"; Some "0" ]
                               [ Some "3"; Some "1" ]
@@ -7431,7 +7431,7 @@ let tests =
                                 store
                                 registry
                                 (sprintf
-                                    "SELECT r.id, (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND UPPER(TRIM(candidate.name)) = UPPER(TRIM(r.name))) FROM requested_names AS r ORDER BY r.id"
+                                    "SELECT r.id, (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND UPPER(TRIM(candidate.name)) = UPPER(TRIM(r.name))) AS matches FROM requested_names AS r ORDER BY r.id"
                                     table)
 
                         result, calls
@@ -7447,7 +7447,7 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT r.id, (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_names) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.label) = LOWER(r.name)) FROM requested_names AS r ORDER BY r.id"
+                            "SELECT r.id, (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_names) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.label) = LOWER(r.name)) AS matches FROM requested_names AS r ORDER BY r.id"
 
                     Expect.equal derived indexed "a projected alias preserves correlated functional results"
                     Expect.isLessThan calls 10 "the projected alias reaches the physical expression bucket"
@@ -7458,7 +7458,7 @@ let tests =
                         run
                             store
                             registry
-                            "WITH candidates(id, label) AS (SELECT id, name FROM indexed_names) SELECT r.id, (SELECT COUNT(*) FROM candidates AS candidate WHERE TOUCH(candidate.id) = candidate.id AND UPPER(TRIM(candidate.label)) = UPPER(TRIM(r.name))) FROM requested_names AS r ORDER BY r.id"
+                            "WITH candidates(id, label) AS (SELECT id, name FROM indexed_names) SELECT r.id, (SELECT COUNT(*) FROM candidates AS candidate WHERE TOUCH(candidate.id) = candidate.id AND UPPER(TRIM(candidate.label)) = UPPER(TRIM(r.name))) AS matches FROM requested_names AS r ORDER BY r.id"
 
                     Expect.equal cte indexed "a pass-through CTE preserves correlated functional results"
                     Expect.isLessThan calls 10 "the CTE reaches the composed physical expression bucket"
@@ -7571,7 +7571,7 @@ let tests =
                                 store
                                 registry
                                 (sprintf
-                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) FROM requested_names AS r WHERE r.id = 1"
+                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) AS matches FROM requested_names AS r WHERE r.id = 1"
                                     table)
 
                         result, calls
@@ -7579,7 +7579,7 @@ let tests =
                     let indexedTextCorrelation, indexedTextCorrelationCalls = correlatedTextRange "indexed_names"
                     let scannedTextCorrelation, scannedTextCorrelationCalls = correlatedTextRange "scanned_names"
                     Expect.equal indexedTextCorrelation scannedTextCorrelation "the correlated text range agrees with a scan"
-                    Expect.equal indexedTextCorrelation (ResultSet([ "(...)" ], [ [ Some "2" ] ])) "correlated text bounds"
+                    Expect.equal indexedTextCorrelation (ResultSet([ "matches" ], [ [ Some "2" ] ])) "correlated text bounds"
                     Expect.isLessThan indexedTextCorrelationCalls 10 "the correlated text key bounds residual evaluation"
                     Expect.isGreaterThan scannedTextCorrelationCalls 490 "the correlated text control exercises the scan"
 
@@ -7589,7 +7589,7 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_names) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.label) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) FROM requested_names AS r WHERE r.id = 1"
+                            "SELECT (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_names) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.label) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) AS matches FROM requested_names AS r WHERE r.id = 1"
 
                     Expect.equal projectedTextRange indexedTextCorrelation "a projected alias preserves the text functional range"
                     Expect.isLessThan calls 10 "the projected text range reaches the physical ordered key"
@@ -7600,9 +7600,9 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) FROM requested_names AS r WHERE r.id = 4"
+                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) BETWEEN LOWER(r.name) AND CONCAT(LOWER(r.name), 'z')) AS matches FROM requested_names AS r WHERE r.id = 4"
 
-                    Expect.equal nullTextRange (ResultSet([ "(...)" ], [ [ Some "0" ] ])) "NULL text bounds match no functional keys"
+                    Expect.equal nullTextRange (ResultSet([ "matches" ], [ [ Some "0" ] ])) "NULL text bounds match no functional keys"
                     Expect.isLessThan calls 5 "NULL text bounds do not trigger a scan"
 
                     calls <- 0
@@ -7624,7 +7624,7 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) >= LOWER(r.name) COLLATE utf8mb4_0900_ai_ci AND LOWER(candidate.name) < 'f' COLLATE utf8mb4_0900_ai_ci) FROM requested_names AS r WHERE r.id = 3"
+                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) >= LOWER(r.name) COLLATE utf8mb4_0900_ai_ci AND LOWER(candidate.name) < 'f' COLLATE utf8mb4_0900_ai_ci) AS matches FROM requested_names AS r WHERE r.id = 3"
                     with
                     | ResultSet(_, [ [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected both accent-insensitive text-range matches, got %A" other
@@ -7701,7 +7701,7 @@ let tests =
                                 store
                                 registry
                                 (sprintf
-                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) = CHAR_LENGTH(r.name)) FROM requested_names AS r WHERE r.id = %d"
+                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) = CHAR_LENGTH(r.name)) AS matches FROM requested_names AS r WHERE r.id = %d"
                                     table
                                     requestedId)
 
@@ -7714,7 +7714,7 @@ let tests =
                     Expect.isGreaterThan scannedLengthCalls 45 "the length control exercises the scan"
 
                     let nullLength, nullLengthCalls = lengthQuery 4 "indexed_lengths"
-                    Expect.equal nullLength (ResultSet([ "(...)" ], [ [ Some "0" ] ])) "NULL does not equal a functional key"
+                    Expect.equal nullLength (ResultSet([ "matches" ], [ [ Some "0" ] ])) "NULL does not equal a functional key"
                     Expect.isLessThan nullLengthCalls 5 "a NULL functional probe does not fall back to a scan"
 
                     let lengthRangeQuery table =
@@ -7725,7 +7725,7 @@ let tests =
                                 store
                                 registry
                                 (sprintf
-                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 1"
+                                    "SELECT (SELECT COUNT(*) FROM %s AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) AS matches FROM requested_names AS r WHERE r.id = 1"
                                     table)
 
                         result, calls
@@ -7733,7 +7733,7 @@ let tests =
                     let indexedLengthRange, indexedLengthRangeCalls = lengthRangeQuery "indexed_lengths"
                     let scannedLengthRange, scannedLengthRangeCalls = lengthRangeQuery "scanned_lengths"
                     Expect.equal indexedLengthRange scannedLengthRange "the functional range agrees with a scan"
-                    Expect.equal indexedLengthRange (ResultSet([ "(...)" ], [ [ Some "3" ] ])) "both inclusive bounds apply"
+                    Expect.equal indexedLengthRange (ResultSet([ "matches" ], [ [ Some "3" ] ])) "both inclusive bounds apply"
                     Expect.isLessThan indexedLengthRangeCalls 10 "the ordered functional key bounds residual evaluation"
                     Expect.isGreaterThan scannedLengthRangeCalls 45 "the range control exercises the scan"
 
@@ -7743,7 +7743,7 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND BIT_LENGTH(REVERSE(candidate.name)) BETWEEN BIT_LENGTH(REVERSE(r.name)) - 8 AND BIT_LENGTH(REVERSE(r.name)) + 8) FROM requested_names AS r WHERE r.id = 1"
+                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND BIT_LENGTH(REVERSE(candidate.name)) BETWEEN BIT_LENGTH(REVERSE(r.name)) - 8 AND BIT_LENGTH(REVERSE(r.name)) + 8) AS matches FROM requested_names AS r WHERE r.id = 1"
 
                     Expect.equal reversedRange indexedLengthRange "a composed numeric functional range keeps the same bounds"
                     Expect.isLessThan calls 10 "the composed ordered key bounds residual evaluation"
@@ -7754,9 +7754,9 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(r.name) - 1 <= CHAR_LENGTH(candidate.name) AND CHAR_LENGTH(r.name) + 1 > CHAR_LENGTH(candidate.name)) FROM requested_names AS r WHERE r.id = 1"
+                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(r.name) - 1 <= CHAR_LENGTH(candidate.name) AND CHAR_LENGTH(r.name) + 1 > CHAR_LENGTH(candidate.name)) AS matches FROM requested_names AS r WHERE r.id = 1"
 
-                    Expect.equal reversedOperands (ResultSet([ "(...)" ], [ [ Some "2" ] ])) "reversed exclusive bounds are merged"
+                    Expect.equal reversedOperands (ResultSet([ "matches" ], [ [ Some "2" ] ])) "reversed exclusive bounds are merged"
                     Expect.isLessThan calls 10 "comparison orientation retains the functional range"
 
                     calls <- 0
@@ -7765,7 +7765,7 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_lengths) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.label) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 1"
+                            "SELECT (SELECT COUNT(*) FROM (SELECT id, name AS label FROM indexed_lengths) AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.label) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) AS matches FROM requested_names AS r WHERE r.id = 1"
 
                     Expect.equal projectedRange indexedLengthRange "a projected alias preserves the functional range"
                     Expect.isLessThan calls 10 "the projected range reaches the physical ordered key"
@@ -7777,11 +7777,11 @@ let tests =
                             run
                                 store
                                 registry
-                                "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 4"
+                                "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) AS matches FROM requested_names AS r WHERE r.id = 4"
 
                         result, calls
 
-                    Expect.equal nullLengthRange (ResultSet([ "(...)" ], [ [ Some "0" ] ])) "NULL bounds match no functional keys"
+                    Expect.equal nullLengthRange (ResultSet([ "matches" ], [ [ Some "0" ] ])) "NULL bounds match no functional keys"
                     Expect.isLessThan nullLengthRangeCalls 5 "NULL bounds do not trigger a scan"
 
                     calls <- 0
@@ -7790,7 +7790,7 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 100 AND CHAR_LENGTH(r.name) + 100) FROM requested_names AS r WHERE r.id = 1"
+                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 100 AND CHAR_LENGTH(r.name) + 100) AS matches FROM requested_names AS r WHERE r.id = 1"
                     with
                     | ResultSet(_, [ [ Some "50" ] ]) -> ()
                     | other -> failtestf "expected the broad functional range, got %A" other
@@ -7807,7 +7807,7 @@ let tests =
                         run
                             store
                             overriddenLength
-                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 1"
+                            "SELECT (SELECT COUNT(*) FROM indexed_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) AS matches FROM requested_names AS r WHERE r.id = 1"
 
                     let overriddenLengthCalls = calls
                     calls <- 0
@@ -7816,7 +7816,7 @@ let tests =
                         run
                             store
                             overriddenLength
-                            "SELECT (SELECT COUNT(*) FROM scanned_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) FROM requested_names AS r WHERE r.id = 1"
+                            "SELECT (SELECT COUNT(*) FROM scanned_lengths AS candidate WHERE TOUCH(candidate.id) = candidate.id AND CHAR_LENGTH(candidate.name) BETWEEN CHAR_LENGTH(r.name) - 1 AND CHAR_LENGTH(r.name) + 1) AS matches FROM requested_names AS r WHERE r.id = 1"
 
                     Expect.equal overriddenLengthIndexed overriddenLengthScanned "an overridden range function bypasses its stored key"
                     Expect.isGreaterThan overriddenLengthCalls 45 "the override retains ordinary row evaluation"
@@ -7831,7 +7831,7 @@ let tests =
                         run
                             store
                             overridden
-                            "SELECT r.id, (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) FROM requested_names AS r ORDER BY r.id"
+                            "SELECT r.id, (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) AS matches FROM requested_names AS r ORDER BY r.id"
 
                     let overriddenCalls = calls
                     calls <- 0
@@ -7840,7 +7840,7 @@ let tests =
                         run
                             store
                             overridden
-                            "SELECT r.id, (SELECT COUNT(*) FROM scanned_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) FROM requested_names AS r ORDER BY r.id"
+                            "SELECT r.id, (SELECT COUNT(*) FROM scanned_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name)) AS matches FROM requested_names AS r ORDER BY r.id"
 
                     Expect.equal overriddenIndexed overriddenScanned "an override bypasses the stored transform"
                     Expect.isGreaterThan overriddenCalls 1400 "the overridden function retains correlated row evaluation"
@@ -7871,7 +7871,7 @@ let tests =
                         run
                             store
                             registry
-                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name) COLLATE utf8mb4_0900_ai_ci) FROM requested_names AS r WHERE r.id = 3"
+                            "SELECT (SELECT COUNT(*) FROM indexed_names AS candidate WHERE TOUCH(candidate.id) = candidate.id AND LOWER(candidate.name) = LOWER(r.name) COLLATE utf8mb4_0900_ai_ci) AS matches FROM requested_names AS r WHERE r.id = 3"
                     with
                     | ResultSet(_, [ [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected the explicit accent-insensitive comparison, got %A" other
