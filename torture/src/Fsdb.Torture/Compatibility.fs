@@ -2659,6 +2659,27 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS aggregate_warning_input" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private naturalAggregates =
+        { Name = "natural-fulltext-aggregates"
+          Setup =
+            [| "CREATE TABLE natural_aggregates(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))"
+               "INSERT INTO natural_aggregates VALUES(1,'database concurrency'),(2,'storage transactions')"
+               "ANALYZE TABLE natural_aggregates" |]
+          Steps =
+            [| for index, sql in
+                   [ "SELECT COUNT(*) AS n FROM natural_aggregates WHERE MATCH(body) AGAINST('database')"
+                     "SELECT SUM(id)+COUNT(*) AS n FROM natural_aggregates WHERE MATCH(body) AGAINST('database')"
+                     "SELECT 1 AS n FROM natural_aggregates WHERE MATCH(body) AGAINST('database') HAVING COUNT(*)>0"
+                     "SELECT COUNT(*) AS n FROM natural_aggregates WHERE MATCH(body) AGAINST('absent')"
+                     "SELECT COUNT(*) AS n FROM natural_aggregates WHERE MATCH(body) AGAINST('database') LIMIT 1"
+                     "SELECT SUM(COUNT(*)) OVER() AS n FROM natural_aggregates WHERE MATCH(body) AGAINST('database')" ]
+                   |> List.indexed do
+                   let name = sprintf "aggregate-%d" index
+                   Contract.query (name + "-text") sql
+                   Contract.preparedQuery (name + "-binary") sql [||] |]
+          Cleanup = [| "DROP TABLE IF EXISTS natural_aggregates" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private naturalPhrases =
         { Name = "natural-fulltext-phrases"
           Setup =
@@ -3059,6 +3080,7 @@ module ContractCatalog =
            storedFunctionSet
            ngramFullText
            naturalPhrases
+           naturalAggregates
            temporalNumericConversion
            roundingPrecisionDescriptors
            integralRoundingDescriptors

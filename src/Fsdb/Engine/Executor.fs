@@ -15648,10 +15648,15 @@ and private runFullTextSelect
 
                                 [ sub expression, label ]
 
+                        let groupsRows =
+                            not select.GroupBy.IsEmpty
+                            || (select.Having |> Option.exists (containsAggregate registry))
+                            || (select.Projections |> List.exists (fst >> collectAggregateCalls registry >> List.isEmpty >> not))
+
                         let implicitOrder =
                             if streamedScoreColumn.IsSome then
                                 []
-                            elif select.OrderBy.IsEmpty && select.GroupBy.IsEmpty && not select.Distinct then
+                            elif select.OrderBy.IsEmpty && not groupsRows && not select.Distinct then
                                 computed
                                 |> List.tryFind (fun (node, mode, _) -> mode <> BooleanMode && List.contains node whereNodes)
                                 |> Option.bind (fun (node, _, _) -> synthetic |> List.tryFind (fst >> (=) node))

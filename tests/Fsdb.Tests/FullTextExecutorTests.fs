@@ -187,6 +187,20 @@ let tests =
                   | Err(1064, _) -> ()
                   | other -> failtestf "expected non-fulltext syntax rejection, got %A" other
 
+          testCase "natural fulltext predicates permit aggregate queries without explicit grouping"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              connection.Query "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))" |> ignore
+              connection.Query "INSERT INTO docs VALUES(1,'database concurrency'),(2,'storage transactions')" |> ignore
+              for sql, expected in
+                  [ "SELECT COUNT(*) AS n FROM docs WHERE MATCH(body) AGAINST('database')", "1"
+                    "SELECT SUM(id)+COUNT(*) AS n FROM docs WHERE MATCH(body) AGAINST('database')", "2"
+                    "SELECT 1 AS n FROM docs WHERE MATCH(body) AGAINST('database') HAVING COUNT(*)>0", "1"
+                    "SELECT COUNT(*) AS n FROM docs WHERE MATCH(body) AGAINST('absent')", "0"
+                    "SELECT COUNT(*) AS n FROM docs WHERE MATCH(body) AGAINST('database') LIMIT 1", "1"
+                    "SELECT SUM(COUNT(*)) OVER() AS n FROM docs WHERE MATCH(body) AGAINST('database')", "1" ] do
+                  Expect.equal (connection.Query sql) (ResultSet([ "n" ], [ [ Some expected ] ])) sql
+
           testCase "natural-language WHERE keeps matching rows and orders by relevance implicitly"
           <| fun _ ->
               let store = setup ()
