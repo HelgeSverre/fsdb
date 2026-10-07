@@ -499,6 +499,7 @@ and SetOp =
 /// real table alias.
 and FromItem =
     | FromTable of TableRef
+    | FromJoinGroup of source: FromItem * joins: Join list
     | FromSubquery of SelectOrUnion * alias: string
     /// `LATERAL (SELECT ...) AS alias` — a derived table that may reference
     /// the columns of the tables to its left in the same `FROM`, so it is
@@ -643,6 +644,98 @@ and SelectStmt =
       /// Locking clauses apply to this query block only. An empty `Tables`
       /// list targets every physical source not named by another clause.
       Locking: LockingRead list }
+
+module FromItem =
+    let (|Qualified|Grouped|) = function
+        | FromTable table -> Qualified(table.Alias |> Option.defaultValue table.Table)
+        | FromSubquery(_, alias) | FromLateral(_, alias) | FromJsonTable(_, _, _, alias) -> Qualified alias
+        | FromJoinGroup(source, joins) -> Grouped(source, joins)
+
+    let tryQualifier = function
+        | Qualified qualifier -> Some qualifier
+        | Grouped _ -> None
+
+    let rec leaves = function
+        | FromJoinGroup(source, joins) -> leaves source @ (joins |> List.collect (fun join -> leaves join.Table))
+        | source -> [ source ]
+
+    type JoinColumnError =
+        | MissingColumn of string
+        | AmbiguousColumn of string
+
+    type LogicalColumn =
+        | SourceColumn of name: string * expression: Expr
+        | MergedColumn of name: string * expression: Expr
+        member column.Name =
+            match column with SourceColumn(name, _) | MergedColumn(name, _) -> name
+        member column.Expression =
+            match column with SourceColumn(_, expression) | MergedColumn(_, expression) -> expression
+
+    /// Logical output columns merge USING keys without hiding qualified source columns.
+    let rec logicalColumns (columnsOf: string -> string list) item =
+        let leaf qualifier = columnsOf qualifier |> List.map (fun name -> SourceColumn(name, QualifiedCol(qualifier, name))) |> Ok
+        match item with
+        | FromJoinGroup(source, joins) ->
+            joins
+            |> List.fold (fun state join -> state |> Result.bind (fun left -> logicalJoinColumns columnsOf left join))
+                (logicalColumns columnsOf source)
+        | FromTable table -> leaf (table.Alias |> Option.defaultValue table.Table)
+        | FromSubquery(_, alias) | FromLateral(_, alias) | FromJsonTable(_, _, _, alias) -> leaf alias
+
+    and logicalJoinColumns columnsOf (left: LogicalColumn list) (join: Join) =
+        let sameName (left: string) right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+        logicalColumns columnsOf join.Table
+        |> Result.bind (fun right ->
+            let names =
+                match join.Kind with
+                | NaturalJoin | NaturalLeftJoin | NaturalRightJoin ->
+                    left |> List.map _.Name |> List.filter (fun name -> right |> List.exists (fun column -> sameName name column.Name))
+                | _ -> join.Using
+            let resolve name (columns: LogicalColumn list) =
+                match columns |> List.filter (fun column -> sameName name column.Name) with
+                | [ column ] -> Ok column.Expression
+                | [] -> Error(MissingColumn name)
+                | _ -> Error(AmbiguousColumn name)
+            let merged =
+                names
+                |> List.fold (fun state name ->
+                    state |> Result.bind (fun columns ->
+                        resolve name left |> Result.bind (fun leftExpression ->
+                            resolve name right |> Result.map (fun rightExpression ->
+                                let expression =
+                                    match join.Kind with
+                                    | RightJoin | NaturalRightJoin -> rightExpression
+                                    | _ -> leftExpression
+                                columns @ [ MergedColumn(name, expression) ])))) (Ok [])
+            merged |> Result.map (fun common ->
+                let isCommon (column: LogicalColumn) = names |> List.exists (sameName column.Name)
+                // USING order follows the left operand's columns, not its key list.
+                let common = left |> List.choose (fun column -> common |> List.tryFind (fun merged -> sameName column.Name merged.Name))
+                let leftRest = left |> List.filter (isCommon >> not)
+                let rightRest = right |> List.filter (isCommon >> not)
+                match names, join.Kind with
+                | [], _ -> left @ right
+                | _, (RightJoin | NaturalRightJoin) -> common @ rightRest @ leftRest
+                | _ -> common @ leftRest @ rightRest))
+
+    let logicalSelectColumns columnsOf (select: SelectStmt) =
+        let initial = select.From |> Option.map (logicalColumns columnsOf) |> Option.defaultValue (Ok [])
+        select.Joins
+        |> List.fold (fun state join -> state |> Result.bind (fun left -> logicalJoinColumns columnsOf left join)) initial
+
+module Join =
+    /// Grouped operands share the query block; derived sources bind their own conditions.
+    let rec conditions (join: Join) =
+        let rec sourceConditions = function
+            | FromJoinGroup(source, joins) -> sourceConditions source @ (joins |> List.collect conditions)
+            | _ -> []
+        join.On :: sourceConditions join.Table
+
+    let rec mapConditions rewrite (join: Join) =
+        let rec mapSource = function
+            | FromJoinGroup(source, joins) -> FromJoinGroup(mapSource source, joins |> List.map (mapConditions rewrite))
+            | source -> source
+        { join with Table = mapSource join.Table; On = rewrite join.On }
 
 [<RequireQualifiedAccess>]
 module SelectStmt =

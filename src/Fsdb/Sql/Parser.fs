@@ -3908,8 +3908,11 @@ let private jsonTable: Parser<FromItem, unit> =
             alias
         )
 
+let private fromJoinChain, fromJoinChainRef = createParserForwardedToRef<FromItem * Join list, unit> ()
+
 let private fromItem: Parser<FromItem, unit> =
     lateralTable <|> derivedTable <|> valuesTable <|> jsonTable <|> (tableRef |>> FromTable)
+    <|> (between (sym "(") (sym ")") fromJoinChain |>> FromJoinGroup)
 
 /// `LEFT` and `RIGHT JOIN` require `ON` or `USING`. MySQL treats an
 /// unqualified `[INNER] JOIN` without either clause as a Cartesian product.
@@ -3934,11 +3937,9 @@ let private crossJoinClause: Parser<Join, unit> =
     attempt (keyword "CROSS" >>. keyword "JOIN" >>. fromItem)
     |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }
 
-/// MySQL's comma join shares the `CrossJoin` AST shape with explicit CROSS
-/// JOIN. The right side may be a table, correlated JSON_TABLE, or LATERAL
-/// derived table; an unqualified derived table is not legal in this form.
+/// Comma operands retain the same source boundaries as explicit CROSS JOIN.
 let private commaJoinClause: Parser<Join, unit> =
-    attempt (sym "," >>. (lateralTable <|> jsonTable <|> (tableRef |>> FromTable)))
+    attempt (sym "," >>. fromItem)
     |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }
 
 /// `JOIN ... USING (col, ...)`'s column list — the equi-keys are resolved by
@@ -3977,15 +3978,12 @@ let private joinClause: Parser<Join, unit> =
                  <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols })
              | CrossJoin -> fail "CROSS JOIN is parsed separately")
 
-/// Parentheses around a left join chain preserve its existing association.
-/// A grouped right operand needs a join tree rather than this flat chain.
-let private fromJoinChain, fromJoinChainRef = createParserForwardedToRef<FromItem * Join list, unit> ()
-
 fromJoinChainRef.Value <-
-    (attempt (fromItem |>> fun source -> source, [])
-     <|> between (sym "(") (sym ")") fromJoinChain)
-    .>>. many joinClause
-    |>> fun ((source, innerJoins), outerJoins) -> source, innerJoins @ outerJoins
+    fromItem .>>. many joinClause
+    |>> fun (source, joins) ->
+        match source with
+        | FromJoinGroup(inner, innerJoins) -> inner, innerJoins @ joins
+        | _ -> source, joins
 
 /// `GROUP BY expr, ... [WITH ROLLUP]` — the flag rides along with the keys
 /// since it only ever qualifies them.

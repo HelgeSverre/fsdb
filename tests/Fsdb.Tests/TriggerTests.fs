@@ -866,6 +866,26 @@ let tests =
               Expect.equal (rows store "SELECT n FROM a.work_log") [ [ Some "7" ] ] "landed in the trigger's schema"
               Expect.equal (rows store "SELECT n FROM b.work_log") [] "the session's database was not written"
 
+          testCase "trigger write databases include grouped mutation targets"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE DATABASE grouped_target"
+                    "CREATE TABLE a(id INT)"
+                    "CREATE TABLE c(id INT)"
+                    "CREATE TABLE target(id INT)"
+                    "CREATE TABLE grouped_target.items(id INT,n INT)"
+                    "INSERT INTO c VALUES(3)"
+                    "INSERT INTO target VALUES(1)"
+                    "INSERT INTO grouped_target.items VALUES(3,0)"
+                    "CREATE TRIGGER grouped_write AFTER INSERT ON a FOR EACH ROW UPDATE c JOIN (grouped_target.items d JOIN target t ON t.id=1) ON c.id=d.id SET d.n=NEW.id" ] do
+                  expectOk (runDefault store sql) sql
+              Expect.contains (triggerWriteDatabases store defaultDatabase "a") "grouped_target"
+                  "publication locking includes targets nested inside groups"
+              expectOk (runDefault store "INSERT INTO a VALUES(9)") "fire grouped mutation"
+              Expect.equal (rows store "SELECT n FROM grouped_target.items") [ [ Some "9" ] ]
+                  "the grouped target receives the trigger write"
+
           testCase "a cross-database trigger preserves a concurrent write to its target database"
           <| fun _ ->
               use entered = new ManualResetEventSlim(false)

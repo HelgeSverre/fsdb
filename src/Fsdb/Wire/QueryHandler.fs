@@ -2840,6 +2840,8 @@ let private statementContainsLockingReadWhere predicate statement =
 
     and sourceContains =
         function
+        | FromJoinGroup(source, joins) ->
+            sourceContains source || (joins |> List.exists (fun join -> sourceContains join.Table || expressionContains join.On))
         | FromSubquery(body, _)
         | FromLateral(body, _) -> bodyContains body
         | FromJsonTable(source, _, _, _) -> expressionContains source

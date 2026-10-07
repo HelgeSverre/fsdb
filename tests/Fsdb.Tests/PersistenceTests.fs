@@ -410,6 +410,26 @@ let tests =
                             [ p * perProducer .. (p + 1) * perProducer - 1 ]
                             (sprintf "producer %d's writes flush in the order it acked them" p) ]
 
+          testCase "grouped USING views retain logical columns after recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let directory = tempDataDir ()
+                  let store = load directory
+                  attach directory store
+                  let session = Fsdb.Session.create 1 store
+                  for sql in
+                      [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"
+                        "INSERT INTO a VALUES(1),(2)"; "INSERT INTO b VALUES(1),(3)"; "INSERT INTO c VALUES(3)"
+                        "CREATE VIEW grouped_view(aid,shared_id) AS SELECT * FROM a LEFT JOIN (b LEFT JOIN c USING(id)) ON a.id=b.id" ] do
+                      match handle session sql |> snd with
+                      | Err(code, message) -> failtestf "%d %s" code message
+                      | _ -> ()
+                  if checkpoint then snapshotNow directory store
+                  let recovered = Fsdb.Session.create 2 (load directory)
+                  Expect.equal (handle recovered "SELECT * FROM grouped_view ORDER BY aid" |> snd)
+                      (ResultSet([ "aid"; "shared_id" ], [ [ Some "1"; Some "1" ]; [ Some "2"; None ] ]))
+                      "WAL and snapshot recovery preserve grouped column ownership"
+
           testCase "attach + reload round-trips one value of every Value case, including datetime fractional seconds"
           <| fun _ ->
               let dir = tempDataDir ()

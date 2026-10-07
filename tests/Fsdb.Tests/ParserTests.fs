@@ -155,6 +155,17 @@ let tests =
                             | Select { Joins = [ { Kind = StraightJoin } ] } -> ()
                             | other -> failtestf "expected preserved straight join, got %A" other
 
+                testCase "grouped right joins retain association through SQL rendering"
+                <| fun _ ->
+                    let statement = parseOk "SELECT a.id,b.id,c.id FROM a LEFT JOIN (b JOIN c ON b.id=c.id) ON a.id=b.id"
+                    let options: SqlText.ViewRenderOptions =
+                        { DefaultSchema = "test"; IncludeSchema = false; RelationColumns = fun _ _ -> Some [ "id" ] }
+                    let rendered = SqlText.viewDefinition options statement |> Option.defaultWith (fun () -> failtest "expected SELECT rendering")
+                    for parsed in [ statement; parseOk rendered ] do
+                        match parsed with
+                        | Select { From = Some(FromTable { Table = "a" }); Joins = [ { Kind = LeftJoin; Table = FromJoinGroup(FromTable { Table = "b" }, [ { Kind = InnerJoin; Table = FromTable { Table = "c" } } ]) } ] } -> ()
+                        | other -> failtestf "expected grouped right operand, got %A" other
+
                 testCase "left-parenthesized join chains retain their association"
                 <| fun _ ->
                     match parseOk "SELECT * FROM ((a LEFT JOIN b ON a.id=b.id)) JOIN c ON c.id=a.id" with

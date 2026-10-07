@@ -284,6 +284,17 @@ let tests =
                       "subquery in an INSERT VALUES needs SELECT on secret"
               | Error e -> failtestf "parse insert: %s" e
 
+          testCase "grouped mutation targets retain write privilege requirements"
+          <| fun _ ->
+              for privilege, sql in
+                  [ "UPDATE", "UPDATE target JOIN (b JOIN c ON b.id=c.id) ON target.id=b.id SET b.id=4"
+                    "DELETE", "DELETE b FROM target JOIN (b JOIN c ON b.id=c.id) ON target.id=b.id" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Error error -> failtestf "parse %s: %s" sql error
+                  | Ok statement ->
+                      Expect.contains (requiredPrivileges "app" statement) (privilege, OnTable("app", "b"))
+                          "the grouped target requires its own mutation privilege"
+
           testCase "DDL privilege requirements cover row creation, foreign keys, and partition truncation"
           <| fun _ ->
               let requirements sql =

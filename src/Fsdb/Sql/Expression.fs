@@ -114,17 +114,19 @@ let exists (predicate: Expr -> bool) (expression: Expr) : bool =
         false
         expression
 
-let private fromItemQualifier =
+let rec private fromItemQualifiers =
     function
-    | FromTable table -> table.Alias |> Option.defaultValue table.Table
+    | FromTable table -> [ table.Alias |> Option.defaultValue table.Table ]
     | FromSubquery(_, alias)
     | FromLateral(_, alias)
-    | FromJsonTable(_, _, _, alias) -> alias
+    | FromJsonTable(_, _, _, alias) -> [ alias ]
+    | FromJoinGroup(source, joins) ->
+        fromItemQualifiers source @ (joins |> List.collect (fun join -> fromItemQualifiers join.Table))
 
 let hasQualifiedOuterReference (select: SelectStmt) =
     let localQualifiers =
-        (select.From |> Option.map fromItemQualifier |> Option.toList)
-        @ (select.Joins |> List.map (fun join -> fromItemQualifier join.Table))
+        (select.From |> Option.toList |> List.collect fromItemQualifiers)
+        @ (select.Joins |> List.collect (fun join -> fromItemQualifiers join.Table))
         |> List.map _.ToLowerInvariant()
         |> Set.ofList
 
@@ -134,7 +136,7 @@ let hasQualifiedOuterReference (select: SelectStmt) =
         @ (select.Having |> Option.toList)
         @ select.GroupBy
         @ (select.OrderBy |> List.map fst)
-        @ (select.Joins |> List.map _.On)
+        @ (select.Joins |> List.collect Join.conditions)
 
     let referencesUnknownQualifier =
         exists (function
@@ -275,6 +277,7 @@ and private rewriteWindowSpec rules (spec: WindowSpec) =
 and private rewriteFromItem rules =
     function
     | FromTable _ as item -> item
+    | FromJoinGroup(source, joins) -> FromJoinGroup(rewriteFromItem rules source, List.map (rewriteJoin rules) joins)
     | FromSubquery(select, alias) -> FromSubquery(rewriteSelectOrUnion rules select, alias)
     | FromJsonTable(source, path, columns, alias) ->
         FromJsonTable(rewriteTreeWith rules source, path, columns, alias)

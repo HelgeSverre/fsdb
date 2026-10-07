@@ -357,8 +357,15 @@ let private inferParameters
 
                 cte.CteName, columns)
 
-        let columnsOfItem scope =
+        let rec columnsOfItem scope =
             function
+            | FromJoinGroup(source, joins) ->
+                let initial = columnsOfItem outerScope source
+                joins
+                |> List.fold (fun columns join ->
+                    let combined = columns @ columnsOfItem (outerScope @ columns) join.Table
+                    inferExpression (outerScope @ combined) None DescribeOnly join.On
+                    combined) initial
             | FromTable table ->
                 let columns =
                     cteColumns

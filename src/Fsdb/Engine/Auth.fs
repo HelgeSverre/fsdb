@@ -2435,6 +2435,9 @@ let rec private exprReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (e
 
 and private fromItemReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (item: FromItem) : (string * string) list =
     match item with
+    | FromJoinGroup(source, joins) ->
+        fromItemReadTablesIn boundCtes defaultDb source
+        @ (joins |> List.collect (fun join -> fromItemReadTablesIn boundCtes defaultDb join.Table @ exprReadTablesIn boundCtes defaultDb join.On))
     | FromTable(r: TableRef) when r.Database.IsNone && Set.contains (r.Table.ToLowerInvariant()) boundCtes -> []
     | FromTable(r: TableRef) -> [ (defaultArg r.Database defaultDb), r.Table ]
     | FromSubquery(body, _)
@@ -2540,17 +2543,20 @@ let private virtualSource qualifier columns =
       Columns = columns
       Target = None }
 
-let private sourceForItem store defaultDb ctes =
+let rec private sourcesForItem store defaultDb ctes =
     function
+    | FromJoinGroup(source, joins) ->
+        sourcesForItem store defaultDb ctes source
+        @ (joins |> List.collect (fun join -> sourcesForItem store defaultDb ctes join.Table))
     | FromTable reference when reference.Database.IsNone ->
-        ctes
-        |> Map.tryFind (reference.Table.ToLowerInvariant())
-        |> Option.map (virtualSource (reference.Alias |> Option.defaultValue reference.Table))
-        |> Option.defaultWith (fun () -> physicalSource store defaultDb reference)
-    | FromTable reference -> physicalSource store defaultDb reference
+        [ ctes
+          |> Map.tryFind (reference.Table.ToLowerInvariant())
+          |> Option.map (virtualSource (reference.Alias |> Option.defaultValue reference.Table))
+          |> Option.defaultWith (fun () -> physicalSource store defaultDb reference) ]
+    | FromTable reference -> [ physicalSource store defaultDb reference ]
     | FromSubquery(body, alias)
-    | FromLateral(body, alias) -> virtualSource alias (selectOrUnionProjectionNames body)
-    | FromJsonTable(_, _, columns, alias) -> virtualSource alias (jsonTableColumnNames columns)
+    | FromLateral(body, alias) -> [ virtualSource alias (selectOrUnionProjectionNames body) ]
+    | FromJsonTable(_, _, columns, alias) -> [ virtualSource alias (jsonTableColumnNames columns) ]
 
 let private columnReferences aliases expression =
     Expression.collect
@@ -2624,7 +2630,7 @@ let private joinKeyRequirements outerSources leftSources right (join: Join) =
             || join.Kind = NaturalLeftJoin
             || join.Kind = NaturalRightJoin
         then
-            let rightNames = right.Columns |> List.map _.ToLowerInvariant() |> Set.ofList
+            let rightNames = right |> List.collect _.Columns |> List.map _.ToLowerInvariant() |> Set.ofList
 
             leftSources
             |> List.collect _.Columns
@@ -2637,9 +2643,12 @@ let private joinKeyRequirements outerSources leftSources right (join: Join) =
     |> List.collect (fun column ->
         requirementsForReferences
             "SELECT"
-            (leftSources @ [ right ])
+            (leftSources @ right)
             outerSources
-            [ QualifiedColumn(right.Qualifier, column); BareColumn column ])
+            ((right
+              |> List.filter (fun source -> source.Columns |> List.exists (eqI column))
+              |> List.map (fun source -> QualifiedColumn(source.Qualifier, column)))
+             @ [ BareColumn column ]))
 
 let rec private selectColumnRequirements store defaultDb outerSources inheritedCtes (select: SelectStmt) =
     let cteRequirements, ctes =
@@ -2657,15 +2666,15 @@ let rec private selectColumnRequirements store defaultDb outerSources inheritedC
         match select.From with
         | None -> [], []
         | Some item ->
-            let source = sourceForItem store defaultDb ctes item
-            [ source ], fromItemColumnRequirements store defaultDb outerSources ctes [] item
+            let sources = sourcesForItem store defaultDb ctes item
+            sources, fromItemColumnRequirements store defaultDb outerSources ctes [] item
 
     let sources, joinRequirements =
         select.Joins
         |> List.fold
             (fun (leftSources, requirements) join ->
-                let right = sourceForItem store defaultDb ctes join.Table
-                let visibleSources = leftSources @ [ right ]
+                let right = sourcesForItem store defaultDb ctes join.Table
+                let visibleSources = leftSources @ right
 
                 let nested =
                     fromItemColumnRequirements store defaultDb outerSources ctes leftSources join.Table
@@ -2744,6 +2753,17 @@ and private selectOrUnionColumnRequirements store defaultDb outerSources ctes =
 
 and private fromItemColumnRequirements store defaultDb outerSources ctes leftSources =
     function
+    | FromJoinGroup(source, joins) ->
+        let initial = sourcesForItem store defaultDb ctes source
+        let initialRequirements = fromItemColumnRequirements store defaultDb outerSources ctes [] source
+        joins
+        |> List.fold (fun (visible, requirements) join ->
+            let right = sourcesForItem store defaultDb ctes join.Table
+            let nested = fromItemColumnRequirements store defaultDb outerSources ctes visible join.Table
+            let predicate = expressionColumnRequirements store defaultDb (visible @ right) outerSources ctes Set.empty join.On
+            let keys = joinKeyRequirements outerSources visible right join
+            visible @ right, requirements @ nested @ predicate @ keys) (initial, initialRequirements)
+        |> snd
     | FromTable _ -> []
     | FromSubquery(body, _) -> selectOrUnionColumnRequirements store defaultDb [] ctes body
     | FromLateral(body, _) -> selectOrUnionColumnRequirements store defaultDb (leftSources @ outerSources) ctes body
@@ -2759,8 +2779,8 @@ let private mutationJoinScope store defaultDb ctes (initial: PrivilegeSource) (j
     joins
     |> List.fold
         (fun (leftSources, requirements) (join: Join) ->
-            let right = sourceForItem store defaultDb ctes join.Table
-            let sources = leftSources @ [ right ]
+            let right = sourcesForItem store defaultDb ctes join.Table
+            let sources = leftSources @ right
             let nested = fromItemColumnRequirements store defaultDb [] ctes leftSources join.Table
             let predicate = expressionColumnRequirements store defaultDb sources [] ctes Set.empty join.On
             let keys = joinKeyRequirements [] leftSources right join
@@ -2982,8 +3002,8 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         let physicalSources =
             u.From
             :: (u.Joins
-                |> List.choose (fun join ->
-                    match join.Table with
+                |> List.collect (fun join -> FromItem.leaves join.Table)
+                |> List.choose (function
                     | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
                     | FromTable table -> Some table
                     | _ -> None))
@@ -3046,8 +3066,8 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         let deletedTables =
             (d.From.Database |> Option.defaultValue defaultDb, d.From.Table)
             :: (d.Joins
-                |> List.choose (fun join ->
-                    match join.Table with
+                |> List.collect (fun join -> FromItem.leaves join.Table)
+                |> List.choose (function
                     | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
                     | FromTable table -> Some(table.Database |> Option.defaultValue defaultDb, table.Table)
                     | _ -> None))
@@ -3189,8 +3209,25 @@ let requiredPrivilegesInStore (store: Store) (defaultDb: string) (stmt: Statemen
             | Error _ -> []
         | _ -> requiredPrivileges defaultDb stmt
 
-    statementRequirements @ statementColumnRequirements store defaultDb stmt
-    |> List.distinct
+    let columnRequirements = statementColumnRequirements store defaultDb stmt
+    let tableRequirements =
+        match stmt with
+        | Update update when not update.Joins.IsEmpty ->
+            // Joined UPDATE checks source access before the assigned columns.
+            let columnTargets =
+                columnRequirements
+                |> List.choose (function
+                    | "UPDATE", OnColumn(database, table, _) -> Some(database.ToLowerInvariant(), table.ToLowerInvariant())
+                    | _ -> None)
+                |> Set.ofList
+            statementRequirements
+            |> List.filter (function
+                | "UPDATE", OnTable(database, table) ->
+                    not (Set.contains (database.ToLowerInvariant(), table.ToLowerInvariant()) columnTargets)
+                | _ -> true)
+        | _ -> statementRequirements
+
+    tableRequirements @ columnRequirements |> List.distinct
 
 /// Checks one selected account against every required privilege, denying with
 /// MySQL's

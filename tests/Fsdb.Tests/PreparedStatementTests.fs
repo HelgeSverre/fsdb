@@ -13,7 +13,93 @@ open Fsdb.QueryHandler
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "placeholderPositions counts only ? outside strings, comments, and backtick identifiers"
+        [ testCase "grouped USING prepared metadata matches execution"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in
+                  [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"
+                    "INSERT INTO a VALUES(1),(2)"; "INSERT INTO b VALUES(1),(3)"; "INSERT INTO c VALUES(3)" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              let sql = "SELECT * FROM a LEFT JOIN (b LEFT JOIN c USING(id)) ON a.id=b.id ORDER BY a.id"
+              let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let statement = createPreparedStatement session sql ast count
+              let _, columns = preparedMetadata session statement.Ast count
+              Expect.equal columns.Length 2 "prepare exposes logical columns"
+              Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId)) [ TypeLong; TypeLong ]
+                  "merged integer columns retain their declared family"
+              let executed, result = executePrepared session statement []
+              Expect.equal result (ResultSet([ "id"; "id" ], [ [ Some "1"; Some "1" ]; [ Some "2"; None ] ]))
+                  "prepared execution preserves merged ownership and NULL extension"
+              Expect.equal executed.LastResultColumnMetadata.Length columns.Length "prepare and execute agree on arity"
+
+          testCase "grouped USING metadata retains the preserved column origin"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in
+                  [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"
+                    "INSERT INTO a VALUES(1),(2)"; "INSERT INTO b VALUES(1),(3)"; "INSERT INTO c VALUES(3)" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              for kind, owner in [ "LEFT JOIN", "b"; "RIGHT JOIN", "c"; "JOIN", "b" ] do
+                  let sql = "SELECT * FROM a LEFT JOIN (b " + kind + " c USING(id)) ON a.id=b.id"
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let statement = createPreparedStatement session sql ast count
+                  let _, columns = preparedMetadata session ast count
+                  let owners metadata = metadata |> List.map (fun column -> column.Origin |> Option.map _.OriginalTable)
+                  Expect.equal (owners (columns |> List.map _.Metadata)) [ Some "a"; Some owner ]
+                      "PREPARE reports the preserved source column"
+                  let executed, result = executePrepared session statement []
+                  match result with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+                  Expect.equal (owners executed.LastResultColumnMetadata) [ Some "a"; Some owner ]
+                      "execution reports the same origins"
+              let ast, count = prepareStatementForSession session "SELECT COALESCE(b.id,c.id) FROM b LEFT JOIN c USING(id)" |> Result.defaultWith (fun error -> failtestf "%A" error)
+              let _, columns = preparedMetadata session ast count
+              Expect.equal (columns |> List.map (fun column -> column.Metadata.Origin)) [ None ]
+                  "an explicit COALESCE remains a computed expression"
+
+          testCase "derived and CTE merged columns retain physical origins"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"; "INSERT INTO b VALUES(1)"; "INSERT INTO c VALUES(3)" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              for sql, name in
+                  [ "SELECT * FROM (SELECT * FROM b RIGHT JOIN c USING(id)) merged", "id"
+                    "WITH merged AS (SELECT * FROM b RIGHT JOIN c USING(id)) SELECT * FROM merged", "id"
+                    "SELECT x FROM (SELECT id AS x FROM b RIGHT JOIN c USING(id)) merged", "x"
+                    "WITH merged(x) AS (SELECT * FROM b RIGHT JOIN c USING(id)) SELECT x FROM merged", "x" ] do
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let statement = createPreparedStatement session sql ast count
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.Origin |> Option.map _.OriginalTable)) [ Some "c" ]
+                      "PREPARE retains the physical owner through the relation boundary"
+                  let executed, result = executePrepared session statement []
+                  Expect.equal result (ResultSet([ name ], [ [ Some "3" ] ])) "the preserved row survives materialization"
+                  Expect.equal (executed.LastResultColumnMetadata |> List.map (fun column -> column.Origin |> Option.map _.OriginalTable)) [ Some "c" ]
+                      "execution retains the same physical owner"
+
+          testCase "invalid grouped USING does not fabricate prepared metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)" ] do
+                  Expect.equal (handle session sql |> snd) (Affected 0UL) "create sources"
+              for sql, code in
+                  [ "SELECT * FROM a LEFT JOIN (b JOIN (SELECT 1 AS other) c USING(id)) ON a.id=b.id", 1054
+                    "SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)", 1052 ] do
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.isEmpty columns "unresolved logical columns have no inferred metadata"
+                  match handle session sql |> snd with
+                  | Err(actual, _) -> Expect.equal actual code "native execution error"
+                  | other -> failtestf "expected invalid grouped USING rejection: %A" other
+
+          testCase "placeholderPositions counts only ? outside strings, comments, and backtick identifiers"
           <| fun _ ->
               let sql =
                   "SELECT * FROM t WHERE a = ? AND b = '?' AND c = \"?\" AND d = `?` -- ?\nAND e = ? /* ? */ AND f = ?"

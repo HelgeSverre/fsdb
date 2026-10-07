@@ -304,8 +304,9 @@ and private jsonColumnNames (columns: JsonTableColumn list) : string list =
 
     columns |> List.collect names
 
-and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (item: FromItem) : string * Source =
+and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (item: FromItem) : string * Source list =
     match item with
+    | FromJoinGroup(source, joins) -> renderJoinChain options { context with Sources = [] } source joins
     | FromTable table ->
         let cteColumns =
             if table.Database.IsNone then tryCte table.Table context else None
@@ -328,21 +329,21 @@ and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (
             if table.Partitions.IsEmpty then "" else sprintf " partition (%s)" (identifiers table.Partitions)
 
         tableText + aliasText + partitionText,
-        { Qualifier = qualifier
-          Reference = table.Alias |> Option.map identifier |> Option.defaultValue tableText
-          Columns = columns }
+        [ { Qualifier = qualifier
+            Reference = table.Alias |> Option.map identifier |> Option.defaultValue tableText
+            Columns = columns } ]
     | FromSubquery(query, alias) ->
         let sql, columns = renderSelectOrUnion options (nestedContext context) query
         sprintf "(%s) %s" sql (identifier alias),
-        { Qualifier = alias
-          Reference = identifier alias
-          Columns = columns }
+        [ { Qualifier = alias
+            Reference = identifier alias
+            Columns = columns } ]
     | FromLateral(query, alias) ->
         let sql, columns = renderSelectOrUnion options (nestedContext context) query
         sprintf "lateral (%s) %s" sql (identifier alias),
-        { Qualifier = alias
-          Reference = identifier alias
-          Columns = columns }
+        [ { Qualifier = alias
+            Reference = identifier alias
+            Columns = columns } ]
     | FromJsonTable(source, path, columns, alias) ->
         let sql =
             sprintf
@@ -353,9 +354,51 @@ and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (
                 (identifier alias)
 
         sql,
-        { Qualifier = alias
-          Reference = identifier alias
-          Columns = jsonColumnNames columns }
+        [ { Qualifier = alias
+            Reference = identifier alias
+            Columns = jsonColumnNames columns } ]
+
+and private renderJoinChain options context source sourceJoins =
+    let sourceSql, firstSources = renderFromItem options context source
+
+    let sources, joins =
+        sourceJoins
+        |> List.fold
+            (fun (sources, rendered) join ->
+                let joinContext = { context with Sources = sources }
+                let tableSql, rightSources = renderFromItem options joinContext join.Table
+
+                let joinText =
+                    match join.Kind with
+                    | InnerJoin -> "join"
+                    | StraightJoin -> "straight_join"
+                    | LeftJoin -> "left join"
+                    | RightJoin -> "right join"
+                    | CrossJoin -> "cross join"
+                    | NaturalJoin -> "natural join"
+                    | NaturalLeftJoin -> "natural left join"
+                    | NaturalRightJoin -> "natural right join"
+
+                let condition =
+                    if not join.Using.IsEmpty then
+                        sprintf " using (%s)" (identifiers join.Using)
+                    else
+                        match join.Kind with
+                        | CrossJoin
+                        | NaturalJoin
+                        | NaturalLeftJoin
+                        | NaturalRightJoin -> ""
+                        | _ -> sprintf " on(%s)" (renderViewExpression options { joinContext with Sources = sources @ rightSources } join.On)
+
+                sources @ rightSources, rendered @ [ sprintf "%s %s%s" joinText tableSql condition ])
+            (firstSources, [])
+
+    let joined =
+        match joins with
+        | [] -> sourceSql
+        | _ -> sprintf "(%s %s)" sourceSql (String.concat " " joins)
+
+    joined, sources
 
 and private renderProjection (options: ViewRenderOptions) (context: ViewContext) ((expr, alias): Projection) : string * string =
     let rendered = renderViewExpression options context expr
@@ -454,48 +497,20 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
         match select.From with
         | None -> { cteContext with Sources = [] }, ""
         | Some source ->
-            let sourceSql, firstSource = renderFromItem options cteContext source
-
-            let sources, joins =
-                select.Joins
-                |> List.fold
-                    (fun (sources, rendered) join ->
-                        let joinContext = { cteContext with Sources = sources }
-                        let tableSql, source = renderFromItem options joinContext join.Table
-
-                        let joinText =
-                            match join.Kind with
-                            | InnerJoin -> "join"
-                            | StraightJoin -> "straight_join"
-                            | LeftJoin -> "left join"
-                            | RightJoin -> "right join"
-                            | CrossJoin -> "cross join"
-                            | NaturalJoin -> "natural join"
-                            | NaturalLeftJoin -> "natural left join"
-                            | NaturalRightJoin -> "natural right join"
-
-                        let condition =
-                            if not join.Using.IsEmpty then
-                                sprintf " using (%s)" (identifiers join.Using)
-                            else
-                                match join.Kind with
-                                | CrossJoin
-                                | NaturalJoin
-                                | NaturalLeftJoin
-                                | NaturalRightJoin -> ""
-                                | _ -> sprintf " on(%s)" (renderViewExpression options { joinContext with Sources = sources @ [ source ] } join.On)
-
-                        sources @ [ source ], rendered @ [ sprintf "%s %s%s" joinText tableSql condition ])
-                    ([ firstSource ], [])
-
-            let joined =
-                match joins with
-                | [] -> sourceSql
-                | _ -> sprintf "(%s %s)" sourceSql (String.concat " " joins)
-
+            let joined, sources = renderJoinChain options cteContext source select.Joins
             { cteContext with Sources = sources }, " from " + joined
 
-    let projections = expandProjections context select.Projections
+    let columnsOf qualifier =
+        trySource qualifier context.Sources |> Option.map _.Columns |> Option.defaultValue []
+    let logicalColumns = FromItem.logicalSelectColumns columnsOf select
+    let projections =
+        select.Projections
+        |> List.collect (function
+            | (Star None, _) as projection ->
+                match logicalColumns with
+                | Ok (_ :: _ as columns) -> columns |> List.map (fun column -> column.Expression, Some column.Name)
+                | _ -> expandProjections context [ projection ]
+            | projection -> expandProjections context [ projection ])
     let projectionText, outputNames = projections |> List.map (renderProjection options context) |> List.unzip
 
     let modifiers =
@@ -627,7 +642,7 @@ let expression expr =
 let expressionInSources options sources expr =
     let context =
         { emptyContext with
-            Sources = sources |> List.map (renderFromItem options emptyContext >> snd) }
+            Sources = sources |> List.collect (renderFromItem options emptyContext >> snd) }
     renderViewExpression options context expr
 
 let viewDefinition options =

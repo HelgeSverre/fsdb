@@ -1593,6 +1593,9 @@ let rec private calledFunctionsInExpression (expression: Expr) : string list =
 
 and private calledFunctionsInFromItem (item: FromItem) : string list =
     match item with
+    | FromJoinGroup(source, joins) ->
+        calledFunctionsInFromItem source
+        @ (joins |> List.collect (fun join -> calledFunctionsInFromItem join.Table @ calledFunctionsInExpression join.On))
     | FromTable _ -> []
     | FromSubquery(query, _)
     | FromLateral(query, _) -> calledFunctionsInSelectOrUnion query

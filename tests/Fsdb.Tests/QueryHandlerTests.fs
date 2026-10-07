@@ -15,10 +15,364 @@ let private (|ProcedureResult|_|) =
     | MultipleResults [ (ResultSet(columns, rows), _); (Affected _, []) ] -> Some(columns, rows)
     | _ -> None
 
+let private queryFixture statements =
+    let mutable session = create 1 (Fsdb.Storage.create ())
+    let run sql =
+        let next, result = handle session sql
+        session <- next
+        result
+
+    for sql in statements do
+        match run sql with
+        | Err(code, message) -> failtestf "%d %s" code message
+        | _ -> ()
+    run
+
+let private groupedJoinQuery () =
+    queryFixture
+        [ "CREATE TABLE a(id INT)"
+          "CREATE TABLE b(id INT)"
+          "CREATE TABLE c(id INT)"
+          "INSERT INTO a VALUES(1),(2)"
+          "INSERT INTO b VALUES(1),(3)"
+          "INSERT INTO c VALUES(3)" ]
+
+let private groupedMutationQuery () =
+    queryFixture
+        [ "CREATE TABLE target(id INT PRIMARY KEY,n INT)"
+          "CREATE TABLE b(id INT)"
+          "CREATE TABLE c(id INT)"
+          "INSERT INTO target VALUES(1,0),(2,0),(3,0)"
+          "INSERT INTO b VALUES(1),(3)"
+          "INSERT INTO c VALUES(3)" ]
+
 let tests =
     testList
         "QueryHandler"
-        [ testCase "HASH partition tablespaces retain declaration ownership"
+        [ testCase "grouped joins preserve association and null extension"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              for source, rows in
+                  [ "a,(b JOIN c ON b.id=c.id)", [ [ Some "1"; Some "3"; Some "3" ]; [ Some "2"; Some "3"; Some "3" ] ]
+                    "a LEFT JOIN (b JOIN c ON b.id=c.id) ON a.id=b.id", [ [ Some "1"; None; None ]; [ Some "2"; None; None ] ]
+                    "(a LEFT JOIN b ON a.id=b.id) JOIN c ON b.id=c.id", []
+                    "a JOIN (b JOIN c ON b.id=c.id) ON a.id=b.id", []
+                    "a LEFT JOIN (b,c) ON a.id=b.id", [ [ Some "1"; Some "1"; Some "3" ]; [ Some "2"; None; None ] ]
+                    "a LEFT JOIN (b LEFT JOIN c ON b.id=c.id) ON a.id=b.id", [ [ Some "1"; Some "1"; None ]; [ Some "2"; None; None ] ] ] do
+                  Expect.equal (run ("SELECT a.id,b.id,c.id FROM " + source + " ORDER BY a.id,b.id,c.id"))
+                      (ResultSet([ "id"; "id"; "id" ], rows)) source
+
+          testCase "grouped USING projections expose logical columns"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              for query, columns, expected in
+                  [ "SELECT * FROM a LEFT JOIN (b JOIN c USING(id)) ON a.id=b.id ORDER BY a.id", [ "id"; "id" ], [ [ Some "1"; None ]; [ Some "2"; None ] ]
+                    "SELECT * FROM a LEFT JOIN (b LEFT JOIN c USING(id)) ON a.id=b.id ORDER BY a.id", [ "id"; "id" ], [ [ Some "1"; Some "1" ]; [ Some "2"; None ] ]
+                    "SELECT * FROM a LEFT JOIN (b JOIN c USING(id)) USING(id) ORDER BY id", [ "id" ], [ [ Some "1" ]; [ Some "2" ] ] ] do
+                  Expect.equal (run query) (ResultSet(columns, expected)) "grouped USING retains logical columns"
+
+          testCase "grouped USING view definitions survive rendering"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              Expect.equal
+                  (run "CREATE VIEW grouped_using_view(aid,shared_id) AS SELECT * FROM a LEFT JOIN (b LEFT JOIN c USING(id)) ON a.id=b.id")
+                  (Affected 0UL) "store a view with the group's logical columns"
+              Expect.equal (run "SELECT * FROM grouped_using_view ORDER BY aid")
+                  (ResultSet([ "aid"; "shared_id" ], [ [ Some "1"; Some "1" ]; [ Some "2"; None ] ]))
+                  "the stored definition retains merged column ownership"
+              let definition =
+                  match run "SHOW CREATE VIEW grouped_using_view" with
+                  | ResultSet(_, [ _ :: Some sql :: _ ]) -> sql
+                  | other -> failtestf "expected stored view SQL: %A" other
+              Expect.equal (run "DROP VIEW grouped_using_view") (Affected 0UL) "drop before recreating the rendered view"
+              Expect.equal (run definition) (Affected 0UL) "recreate the rendered definition"
+              Expect.equal (run "SELECT * FROM grouped_using_view ORDER BY aid")
+                  (ResultSet([ "aid"; "shared_id" ], [ [ Some "1"; Some "1" ]; [ Some "2"; None ] ]))
+                  "rendering preserves the merged columns"
+
+          testCase "enclosing USING reads right-preserved grouped keys"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              Expect.equal (run "INSERT INTO c VALUES(2)") (Affected 1UL) "add an unmatched right row"
+              Expect.equal
+                  (run "SELECT a.id,b.id,c.id FROM a LEFT JOIN (b RIGHT JOIN c USING(id)) USING(id) ORDER BY a.id")
+                  (ResultSet([ "id"; "id"; "id" ], [ [ Some "1"; None; None ]; [ Some "2"; None; Some "2" ] ]))
+                  "enclosing USING reads the group's right-preserved value"
+
+          testCase "full-text queries retain grouped source scope"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              Expect.equal (run "CREATE TABLE grouped_docs(id INT PRIMARY KEY,body TEXT,FULLTEXT(body))") (Affected 0UL) "create full-text source"
+              Expect.equal (run "INSERT INTO grouped_docs VALUES(1,'orchard apples'),(2,'coastal pears')") (Affected 2UL) "seed full-text source"
+              Expect.equal
+                  (run "SELECT d.id FROM grouped_docs d LEFT JOIN (b JOIN c ON b.id=c.id) ON d.id=b.id WHERE MATCH(d.body) AGAINST('orchard')")
+                  (ResultSet([ "id" ], [ [ Some "1" ] ])) "full-text planning retains grouped source scope"
+
+          testCase "EXPLAIN exposes grouped source tables"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              match run "EXPLAIN SELECT a.id FROM a LEFT JOIN (b JOIN c ON b.id=c.id) ON a.id=b.id" with
+              | ResultSet(columns, rows) ->
+                  let tableIndex = columns |> List.findIndex ((=) "table")
+                  Expect.equal (rows |> List.map (List.item tableIndex) |> List.sort)
+                      [ Some "a"; Some "b"; Some "c" ] "grouped sources share the query block"
+              | other -> failtestf "expected grouped join plan: %A" other
+
+          testCase "grouped ON outer references mark dependent subqueries"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              let query = "SELECT a.id,(SELECT COUNT(*) FROM b JOIN (c JOIN (SELECT 1 AS seed) d ON c.id=a.id+1) ON 1) AS n FROM a ORDER BY a.id"
+              Expect.equal (run query)
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "2" ] ]))
+                  "the inner condition reads the current outer row"
+              match run ("EXPLAIN " + query) with
+              | ResultSet(columns, rows) ->
+                  let idIndex = columns |> List.findIndex ((=) "id")
+                  let typeIndex = columns |> List.findIndex ((=) "select_type")
+                  let subqueryRows = rows |> List.filter (fun row -> row.[idIndex] = Some "2")
+                  Expect.isNonEmpty subqueryRows "the correlated query block is present"
+                  Expect.all subqueryRows (fun row -> row.[typeIndex] = Some "DEPENDENT SUBQUERY")
+                      "grouped conditions participate in correlation detection"
+              | other -> failtestf "expected correlated join plan: %A" other
+
+          testCase "grouped ON conditions cannot see the outer left operand"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              match run "SELECT a.id FROM a LEFT JOIN (b JOIN c ON c.id=a.id) ON a.id=b.id" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "inner ON cannot see outer left source: %A" other
+
+          testCase "grouped full-text joins with LIMIT retain source scope"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let run sql = handle session sql |> snd
+              for sql in
+                  [ "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT(body))"
+                    "CREATE TABLE b(id INT)"
+                    "CREATE TABLE c(id INT)"
+                    "INSERT INTO docs VALUES(1,'orchard apples'),(2,'coastal pears')"
+                    "INSERT INTO b VALUES(3)"
+                    "INSERT INTO c VALUES(3)" ] do
+                  match run sql with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              Expect.equal
+                  (run "SELECT d.id FROM docs d JOIN (b JOIN c ON b.id=c.id) ON 1 WHERE MATCH(d.body) AGAINST('orchard') LIMIT 1")
+                  (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                  "the grouped operand does not have a single physical qualifier"
+              Expect.equal
+                  (run "SELECT d.id FROM b JOIN (docs d JOIN c ON 1) ON 1 WHERE MATCH(d.body) AGAINST('orchard') LIMIT 1")
+                  (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                  "prepared full-text scores follow their source into the group"
+
+          testCase "full-text expressions inside grouped ON retain source identity"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE a(id INT)"
+                        "CREATE TABLE c(id INT)"
+                        "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,n INT,FULLTEXT(body))"
+                        "INSERT INTO a VALUES(1),(2)"
+                        "INSERT INTO c VALUES(3)"
+                        "INSERT INTO docs VALUES(1,'orchard apples',0),(2,'coastal pears',0)" ]
+              let source = "a JOIN (docs d JOIN c ON MATCH(d.body) AGAINST('orchard')) ON a.id=d.id"
+              Expect.equal (run ("SELECT d.id FROM " + source)) (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                  "the inner ON receives prepared scores"
+              Expect.equal (run ("UPDATE " + source + " SET d.n=9")) (Affected 1UL)
+                  "the augmented source retains its update identity"
+              Expect.equal (run "SELECT id,n FROM docs ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "9" ]; [ Some "2"; Some "0" ] ]))
+                  "only the matching document changes"
+              Expect.equal (run ("DELETE d FROM " + source)) (Affected 1UL)
+                  "the augmented source retains its delete identity"
+              Expect.equal (run "SELECT id FROM docs") (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                  "the unmatched document survives"
+
+          testCase "CTE materialization accepts grouped join bodies"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              Expect.equal
+                  (run "WITH grouped AS (SELECT a.id AS aid,b.id AS bid FROM a LEFT JOIN (b JOIN c ON b.id=c.id) ON a.id=b.id) SELECT aid,bid FROM grouped ORDER BY aid")
+                  (ResultSet([ "aid"; "bid" ], [ [ Some "1"; None ]; [ Some "2"; None ] ]))
+                  "CTE metadata traverses every physical source in the group"
+
+          testCase "ON conditions resolve merged columns in both operands"
+          <| fun _ ->
+              let run = groupedJoinQuery ()
+              for sql in
+                  [ "SELECT b.id FROM a RIGHT JOIN b USING(id) JOIN (SELECT 3 AS wanted) d ON id=d.wanted"
+                    "SELECT c.id FROM (SELECT 3 AS wanted) d JOIN (a RIGHT JOIN c USING(id)) ON id=d.wanted" ] do
+                  Expect.equal (run sql) (ResultSet([ "id" ], [ [ Some "3" ] ]))
+                      "ON reads the uniquely named logical key"
+              match run "SELECT a.id FROM a JOIN (b RIGHT JOIN c USING(id)) ON id=a.id" with
+              | Err(1052, _) -> ()
+              | other -> failtestf "both operands expose id, so ON remains ambiguous: %A" other
+              Expect.equal (run "UPDATE a RIGHT JOIN b USING(id) JOIN (SELECT 3 AS wanted) d ON id=d.wanted SET b.id=4")
+                  (Affected 1UL) "UPDATE ON uses the merged key"
+              Expect.equal (run "SELECT id FROM b ORDER BY id") (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "4" ] ]))
+                  "only the matched source changes"
+              Expect.equal (run "DELETE b FROM a RIGHT JOIN b USING(id) JOIN (SELECT 4 AS wanted) d ON id=d.wanted")
+                  (Affected 1UL) "DELETE ON uses the merged key"
+              Expect.equal (run "SELECT id FROM b") (ResultSet([ "id" ], [ [ Some "1" ] ])) "the unmatched source survives"
+
+          testCase "chained named joins retain left merged keys"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let run sql = handle session sql |> snd
+              for sql in
+                  [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT,n INT)"; "CREATE TABLE c(id INT)"
+                    "INSERT INTO a VALUES(1),(2)"; "INSERT INTO b VALUES(1,0),(3,0)"; "INSERT INTO c VALUES(3)" ] do
+                  match run sql with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              for source in
+                  [ "a RIGHT JOIN b USING(id) JOIN c USING(id)"
+                    "(SELECT 1 AS seed) d JOIN (a RIGHT JOIN b USING(id) JOIN c USING(id)) ON 1"
+                    "a NATURAL RIGHT JOIN b NATURAL JOIN c" ] do
+                  Expect.equal (run ("SELECT b.id FROM " + source)) (ResultSet([ "id" ], [ [ Some "3" ] ]))
+                      "the second join reads the key supplied by b"
+              Expect.equal (run "UPDATE a RIGHT JOIN b USING(id) JOIN c USING(id) SET b.n=9") (Affected 1UL)
+                  "UPDATE retains left merged ownership"
+              Expect.equal (run "SELECT id,n FROM b ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "0" ]; [ Some "3"; Some "9" ] ])) "only the matching target changes"
+              Expect.equal (run "DELETE b FROM a RIGHT JOIN b USING(id) JOIN c USING(id)") (Affected 1UL)
+                  "DELETE retains left merged ownership"
+              Expect.equal (run "SELECT id FROM b") (ResultSet([ "id" ], [ [ Some "1" ] ])) "the unmatched target remains"
+
+          testCase "grouped named mutation joins match right-preserved keys"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let run sql = handle session sql |> snd
+              for sql in
+                  [ "CREATE TABLE target(id INT PRIMARY KEY,n INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"
+                    "INSERT INTO target VALUES(1,0),(2,0),(3,0)"; "INSERT INTO b VALUES(1),(3)"; "INSERT INTO c VALUES(2),(3)" ] do
+                  match run sql with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              for source in [ "JOIN (b RIGHT JOIN c USING(id)) USING(id)"; "NATURAL JOIN (b NATURAL RIGHT JOIN c)" ] do
+                  Expect.equal (run ("UPDATE target " + source + " SET n=9")) (Affected 2UL)
+                      "both preserved keys match their target"
+                  Expect.equal (run "SELECT id,n FROM target ORDER BY id")
+                      (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "9" ]; [ Some "3"; Some "9" ] ]))
+                      "the absent b row does not hide c's key"
+                  Expect.equal (run "UPDATE target SET n=0") (Affected 2UL) "restore changed values"
+              Expect.equal (run "DELETE target FROM target JOIN (b RIGHT JOIN c USING(id)) USING(id)") (Affected 2UL)
+                  "DELETE uses the same logical key"
+              Expect.equal (run "SELECT id FROM target") (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                  "the unmatched target survives"
+
+          testCase "grouped mutation targets require write locks"
+          <| fun _ ->
+              let run = groupedMutationQuery ()
+              Expect.equal (run "LOCK TABLES target READ,b READ,c READ") (Affected 0UL) "acquire read locks"
+              match run "UPDATE target JOIN (b JOIN c ON b.id=c.id) ON target.id=b.id SET b.id=4" with
+              | Err(1099, _) -> ()
+              | other -> failtestf "expected grouped target write-lock rejection: %A" other
+              match run "DELETE b FROM target JOIN (b JOIN c ON b.id=c.id) ON target.id=b.id" with
+              | Err(1099, _) -> ()
+              | other -> failtestf "expected grouped delete write-lock rejection: %A" other
+              Expect.equal (run "UNLOCK TABLES") (Affected 0UL) "release read locks"
+
+          testCase "EXPLAIN exposes grouped mutation sources without writing"
+          <| fun _ ->
+              let run = groupedMutationQuery ()
+              for statement in
+                  [ "UPDATE target t JOIN (b JOIN c ON b.id=c.id) ON t.id=b.id SET t.n=20"
+                    "DELETE t FROM target t JOIN (b JOIN c ON b.id=c.id) ON t.id=b.id" ] do
+                  match run ("EXPLAIN " + statement) with
+                  | ResultSet(columns, rows) ->
+                      let tableIndex = columns |> List.findIndex ((=) "table")
+                      Expect.equal (rows |> List.map (List.item tableIndex) |> List.sort)
+                          [ Some "b"; Some "c"; Some "t" ] "all mutation sources have plan rows"
+                  | other -> failtestf "expected mutation plan: %A" other
+              Expect.equal (run "SELECT id,n FROM target ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ]))
+                  "EXPLAIN leaves targets unchanged"
+
+          testCase "grouped outer mutations preserve target identities"
+          <| fun _ ->
+              let run = groupedMutationQuery ()
+              Expect.equal
+                  (run "UPDATE target t LEFT JOIN (b JOIN c ON b.id=c.id) ON t.id=b.id SET t.n=IF(c.id IS NULL,10,20)")
+                  (Affected 3UL) "each target is updated once"
+              Expect.equal (run "SELECT id,n FROM target ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "20" ] ]))
+                  "the unmatched group is NULL extended"
+              Expect.equal (run "DELETE t FROM target t JOIN (b JOIN c ON b.id=c.id) ON t.id=b.id")
+                  (Affected 1UL) "only the matched target is deleted"
+              Expect.equal (run "SELECT id,n FROM target ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ] ]))
+                  "unmatched targets retain their identities"
+
+          testCase "grouped inner mutation targets retain stored identities"
+          <| fun _ ->
+              let run = groupedMutationQuery ()
+              Expect.equal (run "UPDATE target t JOIN (b JOIN c ON b.id=c.id) ON t.id=1 SET b.id=4")
+                  (Affected 1UL) "a source inside the group is writable"
+              Expect.equal (run "SELECT id FROM b ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "4" ] ])) "the inner target retains its stored row identity"
+              Expect.equal (run "DELETE b FROM target t JOIN (b JOIN c ON b.id=c.id+1) ON t.id=1")
+                  (Affected 1UL) "a grouped source can be a delete target"
+              Expect.equal (run "SELECT id FROM b ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "1" ] ])) "only the matched inner target is removed"
+
+          testCase "grouped mutations enforce target authorization"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              for sql in
+                  [ "CREATE TABLE target(id INT PRIMARY KEY)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"
+                    "INSERT INTO target VALUES(3)"; "INSERT INTO b VALUES(3)"; "INSERT INTO c VALUES(3)"
+                    "CREATE USER 'grouped_reader'@'%'"
+                    "GRANT SELECT ON fsdb.* TO 'grouped_reader'@'%'"
+                    "GRANT UPDATE,DELETE ON fsdb.target TO 'grouped_reader'@'%'" ] do
+                  match handle root sql |> snd with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              let reader = { create 2 store with User = "grouped_reader" }
+              for code, sql in
+                  [ 1142, "UPDATE b SET id=4"
+                    1143, "UPDATE target JOIN b ON target.id=b.id SET b.id=4"
+                    1143, "UPDATE target JOIN (b JOIN c ON b.id=c.id) ON target.id=b.id SET b.id=4"
+                    1142, "DELETE b FROM target JOIN (b JOIN c ON b.id=c.id) ON target.id=b.id" ] do
+                  match handle reader sql |> snd with
+                  | Err(actual, _) -> Expect.equal actual code "native target privilege error"
+                  | other -> failtestf "expected authorization rejection: %A" other
+              Expect.equal (handle root "SELECT id FROM b" |> snd) (ResultSet([ "id" ], [ [ Some "3" ] ]))
+                  "rejected mutations leave the grouped target intact"
+
+          testCase "grouped upsert subqueries retain local aliases"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let run sql = handle session sql |> snd
+              for sql in
+                  [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"
+                    "INSERT INTO a VALUES(1),(2)"; "INSERT INTO b VALUES(1),(3)"; "INSERT INTO c VALUES(3)"
+                    "CREATE TABLE grouped_upsert(id INT PRIMARY KEY,n INT)"; "INSERT INTO grouped_upsert VALUES(1,0)" ] do
+                  match run sql with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              Expect.equal
+                  (run "INSERT INTO grouped_upsert SELECT 1,0 ON DUPLICATE KEY UPDATE n=(SELECT MAX(b.id) FROM a JOIN (b JOIN c ON b.id=c.id) ON 1)")
+                  (Affected 2UL) "the duplicate row is updated through a local subquery"
+              Expect.equal (run "SELECT n FROM grouped_upsert") (ResultSet([ "n" ], [ [ Some "3" ] ]))
+                  "the grouped alias is local to the subquery"
+
+          testCase "grouped joins retain CTE dependencies"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let run sql = handle session sql |> snd
+              for sql in [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"; "INSERT INTO c VALUES(3)"; "INSERT INTO a VALUES(1),(2)"; "INSERT INTO b VALUES(1),(3)" ] do
+                  run sql |> ignore
+              for source in [ "b JOIN chosen c ON b.id=c.id"; "b JOIN c ON b.id=c.id AND EXISTS (SELECT 1 FROM chosen WHERE chosen.id=c.id)" ] do
+                  let query =
+                      "WITH chosen AS (SELECT 3 AS id) SELECT a.id,b.id,c.id FROM a LEFT JOIN ("
+                      + source + ") ON a.id=b.id ORDER BY a.id,b.id,c.id"
+                  Expect.equal (run query)
+                      (ResultSet([ "id"; "id"; "id" ], [ [ Some "1"; None; None ]; [ Some "2"; None; None ] ]))
+                      "CTEs referenced inside grouped operands remain available"
+
+          testCase "HASH partition tablespaces retain declaration ownership"
           <| fun _ ->
               for declared in [ "a"; "b" ] do
                   let session = create 1 (Fsdb.Storage.create ())

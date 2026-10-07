@@ -462,6 +462,9 @@ and private optionalExpressionAccesses boundCtes defaultDb expression =
 
 and private sourceAccesses boundCtes defaultDb =
     function
+    | FromJoinGroup(source, joins) ->
+        sourceAccesses boundCtes defaultDb source
+        @ (joins |> List.collect (fun join -> sourceAccesses boundCtes defaultDb join.Table @ expressionAccesses boundCtes defaultDb join.On))
     | FromTable table when table.Database.IsNone && Set.contains (normalize table.Table) boundCtes -> []
     | FromTable table -> [ tableReference defaultDb ReadAccess table ]
     | FromSubquery(body, _)
@@ -523,8 +526,8 @@ let private updateAccesses defaultDb (update: UpdateStmt) =
     let sources =
         update.From
         :: (update.Joins
-            |> List.choose (fun join ->
-                match join.Table with
+            |> List.collect (fun join -> FromItem.leaves join.Table)
+            |> List.choose (function
                 | FromTable table -> Some table
                 | _ -> None))
 
@@ -568,13 +571,18 @@ let private deleteAccesses defaultDb (delete: DeleteStmt) =
             let qualifier = table.Alias |> Option.defaultValue table.Table
             [ tableReference defaultDb (if Set.contains (normalize qualifier) written then WriteAccess else ReadAccess) table ]
 
+    let rec sourceItem = function
+        | FromTable table -> source table
+        | FromJoinGroup(first, joins) ->
+            sourceItem first
+            @ (joins |> List.collect (fun join -> sourceItem join.Table @ expressionAccesses boundCtes defaultDb join.On))
+        | nested -> sourceAccesses boundCtes defaultDb nested
+
     ctes
     @ source delete.From
     @ (delete.Joins
        |> List.collect (fun join ->
-           (match join.Table with
-            | FromTable table -> source table
-            | nested -> sourceAccesses boundCtes defaultDb nested)
+           sourceItem join.Table
            @ expressionAccesses boundCtes defaultDb join.On))
     @ optionalExpressionAccesses boundCtes defaultDb delete.Where
     @ (delete.OrderBy |> List.collect (fst >> expressionAccesses boundCtes defaultDb))

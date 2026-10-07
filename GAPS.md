@@ -126,7 +126,7 @@ refuses it through the prepared-statement protocol.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Grouped join operands | nested table references preserve join association and inner ON scope | left-associated parenthesized chains work; grouped right operands are refused, including outer joins over an inner join or comma group ([oracle](torture/findings/2026-10-07-grouped-joins.md)) | medium | refusal |
+| Grouped join operands | nested table references preserve join association and inner ON scope | grouped execution, mutations, locks, authorization, stored-view recovery, and merged-column ownership are covered; prepared metadata edge cases, PREPARE-time semantic rejection, and broader nested-source coverage remain ([oracle](torture/findings/2026-10-07-grouped-joins.md)) | medium | partial |
 | Locking-read granularity | row and next-key locks over the selected access path | `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, `OF`, `NOWAIT`, and `SKIP LOCKED` hold shared or exclusive row-stripe ownership until transaction end; direct indexed single-table predicates narrow their targets, while joins and scan-shaped reads conservatively lock every row in each named physical source; no next-key/gap locks | low | divergence |
 The expression grammar includes:
 
