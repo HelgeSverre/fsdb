@@ -1588,9 +1588,6 @@ let private currentCteScope () : Map<string, CteBinding> =
 let private withoutCteScope (body: unit -> 'a) : 'a =
     DynamicScope.withValue cteScope Map.empty body
 
-let private unknownColumn (name: string) : EvalError =
-    1054, sprintf "Unknown column '%s' in 'field list'" name
-
 let private unknownFunction (name: string) : EvalError =
     1305, sprintf "FUNCTION %s does not exist" name
 
@@ -1729,6 +1726,7 @@ type private Clause =
     | OnClause
     | OrderClause
     | GroupStatement
+    | TableFunctionArgument
 
 let private clauseLabel =
     function
@@ -1737,6 +1735,12 @@ let private clauseLabel =
     | OnClause -> "on clause"
     | OrderClause -> "order clause"
     | GroupStatement -> "group statement"
+    | TableFunctionArgument -> "a table function argument"
+
+let private unknownColumnIn clause name : EvalError =
+    1054, sprintf "Unknown column '%s' in '%s'" name (clauseLabel clause)
+
+let private unknownColumn name = unknownColumnIn FieldList name
 
 /// Aggregate-call recognition: a `FuncCall` whose name is registered as an
 /// aggregate on `registry` (see `Functions.Registry.Aggregates`) rather than
@@ -2329,7 +2333,7 @@ let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, Eva
         | Some [] | None ->
             match ctx.Outer with
             | Some parent -> resolveCol { parent with Clause = ctx.Clause } name
-            | None -> Error(unknownColumn name)
+            | None -> Error(unknownColumnIn ctx.Clause name)
 
 /// The `QualifiedCol` counterpart of `resolveCol` — same outer-context
 /// fallback, checked against `ctx.Qualifiers` instead of `ctx.ColumnIndex`.
@@ -2346,8 +2350,8 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
         | Some row ->
             match images.Columns |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
             | Some index -> Ok(readColumnValue ctx.Store images.Columns.[index] row.[index])
-            | None -> Error(unknownColumn (sprintf "%s.%s" table col))
-        | None -> Error(unknownColumn (sprintf "%s.%s" table col))
+            | None -> Error(unknownColumnIn ctx.Clause (sprintf "%s.%s" table col))
+        | None -> Error(unknownColumnIn ctx.Clause (sprintf "%s.%s" table col))
     | _ ->
         let localColumn =
             Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers
@@ -2360,8 +2364,8 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
         | Some(column, index) -> Ok(readColumnValue ctx.Store column ctx.Row.[index])
         | None ->
             match ctx.Outer with
-            | Some parent -> resolveQualifiedCol parent table col
-            | None -> Error(unknownColumn (sprintf "%s.%s" table col))
+            | Some parent -> resolveQualifiedCol { parent with Clause = ctx.Clause } table col
+            | None -> Error(unknownColumnIn ctx.Clause (sprintf "%s.%s" table col))
 
 let private tryDirectColumnForExpr (ctx: EvalContext) (expr: Expr) : (int * ColumnDef) option =
     match expr with
@@ -6689,13 +6693,22 @@ and private describeQueryColumnsChecked
             | 1 -> Ok()
             | _ -> Error(InvalidDescription(Err(1052, sprintf "Column '%s' in %s is ambiguous" label clause)))
 
-    let validateReferences scopes clause expression =
+    let validateReferencesWith resolve expression =
         Expression.collect (function
             | Col name -> Some(None, name)
             | QualifiedCol(qualifier, name) -> Some(Some qualifier, name)
             | _ -> None) expression
-        |> traverse (resolveReference scopes clause)
+        |> traverse resolve
         |> Result.map ignore
+
+    let validateReferences scopes clause expression =
+        validateReferencesWith (resolveReference scopes clause) expression
+
+    let resolveTableFunctionReference (scopes: DescribedJoinScope list) reference =
+        match reference with
+        | Some qualifier, _ when scopes |> List.forall (fun scope -> scope.Sources.IsEmpty) ->
+            Error(InvalidDescription(Err(1109, sprintf "Unknown table '%s' in a table function argument" qualifier)))
+        | _ -> resolveReference scopes (clauseLabel TableFunctionArgument) reference
 
     let rec describeBody (seen: Set<string * string>) dbName ctes outerScopes =
         function
@@ -6743,7 +6756,10 @@ and private describeQueryColumnsChecked
                 | None -> scan store tableDb tableRef.Table |> Result.mapError (fun _ -> DescriptionUnavailable) |> Result.map (fst >> List.map describeColumn)
         | FromSubquery(body, _) -> describeBody seen dbName ctes outerScopes body |> Result.bind (renameColumns [])
         | FromLateral(body, _) -> describeBody seen dbName ctes (preceding :: outerScopes) body |> Result.bind (renameColumns [])
-        | FromJsonTable(_, _, columns, _) -> jsonTableColumnDefs columns |> List.map describeColumn |> Ok
+        | FromJsonTable(argument, _, columns, _) ->
+            let scopes = preceding :: outerScopes
+            validateExpression seen dbName ctes scopes (resolveTableFunctionReference scopes) argument
+            |> Result.map (fun () -> jsonTableColumnDefs columns |> List.map describeColumn)
 
     and describeJoinSource seen dbName ctes outerScopes preceding item : Result<DescribedJoinScope, ColumnDescriptionError> =
         match item with
@@ -6767,7 +6783,7 @@ and private describeQueryColumnsChecked
                     describeJoinSource seen dbName ctes outerScopes lateralScope join.Table
                     |> Result.bind (fun right ->
                         let onScope = appendScopes left right
-                        validateExpression seen dbName ctes (onScope :: outerScopes) "on clause" join.On
+                        validateExpression seen dbName ctes (onScope :: outerScopes) (resolveReference (onScope :: outerScopes) "on clause") join.On
                         |> Result.bind (fun () ->
                             let columnsOf qualifier =
                                 onScope.Sources |> List.tryFind (fst >> equalsIgnoreCase qualifier)
@@ -6778,8 +6794,8 @@ and private describeQueryColumnsChecked
                             |> Result.map (fun columns -> { onScope with LogicalColumns = columns })))))
                 (Ok initial))
 
-    and validateExpression seen dbName ctes scopes clause expression =
-        validateReferences scopes clause expression
+    and validateExpression seen dbName ctes scopes resolve expression =
+        validateReferencesWith resolve expression
         |> Result.bind (fun _ ->
             Expression.collectSubqueries expression
             |> traverse (fun nested ->
@@ -8162,20 +8178,20 @@ and private expandJsonTableJoinRows
 
         resolvedJoinCondition sourcesSoFar [ alias, joinColumns ] leftOperand join
         |> Result.bind (fun effectiveOn ->
-            let rec qualifierInScope (ctx: EvalContext) (qualifier: string) =
-                ctx.Qualifiers.ContainsKey(qualifier.ToLowerInvariant())
-                || (ctx.Outer |> Option.exists (fun outerCtx -> qualifierInScope outerCtx qualifier))
+            let rec hasSourceScope (ctx: EvalContext) =
+                not ctx.Qualifiers.IsEmpty
+                || (ctx.Outer |> Option.exists hasSourceScope)
 
             let expandLeft (row: 'Row) : Result<'Result list, QueryResult> =
                 let left = flatRow row
-                let leftCtx = leftCtxFor left
+                let leftCtx = { leftCtxFor left with Clause = TableFunctionArgument }
 
                 let sourceResult =
                     match evalExpr leftCtx source with
                     | Error(1054, message) ->
                         let missingQualifier = Regex.Match(message, @"^Unknown column '([^.']+)\.")
 
-                        if missingQualifier.Success && not (qualifierInScope leftCtx missingQualifier.Groups.[1].Value) then
+                        if missingQualifier.Success && not (hasSourceScope leftCtx) then
                             let qualifier = missingQualifier.Groups.[1].Value
                             Error(1109, sprintf "Unknown table '%s' in a table function argument" qualifier)
                         else

@@ -330,3 +330,10 @@ NATURAL/USING matching uses the shared logical join-condition resolver.
 Independent right sources use the ordinary read or mutation matcher. Native
 UPDATE fixtures verify affected rows and stored targets, including skipping
 NULL-padded targets. Broader dependent mutation combinations remain uncovered.
+
+JSON_TABLE argument references are checked during SQL and binary preparation
+without evaluating the argument. The oracle distinguishes missing or ambiguous
+columns in a visible preceding scope from qualified references with no visible
+source: those report 1054/1052 and 1109 respectively. Runtime lookup retains the
+table-function clause through outer scopes. Fixtures cover direct references,
+nested COALESCE arguments, forward references, and excluded RIGHT operands.

@@ -33,7 +33,28 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "right lateral preparation excludes only the left operand"
+        [ testCase "JSON_TABLE preparation validates argument references in lateral scope"
+          <| fun _ ->
+              let session = relationNameSession ()
+              for sql, code, message in
+                  [ "SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(a.missing),'$[*]' COLUMNS(v INT PATH '$')) j ON 1", 1054, "Unknown column 'a.missing' in 'a table function argument'"
+                    "SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(b.id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1 JOIN b ON 1", 1054, "Unknown column 'b.id' in 'a table function argument'"
+                    "SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(x.id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1", 1054, "Unknown column 'x.id' in 'a table function argument'"
+                    "SELECT * FROM a RIGHT JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1", 1109, "Unknown table 'a' in a table function argument"
+                    "SELECT * FROM JSON_TABLE(JSON_ARRAY(b.id),'$[*]' COLUMNS(v INT PATH '$')) j JOIN b ON 1", 1109, "Unknown table 'b' in a table function argument"
+                    "SELECT * FROM a JOIN b ON 1 JOIN JSON_TABLE(JSON_ARRAY(id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1", 1052, "Column 'id' in a table function argument is ambiguous" ] do
+                  match prepareStatementForSession session sql with
+                  | Error error -> Expect.equal error (code, message) sql
+                  | other -> failtestf "expected binary preparation error: %A" other
+                  let quoted = sql.Replace("'", "''")
+                  Expect.equal (handle session ("PREPARE json_source FROM '" + quoted + "'") |> snd) (Err(code, message)) "SQL preparation"
+                  Expect.equal (handle session sql |> snd) (Err(code, message)) "execution"
+              let valid = "SELECT * FROM a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(v INT PATH '$')) j ON 1"
+              match prepareStatementForSession session valid with
+              | Ok _ -> ()
+              | Error error -> failtestf "valid preceding reference: %A" error
+
+          testCase "right lateral preparation excludes only the left operand"
           <| fun _ ->
               let session = relationNameSession ()
               for sql, expected in
