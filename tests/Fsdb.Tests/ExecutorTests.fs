@@ -9396,7 +9396,7 @@ let tests =
                             at20k
                             ratio)
 
-                testCase "point SELECT by PRIMARY KEY on a 50,000-row table stays flat, not linear in table size"
+                TestSupport.processGlobalCase "primary-key point lookup on 50,000 rows stays within its latency bound"
                 <| fun _ ->
                     // The generous bound separates indexed access from a full
                     // scan; it is not a latency target.
@@ -9418,15 +9418,11 @@ let tests =
                         Expect.isLessThan
                             sw.Elapsed.TotalMilliseconds
                             20.0
-                            (sprintf "point SELECT by PK against 50,000 rows took %A — looks like a full scan again" sw.Elapsed)
+                            (sprintf "primary-key lookup against 50,000 rows took %A" sw.Elapsed)
 
-                testCase "point SELECT by PRIMARY KEY latency is flat from 10k to 40k rows, the actual O(1) proof, not just a single-size bound"
+                TestSupport.processGlobalCase "primary-key lookup latency remains bounded from 10k to 40k rows"
                 <| fun _ ->
-                    // A single-size bound (generous, at one n) is consistent
-                    // with a merely-faster linear scan; the thing that
-                    // actually proves the index is O(1) is this ratio staying
-                    // near 1 across a 4x size increase instead of tracking
-                    // it.
+                    // Concurrent fixtures distort the ratio through shared CPU and GC pressure.
                     let timeLookup (n: int) : float =
                         let store = newStore ()
                         runDefault store "CREATE TABLE flat (id INT PRIMARY KEY, name VARCHAR(20))" |> ignore
@@ -9449,11 +9445,6 @@ let tests =
                     let at10k = timeLookup 10_000
                     let at40k = timeLookup 40_000
 
-                    // An O(n) scan would show ~4x here (1.315ms @10k ->
-                    // 7.287ms @40k, a 5.5x ratio); a real O(1)/O(log n)
-                    // index stays well under that. Floored by the harness's
-                    // own per-call noise at this scale, so the bound is
-                    // generous, not tight.
                     let ratio = at40k / (max at10k 0.001)
 
                     if not (TestSupport.skipTimingAssertions ()) then
@@ -9461,7 +9452,7 @@ let tests =
                             ratio
                             2.5
                             (sprintf
-                                "point SELECT by PK took %fms at 10k rows and %fms at 40k rows (ratio %f) — looks linear in table size again"
+                                "primary-key lookup medians were %fms at 10k rows and %fms at 40k rows (ratio %f)"
                                 at10k
                                 at40k
                                 ratio)
