@@ -6313,11 +6313,17 @@ let private validatePartitionDefinitions (definitions: HashPartitionDefinition l
                 check (Set.add key seen) rest
     check Set.empty definitions
 
+let private canonicalPartitionEngine (engine: string) =
+    match engine.ToLowerInvariant() with
+    | "heap" -> "memory"
+    | "merge" -> "mrg_myisam"
+    | name -> name
+
 let validateHashPartitionDefinitions (tableEngine: string option) definitions =
     validatePartitionDefinitions definitions
     |> Result.bind (fun definitions ->
-        let requested = definitions |> List.map (fun definition -> definition.RequestedEngines |> List.tryLast |> Option.map _.ToLowerInvariant())
-        let tableEngine = tableEngine |> Option.map _.ToLowerInvariant()
+        let requested = definitions |> List.map (fun definition -> definition.RequestedEngines |> List.tryLast |> Option.map canonicalPartitionEngine)
+        let tableEngine = tableEngine |> Option.map canonicalPartitionEngine
         let mixed =
             match tableEngine with
             | Some engine -> requested |> List.exists (Option.exists ((<>) engine))
@@ -6325,6 +6331,8 @@ let validateHashPartitionDefinitions (tableEngine: string option) definitions =
         let engine = tableEngine |> Option.orElseWith (fun () -> requested |> List.tryPick id) |> Option.defaultValue "innodb"
         if mixed then
             Error(ExpressionError(1497, "The mix of handlers in the partitions is not allowed in this version of MySQL"))
+        elif engine = "csv" || engine = "mrg_myisam" || engine = "performance_schema" then
+            Error(ExpressionError(1572, "Engine cannot be used in partitioned tables"))
         elif engine <> "innodb" then
             Error(ExpressionError(1178, "The storage engine for the table doesn't support native partitioning"))
         else

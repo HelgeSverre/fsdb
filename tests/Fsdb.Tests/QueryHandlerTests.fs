@@ -83,6 +83,14 @@ let tests =
                     "", "InnoDB", "", Some 1497
                     "", "InnoDB", "InnoDB", None
                     "", "MyISAM", "MyISAM", Some 1178
+                    "ENGINE=HEAP", "MEMORY", "HEAP", Some 1178
+                    "", "HEAP", "MEMORY", Some 1178
+                    "ENGINE=MERGE", "MRG_MYISAM", "MERGE", Some 1572
+                    "", "MERGE", "MRG_MYISAM", Some 1572
+                    "ENGINE=CSV", "", "", Some 1572
+                    "", "performance_schema", "performance_schema", Some 1572
+                    "ENGINE=performance_schema", "", "", Some 1572
+                    "ENGINE=performance_schema", "InnoDB", "InnoDB", Some 1497
                     "ENGINE=InnoDB", "InnoDB", "", None
                     "ENGINE=InnoDB", "MyISAM", "MyISAM", Some 1497
                     "ENGINE=MyISAM", "", "", Some 1178
@@ -109,7 +117,10 @@ let tests =
                     "ADD PARTITION (PARTITION p0 ENGINE=unknown_engine)", Some 1286
                     "REORGANIZE PARTITION missing INTO (PARTITION d ENGINE=MyISAM)", Some 1507
                     "REORGANIZE PARTITION p0 INTO (PARTITION d ENGINE=InnoDB)", None
-                    "ENGINE=MyISAM", Some 1178 ] do
+                    "ENGINE=MyISAM", Some 1178
+                    "ENGINE=CSV", Some 1572
+                    "ENGINE=MERGE", Some 1572
+                    "ENGINE=performance_schema", Some 1031 ] do
                   match expected, (handle session ("ALTER TABLE p " + action) |> snd) with
                   | None, Affected 0UL -> ()
                   | Some expected, Err(actual, _) -> Expect.equal actual expected action

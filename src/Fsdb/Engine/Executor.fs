@@ -1548,11 +1548,11 @@ let private recognizedStorageEngines =
 let private isRecognizedStorageEngine (engine: string) =
     recognizedStorageEngines.Contains(engine.ToLowerInvariant())
 
-let private validateCreateEngine (store: Store) tableName =
+let private validateCreateEngine (store: Store) tableName (partitioning: HashPartitioning option) =
     function
     | None -> None
     | Some engine when equalsIgnoreCase engine "performance_schema" ->
-        Some(Err(1683, "Invalid performance_schema usage."))
+        if partitioning.IsSome then None else Some(Err(1683, "Invalid performance_schema usage."))
     | Some engine when isRecognizedStorageEngine engine -> None
     | Some engine when store.ExecutionSettings.SqlMode.NoEngineSubstitution ->
         Some(Err(1286, sprintf "Unknown storage engine '%s'" engine))
@@ -20187,7 +20187,7 @@ let rec executeAs
         let destinationExists = scan store destinationDb destinationName |> Result.isOk
         let viewExists = tryStoredView store destinationDb destinationName |> Option.isSome
 
-        match validateCreateEngine store destinationName requestedEngine with
+        match validateCreateEngine store destinationName None requestedEngine with
         | Some error -> ids, error
         | None ->
             if ifNotExists && (destinationExists || viewExists) then
@@ -20288,7 +20288,7 @@ let rec executeAs
     | CreateTable table ->
         let db, name = splitQualified dbName table.Name
 
-        match validateCreateEngine store name table.RequestedEngine with
+        match validateCreateEngine store name table.Partitioning table.RequestedEngine with
         | Some error -> ids, error
         | None ->
             let table, partitionEngineError =
@@ -20317,7 +20317,7 @@ let rec executeAs
                           validateIndexExpressions registry table.Columns table.Indexes |> validationErrorOption storageErr ]
                         |> List.tryPick id
 
-                    let tableEngine = table.RequestedEngine |> Option.map (fun engine -> if isRecognizedStorageEngine engine then engine else "InnoDB")
+                    let tableEngine = table.RequestedEngine |> Option.map (fun engine -> if isRecognizedStorageEngine engine || equalsIgnoreCase engine "performance_schema" then engine else "InnoDB")
                     let partitioning = prepareHashPartitioning tableEngine table.Partitioning
                     match error, partitioning with
                     | Some error, _ -> ids, error

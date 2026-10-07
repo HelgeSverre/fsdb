@@ -229,3 +229,23 @@ Snapshot FSNM and schema WAL version 12 preserve the declaring partition.
 Captured FSNL and V11 WAL fixtures load existing hints and comments without
 inventing tablespace declarations. Recovery tests retain declarations introduced
 by CREATE and ADD independently of the table-wide rendered representation.
+
+## Engine aliases and refusal families
+
+At baseline `cfa19330`, equivalent HEAP/MEMORY and MERGE/MRG_MYISAM
+requests incorrectly produced mixed-engine error 1497. The native engine
+oracle now covers both alias pairs with omitted and explicit table engines.
+Canonical identity is checked before deciding whether handlers conflict.
+
+MySQL 8.4.11 returns 1178 / 42000 for MEMORY/HEAP, MyISAM, ARCHIVE, and
+BLACKHOLE partitioning. CSV, MERGE/MRG_MYISAM, and performance_schema instead
+return 1572 / HY000. A conflicting InnoDB declaration still takes precedence
+with 1497. CREATE with a performance_schema table engine and partitioning
+reaches these checks; ordinary CREATE retains its 1683 refusal. ALTER to
+performance_schema retains its distinct 1031 refusal, while ALTER to CSV or
+MERGE returns 1572. Regressions cover these distinctions without changing the
+shared row-store policy for ordinary tables.
+
+Alias validation passes the 2,951-test root gate, the expanded native engine
+oracle, and 49 compatibility cases / 5,117 steps with zero differences at
+`20261007T123400576-73711/contracts`.

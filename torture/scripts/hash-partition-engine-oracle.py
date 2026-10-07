@@ -58,6 +58,20 @@ def verify(client, _writer):
                 "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='h'"
             ), "1" if error is None else "0")
 
+    for engine, alias, code, state in [
+        ("MEMORY", "HEAP", 1178, "42000"),
+        ("MRG_MYISAM", "MERGE", 1572, "HY000"),
+        ("CSV", "CSV", 1572, "HY000"),
+        ("performance_schema", "performance_schema", 1572, "HY000"),
+    ]:
+        for table_option in ["", " ENGINE=" + engine, " ENGINE=" + alias]:
+            client.query("DROP TABLE IF EXISTS probe.h")
+            execute(client, "CREATE TABLE h(id INT)" + table_option + " PARTITION BY HASH(id) "
+                    "(PARTITION a ENGINE=" + engine + ",PARTITION b ENGINE=" + alias + ")", (code, state))
+        execute(client, "CREATE TABLE h(id INT) ENGINE=" + engine + " PARTITION BY HASH(id) "
+                "(PARTITION a ENGINE=InnoDB,PARTITION b ENGINE=InnoDB)", mixed)
+
+
     for table_option in ["", " ENGINE=InnoDB"]:
         client.query("DROP TABLE IF EXISTS probe.h")
         sql = ("CREATE TABLE h(id INT)" + table_option
@@ -80,6 +94,9 @@ def verify(client, _writer):
         ("REORGANIZE PARTITION missing INTO (PARTITION c ENGINE=MyISAM)", (1507, "HY000"), "p0,p1"),
         ("ENGINE=InnoDB", None, "p0,p1"),
         ("ENGINE=MyISAM", unsupported, "p0,p1"),
+        ("ENGINE=CSV", (1572, "HY000"), "p0,p1"),
+        ("ENGINE=MERGE", (1572, "HY000"), "p0,p1"),
+        ("ENGINE=performance_schema", (1031, "HY000"), "p0,p1"),
         ("ENGINE=unknown_engine", unknown, "p0,p1"),
     ]:
         client.query(

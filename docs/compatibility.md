@@ -483,7 +483,8 @@ these values. Older name-only files load with empty comments.
 
 `ENGINE` clauses on CREATE, ADD, and REORGANIZE accept compatible InnoDB
 requests and validate explicit versus inferred defaults. Mixed engines return
-1497; nonpartitionable engines return 1178. Unknown engines follow
+1497; nonpartitionable engines return 1178 or 1572 according to engine family.
+HEAP/MEMORY and MERGE/MRG_MYISAM aliases share one identity. Unknown engines follow
 `NO_ENGINE_SUBSTITUTION`, including substitution warnings. ALTER cannot change
 a partitioned table to a nonpartitionable engine.
 
