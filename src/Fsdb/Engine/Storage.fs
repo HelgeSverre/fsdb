@@ -7180,7 +7180,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some partitioning when count > 8192u - partitioning.Count ->
             Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
         | Some partitioning ->
-            let added = [ for index in partitioning.Count .. partitioning.Count + count - 1u -> { Name = sprintf "p%d" index; Comment = ""; RequestedEngines = []; MaxRows = 0L; MinRows = 0L; NodeGroup = None } ]
+            let added = [ for index in partitioning.Count .. partitioning.Count + count - 1u -> HashPartitionDefinition.create (sprintf "p%d" index) ]
             validatePartitionDefinitions (partitioning.OrderedDefinitions @ added)
             |> Result.map (fun definitions ->
                 let resized =

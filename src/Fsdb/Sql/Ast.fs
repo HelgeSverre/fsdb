@@ -725,6 +725,15 @@ type HashPartitionDefinition =
       MinRows: int64
       NodeGroup: uint16 option }
 
+module HashPartitionDefinition =
+    let create name =
+        { Name = name
+          Comment = ""
+          RequestedEngines = []
+          MaxRows = 0L
+          MinRows = 0L
+          NodeGroup = None }
+
 /// One `ALTER TABLE` action; a statement carries a list of these since
 /// MySQL (and Laravel) commonly comma-separates several in one `ALTER
 /// TABLE`.
@@ -771,7 +780,7 @@ type HashPartitioning =
 
     member this.OrderedDefinitions =
         this.Definitions
-        |> Option.defaultWith (fun () -> [ for index in 0u .. this.Count - 1u -> { Name = sprintf "p%d" index; Comment = ""; RequestedEngines = []; MaxRows = 0L; MinRows = 0L; NodeGroup = None } ])
+        |> Option.defaultWith (fun () -> [ for index in 0u .. this.Count - 1u -> HashPartitionDefinition.create (sprintf "p%d" index) ])
 
     member this.OrderedNames = this.OrderedDefinitions |> List.map _.Name
 

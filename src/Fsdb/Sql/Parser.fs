@@ -2763,15 +2763,17 @@ let private hashPartitionDefinitions =
         <|> (keyword "MAX_ROWS" >>. opt (sym "=") >>. rowHint |>> PartitionMaxRows)
         <|> (keyword "MIN_ROWS" >>. opt (sym "=") >>. rowHint |>> PartitionMinRows)
         <|> (keyword "NODEGROUP" >>. opt (sym "=") >>. nodeGroup |>> PartitionNodeGroup)
+    let applyOption (definition: HashPartitionDefinition) = function
+        | PartitionComment comment -> { definition with Comment = comment }
+        | PartitionEngine engine -> { definition with RequestedEngines = engine :: definition.RequestedEngines }
+        | PartitionMaxRows rows -> { definition with MaxRows = rows }
+        | PartitionMinRows rows -> { definition with MinRows = rows }
+        | PartitionNodeGroup group -> { definition with NodeGroup = group }
     let definition =
         keyword "PARTITION" >>. identifier .>>. many option
         |>> fun (name, options) ->
-            { Name = name
-              Comment = options |> List.choose (function PartitionComment comment -> Some comment | _ -> None) |> List.tryLast |> Option.defaultValue ""
-              RequestedEngines = options |> List.choose (function PartitionEngine engine -> Some engine | _ -> None)
-              MaxRows = options |> List.choose (function PartitionMaxRows rows -> Some rows | _ -> None) |> List.tryLast |> Option.defaultValue 0L
-              MinRows = options |> List.choose (function PartitionMinRows rows -> Some rows | _ -> None) |> List.tryLast |> Option.defaultValue 0L
-              NodeGroup = options |> List.choose (function PartitionNodeGroup group -> Some group | _ -> None) |> List.tryLast |> Option.flatten }
+            let definition = List.fold applyOption (HashPartitionDefinition.create name) options
+            { definition with RequestedEngines = List.rev definition.RequestedEngines }
     between (sym "(") (sym ")") (sepBy1 definition (sym ","))
 
 let private hashPartitionOption: Parser<TableOption, unit> =
