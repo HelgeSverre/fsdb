@@ -101,3 +101,52 @@ The length limit is 1,024 characters: 1,024 ASCII characters or 1,024 copies
 of `é` succeed, while 1,025 fail with 1793 / HY000. Regression coverage includes
 an overlong alteration leaving existing definitions unchanged, quoted-comment
 rendering and parsing, and comment recovery from both WAL and snapshots.
+
+
+## Partition engine validation
+
+Status: open. At `264305d9`, fsdb rejects the engine clauses emitted by native
+`SHOW CREATE TABLE` with 1064 / 42000. It also accepts
+`CREATE TABLE h(id INT) ENGINE=MyISAM PARTITION BY HASH(id) PARTITIONS 2`,
+which native MySQL rejects with 1178 / 42000.
+
+The maintained [engine oracle](../scripts/hash-partition-engine-oracle.py)
+runs against disposable native MySQL 8.4.11:
+
+```sh
+python3 torture/scripts/hash-partition-engine-oracle.py
+```
+
+For a two-partition CREATE definition:
+
+| Table engine | Partition engine declarations | Native outcome |
+|---|---|---|
+| Omitted | Both omitted | Accept |
+| Omitted | Both InnoDB | Accept |
+| Omitted | One InnoDB, one omitted | 1497 / HY000 |
+| InnoDB | Omitted, InnoDB, or a mixture of those two | Accept |
+| InnoDB | Any MyISAM | 1497 / HY000 |
+| MyISAM | Omitted or MyISAM only | 1178 / 42000 |
+| MyISAM | Any InnoDB | 1497 / HY000 |
+| Omitted | Both MyISAM | 1178 / 42000 |
+| Any tested setting | Unknown partition engine, with NO_ENGINE_SUBSTITUTION | 1286 / 42000 |
+
+With `sql_mode=''`, an unknown engine on one partition produces warning 1286
+and uses the default engine, even when the other partition and table omit an
+engine. This differs from explicitly naming InnoDB on just one partition.
+Explicitness must therefore survive long enough to validate engine inference;
+substitution cannot simply turn every omitted or unknown engine into an
+explicit InnoDB declaration before those checks.
+
+ADD and REORGANIZE accept InnoDB clauses against an existing InnoDB table,
+including ADD lists that mix explicit InnoDB and omitted engine clauses.
+A conflicting MyISAM declaration returns 1497. Structural errors precede that
+conflict: ADD with a duplicate partition name and MyISAM returns 1517, while
+REORGANIZE of a missing partition and MyISAM returns 1507. Unknown-engine
+resolution comes earlier: ADD with both a duplicate name and an unknown engine
+returns 1286 when substitution is disabled.
+
+The oracle verifies that rejected CREATE statements publish no table, and
+that rejected alterations preserve partition names and all six fixture rows.
+These are compatibility contracts for the engine implementation; they do not
+indicate that fsdb supports these clauses yet.
