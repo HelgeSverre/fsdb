@@ -37,6 +37,12 @@ cases = [
     ("SET NAMES latin1 COLLATE latin1_bin;CREATE FUNCTION literal_function() RETURNS VARCHAR(64) DETERMINISTIC RETURN COLLATION('a');SET NAMES utf8mb4;SELECT literal_function()", 'literal_function()\nlatin1_bin\n'),
     ("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;SELECT CHARSET(_utf8mb4'a'),COLLATION(_utf8mb4'a'),COERCIBILITY(_utf8mb4'a')", "CHARSET(_utf8mb4'a')\tCOLLATION(_utf8mb4'a')\tCOERCIBILITY(_utf8mb4'a')\nutf8mb4\tutf8mb4_0900_ai_ci\t4\n"),
     ("SET NAMES latin1;SELECT CHARSET(_binary'a'),COLLATION(_binary'a'),COERCIBILITY(_binary'a')", "CHARSET(_binary'a')\tCOLLATION(_binary'a')\tCOERCIBILITY(_binary'a')\nbinary\tbinary\t4\n"),
+    ("SELECT _latin1 X'41',N'a',_latin1'a',_latin1'a' 'b'", "_latin1 X'41'\ta\ta\ta\nA\ta\ta\tab\n"),
+    ("SELECT _latin1'é' 'x',_LATIN1'a',(_latin1 X'41')", "Ã©\ta\t(_latin1 X'41')\nÃ©x\ta\tA\n"),
+    ("SELECT NAME_CONST(_latin1 X'41',_latin1 X'42')", 'A\nB\n'),
+    ("SELECT HEX(CONCAT(_latin1'é',_latin1'x')) AS h,LENGTH(CONCAT(_latin1'é',_latin1'x')) AS n", 'h\tn\nC3A978\t3\n'),
+    ("SELECT _utf8mb3'ÅGE' = 'age' AS v,COLLATION(CONCAT(_utf8mb3'a',_utf8mb4'b')) AS c", 'v\tc\n1\tutf8mb4_0900_ai_ci\n'),
+    ("CREATE TABLE intro_recovery(id INT,cs VARCHAR(20) GENERATED ALWAYS AS (HEX(_latin1'é')) STORED);INSERT INTO intro_recovery(id) VALUES(1);SELECT cs FROM intro_recovery", 'cs\nC3A9\n'),
 ]
 
 

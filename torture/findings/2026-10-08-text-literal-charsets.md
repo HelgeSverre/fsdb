@@ -59,18 +59,30 @@ exposes VAR_STRING, collation 63, length 1, and NOT_NULL/BINARY flags. These
 metadata observations are exploratory; the maintained oracle checks SQL
 observable identity and values, not raw protocol descriptors.
 
-## Current fsdb boundary
+## fsdb coverage and remaining boundary
 
-At `6ba0dd27`, direct probes return utf8mb4/utf8mb4_0900_ai_ci for both
-`_latin1'a'` and `N'a'`. `_latin1'a' COLLATE utf8mb4_bin` succeeds, and the
-latin1-introduced hexadecimal case fails with 1064/42000. The prepared literal
-changes to latin1/latin1_swedish_ci after SET NAMES latin1.
+Explicit introducers and national literals retain their charset in the AST.
+Binding rejects incompatible COLLATE annotations, and byte-oriented functions
+use the shared expression collation resolver. Mixed utf8mb3/utf8mb4 literals
+select utf8mb4 for the tested comparison and CONCAT forms.
 
-The parser decodes introduced strings into an ordinary `Lit(VString ...)`,
-and ordinary string expressions retain no preparation-time collation. The
-expression representation must retain literal encoding and collation before
-binding can enforce these contracts. Persistence and SQL rendering must retain
-that identity without reinterpreting already-decoded introducer bytes. Parser
-cache keys must distinguish connection collations when parsing captures them.
-The existing shared literal binding traversal can then validate the retained
-charset; explicit COLLATE and binary-conversion nodes remain separate concepts.
+Quoted, hexadecimal, bit, adjacent, uppercase-introducer, and parenthesized
+projection cases preserve their native labels. NAME_CONST uses the decoded
+name value. SQL rendering emits introduced hexadecimal bytes so reparsing does
+not reinterpret an already-decoded latin1 value as UTF-8 client text. WAL and
+snapshot regressions recover a generated `HEX(_latin1'é')` expression and
+produce `C3A9` after inserting into the recovered table.
+
+Validation: `just check` passes 3,024 tests with zero build warnings or errors,
+using `DOTNET_PROCESSOR_COUNT=8` and a 4 GiB `DOTNET_GCHeapHardLimit`. The
+maintained native oracle passes. Differential contracts pass 49 cases and
+5,117 steps with no differences; the run artifact is
+`torture/artifacts/runs/20261007T225402087-97362/contracts`.
+
+Ordinary string expressions still retain no preparation-time connection
+collation. The prepared literal changes to latin1/latin1_swedish_ci after
+SET NAMES latin1, rather than retaining utf8mb4_general_ci. Connection capture
+must also survive stored definitions, and parser cache keys must distinguish
+the captured context. Invalid byte sequences, client encodings beyond the
+current UTF-8 input assumption, and broader expression collation inference
+remain outside the verified introducer coverage.

@@ -2019,7 +2019,7 @@ let private opSymbol =
 let rec internal exprLabel (expr: Expr) : string =
     match expr with
     | ApproximateLiteral(_, spelling) -> spelling
-    | Lit v -> v |> toText |> Option.defaultValue "NULL"
+    | Lit v | IntroducedLiteral(v, _) -> v |> toText |> Option.defaultValue "NULL"
     | MatchAgainst(cols, q, _) ->
         let columnLabel (column: MatchColumn) =
             column.Qualifier
@@ -2065,7 +2065,7 @@ let rec internal exprLabel (expr: Expr) : string =
 
 and private expressionLabelFragment expression =
     match expression with
-    | Lit(VString text) -> "'" + text.Replace(@"\", @"\\").Replace("'", "''") + "'"
+    | LiteralValue(VString text) -> "'" + text.Replace(@"\", @"\\").Replace("'", "''") + "'"
     | QualifiedCol(qualifier, name) -> qualifier + "." + name
     | RuntimeExpression inner -> expressionLabelFragment inner
     | FuncCall(name, arguments) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) ->
@@ -2524,20 +2524,6 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         | [ LiteralValue v ] -> Some(Value.toDouble v |> int |> max 0 |> min 6)
         | _ -> Some 0
     | _ -> tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type)
-
-let rec private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
-    match expr with
-    | RuntimeExpression inner -> sourceCharset ctx inner
-    | Expression.CollationOverride(_, name) -> Collation.charsetOfCollation name
-    | Cast(value, _) -> sourceCharset ctx value
-    | NamedFunction "CONVERT" [ _; Lit(VString charset) ] ->
-        Charset.canonicalName charset
-    | _ ->
-        tryColumnDefForExpr ctx expr
-        |> Option.bind (fun column ->
-            column.Charset
-            |> Option.orElseWith (fun () -> column.Collation |> Option.map Collation.charsetOfCollation))
-        |> Option.defaultValue "utf8mb4"
 
 let private metadataCollationId name =
     Collation.idAndSortlen
@@ -3158,6 +3144,8 @@ let private combineStringCollations operation left right =
         Ok left
     elif right.Charset = "binary" then
         Ok right
+    elif isUnicodeCharset left.Charset && isUnicodeCharset right.Charset && left.Charset <> right.Charset then
+        Ok(if left.Charset = "utf8mb4" then left else right)
     elif isUnicodeCharset left.Charset <> isUnicodeCharset right.Charset then
         Ok(if isUnicodeCharset left.Charset then left else right)
     elif left.Charset = "latin1" || right.Charset = "ascii" then
@@ -3215,6 +3203,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
                 | _ -> Ok(connection 2)
         | None -> Ok(connection 2)
     | Lit VNull -> named "binary" 6
+    | IntroducedLiteral(_, charset) -> named (Collation.defaultNameForCharset charset) 4
     | Lit(VString _) -> Ok(connection 4)
     | Lit(VJson _) -> named "utf8mb4_bin" 4
     | Lit _ | ApproximateLiteral _ -> named "binary" 5
@@ -3283,6 +3272,11 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
 
 let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation option =
     expressionCollation ctx expr |> Result.toOption |> Option.map _.Collation
+
+let private sourceCharset ctx expression =
+    expressionCollation ctx expression
+    |> Result.map _.Charset
+    |> Result.defaultValue ctx.Store.ExecutionSettings.ConnectionCharset
 
 let private coercibilityOfExpr ctx expr =
     expressionCollation ctx expr
@@ -3410,7 +3404,7 @@ let private combineConjuncts =
 let private canPushIntoSource (qualifier: string) =
     let rec eligible =
         function
-        | Lit _ | ApproximateLiteral _ -> true
+        | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
         | QualifiedCol(source, _) -> source.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
         | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
             eligible left && eligible right
@@ -3904,6 +3898,8 @@ let private resolveOperandCollation
         Ok left.Collation
     elif left.Charset = right.Charset && isBinaryCollation right.Collation then
         Ok right.Collation
+    elif isUnicodeCharset left.Charset && isUnicodeCharset right.Charset && left.Charset <> right.Charset then
+        Ok(if left.Charset = "utf8mb4" then left.Collation else right.Collation)
     elif isUnicodeCharset left.Charset <> isUnicodeCharset right.Charset then
         Ok(if isUnicodeCharset left.Charset then left.Collation else right.Collation)
     else
@@ -4288,7 +4284,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
     let every expressions = expressions |> List.forall (isStatementStableExpr store registry dbName scope)
 
     match expression with
-    | Lit _ | ApproximateLiteral _
+    | Lit _ | IntroducedLiteral _ | ApproximateLiteral _
     | Star None -> true
     | Star(Some qualifier) -> scope.Qualifiers.Contains(qualifier.ToLowerInvariant())
     | Col name -> scope.Columns.Contains(name.ToLowerInvariant())
@@ -4464,7 +4460,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         || (Temporal.hasZeroMonthOrDay date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | ApproximateLiteral(value, _) -> Ok(VDouble value)
-    | Lit v -> Ok v
+    | Lit v | IntroducedLiteral(v, _) -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
     // MATCH reaches scalar evaluation only when its statement shape has no
     // physical FULLTEXT source for the score pre-pass.
@@ -5234,7 +5230,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 and private isLiteralConstantExpression registry expression =
     let closed = isLiteralConstantExpression registry
     match expression with
-    | Lit _ | ApproximateLiteral _ -> true
+    | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
     | Neg _ | Not _ | IsNull _ | IsNotNull _ | IsTrue _ | IsFalse _
     | BinOp _ | Cast _ | Expression.CollationOverride _ | Like _ | Between _ | In _ | Case _ ->
         Expression.children expression |> List.forall closed
@@ -5601,7 +5597,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         let containsAny (tokens: string list) (value: string) = tokens |> List.exists value.Contains
 
         match format with
-        | Lit(VString value) ->
+        | LiteralValue(VString value) ->
             let hasDate = containsAny strToDateDateTokens value
             let hasTime = containsAny strToDateTimeTokens value
             let fsp = if value.Contains("%f", System.StringComparison.Ordinal) then 6 else 0
@@ -5616,7 +5612,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     let rec characterBound expression =
         match expression with
         | Expression.CollationOverride(value, _) -> characterBound value
-        | Lit(VString text) -> text.EnumerateRunes() |> Seq.length
+        | LiteralValue(VString text) -> text.EnumerateRunes() |> Seq.length
         | Lit(VBinaryLiteral bytes)
         | Lit(VBytes bytes) -> bytes.Length
         | Lit(VBit(width, _)) -> (width + 7) / 8
@@ -5682,6 +5678,13 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
         simple TypeNewDecimal
         |> Option.map (fun metadata ->
             withDecimalShape (decimalShape expr None) { metadata with Flags = NotNullFlag })
+    | IntroducedLiteral(VString text, charset) ->
+        Some
+            { Value.columnMetadata TypeVarString with
+                ColumnLength = uint32 (Charset.encode charset text).Length
+                Flags = NotNullFlag
+                CollationId = metadataCollationId (Collation.defaultNameForCharset charset) }
+    | IntroducedLiteral(value, _) -> metadataOfExpr ctx (Lit value)
     | Lit(VString text) ->
         Some
             { Value.columnMetadata TypeVarString with
@@ -5816,7 +5819,7 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             let shape = decimalShape expression metadata
             let precision =
                 match expression, metadata with
-                | Lit(VString _), _ -> characterBound expression
+                | LiteralValue(VString _), _ -> characterBound expression
                 | _, Some item when item.TypeId = TypeString || item.TypeId = TypeVarString ->
                     match tryColumnDefForExpr ctx expression with
                     | Some { Type = TChar length | TVarchar length } -> length
@@ -6989,7 +6992,7 @@ and private describeQueryColumnsChecked
                             | FuncCall(functionName, arguments) when functionName.Equals("CONCAT", System.StringComparison.OrdinalIgnoreCase) ->
                                 let lengthOf =
                                     function
-                                    | Lit(VString text) -> Some(text.EnumerateRunes() |> Seq.length)
+                                    | LiteralValue(VString text) -> Some(text.EnumerateRunes() |> Seq.length)
                                     | value ->
                                         tryColumnDefForExpr context value
                                         |> Option.bind (fun column ->
@@ -7036,6 +7039,8 @@ and private describeQueryColumnsChecked
                             | ApproximateLiteral(_, spelling) ->
                                 approximateLiteralColumn name spelling |> describeColumn |> Some
                             | Lit(VDouble _) -> Some(computedColumn name (TDouble false) false (Some(DConst(VInt 0L))) None |> describeColumn)
+                            | IntroducedLiteral(VString text, charset) ->
+                                Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some(Collation.defaultNameForCharset charset)) |> describeColumn)
                             | Lit(VString text) ->
                                 Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci") |> describeColumn)
                             | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None |> describeColumn)
@@ -8907,7 +8912,7 @@ and private applyPreparedJoin
 
         let rec safeLeftFilter =
             function
-            | Lit _ | ApproximateLiteral _ -> true
+            | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
             | QualifiedCol(qualifier, column) ->
                 leftQualifiers |> Set.contains (qualifier.ToLowerInvariant())
                 && (resolveQualified qualifier column
@@ -9632,7 +9637,7 @@ and private tryMergeDirectView
     let rec mergeablePredicate =
         function
         | Col _
-        | Lit _ | ApproximateLiteral _ -> true
+        | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
         | BinOp(_, left, right)
         | Like(left, right, _, _)
         | Regexp(left, right) -> mergeablePredicate left && mergeablePredicate right
@@ -10645,7 +10650,7 @@ and private isNumericIndexValue = function
 
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let rec isSafe = function
-        | Lit _ | ApproximateLiteral _ -> true
+        | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> true
         | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafe left && isSafe right
         | Expression.CollationOverride(expression, _) -> isSafe expression
         | FuncCall(name, arguments)
@@ -10682,7 +10687,7 @@ and private pointLookupEqualities
 
     let tryNonLiteralConstant expression =
         match expression with
-        | Lit _ | ApproximateLiteral _ -> None
+        | Lit _ | IntroducedLiteral _ | ApproximateLiteral _ -> None
         | _ -> tryNumericConstant expression
 
     let tryNumericColumn expression =
@@ -13209,7 +13214,7 @@ and private evalAggregateUsing<'row>
         let orderKeys = rest |> List.choose (function OrderBy(e, d) -> Some(e, d) | _ -> None)
 
         let separator =
-            match rest |> List.tryPick (function Lit(VString s) -> Some s | _ -> None) with
+            match rest |> List.tryPick (function LiteralValue(VString s) -> Some s | _ -> None) with
             | Some s -> s
             | None -> ","
 
@@ -13416,7 +13421,7 @@ and private rewriteAggregates
             whens
             |> traverse (fun (c, r) -> sub c |> Result.bind (fun c' -> sub r |> Result.map (fun r' -> c', r')))
             |> Result.bind (fun whens' -> subOpt elseBranch |> Result.map (fun else' -> Case(subject', whens', else'))))
-    | Lit _ | ApproximateLiteral _
+    | Lit _ | IntroducedLiteral _ | ApproximateLiteral _
     | Col _
     | QualifiedCol _
     | Star _
@@ -13494,7 +13499,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
             whens
             |> traverse (fun (c, r) -> sub c |> Result.bind (fun c' -> sub r |> Result.map (fun r' -> c', r')))
             |> Result.bind (fun whens' -> subOpt elseBranch |> Result.map (fun else' -> Case(subject', whens', else'))))
-    | Lit _ | ApproximateLiteral _
+    | Lit _ | IntroducedLiteral _ | ApproximateLiteral _
     | QualifiedCol _
     | Star _
     | WindowOver _

@@ -784,39 +784,6 @@ let private concatenatedStringLit =
         | [] -> first
         | _ -> (first :: rest) |> List.map (toText >> Option.defaultValue "") |> String.concat "" |> VString)
 
-/// MySQL's `_charset'text'` introducer — labels the literal's
-/// client-encoded (hence UTF-8) bytes with the named charset *without*
-/// converting them, verified against 8.4: `_latin1'é'` reads back as the
-/// two cp1252 chars of é's UTF-8 bytes (`Ã©`), `_ascii'å'` as `??` (one
-/// '?' per byte), and `_binary'abc'` compares byte-wise. Desugared at parse
-/// time into the final `Lit` — the common ASCII-subset cases are identical
-/// to a real conversion.
-let private introducedStringLit: Parser<Expr, unit> =
-    let introducer =
-        attempt (
-            (pchar '_' >>. many1Chars (satisfy isIdentChar)
-             >>= fun name ->
-                 if charsetIntroducerNames.Contains("_" + name) then preturn name
-                 else fail "expected a character set introducer")
-            .>> ws
-            .>> followedBy (anyOf "'\"")
-        )
-
-    introducer
-    .>>. concatenatedStringLit
-    >>= fun (charset, v) ->
-        let text =
-            match v with
-            | VString s -> s
-            | _ -> ""
-
-        let bytes = Text.Encoding.UTF8.GetBytes text
-
-        match Charset.canonicalName charset with
-        | "binary" -> preturn (Lit(VBytes bytes))
-        | charset when Charset.tryFind charset |> Option.isSome -> preturn (Lit(VString(Charset.decodeBytes charset bytes)))
-        | _ -> fail (sprintf "Unknown character set: '%s'" charset)
-
 /// MySQL's quoted hexadecimal binary literal (`X'00ff'`, case-insensitive
 /// on the introducer). The introducer and opening quote are attempted as a
 /// unit so an ordinary identifier beginning with `x` can still fall through
@@ -869,6 +836,30 @@ let private introducedBinaryLit: Parser<Value, unit> =
     introducedBinaryPrefix
     >>. choice [ hexBytesLit; bitBytesLit; hexadecimalNumber ]
     |>> Value.materialize
+
+/// Introducers label client-encoded bytes without converting them first.
+let private introducedStringLit: Parser<Expr, unit> =
+    let introducer =
+        attempt (
+            (pchar '_' >>. many1Chars (satisfy isIdentChar)
+             >>= fun name ->
+                 if charsetIntroducerNames.Contains("_" + name.ToLowerInvariant()) then preturn name
+                 else fail "expected a character set introducer")
+            .>> ws
+            .>> followedBy (choice [ anyOf "'\"" >>% (); pstringCI "X'" >>% (); pstringCI "B'" >>% (); pstring "0x" >>% (); pstring "0b" >>% () ]))
+    let hexadecimalNumber = followedBy (pstring "0x") >>. numberLit
+    introducer
+    .>>. choice [ concatenatedStringLit; hexBytesLit; bitBytesLit; hexadecimalNumber ]
+    >>= fun (charset, value) ->
+        let bytes =
+            match value with
+            | VString text -> Text.Encoding.UTF8.GetBytes text
+            | _ -> Value.tryRawBytes value |> Option.defaultValue [||]
+        match Charset.canonicalName charset with
+        | "binary" -> preturn (Lit(VBytes bytes))
+        | charset when Charset.tryFind charset |> Option.isSome ->
+            preturn (IntroducedLiteral(VString(Charset.decodeBytes charset bytes), charset))
+        | _ -> fail (sprintf "Unknown character set: '%s'" charset)
 
 let private nationalStringLit: Parser<Value, unit> =
     attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>. concatenatedStringLit
@@ -2075,7 +2066,7 @@ let private atom: Parser<Expr, unit> =
           bitBytesLit |>> Lit
           numberExpr
           hexBytesLit |>> Lit
-          nationalStringLit |>> Lit
+          nationalStringLit |>> fun value -> IntroducedLiteral(value, "utf8mb3")
           introducedStringLit
           concatenatedStringLit |>> Lit
           keyword "NULL" >>% Lit VNull
@@ -3601,13 +3592,15 @@ let private projectionSourceBounds (state: ParserState) first finish =
 
 let private literalSourcePrefix = skipMany (sym "(" <|> sym "+")
 
-let private firstStringSourceName source =
+let private firstStringSourceNameWith decode source =
     let introducer =
         (attempt (pchar '_' >>. many1Satisfy isIdentChar .>> ws) >>% ())
         <|> (attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>% ())
     match run (literalSourcePrefix >>. optional introducer >>. stringLit) source with
-    | Success(VString text, _, _) -> Some(Projection.literalName text)
+    | Success(VString text, _, _) -> Some(Projection.literalName (decode text))
     | _ -> None
+
+let private firstStringSourceName source = firstStringSourceNameWith id source
 
 let private literalSourceName source =
     let quotedBinary =
@@ -3626,8 +3619,14 @@ let private projectionSourceName state expression first finish =
     let first, finish, quotedTokens = projectionSourceBounds state first finish
     let source () = state.SourceText.Substring(first, finish - first)
     match expression with
-    | Lit(VString text) ->
-        if quotedTokens > 1 then firstStringSourceName (source ())
+    | IntroducedLiteral _ when firstStringSourceName (source ()) |> Option.isNone -> Some(source ())
+    | LiteralValue(VString text) ->
+        if quotedTokens > 1 then
+            let decode (text: string) =
+                match expression with
+                | IntroducedLiteral(_, charset) -> Text.Encoding.UTF8.GetBytes text |> Charset.decodeBytes charset
+                | _ -> text
+            firstStringSourceNameWith decode (source ())
         else
             let name = Projection.literalName text
             if name = text then None else Some name

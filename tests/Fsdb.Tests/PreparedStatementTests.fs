@@ -33,7 +33,53 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "literal binary charsets reject incompatible COLLATE before evaluation"
+        [ testCase "introduced literals retain charset and encoded byte identity"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, charset, collation, hex, length, characters in
+                  [ "_latin1'a'", "latin1", "latin1_swedish_ci", "61", "1", "1"
+                    "_utf8mb4'a'", "utf8mb4", "utf8mb4_0900_ai_ci", "61", "1", "1"
+                    "N'a'", "utf8mb3", "utf8mb3_general_ci", "61", "1", "1"
+                    "_utf8'a'", "utf8mb3", "utf8mb3_general_ci", "61", "1", "1"
+                    "_latin1'é'", "latin1", "latin1_swedish_ci", "C3A9", "2", "2"
+                    "_latin1 X'C3A9'", "latin1", "latin1_swedish_ci", "C3A9", "2", "2"
+                    "_utf8mb4 X'C3A9'", "utf8mb4", "utf8mb4_0900_ai_ci", "C3A9", "2", "1"
+                    "_latin1 b'01100001'", "latin1", "latin1_swedish_ci", "61", "1", "1" ] do
+                  let sql = sprintf "SELECT CHARSET(%s) AS cs,COLLATION(%s) AS co,COERCIBILITY(%s) AS c,HEX(%s) AS h,LENGTH(%s) AS b,CHAR_LENGTH(%s) AS n" expression expression expression expression expression expression
+                  let expected = [ charset; collation; "4"; hex; length; characters ] |> List.map Some
+                  Expect.equal (handle session sql |> snd) (ResultSet([ "cs"; "co"; "c"; "h"; "b"; "n" ], [ expected ])) sql
+                  Expect.isOk (prepareStatementForSession session sql) ("prepare: " + sql)
+              let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+              Expect.equal
+                  (handle session "SELECT COLLATION(_latin1'a') AS c" |> snd)
+                  (ResultSet([ "c" ], [ [ Some "latin1_swedish_ci" ] ]))
+                  "introducers retain their default independently of the connection collation"
+
+          testCase "introduced literal names and composed byte expressions retain their origin"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, columns, row in
+                  [ "SELECT _utf8mb3'ÅGE' = 'age' AS v,COLLATION(CONCAT(_utf8mb3'a',_utf8mb4'b')) AS c", [ "v"; "c" ], [ "1"; "utf8mb4_0900_ai_ci" ]
+                    "SELECT _latin1 X'41',N'a',_latin1'a',_latin1'a' 'b'", [ "_latin1 X'41'"; "a"; "a"; "a" ], [ "A"; "a"; "a"; "ab" ]
+                    "SELECT _latin1'é' 'x',_LATIN1'a',(_latin1 X'41')", [ "Ã©"; "a"; "(_latin1 X'41')" ], [ "Ã©x"; "a"; "A" ]
+                    "SELECT NAME_CONST(_latin1 X'41',_latin1 X'42')", [ "A" ], [ "B" ]
+                    "SELECT HEX(CONCAT(_latin1'é',_latin1'x')) AS h,LENGTH(CONCAT(_latin1'é',_latin1'x')) AS n", [ "h"; "n" ], [ "C3A978"; "3" ] ] do
+                  Expect.equal (handle session sql |> snd) (ResultSet(columns, [ List.map Some row ])) sql
+                  Expect.isOk (prepareStatementForSession session sql) ("prepare: " + sql)
+
+          testCase "introduced literals reject collations of another charset"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, collation, charset in
+                  [ "_latin1'a'", "utf8mb4_bin", "latin1"
+                    "_utf8mb4'a'", "latin1_bin", "utf8mb4"
+                    "N'a'", "utf8mb4_bin", "utf8mb3" ] do
+                  let sql = sprintf "SELECT %s COLLATE %s" expression collation
+                  let message = sprintf "COLLATION '%s' is not valid for CHARACTER SET '%s'" collation charset
+                  Expect.equal (handle session sql |> snd) (Err(1253, message)) sql
+                  Expect.equal (prepareStatementForSession session sql) (Error(1253, message)) ("prepare: " + sql)
+
+          testCase "literal binary charsets reject incompatible COLLATE before evaluation"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let message = "COLLATION 'utf8mb4_bin' is not valid for CHARACTER SET 'binary'"

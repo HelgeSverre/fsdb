@@ -141,6 +141,12 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
     match expr with
     | ApproximateLiteral(_, spelling) -> spelling
     | Lit value -> literal value
+    | IntroducedLiteral(value, charset) ->
+        let bytes =
+            match value with
+            | VString text -> Fsdb.Charset.encode charset text
+            | _ -> tryRawBytes value |> Option.defaultValue [||]
+        sprintf "_%s X'%s'" charset (Convert.ToHexString bytes)
     | Placeholder _ -> "?"
     | UserVariable variable -> variable.Sql
     | SystemVariable(scope, name) ->

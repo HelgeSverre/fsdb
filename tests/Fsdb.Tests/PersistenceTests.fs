@@ -2376,6 +2376,23 @@ let tests =
                   let _, result = handle session "SELECT calculated FROM literal_generated"
                   Expect.equal result (ResultSet([ "calculated" ], [ [ Some "3" ] ])) "literal origin survives recovery"
 
+          testCase "introduced literal charsets survive WAL and snapshot recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let session = Fsdb.Session.create 1 store
+                  let _, created = handle session "CREATE TABLE charset_generated(id INT,cs VARCHAR(20) GENERATED ALWAYS AS (HEX(_latin1'é')) STORED)"
+                  Expect.equal created (Affected 0UL) "introduced literal is persisted"
+                  if checkpoint then snapshotNow dir store
+                  let reloaded = load dir
+                  let session = Fsdb.Session.create 2 reloaded
+                  let session, inserted = handle session "INSERT INTO charset_generated(id) VALUES(1)"
+                  Expect.equal inserted (Affected 1UL) "the recovered expression executes"
+                  Expect.equal (handle session "SELECT cs FROM charset_generated" |> snd)
+                      (ResultSet([ "cs" ], [ [ Some "C3A9" ] ])) "recovery preserves charset identity"
+
           testCase "generated binary casts survive WAL and snapshot recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do

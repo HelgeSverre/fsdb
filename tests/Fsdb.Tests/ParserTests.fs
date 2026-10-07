@@ -70,7 +70,17 @@ let private mkSelect
 let tests =
     testList
         "parser"
-        [ testCase "binary casts remain distinct from explicit binary collations"
+        [ testCase "introduced literal rendering preserves decoded bytes and charset"
+          <| fun _ ->
+              for sql in [ "_latin1'é'"; "N'héllo'"; "_utf8mb4 X'C3A9'"; "_latin1 b'01100001'" ] do
+                  let expression =
+                      match Fsdb.Parser.parseExpression sql with
+                      | Ok expression -> expression
+                      | Error error -> failtestf "%s: %s" sql error
+                  Expect.equal (Expression.rewrite (fun _ -> None) expression) expression "rewriting preserves literal identity"
+                  Expect.equal (Fsdb.Parser.parseExpression (SqlText.expression expression)) (Ok expression) sql
+
+          testCase "binary casts remain distinct from explicit binary collations"
           <| fun _ ->
               Expect.notEqual (parseOk "SELECT BINARY value") (parseOk "SELECT value COLLATE 'binary'")
                   "conversion and collation annotation require distinct validation"
@@ -914,7 +924,7 @@ let tests =
                               Lit(VBinaryLiteral [| 0x01uy; 0xffuy |]), None
                               Lit(VBinaryLiteral [| 0x05uy |]), None
                               Lit(VBinaryLiteral [||]), None
-                              Lit(VString "héllo"), None ],
+                              IntroducedLiteral(VString "héllo", "utf8mb3"), None ],
                             None,
                             None,
                             [],

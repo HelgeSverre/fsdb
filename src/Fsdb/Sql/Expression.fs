@@ -87,6 +87,7 @@ let children =
         @ (branches |> List.collect (fun (condition, result) -> [ condition; result ]))
         @ Option.toList fallback
     | Lit _
+    | IntroducedLiteral _
     | ApproximateLiteral _
     | Placeholder _
     | UserVariable _
@@ -451,6 +452,7 @@ let statementExists predicate statement =
     statementCount predicate statement > 0
 
 let private knownLiteralCharset = function
+    | IntroducedLiteral(_, charset) -> Some charset
     | Lit(Fsdb.Value.VNull | Fsdb.Value.VBytes _ | Fsdb.Value.VBinaryLiteral _ | Fsdb.Value.VBit _)
     | BinaryCast _
     | Cast(_, (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob)) -> Some "binary"
