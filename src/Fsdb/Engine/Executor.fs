@@ -15330,6 +15330,7 @@ and private fullTextJoinBounds (sources: FullTextPhysicalSource list) (select: S
     let completeScope = Set.ofList qualifiers
     let compatibleLiteral (column: ColumnDef) value =
         match column.Type, value with
+        | _, VNull -> true
         | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText), VString _ -> true
         | (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBit _ | TDecimal _ | TDouble _ | TFloat _),
           (VInt _ | VUInt _ | VDecimal _ | VDouble _) -> true
@@ -15368,18 +15369,30 @@ and private fullTextJoinBounds (sources: FullTextPhysicalSource list) (select: S
                 | next :: pending ->
                     visit (Set.add next seen) ((Map.tryFind next edges |> Option.defaultValue []) @ pending)
             visit Set.empty [ origin ]
-        let seed visible column literal =
-            match ownedColumn visible column, literal with
-            | Some(identity, definition), LiteralValue value when compatibleLiteral definition value ->
-                reachable identity
-                |> Set.remove identity
-                |> Set.toList
-                |> List.map (fun (qualifier, name) -> qualifier, BinOp(Eq, QualifiedCol(qualifier, name), literal))
+        let literalBound = function
+            | BinOp((Eq | Lt | Lte | Gt | Gte), column, LiteralValue value)
+            | BinOp((Eq | Lt | Lte | Gt | Gte), LiteralValue value, column) -> Some(column, [ value ])
+            | Between(column, LiteralValue lo, LiteralValue hi) -> Some(column, [ lo; hi ])
+            | In(column, candidates) ->
+                candidates
+                |> List.map (function LiteralValue value -> Some value | _ -> None)
+                |> tryAllSome
+                |> Option.map (fun values -> column, values)
+            | _ -> None
+        let infer visible predicate =
+            match literalBound predicate with
+            | Some(column, values) ->
+                match ownedColumn visible column with
+                | Some(identity, definition) when values |> List.forall (compatibleLiteral definition) ->
+                    reachable identity
+                    |> Set.remove identity
+                    |> Set.toList
+                    |> List.map (fun (qualifier, name) ->
+                        qualifier, substituteExprs [ column, QualifiedCol(qualifier, name) ] predicate)
+                | _ -> []
             | _ -> []
         predicates
-        |> List.collect (function
-            | visible, BinOp(Eq, left, right) -> seed visible left right @ seed visible right left
-            | _ -> [])
+        |> List.collect (fun (visible, predicate) -> infer visible predicate)
         |> List.distinct
         |> List.groupBy fst
         |> List.choose (fun (qualifier, bounds) -> combineConjuncts (List.map snd bounds) |> Option.map (fun predicate -> qualifier, predicate))

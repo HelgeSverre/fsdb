@@ -35,6 +35,22 @@ def verify(client, _):
         native["expect"](label, actual, expected)
         native["expect"](label + " explicit bound", client.query(query + " AND d.owner_id=42 ORDER BY d.id"), actual)
 
+    client.query("INSERT INTO owners VALUES(43),(97)")
+    for bound, selected in [
+        ("o.id BETWEEN 42 AND 43", [42, 43]),
+        ("o.id>=42 AND o.id<44", [42, 43]),
+        ("44>o.id AND 42<=o.id", [42, 43]),
+        ("o.id IN (42,97)", [42, 97]),
+        ("o.id IN (42,97,NULL)", [42, 97]),
+    ]:
+        query = ("SELECT d.id,ROUND(MATCH(d.body) AGAINST('needle'),6) FROM docs d "
+                 "JOIN owners o ON o.id=d.owner_id WHERE " + bound
+                 + " AND MATCH(d.body) AGAINST('needle')")
+        expected = "\n".join(f"{i}\t0.009392" for i in range(1, 1001) if i % 100 in selected)
+        native["expect"](bound, client.query(query + " ORDER BY d.id"), expected)
+        native["expect"](bound + " explicit bound", client.query(
+            query + " AND " + bound.replace("o.id", "d.owner_id") + " ORDER BY d.id"), expected)
+
     for label, query, expected_code in [
         ("ambiguous WHERE", "SELECT d.id FROM docs d JOIN owners o ON o.id=d.owner_id WHERE id=42 AND MATCH(d.body) AGAINST('needle')", "1052"),
         ("ambiguous ON", "SELECT d.id FROM docs d JOIN owners o ON id=d.owner_id WHERE o.id=42 AND MATCH(d.body) AGAINST('needle')", "1052"),
@@ -52,6 +68,9 @@ def verify(client, _):
     suffix = " AND MATCH(d.body) AGAINST('needle') ORDER BY d.id"
     native["expect"]("numeric text bound", client.query(prefix + "o.k=1" + suffix), "1\n2")
     native["expect"]("numeric text bound cannot propagate", client.query(prefix + "o.k=1 AND d.k=1" + suffix), "2")
+    native["expect"]("numeric text range", client.query(prefix + "o.k BETWEEN 1 AND 1" + suffix), "1\n2")
+    native["expect"]("numeric text IN without MATCH", client.query(prefix + "o.k IN (1,NULL) ORDER BY d.id"), "1\n2")
+    native["expect"]("numeric text IN with MATCH", client.query(prefix + "o.k IN (1,NULL)" + suffix), "2")
     native["expect"]("string text bound", client.query(prefix + "o.k='1'" + suffix), "1\n2")
 
     client.query("INSERT INTO names VALUES(4,'missing','needle')")

@@ -513,13 +513,15 @@ Bounded AND/OR predicate trees intersect or union MATCH candidates before
 residual evaluation.
 
 Single-table reads and writes intersect compatible equality, indexed `IN`,
-range, and spatial candidates before scoring. Physical joins score each owning
-corpus before joining, and multi-table UPDATE/DELETE score each physical source
-before evaluating joins, predicates, and assignments.
+range, and spatial candidates before scoring. Inner joins also propagate compatible
+bounds through equality chains without shrinking the relevance corpus. Multi-table
+UPDATE/DELETE score each physical source before evaluating joins, predicates,
+and assignments.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, indexed `IN`, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; [equality chains](torture/findings/2026-10-07-fulltext-join-bounds.md) propagate compatible numeric and string literal bounds across inner/cross joins without shrinking the relevance corpus; mixed comparison domains and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
+| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, indexed `IN`, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; [equality chains](torture/findings/2026-10-07-fulltext-join-bounds.md) propagate compatible equality, range, and literal `IN` bounds across inner/cross joins without shrinking the relevance corpus; mixed comparison domains and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
+| Mixed-type join filters | a numeric `IN` on a text join key can change result membership when MATCH is present | preserves the same collation-based join result with and without MATCH; the [numeric IN case](torture/findings/2026-10-07-fulltext-join-bounds.md#mixed-type-in-remains-open) returns an extra row compared with native MySQL | medium (result membership) | divergence |
 | Transaction relevance | MySQL uses an approximate global table-row estimate for ranking | visibility cases agree; fsdb uses the committed corpus count rather than estimates that remain changed after rollback until ANALYZE ([controlled oracle](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary)); follows the deliberate statistics policy in section 16 | high (relevance correctness) | deliberate divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); MeCab remains open ([oracle and regressions](torture/findings/2026-10-07-ngram-fulltext.md)) | medium (for CJK) | partial |
 

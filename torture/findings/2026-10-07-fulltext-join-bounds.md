@@ -5,14 +5,16 @@ Status: bounded inference implemented; broader MATCH planning remains in GAPS.md
 For an inner join on `o.id=d.owner_id`, `WHERE o.id=42` restricts the possible
 values of `d.owner_id`. Fsdb uses this bound to select indexed scoring candidates
 before preparing full-text source rows. Equality chains can span multiple
-physical sources, with literal bounds in WHERE or ON. The original predicates
+physical sources, with equality, ordered comparisons, BETWEEN, and literal IN bounds in
+WHERE or ON. The original predicates
 and joins still execute, and relevance uses the complete indexed corpus.
 
 Inference requires uniquely resolved columns, identical column types and compatible
 text collations. Each ON clause resolves names against its visible join prefix;
 WHERE resolves against all sources. A later source with the same column name
 does not make an earlier ON reference ambiguous. Numeric columns accept numeric literal bounds; text columns
-accept string literal bounds. Outer joins, USING joins, disjunctions, mixed
+accept string literal bounds. NULL list members retain SQL three-valued semantics.
+Outer joins, USING joins, disjunctions, mixed
 comparison domains, and invalid forward ON references do not supply inferred
 bounds. Existing source-local access remains available.
 
@@ -36,7 +38,9 @@ references return error 1052; forward ON references return error 1054. The match
 Expecto regressions compare results with the explicit-bound query and count
 virtual-column evaluations to verify candidate preparation. Before inference,
 the 1,000-row fixture prepares 800 rows despite returning ten; the regression
-requires fewer than 30 evaluations after inference.
+requires fewer than 30 evaluations after inference. Range and IN cases return
+20 rows and require fewer than 50 evaluations, including reversed comparisons
+and an IN list containing NULL.
 
 ## Targeted performance evidence
 
@@ -67,4 +71,30 @@ are diagnostic engine timings, not durable deployment or MySQL comparisons.
 `just check` passes 2,936 tests without build warnings or errors. The native
 join-bound oracle and natural-phrase oracle pass. The contract lane passes
 49 cases / 5,117 steps without differences at
-`20261007T101140766-63814/contracts`.
+`20261007T102100948-68067/contracts`.
+
+## Mixed-type IN remains open
+
+The same native oracle records a MATCH-dependent difference for a numeric IN
+filter on collation-equivalent text keys. This is outside compatible-domain
+bound propagation and remains a result-membership gap.
+
+```sql
+CREATE TABLE names(id INT PRIMARY KEY,
+  k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci, body TEXT, KEY(k), FULLTEXT(body));
+CREATE TABLE labels(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci);
+INSERT INTO names VALUES(1,'①','needle'),(2,'1','needle'),(3,'other','ordinary');
+INSERT INTO labels VALUES('1');
+SELECT d.id FROM names d JOIN labels o ON o.k=d.k
+WHERE o.k IN (1,NULL) AND MATCH(d.body) AGAINST('needle') ORDER BY d.id;
+```
+
+MySQL 8.4.11 returns ID 2; fsdb returns IDs 1 and 2. Removing MATCH returns
+IDs 1 and 2 on both engines. Replacing IN with `o.k=1` or
+`o.k BETWEEN 1 AND 1` also retains both rows on MySQL. Replacing the numeric
+literal with the string `'1'` retains both rows with IN and MATCH.
+
+Matching this behavior requires further investigation of MySQL's plan and
+coercion rules. General numeric-bound propagation across text equalities is
+invalid: the collation equates `'①'` and `'1'`, but their numeric conversions
+differ. No known-gap suppression is added for this case.

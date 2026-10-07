@@ -86,6 +86,24 @@ let tests =
                   Expect.equal actual control "the bound preserves scores from the complete corpus"
                   Expect.isLessThan calls 30 "only the ten matching candidates need virtual values"
 
+              execute "INSERT INTO owners VALUES(43),(97)" |> ignore
+              for bound, selected in
+                  [ "o.id BETWEEN 42 AND 43", [ 42; 43 ]
+                    "o.id>=42 AND o.id<44", [ 42; 43 ]
+                    "44>o.id AND 42<=o.id", [ 42; 43 ]
+                    "o.id IN (42,97)", [ 42; 97 ]
+                    "o.id IN (42,97,NULL)", [ 42; 97 ] ] do
+                  let query redundant =
+                      "SELECT d.id, ROUND(MATCH(d.body) AGAINST('needle'),6) FROM docs d JOIN owners o ON o.id=d.owner_id WHERE "
+                      + bound + " AND MATCH(d.body) AGAINST('needle')" + redundant + " ORDER BY d.id"
+                  let control = execute (query (" AND " + bound.Replace("o.id", "d.owner_id")))
+                  calls <- 0
+                  let actual = execute (query "")
+                  let expected = [ 1..1000 ] |> List.filter (fun id -> List.contains (id % 100) selected) |> List.map string
+                  Expect.equal (ids actual) expected "MySQL range and membership IDs"
+                  Expect.equal actual control "propagated filters preserve full-corpus scores"
+                  Expect.isLessThan calls 50 "only bounded candidates need virtual values"
+
           testCase "fulltext bound inference preserves ambiguous and forward reference errors"
           <| fun _ ->
               let store = create ()
@@ -116,6 +134,7 @@ let tests =
                   |> fun actual -> Expect.equal actual expected predicate
               check [ "1"; "2" ] "JOIN labels o ON o.k=d.k" "o.k=1"
               check [ "2" ] "JOIN labels o ON o.k=d.k" "o.k=1 AND d.k=1"
+              check [ "1"; "2" ] "JOIN labels o ON o.k=d.k" "o.k BETWEEN 1 AND 1"
               check [ "1"; "2" ] "JOIN labels o ON o.k=d.k" "o.k='1'"
               check [ "1"; "2"; "4" ] "LEFT JOIN labels o ON o.k=d.k AND o.k='1'" "TRUE"
               check [ "1"; "2"; "4" ] "CROSS JOIN labels o" "(o.k=d.k OR d.id=4) AND o.k='1'"
