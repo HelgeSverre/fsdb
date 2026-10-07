@@ -49,7 +49,34 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "grouped mutation dependencies preserve scope and target identities"
+        [ testCase "empty dependent joins do not execute session side effects"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"
+                        "CREATE TABLE b(id INT PRIMARY KEY,n INT)"
+                        "INSERT INTO b VALUES(1,0)"
+                        "CREATE FUNCTION bump() RETURNS INT NO SQL RETURN @touches:=COALESCE(@touches,0)+1" ]
+              for expression in [ "@touches:=@touches+1"; "bump()" ] do
+                  for source in
+                      [ "LATERAL (SELECT " + expression + " AS v,a.id AS id) d"
+                        "(b JOIN LATERAL (SELECT " + expression + " AS v,a.id AS id) d ON 1)"
+                        "(b JOIN JSON_TABLE(JSON_ARRAY(" + expression + ",a.id),'$[*]' COLUMNS(v INT PATH '$')) d ON 1)" ] do
+                      for sql in
+                          [ "SELECT * FROM a JOIN " + source + " ON 1"
+                            "UPDATE a JOIN " + source + " ON 1 SET a.n=d.v" ] do
+                          run "SET @touches=0" |> ignore
+                          match run sql with
+                          | ResultSet(_, []) | Affected 0UL -> ()
+                          | other -> failtestf "%s: %A" sql other
+                          Expect.equal (run "SELECT @touches")
+                              (ResultSet([ "@touches" ], [ [ Some "0" ] ])) sql
+              Expect.equal (run "SELECT * FROM b")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "0" ] ])) "no physical target changed"
+              Expect.equal (run "SELECT bump() AS value")
+                  (ResultSet([ "value" ], [ [ Some "1" ] ])) "normal execution resumes after metadata probing"
+
+          testCase "grouped mutation dependencies preserve scope and target identities"
           <| fun _ ->
               let run =
                   queryFixture

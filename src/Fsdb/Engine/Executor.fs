@@ -662,6 +662,10 @@ let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
 let private withMetadataProbe (body: unit -> 'a) : 'a =
     DynamicScope.withValue metadataProbe true body
 
+let private withSourceMetadataProbe body =
+    Diagnostics.suppress (fun () ->
+        withMetadataProbe (fun () -> withSuppressedVariableAssignments body))
+
 let internal isMetadataProbe () = metadataProbe.Value
 
 let private withPlanningProbe (body: unit -> 'a) : 'a =
@@ -8057,8 +8061,9 @@ and private applyDependentJoinGroup
         prepare row |> Result.bind (matchSource (Seq.singleton row))
     match rows |> List.ofSeq with
     | [] ->
-        prepare (probeRow columns)
-        |> Result.bind (matchSource Seq.empty)
+        withSourceMetadataProbe (fun () ->
+            prepare (probeRow columns)
+            |> Result.bind (matchSource Seq.empty))
     | firstRow :: remainingRows ->
         matchRow firstRow
         |> Result.bind (fun (combinedSources, firstRows, names) ->
@@ -8135,8 +8140,9 @@ and private applyLateralJoin
         match rowsSoFar |> List.ofSeq with
         | [] ->
             // Retain correlated column names even when there is no input row.
-            runBody (Some(contextFor (probeRow columns)))
-            |> Result.bind (matchBody Seq.empty)
+            withSourceMetadataProbe (fun () ->
+                runBody (Some(contextFor (probeRow columns)))
+                |> Result.bind (matchBody Seq.empty))
             |> Result.map asSequence
         | first :: rest ->
             matchRow first
@@ -9130,7 +9136,9 @@ and private applyDependentMutationJoin
     let matchRows rows = applyPreparedMutationJoin store registry dbName scope (sources, rows) leftOperand join
     let matchRow ((_, flat) as row) = prepare (contextFor flat) |> Result.bind (matchRows [ row ])
     match rows with
-    | [] -> prepare (contextFor (probeRow columns)) |> Result.bind (matchRows [])
+    | [] ->
+        withSourceMetadataProbe (fun () ->
+            prepare (contextFor (probeRow columns)) |> Result.bind (matchRows []))
     | first :: rest ->
         matchRow first
         |> Result.bind (fun (combinedSources, firstRows) ->

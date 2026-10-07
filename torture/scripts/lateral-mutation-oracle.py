@@ -42,6 +42,7 @@ def verify(client, _writer):
         oracle["expect"](statement, client.query(statement + ";SELECT ROW_COUNT()"), affected)
     oracle["expect"]("targets deleted", client.query("SELECT * FROM a"), "")
     verify_grouped(client)
+    verify_empty(client)
 
 
 def verify_grouped(client):
@@ -67,6 +68,25 @@ def verify_grouped(client):
     oracle["expect"]("inner ON scope", actual, (1054, "42S22", "Unknown column 'a.id' in 'on clause'"))
     statement = "DELETE a FROM a JOIN (b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1) ON a.id=b.id"
     oracle["expect"]("dependent delete", client.query(statement + ";SELECT ROW_COUNT();SELECT * FROM a ORDER BY id"), "1\n2\t9")
+
+
+def verify_empty(client):
+    client.query("DELETE FROM a;DELETE FROM b;INSERT INTO b VALUES(1,0);CREATE FUNCTION bump() RETURNS INT NO SQL RETURN @touches:=COALESCE(@touches,0)+1")
+    for expression in ["@touches:=@touches+1", "bump()"]:
+        for source in [
+            "LATERAL (SELECT " + expression + " AS v,a.id AS id) d",
+            "(b JOIN LATERAL (SELECT " + expression + " AS v,a.id AS id) d ON 1)",
+            "(b JOIN JSON_TABLE(JSON_ARRAY(" + expression + ",a.id),'$[*]' COLUMNS(v INT PATH '$')) d ON 1)",
+        ]:
+            for statement in [
+                "SELECT * FROM a JOIN " + source + " ON 1",
+                "UPDATE a JOIN " + source + " ON 1 SET a.n=d.v",
+            ]:
+                client.query("SET @touches=0")
+                oracle["expect"](statement, client.query(statement), "")
+                oracle["expect"]("no session side effects", client.query("SELECT @touches"), "0")
+    oracle["expect"]("physical target unchanged", client.query("SELECT * FROM b"), "1\t0")
+    oracle["expect"]("normal function execution", client.query("SELECT bump()"), "1")
 
 
 if __name__ == "__main__":

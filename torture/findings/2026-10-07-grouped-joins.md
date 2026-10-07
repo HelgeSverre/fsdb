@@ -359,3 +359,9 @@ DELETE. The inner ON clause retains its local scope and rejects references to
 preceding outer operands. Direct and grouped dependencies share per-row source
 preparation while the mutation matcher retains physical target identities.
 Broader correlated-source combinations and prepared metadata edges remain.
+
+Empty direct and grouped dependent joins infer source columns under a metadata
+probe that suppresses user-variable assignments and stored-function execution.
+The lateral mutation oracle checks unchanged session counters for SELECT and
+UPDATE with LATERAL and JSON_TABLE sources, and verifies that ordinary function
+execution resumes after the probe.
