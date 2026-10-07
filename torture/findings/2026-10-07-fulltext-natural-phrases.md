@@ -58,3 +58,15 @@ warnings or errors. The maintained native oracle passes. The differential
 lane passes 45 cases and 4,978 steps with zero differences; the manifest is
 `torture/artifacts/runs/20261007T013106585-39177/contracts/manifest.json`.
 No differences are enrolled in the known-gaps ledger.
+
+The scoring fixtures explicitly run `ANALYZE TABLE` after insertion. Without
+that step, fresh MySQL instances returned different relevance values for the
+same rows, including 0.0770632 instead of 0.0479892 in the isolated oracle.
+The unanalysed contract run
+`torture/artifacts/runs/20261007T013449633-39894/contracts/manifest.json`
+recorded 68 differences. Matching-row assertions still passed; rounded scores
+were unstable. Refreshing statistics preserves the same scoring assertions.
+Two fresh-instance runs with analysed fixtures pass all 4,978 steps:
+`20261007T013718612-40277` and `20261007T013746434-40339` under
+`torture/artifacts/runs/`. The full repository gate also passes 2,858 tests
+after the match-result cleanup.

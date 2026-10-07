@@ -15,6 +15,7 @@ let run () =
         execute ("USE " + database)
         execute "CREATE TABLE docs(id INT PRIMARY KEY,a TEXT,b TEXT,FULLTEXT(a,b))"
         execute "INSERT INTO docs VALUES(1,'mysql','security'),(2,'mysql security',''),(3,'mysqlsecurity',NULL),(4,'my','sql'),(5,'sql','mysql security'),(6,'mysql extra security',''),(7,'security mysql',''),(8,'database',''),(9,'mysql the security',''),(10,'mysql x security','')"
+        execute "ANALYZE TABLE docs"
         let cases =
             [ "\"mysql security\"", [2;5], [2;4;5]
               "\"mysql security\" database", [2;5;8], [2;4;5;8]

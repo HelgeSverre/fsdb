@@ -2663,7 +2663,8 @@ module ContractCatalog =
         { Name = "natural-fulltext-phrases"
           Setup =
             [| "CREATE TABLE natural_phrases(id INT PRIMARY KEY,a TEXT,b TEXT,FULLTEXT(a,b))"
-               "INSERT INTO natural_phrases VALUES(1,'mysql','security'),(2,'mysql security',''),(3,'mysqlsecurity',NULL),(4,'my','sql'),(5,'sql','mysql security'),(6,'mysql extra security',''),(7,'security mysql',''),(8,'database',''),(9,'mysql the security',''),(10,'mysql x security','')" |]
+               "INSERT INTO natural_phrases VALUES(1,'mysql','security'),(2,'mysql security',''),(3,'mysqlsecurity',NULL),(4,'my','sql'),(5,'sql','mysql security'),(6,'mysql extra security',''),(7,'security mysql',''),(8,'database',''),(9,'mysql the security',''),(10,'mysql x security','')"
+               "ANALYZE TABLE natural_phrases" |]
           Steps =
             [| for modeIndex, mode in [ "IN NATURAL LANGUAGE MODE"; "WITH QUERY EXPANSION" ] |> List.indexed do
                    for termIndex, term in
