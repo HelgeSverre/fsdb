@@ -1,6 +1,7 @@
 """Verify full-text transaction visibility on disposable native MySQL 8.4.11."""
 
 import contextlib
+import math
 import os
 import pathlib
 import select
@@ -158,6 +159,42 @@ def concurrent_writes(reader, writer):
         writer.query("ROLLBACK")
 
 
+def relevance_population(reader, writer):
+    def expect_score(client, statement, expected, label):
+        actual = float(client.query(statement))
+        if not math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-12):
+            raise AssertionError(f"{label}: expected {expected}, got {actual}")
+        print(f"{label}: {actual}", flush=True)
+
+    baseline = math.log10(3 / 2) ** 2
+    for label, old, new, parser in [
+        ("words", "orchard", "cobalt", ""),
+        ("ngram", "生日", "中文", " WITH PARSER ngram"),
+    ]:
+        score = (f"SELECT MATCH(body) AGAINST('{old}' IN BOOLEAN MODE) "
+                 "FROM probe.docs WHERE id=2")
+        for isolation in ["REPEATABLE READ", "READ COMMITTED", "READ UNCOMMITTED"]:
+            for name, change, pending_score in [
+                ("insert", f"INSERT INTO probe.docs VALUES(4,'{new} gold')", math.log10(4 / 2) ** 2),
+                ("delete", "DELETE FROM probe.docs WHERE id=1", math.log10(1.0001) ** 2),
+            ]:
+                setup(writer, old, new, parser)
+                writer.query("ANALYZE TABLE probe.docs")
+                reader.query("SET TRANSACTION ISOLATION LEVEL " + isolation
+                             + ";START TRANSACTION;SELECT * FROM probe.docs")
+                case = f"{label} {isolation} {name} relevance"
+                expect_score(reader, score, baseline, case + " baseline")
+                writer.query("START TRANSACTION;" + change)
+                expect_score(reader, score, pending_score, case + " other pending")
+                expect_score(writer, score, pending_score, case + " own pending")
+                writer.query("ROLLBACK")
+                expect("ordinary rows after rollback", reader.query("SELECT COUNT(*) FROM probe.docs"), "3")
+                expect_score(reader, score, pending_score, case + " after rollback")
+                writer.query("ANALYZE TABLE probe.docs")
+                expect_score(reader, score, baseline, case + " after analyze")
+                reader.query("ROLLBACK")
+
+
 def run():
     with tempfile.TemporaryDirectory(prefix="fsdb-fulltext-transactions-") as directory:
         data = pathlib.Path(directory) / "data"
@@ -191,6 +228,7 @@ def run():
                     reader.query("CREATE DATABASE probe CHARACTER SET utf8mb4")
                     own_writes(reader)
                     concurrent_writes(reader, writer)
+                    relevance_population(reader, writer)
         except Exception:
             print(log_path.read_text(), flush=True)
             raise

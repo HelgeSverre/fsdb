@@ -1,14 +1,15 @@
 # Full-text transaction visibility
 
-Status: partial. The maintained word/ngram visibility matrix now agrees with
-native MySQL 8.4.11, including pending writes, projected scores, savepoints,
-cross-index updates, write predicates, and concurrent reads. Relevance population
-statistics remain open. The original observations below compare MySQL with fsdb
+Status: visibility fixed for the maintained matrix. Word/ngram pending writes,
+projected scores, savepoints, cross-index updates, write predicates, and concurrent
+reads agree with MySQL 8.4.11. Numeric ranking retains the repository's existing
+[deliberate statistics divergence](../../GAPS.md#16-deliberate-divergences-accepted-not-targeted-for-parity). The original observations below compare MySQL with fsdb
 revision `7a8a5528`; they explain the behavior the regressions preserve.
 
 The [native oracle](../scripts/fulltext-transaction-oracle.py) starts a disposable
 socket-only MySQL server and checks membership, projected MATCH results, rollback,
-savepoints, cross-index visibility, and two-connection isolation boundaries.
+savepoints, cross-index visibility, two-connection isolation boundaries, and
+MySQL's approximate scoring population before and after ANALYZE.
 Run it with native `mysqld`, `mysql`, and `mysqladmin` on PATH:
 
 ```sh
@@ -76,17 +77,37 @@ The native oracle covers pending insert, update, and delete cases at this level.
 
 ## Relevance and implementation boundary
 
-Filtering fsdb's current score map is insufficient. In one three-row word-index
-probe, a pending fourth orchard row changed MySQL's existing orchard scores to
-approximately 0.09061906 while the pending row's score remained zero. fsdb scored
-all three orchard rows at approximately 0.01560969. InnoDB statistics varied in
-exploratory runs, so these are diagnostic samples rather than stable numeric
-fixtures; the maintained oracle asserts visibility and zero pending-row
-projections. Numeric parity needs controlled validation alongside the read model.
+MySQL's relevance population is an approximate global table statistic, not a
+transaction's visible row count. The native oracle now seeds three rows, runs
+ANALYZE, primes a reader, and makes a pending insert or delete on another
+connection. The searched term occurs once in two committed documents. Word and
+ngram probes give the same results at REPEATABLE READ, READ COMMITTED, and READ
+UNCOMMITTED:
+
+| State | Pending insert | Pending delete |
+|---|---|---|
+| After initial ANALYZE | 0.03100813 | 0.03100813 |
+| Pending write, read by either connection | 0.09061906 | approximately 0.000000001886 |
+| After writer rollback | 0.09061906 | approximately 0.000000001886 |
+| After another ANALYZE | 0.03100813 | 0.03100813 |
+
+Ordinary row counts return to three on rollback, but ranking retains the changed
+estimate until ANALYZE in these controlled cases. Repeated probes reproduced
+this result. The maintained assertions allow floating-point rounding and retain
+the nonzero floor for the delete case.
+
+MySQL 8.4.11's [ranking implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3409)
+reads `dict_table_get_n_rows`. That accessor returns `stat_n_rows`, explicitly an
+[approximate estimate](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/include/dict0dict.ic#L191).
+This connects the observed score drift to the statistics behavior already
+accepted as a deliberate divergence in GAPS.md. Fsdb keeps the committed corpus
+count: its pending-insert score remains approximately 0.03100813. It does not
+emulate rollback-stale InnoDB estimates. This decision leaves numeric ranking
+parity unclaimed; it does not excuse membership or pending-row projection errors.
 
 `fullTextScoresForTable` creates a `FullText.ReadView` from the committed table's
-index and uses shared view-based scoring for natural, boolean, and expansion modes. A view
-can restrict document visibility and supply its scoring population without
+index and uses shared view-based scoring for natural, boolean, and expansion
+modes. A view can restrict document visibility and supply its scoring population without
 changing the write index or its term frequencies. Expansion excludes hidden seed
 documents while still allowing visible seeds outside a final predicate's row set.
 Focused regressions cover these rules and both optimized dictionary paths.
@@ -98,10 +119,6 @@ projected MATCH, predicates, query expansion seeds, and MATCH used by UPDATE or
 DELETE. Physical sources carry their owning database through joined queries.
 The private write indexes remain complete for commit, XA publication, and recovery.
 
-The view currently uses the committed corpus's document count. MySQL's relevance
-population can include pending row-count changes, so numeric parity remains open.
-No score-population policy is inferred from the unstable exploratory samples.
-
 Publication now preserves document replacement even when final row values equal
 the transaction's base values. `RowStore.ChangesFrom` deliberately omits equal
 values, so full-text publication compares document identity separately. Both the
@@ -112,7 +129,8 @@ retains the branch's index objects.
 
 Regressions cover word and ngram replacements with changed or restored text,
 concurrent writes, deletion, and inserted-row rebasing. The identity comparison
-scans a changed index's document maps; unchanged maps return immediately. Read visibility compares snapshot documents with these retained identities.
+scans a changed index's document maps; unchanged maps return immediately. Read
+visibility compares snapshot documents with these retained identities.
 
 ## Verification
 
@@ -122,9 +140,11 @@ comparisons against fsdb's Debug executable reproduced the differences above.
 read-view, publication, and transaction-visibility regressions. After disk space became available, the native
 natural-phrase oracle and all 47 contracts (5,007 steps) passed with no differences:
 `torture/artifacts/runs/20261007T044523330-73434/contracts`.
-The extended transaction oracle passes on both MySQL 8.4.11 and fsdb's Debug
+The transaction visibility cases pass on both MySQL 8.4.11 and fsdb's Debug
 server, including restored-text document replacement under REPEATABLE READ and
 READ COMMITTED, READ UNCOMMITTED pending writes, and UPDATE/DELETE predicates.
+The native relevance-population cases also pass; applying those numeric
+expectations to fsdb reproduces the deliberate statistics difference.
 No known-gap suppression is included.
 
 The publication foundation passed the durability lane with 12 crash restarts
