@@ -9133,120 +9133,129 @@ and private applyMutationJoin
                     rows |> List.map (fun row -> [ None ], row))
             | FromLateral _ -> failwith "applyMutationJoin: lateral source handled above"
 
-        match resolved with
-        | Error e -> Error e
-        | Ok(rightSources, rightRows) ->
-            let joinColumns = rightSources |> List.collect _.Columns
-            let joinRows = rightRows |> List.map snd
-            let newSources = sourcesSoFar @ rightSources
-            let qualifiers = qualifierRanges (newSources |> List.map (fun source -> source.Qualifier, source.Columns))
-            let combinedColumnsSoFar = sourcesSoFar |> List.collect _.Columns
-            let leftFlatPadding = Array.create combinedColumnsSoFar.Length VNull
-            let rightFlatPadding = Array.create joinColumns.Length VNull
-            let leftIdentityPadding = List.replicate sourcesSoFar.Length None
+        resolved
+        |> Result.bind (applyPreparedMutationJoin store registry dbName (sourcesSoFar, rowsSoFar) leftOperand join)
 
-            let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers None
+and private applyPreparedMutationJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    ((sourcesSoFar, rowsSoFar): MutationSource list * (Value[] option list * Value[]) list)
+    (leftOperand: FromItem option)
+    (join: Join)
+    ((rightSources, rightRows): MutationSource list * (Value[] option list * Value[]) list)
+    : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
+    let joinColumns = rightSources |> List.collect _.Columns
+    let joinRows = rightRows |> List.map snd
+    let newSources = sourcesSoFar @ rightSources
+    let qualifiers = qualifierRanges (newSources |> List.map (fun source -> source.Qualifier, source.Columns))
+    let combinedColumnsSoFar = sourcesSoFar |> List.collect _.Columns
+    let leftFlatPadding = Array.create combinedColumnsSoFar.Length VNull
+    let rightFlatPadding = Array.create joinColumns.Length VNull
+    let leftIdentityPadding = List.replicate sourcesSoFar.Length None
 
-            let leftIndexed = rowsSoFar |> List.indexed
-            let rightIndexed = rightRows |> List.indexed
-            let leftFlatRows = rowsSoFar |> List.map snd
+    let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers None
 
-            let resolveQualified (qualifier: string) (column: string) =
-                qualifiers
-                |> Map.tryFind (qualifier.ToLowerInvariant())
-                |> Option.bind (fun (columns, offset) ->
-                    columns
-                    |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
-                    |> Option.map (fun index -> offset + index, columns.[index].Type))
+    let leftIndexed = rowsSoFar |> List.indexed
+    let rightIndexed = rightRows |> List.indexed
+    let leftFlatRows = rowsSoFar |> List.map snd
 
-            let buildCombinedRows (matched: (int * int * (Value[] option list * Value[])) list) =
-                let matchedRows = matched |> List.map (fun (_, _, row) -> row)
-                let matchedLeft = matched |> List.map (fun (li, _, _) -> li) |> Set.ofList
-                let matchedRight = matched |> List.map (fun (_, ri, _) -> ri) |> Set.ofList
+    let resolveQualified (qualifier: string) (column: string) =
+        qualifiers
+        |> Map.tryFind (qualifier.ToLowerInvariant())
+        |> Option.bind (fun (columns, offset) ->
+            columns
+            |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
+            |> Option.map (fun index -> offset + index, columns.[index].Type))
 
-                let leftOnly =
-                    leftIndexed
-                    |> List.filter (fst >> matchedLeft.Contains >> not)
-                    |> List.map (fun (_, (lIdent, lFlat)) -> lIdent @ List.replicate rightSources.Length None, Array.append lFlat rightFlatPadding)
+    let buildCombinedRows (matched: (int * int * (Value[] option list * Value[])) list) =
+        let matchedRows = matched |> List.map (fun (_, _, row) -> row)
+        let matchedLeft = matched |> List.map (fun (li, _, _) -> li) |> Set.ofList
+        let matchedRight = matched |> List.map (fun (_, ri, _) -> ri) |> Set.ofList
 
-                let rightOnly =
-                    rightIndexed
-                    |> List.filter (fst >> matchedRight.Contains >> not)
-                    |> List.map (fun (_, (rIdent, r)) -> leftIdentityPadding @ rIdent, Array.append leftFlatPadding r)
+        let leftOnly =
+            leftIndexed
+            |> List.filter (fst >> matchedLeft.Contains >> not)
+            |> List.map (fun (_, (lIdent, lFlat)) -> lIdent @ List.replicate rightSources.Length None, Array.append lFlat rightFlatPadding)
 
-                let rows =
-                    match join.Kind with
-                    | InnerJoin
-                    | StraightJoin
-                    | CrossJoin
-                    | NaturalJoin -> matchedRows
-                    | LeftJoin
-                    | NaturalLeftJoin -> matchedRows @ leftOnly
-                    | RightJoin
-                    | NaturalRightJoin -> matchedRows @ rightOnly
+        let rightOnly =
+            rightIndexed
+            |> List.filter (fst >> matchedRight.Contains >> not)
+            |> List.map (fun (_, (rIdent, r)) -> leftIdentityPadding @ rIdent, Array.append leftFlatPadding r)
 
-                newSources, rows
+        let rows =
+            match join.Kind with
+            | InnerJoin
+            | StraightJoin
+            | CrossJoin
+            | NaturalJoin -> matchedRows
+            | LeftJoin
+            | NaturalLeftJoin -> matchedRows @ leftOnly
+            | RightJoin
+            | NaturalRightJoin -> matchedRows @ rightOnly
 
-            let columnsOf (sources: MutationSource list) = sources |> List.map (fun source -> source.Qualifier, source.Columns)
-            let condition = resolvedJoinCondition (columnsOf sourcesSoFar) (columnsOf rightSources) leftOperand join
+        newSources, rows
 
-            match condition with
-            | Error error -> Error error
-            | Ok effectiveOn ->
-                let equiKeys, residualConjuncts = extractEquiKeys resolveQualified combinedColumnsSoFar.Length effectiveOn
+    let columnsOf (sources: MutationSource list) = sources |> List.map (fun source -> source.Qualifier, source.Columns)
+    let condition = resolvedJoinCondition (columnsOf sourcesSoFar) (columnsOf rightSources) leftOperand join
 
-                let keyClasses =
-                    equiKeys
-                    |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
-                    |> tryAllSome
+    match condition with
+    | Error error -> Error error
+    | Ok effectiveOn ->
+        let equiKeys, residualConjuncts = extractEquiKeys resolveQualified combinedColumnsSoFar.Length effectiveOn
 
-                let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
+        let keyClasses =
+            equiKeys
+            |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+            |> tryAllSome
 
-                let hashEligible =
-                    match keyClasses with
-                    | Some classes ->
-                        storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
-                        && not equiKeys.IsEmpty
-                        && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
-                        && rowsMatchKeyClasses classes (equiKeys |> List.map fst) leftFlatRows
-                        && rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
-                    | None -> false
+        let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
 
-                let residualHolds (combinedFlat: Value[]) : Result<bool, EvalError> =
-                    residualConjuncts
-                    |> traverse (fun c -> evalExpr { ctxFor combinedFlat with Clause = OnClause } c)
-                    |> Result.map (List.forall (fun v -> truthy v = Some true))
+        let hashEligible =
+            match keyClasses with
+            | Some classes ->
+                storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
+                && not equiKeys.IsEmpty
+                && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
+                && rowsMatchKeyClasses classes (equiKeys |> List.map fst) leftFlatRows
+                && rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
+            | None -> false
 
-                if hashEligible then
-                    let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
-                    let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-                    let buildOnLeft = rowsSoFar.Length <= joinRows.Length
+        let residualHolds (combinedFlat: Value[]) : Result<bool, EvalError> =
+            residualConjuncts
+            |> traverse (fun c -> evalExpr { ctxFor combinedFlat with Clause = OnClause } c)
+            |> Result.map (List.forall (fun v -> truthy v = Some true))
 
-                    let leftKeyOf (lIdent: Value[] option list, lFlat: Value[]) = equiKeyOf leftKeyIndices lFlat
-                    let rightKeyOf (_, r: Value[]) = equiKeyOf rightKeyIndices r
+        if hashEligible then
+            let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
+            let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+            let buildOnLeft = rowsSoFar.Length <= joinRows.Length
 
-                    let candidates : (int * int * (Value[] option list * Value[])) list =
-                        if buildOnLeft then
-                            hashPairs keyCollations leftKeyOf rightKeyOf leftIndexed rightIndexed
-                            |> Seq.map (fun (li, (lIdent, lFlat), ri, (rIdent, r)) -> li, ri, (lIdent @ rIdent, Array.append lFlat r))
-                            |> List.ofSeq
-                        else
-                            hashPairs keyCollations rightKeyOf leftKeyOf rightIndexed leftIndexed
-                            |> Seq.map (fun (ri, (rIdent, r), li, (lIdent, lFlat)) -> li, ri, (lIdent @ rIdent, Array.append lFlat r))
-                            |> List.ofSeq
+            let leftKeyOf (lIdent: Value[] option list, lFlat: Value[]) = equiKeyOf leftKeyIndices lFlat
+            let rightKeyOf (_, r: Value[]) = equiKeyOf rightKeyIndices r
 
-                    candidates |> keepMatches residualHolds snd |> Result.map buildCombinedRows
+            let candidates : (int * int * (Value[] option list * Value[])) list =
+                if buildOnLeft then
+                    hashPairs keyCollations leftKeyOf rightKeyOf leftIndexed rightIndexed
+                    |> Seq.map (fun (li, (lIdent, lFlat), ri, (rIdent, r)) -> li, ri, (lIdent @ rIdent, Array.append lFlat r))
+                    |> List.ofSeq
                 else
-                    let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
+                    hashPairs keyCollations rightKeyOf leftKeyOf rightIndexed leftIndexed
+                    |> Seq.map (fun (ri, (rIdent, r), li, (lIdent, lFlat)) -> li, ri, (lIdent @ rIdent, Array.append lFlat r))
+                    |> List.ofSeq
 
-                    pairs
-                    |> traverseSeq (fun (li, ri, (lIdent, lFlat), (rIdent, r)) ->
-                        let combinedFlat = Array.append lFlat r
+            candidates |> keepMatches residualHolds snd |> Result.map buildCombinedRows
+        else
+            let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
 
-                        evalExpr { ctxFor combinedFlat with Clause = OnClause } effectiveOn
-                        |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ rIdent, combinedFlat)) else None))
-                    |> Result.mapError Err
-                    |> Result.map buildCombinedRows
+            pairs
+            |> traverseSeq (fun (li, ri, (lIdent, lFlat), (rIdent, r)) ->
+                let combinedFlat = Array.append lFlat r
+
+                evalExpr { ctxFor combinedFlat with Clause = OnClause } effectiveOn
+                |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ rIdent, combinedFlat)) else None))
+            |> Result.mapError Err
+            |> Result.map buildCombinedRows
 
 /// Resolves `from :: joins` into the same `(sources, rows)` shape
 /// `applyMutationJoin` builds up — the multi-table `UPDATE`/`DELETE`
