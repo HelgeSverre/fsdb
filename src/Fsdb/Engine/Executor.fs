@@ -2110,6 +2110,9 @@ and private overLabel (over: OverClause) : string =
         |> String.concat " "
         |> sprintf "(%s)"
 
+let private projectionLabel ((expression, alias): Projection) =
+    alias |> Option.defaultWith (fun () -> exprLabel expression)
+
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 
 /// MySQL folds LIKE one character at a time: `ä` matches `a`, but `æ` does
@@ -2858,7 +2861,7 @@ let rec private outputColumnSourcesInScope
                 FromItem.logicalSelectColumns namesForQualifier body |> Result.toOption
                 |> Option.map (List.map _.Name) |> Option.defaultValue []
             | Star(Some qualifier) -> namesForQualifier qualifier
-            | _ -> [ alias |> Option.defaultValue (exprLabel expression) ])
+            | _ -> [ projectionLabel (expression, alias) ])
 
     let alignOrigins columns origins =
         if sameLength columns origins then
@@ -7093,7 +7096,7 @@ and private describeQueryColumnsChecked
                         |> Map.tryFind (qualifier.ToLowerInvariant())
                         |> Option.map (fst >> List.map describeColumn)
                         |> Option.defaultValue []
-                    | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ])))
+                    | _ -> [ columnForExpression (projectionLabel (expression, alias)) expression ])))
 
     (match source with
      | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = [] })
@@ -11557,7 +11560,7 @@ and private tryPhysicalProjectionUncached
                             |> Option.bind (fun name ->
                                 resolveColumn input.OutputColumns name
                                 |> Result.toOption
-                                |> Option.map (fun index -> index, alias |> Option.defaultValue (exprLabel expression)))
+                                |> Option.map (fun index -> index, projectionLabel (expression, alias)))
                         with
                         | Some projected -> Ok projected
                         | None -> Error())
@@ -13129,7 +13132,7 @@ and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
     | Star(Some qualifier), _ -> resolveStarQualifier ctx qualifier
     | expr, aliasOpt ->
         evalExpr ctx expr
-        |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ])
+        |> Result.map (fun v -> [ projectionLabel (expr, aliasOpt), v ])
 
 /// An all-NULL row that surfaces schema errors even when no data row matches.
 and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
@@ -14142,7 +14145,7 @@ and private runGroupedSelect
             | _ ->
                 rewriteAggregates registry ctxFor groupRows (rollup expr)
                 |> Result.bind (evalExpr (ctxFor representative))
-                |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ]))
+                |> Result.map (fun v -> [ projectionLabel (expr, aliasOpt), v ]))
         |> Result.map List.concat
 
     let havingOk (rollup: Expr -> Expr) (groupRows: Value[] list) : Result<bool, EvalError> =
@@ -14524,7 +14527,7 @@ and private runGroupedWindowSelect
 
         // Synthetic columns must not leak into result headers.
         let rewrite (expr: Expr, alias: string option) =
-            substituteExprs replacements expr, Some(alias |> Option.defaultValue (exprLabel expr))
+            substituteExprs replacements expr, Some(projectionLabel (expr, alias))
 
         let outerSelect =
             { select with
