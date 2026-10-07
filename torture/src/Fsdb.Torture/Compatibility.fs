@@ -2711,6 +2711,26 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS natural_aggregates" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private shortFullTextLookups =
+        { Name = "short-fulltext-lookups"
+          Setup =
+            [| "CREATE TABLE short_lookups(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))"
+               "INSERT INTO short_lookups VALUES(1,'ffi'),(2,'orchard'),(3,'zzzz'),(4,'ﬃ')"
+               "ANALYZE TABLE short_lookups" |]
+          Steps =
+            [| for modeIndex, mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE"; "WITH QUERY EXPANSION" ] |> List.indexed do
+                   for queryIndex, query in [ "ﬃ"; "ﬃ ﬃ"; "+ﬃ"; "\"ﬃ\""; "\"ﬃ orchard\""; "ffi ffi"; "+ffi +ﬃ"; "ﬃ ﬃ ﬃ" ] |> List.indexed do
+                       let name = sprintf "short-%d-%d" modeIndex queryIndex
+                       let score = sprintf "MATCH(body) AGAINST('%s' %s)" query mode
+                       let matches = "SELECT id FROM short_lookups WHERE " + score + " ORDER BY id"
+                       let scores = "SELECT id,CAST(" + score + " AS DECIMAL(12,5)) AS relevance FROM short_lookups ORDER BY id"
+                       Contract.query (name + "-text") matches
+                       Contract.preparedQuery (name + "-binary") matches [||]
+                       Contract.query (name + "-scores-text") scores
+                       Contract.preparedQuery (name + "-scores-binary") scores [||] |]
+          Cleanup = [| "DROP TABLE IF EXISTS short_lookups" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private fullTextExpansionSeeds =
         let values =
             [ for id in 1..25 do
@@ -3136,6 +3156,7 @@ module ContractCatalog =
            ngramFullText
            naturalPhrases
            fullTextExpansionSeeds
+           shortFullTextLookups
            naturalAggregates
            singleGroupOrdering
            temporalNumericConversion

@@ -252,6 +252,9 @@ let private containsNgramStopword policy (text: string) =
 let private hasSearchableWordLength (token: Token) =
     token.Text.Length >= minTokenLength && token.Text.Length <= maxTokenLength
 
+// Short query spellings can address longer indexed collation equivalents.
+let private hasLookupWordLength (token: Token) = token.Text.Length <= maxTokenLength
+
 let private isSearchableWord policy token =
     hasSearchableWordLength token && not (isStopword policy token.Text)
 
@@ -271,7 +274,7 @@ let private isBooleanSearchable rules token =
 /// Exact word lookups can reach older postings or an indexed collation equivalent.
 let private isBooleanLookup rules token =
     match rules.Tokenizer with
-    | Words -> hasSearchableWordLength token
+    | Words -> hasLookupWordLength token
     | Ngrams _ -> isBooleanSearchable rules token
 
 let private indexedTokens (document: Document) =
@@ -530,7 +533,7 @@ let private naturalTerms (view: ReadView<'id>) (query: string) : string[] =
     let tokens = queryTokens view query
     let terms =
         match view.Rules.Tokenizer with
-        | Words -> tokens |> Array.filter hasSearchableWordLength
+        | Words -> tokens |> Array.filter hasLookupWordLength
         // A stopped spelling can still match an indexed collation equivalent.
         | Ngrams _ -> tokens
 
@@ -564,7 +567,7 @@ type private NaturalClause =
 
 let private naturalWordClauses (view: ReadView<'id>) (query: string) =
     let words text = tokensWith Words view.Collation text
-    let plain text = words text |> Array.filter hasSearchableWordLength |> Array.map (fun word -> NaturalWord word.Key)
+    let plain text = words text |> Array.filter hasLookupWordLength |> Array.map (fun word -> NaturalWord word.Key)
     let clauses = ResizeArray<NaturalClause>()
     let mutable start = 0
     while start < query.Length do
@@ -592,7 +595,7 @@ let private needsNaturalWordEvaluation (view: ReadView<'id>) (query: string) =
     | Words ->
         if query.Contains '"' then true
         else
-            let terms = queryTokens view query |> Array.filter hasSearchableWordLength
+            let terms = queryTokens view query |> Array.filter hasLookupWordLength
             terms.Length <> (terms |> Array.distinctBy _.Key).Length
 
 type private NaturalMatches<'id when 'id: comparison> =
@@ -1048,9 +1051,39 @@ and private evalNodes
 let private visibleBooleanScore score =
     if score = 0.0 then idfFloor * idfFloor else score
 
+let private tryRepeatedWordScores candidateIds (view: ReadView<'id>) nodes =
+    let words =
+        nodes |> List.choose (function
+            | (Optional | Must as operator), BWord(word, false) -> Some(operator, word)
+            | _ -> None)
+    if view.Rules.Tokenizer <> Words
+       || words.Length <> nodes.Length
+       || (words |> List.distinctBy (snd >> _.Key)).Length = words.Length then
+        None
+    else
+        let candidates =
+            (candidateIds, words)
+            ||> List.fold (fun candidates (operator, word) ->
+                if operator <> Must then candidates
+                else
+                    let ids =
+                        if isBooleanLookup view.Rules word then
+                            view.Postings |> Map.tryFind word.Key
+                            |> Option.map (Map.keys >> Set.ofSeq) |> Option.defaultValue Set.empty
+                        else Set.empty
+                    intersectCandidates candidates (Some ids))
+        words
+        |> List.choose (fun (_, word) -> if isBooleanLookup view.Rules word then Some(NaturalWord word.Key) else None)
+        |> List.toArray
+        |> naturalWordMatches candidates view
+        |> scoreNaturalWordMatches view
+        |> Some
+
 let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =
     let candidateIds = candidatesInView candidateIds view
-    evalNodes candidateIds view (parseBooleanQuery view.Rules view.Collation query)
+    let nodes = parseBooleanQuery view.Rules view.Collation query
+    tryRepeatedWordScores candidateIds view nodes
+    |> Option.defaultWith (fun () -> evalNodes candidateIds view nodes)
     |> Map.map (fun _ score -> visibleBooleanScore score)
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
@@ -1071,9 +1104,7 @@ let internal tryFlatBooleanScoresDictionaryInView
         | (op, BWord(term, prefix)) :: rest -> flatTerms ((op, term, prefix) :: found) rest
         | _ -> None
 
-    parseBooleanQuery view.Rules view.Collation query
-    |> flatTerms []
-    |> Option.map (fun terms ->
+    let scoreTerms terms =
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key view.PrefixPostings
             elif isBooleanLookup view.Rules term then Map.tryFind term.Key view.Postings
@@ -1188,7 +1219,15 @@ let internal tryFlatBooleanScoresDictionaryInView
 
             match candidateIds, candidateProbeWork with
             | Some candidates, Some work when work < postingWork -> scoreCandidates candidates candidates.Count
-            | _ -> accumulatePositivePostings ())
+            | _ -> accumulatePositivePostings ()
+
+    let nodes = parseBooleanQuery view.Rules view.Collation query
+    match tryRepeatedWordScores candidateIds view nodes with
+    | Some scores ->
+        let result = Collections.Generic.Dictionary<'id, float>()
+        scores |> Map.iter (fun id score -> result.Add(id, visibleBooleanScore score))
+        Some result
+    | None -> nodes |> flatTerms [] |> Option.map scoreTerms
 
 let internal tryFlatBooleanScoresDictionaryWithin candidateIds index query =
     tryFlatBooleanScoresDictionaryInView candidateIds (readView index) query

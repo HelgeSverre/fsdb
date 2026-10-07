@@ -150,6 +150,28 @@ let tests =
                   Expect.equal ((Option.get scores).Keys |> Seq.sort |> Seq.toList) [ 2; 3 ] "optimized lookups normalize case"
               closeTo (log10 2.0 ** 2.0) (naturalScores index "CAFÉ").[2] "case variants share document frequency"
 
+          testCase "short word lookups reach indexed collation equivalents without changing phrase anchors"
+          <| fun _ ->
+              let index = buildIndexWith defaultCollation [ 1, "ffi"; 2, "orchard"; 3, "zzzz"; 4, "ﬃ" ]
+              for score in [ naturalScores; booleanScores; expansionScores ] do
+                  for query in [ "ﬃ"; "ﬃ ﬃ"; "+ﬃ" ] do
+                      Expect.equal (score index query |> Map.keys |> Seq.toList) [ 1 ] "lookup does not apply the indexing minimum"
+                  Expect.isEmpty (score index "\"ﬃ\"") "a short word alone cannot anchor a phrase"
+                  Expect.equal (score index "\"ﬃ orchard\"" |> Map.keys |> Seq.toList) [ 2 ] "phrase anchors still skip short words"
+              for scores in
+                  [ tryNaturalSingleTermScoresDictionaryInView None (readView index) "ﬃ"
+                    tryFlatBooleanScoresDictionaryInView None (readView index) "ﬃ" ] do
+                  Expect.equal ((Option.get scores).Keys |> Seq.toList) [ 1 ] "optimized lookup uses the same bounds"
+
+          testCase "repeated unweighted boolean words increase document frequency once per occurrence"
+          <| fun _ ->
+              let index = buildIndexWith defaultCollation [ 1, "ffi"; 2, "orchard"; 3, "zzzz"; 4, "ﬃ" ]
+              for query, count in [ "ffi ffi", 2; "ﬃ ﬃ", 2; "ffi ﬃ", 2; "+ffi +ﬃ", 2; "ﬃ ﬃ ﬃ", 3 ] do
+                  let expected = log10 (4.0 / float count) ** 2.0
+                  closeTo expected (booleanScores index query).[1] "the posting contributes once using the accumulated document frequency"
+                  let optimized = tryFlatBooleanScoresDictionaryInView None (readView index) query |> Option.get
+                  closeTo expected optimized.[1] "optimized and general evaluation agree"
+
           testCase "word lookups use indexed collation equivalents of stopped spellings"
           <| fun _ ->
               let index = buildIndexWith defaultCollation [ 1, "the"; 2, "thé"; 3, "THE"; 4, "tHe"; 5, "zzzz" ]
