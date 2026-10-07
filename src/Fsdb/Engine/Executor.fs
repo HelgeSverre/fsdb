@@ -434,6 +434,22 @@ let private validateRelationNames schema (cteNames: Set<string>) (ctes: CommonTa
             | Some name -> duplicate name
             | None -> Ok()
 
+let private nullableJoinQualifiers (select: SelectStmt) =
+    let rec sourceScope = function
+        | FromItem.Qualified qualifier -> Set.singleton (qualifier.ToLowerInvariant()), Set.empty
+        | FromItem.Grouped(source, joins) -> joinScope source joins
+    and joinScope source joins =
+        joins
+        |> List.fold (fun (left, nullable) join ->
+            let right, rightNullable = sourceScope join.Table
+            let optional =
+                match join.Kind with
+                | LeftJoin | NaturalLeftJoin -> right
+                | RightJoin | NaturalRightJoin -> left
+                | _ -> Set.empty
+            Set.union left right, Set.unionMany [ nullable; rightNullable; optional ]) (sourceScope source)
+    select.From |> Option.map (fun source -> joinScope source select.Joins |> snd) |> Option.defaultValue Set.empty
+
 let private equalityMembershipKey domain value =
     match domain, value with
     | SignedIntegerMembership, VInt _
@@ -6046,6 +6062,7 @@ and private outputColumnWireOverridesFor
                   | None -> metadataOfExpr ctx expr ])
 
     let origins = outputColumnOrigins ctx.Store ctx.DbName ctx.Qualifiers select
+    let nullable = nullableJoinQualifiers select
 
     if sameLength origins overrides then
         List.map2
@@ -6060,8 +6077,11 @@ and private outputColumnWireOverridesFor
                             |> Option.map (fun table -> ColumnWire.withIndexFlags table.Indexes source.OriginalName value))
                         |> Option.defaultValue value
 
-                    { value with
-                        Origin = origin }))
+                    let flags =
+                        if origin |> Option.exists (fun source -> Set.contains (source.Table.ToLowerInvariant()) nullable) then
+                            value.Flags &&& ~~~NotNullFlag
+                        else value.Flags
+                    { value with Flags = flags; Origin = origin }))
             origins
             overrides
     else
@@ -6744,6 +6764,16 @@ and private describeQueryColumnsChecked
                 | Some source -> describeJoinChain seen dbName cteMap outerScopes emptyScope source select.Joins)
         sources
         |> Result.bind (fun scope ->
+            let nullable = nullableJoinQualifiers select
+            let scope =
+                { scope with
+                    Sources = scope.Sources |> List.map (fun (qualifier, columns) ->
+                        let columns =
+                            if Set.contains (qualifier.ToLowerInvariant()) nullable then
+                                columns |> List.map (fun descriptor ->
+                                    { descriptor with Column = { descriptor.Column with Nullable = true; PrimaryKey = false } })
+                            else columns
+                        qualifier, columns) }
             let sources = scope.Sources
             let rewritten =
                 if select.Joins |> List.exists joinCoalescesColumns then

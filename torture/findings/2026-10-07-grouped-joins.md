@@ -248,3 +248,20 @@ The inner alias `a` has no `id`, so its ON condition resolves the outer column.
 Runtime lookup follows the same rule as schema-only preparation, including
 multiple intervening scopes. A local `a.id` containing NULL wins over outer
 values. Native results and an execution regression cover these cases.
+
+## Outer-join result nullability
+
+The [outer-join metadata oracle](../scripts/outer-join-metadata-oracle.py)
+uses primary-key columns to distinguish declared nullability from NULL
+extension. For `a LEFT JOIN (b JOIN c USING(id)) ON a.id=b.id`, projected
+`a.id,b.id,c.id` have NOT_NULL flags `true,false,false`. A RIGHT join makes
+the accumulated left operand optional instead. A merged USING key retains
+the nullability of its preserved source, including when the containing group
+is optional in an enclosing join.
+
+Schema-only preparation and execution share the traversal of optional source
+qualifiers. Execution clears NOT_NULL without discarding the physical source's
+key flags. Regressions cover explicit projections, merged stars, LEFT/RIGHT
+boundaries, and empty results. Full flag parity remains open: prepared metadata
+still differs from execution in primary-key and related origin flags. Computed
+expressions and broader nested-source metadata also need independent coverage.

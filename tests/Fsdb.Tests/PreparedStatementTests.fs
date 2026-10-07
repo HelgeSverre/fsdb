@@ -33,7 +33,30 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "grouped USING prepared metadata matches execution"
+        [ testCase "outer join metadata clears nullability on optional grouped sources"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE a(id INT PRIMARY KEY)"; "CREATE TABLE b(id INT PRIMARY KEY)"; "CREATE TABLE c(id INT PRIMARY KEY)"; "INSERT INTO a VALUES(1)" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              for sql, expected in
+                  [ "SELECT a.id,b.id,c.id FROM a LEFT JOIN (b JOIN c USING(id)) ON a.id=b.id", [ true; false; false ]
+                    "SELECT * FROM a LEFT JOIN (b LEFT JOIN c USING(id)) ON a.id=b.id", [ true; false ]
+                    "SELECT * FROM a RIGHT JOIN (b LEFT JOIN c USING(id)) ON a.id=b.id", [ false; true ]
+                    "SELECT * FROM b RIGHT JOIN c USING(id)", [ true ] ] do
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  let notNull metadata = metadata |> List.map (hasMetadataFlag NotNullFlag)
+                  Expect.equal (notNull (columns |> List.map _.Metadata)) expected "prepared optional columns are nullable"
+                  let executed, result = handle session sql
+                  match result with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+                  Expect.equal (notNull executed.LastResultColumnMetadata) expected "execution preserves the same nullable boundaries"
+                  Expect.all executed.LastResultColumnMetadata (hasMetadataFlag PrimaryKeyFlag) "nullable source columns retain primary-key origin flags"
+
+          testCase "grouped USING prepared metadata matches execution"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               for sql in
