@@ -268,7 +268,8 @@ coverage; the prepared source-flag boundary is covered below.
 ## Prepared physical and materialized source flags
 
 The [prepared source-flag oracle](../scripts/prepared-source-flags-oracle.py)
-reads native COM_STMT_PREPARE column-definition packets. Direct projections
+reads native COM_STMT_PREPARE column-definition packets and ordinary result
+flags. Direct projections
 retain primary-key, unique/index, auto-increment, and no-default flags through
 aliases. Optional outer-join columns drop NOT_NULL independently. Simple derived
 projections retain these source flags, but LIMIT-derived tables and CTEs drop
@@ -276,9 +277,9 @@ them while retaining their physical origin names.
 
 Column-source metadata distinguishes physical from materialized values. CTE
 bindings retain that distinction after execution removes their WITH clause.
-Preparation reads physical flags from the original column name rather than the
-projection alias; materialized outputs clear source flags during preparation
-and execution. The native fixture and regression cover LIMIT, DISTINCT, GROUP BY, HAVING,
+Preparation and execution read physical flags from the original column name
+rather than the projection alias; materialized outputs clear source flags in
+both paths. ROLLUP results drop physical key and auto-increment properties. The native fixture and regression cover LIMIT, DISTINCT, GROUP BY, HAVING,
 and window boundaries. Scalar subqueries in the tested projections retain
 physical source flags. Output names remain independent of inferred types, so
 an unknown scalar descriptor does not discard a neighboring column's origin.

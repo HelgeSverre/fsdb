@@ -6116,16 +6116,17 @@ and private outputColumnWireOverridesFor
                 metadata
                 |> Option.map (fun value ->
                     let value =
-                        origin
-                        |> Option.bind (fun (source: ColumnOrigin) ->
-                            Storage.tableSnapshot ctx.Store source.Schema source.OriginalTable
-                            |> Result.toOption
-                            |> Option.map (fun table -> ColumnWire.withIndexFlags table.Indexes source.OriginalName value))
-                        |> Option.defaultValue value
-
-                    let value =
                         match source with
+                        | Some(PhysicalColumn origin) when not rollup ->
+                            Storage.tableSnapshot ctx.Store origin.Schema origin.OriginalTable
+                            |> Result.toOption
+                            |> Option.bind (fun table ->
+                                table.Columns
+                                |> List.tryFind (fun column -> equalsIgnoreCase column.Name origin.OriginalName)
+                                |> Option.map (fun column -> ColumnWire.withSourceColumnFlags table.Indexes column value))
+                            |> Option.defaultValue value
                         | Some(MaterializedColumn _) -> ColumnWire.withoutSourceColumnFlags value
+                        | _ when rollup -> ColumnWire.withoutSourceColumnFlags value
                         | _ -> value
                     let flags =
                         if origin |> Option.exists (fun source -> Set.contains (source.Table.ToLowerInvariant()) nullable) then

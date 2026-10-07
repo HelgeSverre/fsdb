@@ -1,6 +1,8 @@
 """Verify native MySQL 8.4.11 COM_STMT_PREPARE source flags."""
 
 import pathlib
+import re
+import subprocess
 import runpy
 import socket
 import struct
@@ -43,6 +45,17 @@ def column_flags(payload):
     return int.from_bytes(payload[offset + 8:offset + 10], "little")
 
 
+def ordinary_source_flags(client, query):
+    arguments = [arg for arg in client.process.args if arg not in ["--batch", "--raw", "--skip-column-names"]]
+    result = subprocess.run([*arguments, "--column-type-info", "-vvv", "-e", query],
+                            capture_output=True, text=True, check=True)
+    flag_bits = {"NOT_NULL": 1, "PRI_KEY": 2, "UNIQUE_KEY": 4, "MULTIPLE_KEY": 8,
+                 "AUTO_INCREMENT": 512, "NO_DEFAULT_VALUE": 4096, "PART_KEY": 16384}
+    flags = [sum(flag_bits.get(flag, 0) for flag in line.split())
+             for line in re.findall(r"^Flags:\s*(.*)", result.stdout, re.MULTILINE)]
+    return flags
+
+
 def verify(client, _writer):
     client.query("USE probe;CREATE TABLE t(id INT PRIMARY KEY AUTO_INCREMENT,"
                  "u INT NOT NULL UNIQUE,k INT NOT NULL,KEY(k));CREATE TABLE a(id INT PRIMARY KEY)")
@@ -60,6 +73,8 @@ def verify(client, _writer):
             ("SELECT id,u,k FROM probe.t", [16899, 20485, 20489]),
             ("SELECT id AS renamed,u AS un,k AS kn FROM probe.t", [16899, 20485, 20489]),
             ("SELECT a.id,t.id,t.u,t.k FROM probe.a LEFT JOIN probe.t ON a.id=t.id", [20483, 16898, 20484, 20488]),
+            ("SELECT id,u,k FROM (SELECT id,u,k FROM probe.t) d", [16899, 20485, 20489]),
+            ("WITH d AS (SELECT id,u,k FROM probe.t) SELECT id,u,k FROM d", [16899, 20485, 20489]),
             ("SELECT id FROM (SELECT id FROM probe.t) d", [16899]),
             ("SELECT id FROM (SELECT DISTINCT id FROM probe.t) d", [1]),
             ("SELECT id FROM (SELECT id FROM probe.t GROUP BY id) d", [1]),
@@ -81,7 +96,11 @@ def verify(client, _writer):
                 if read_packet(connection)[0] != 254:
                     raise RuntimeError("Missing prepared-column EOF")
             oracle["expect"](query, actual, expected)
+            oracle["expect"]("ordinary execution: " + query, ordinary_source_flags(client, query), expected)
             send_packet(connection, b"\x19" + prepared[1:5])
+
+    oracle["expect"]("ROLLUP drops physical source flags",
+                     ordinary_source_flags(client, "SELECT id,COUNT(*) FROM probe.t GROUP BY id WITH ROLLUP"), [0, 1])
 
 
 if __name__ == "__main__":
