@@ -33,9 +33,11 @@ exploratory MySQL run; the maintained oracle uses separate statements.
 
 ## Implementation implications
 
-fsdb's `FullText.Index` currently owns one tokenizer for both document and
-query processing. Recovery reconstructs all postings from rows, and neither
-WAL nor snapshots retain the tokenization context of individual indexed rows.
+fsdb's in-memory full-text documents retain their indexing tokenizer separately
+from the active tokenizer for queries and future writes. Removal and replacement
+use that historical tokenizer when clearing prefix postings. Recovery still
+reconstructs all postings from rows, and neither WAL nor snapshots retain the
+tokenization context of individual indexed rows.
 Changing only the startup constant would silently retokenize historical data
 and disagree with the observed recovery behavior.
 
@@ -45,3 +47,22 @@ Index rebuilds must deliberately replace that state. The same distinction
 will matter when implementing configurable stopwords. Default-size snapshots
 must remain readable, and reported system variables must agree with the
 active startup configuration.
+
+## In-memory regression
+
+`ngram size changes retain historical postings during writes` in
+`FullTextTests.fs` starts with size-2 documents, selects size 3 for queries and
+future writes, then inserts, deletes, and replaces rows. Natural-language
+three-character queries find newly indexed rows; short boolean words and
+quoted words still find size-2 postings. Prefix searches stop finding deleted
+or replaced historical rows. The test failed on short boolean lookup before
+the document/query distinction was implemented.
+
+The maintained native oracle also checks quoted historical lookup and prefix
+removal inside a rolled-back transaction. This covers the engine foundation;
+startup options and persistence remain open.
+
+Validation on 2026-10-07: `just check` passes 2,859 tests with no build
+warnings or errors. The extended six-restart native oracle passes. Existing
+contracts pass 45 cases and 4,978 steps with zero differences; the manifest is
+`torture/artifacts/runs/20261007T014753317-42751/contracts/manifest.json`.

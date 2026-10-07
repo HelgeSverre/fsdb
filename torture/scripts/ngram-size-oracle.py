@@ -99,6 +99,13 @@ def run():
                 new_rows = "1,2,12" if requested == 2 else str(new_id)
                 check(matches("生日快"), "NULL" if effective == 10 else new_rows)
 
+                if requested == 3:
+                    check(matches('"生日"', "IN BOOLEAN MODE"), "1,2,12")
+                    check(matches("生*", "IN BOOLEAN MODE"), "1,2,12,13")
+                    check("START TRANSACTION; DELETE FROM probe.docs WHERE id=2;"
+                          + matches("生*", "IN BOOLEAN MODE") + ";ROLLBACK",
+                          "1,12,13")
+
                 # Separate statements force removal of the old full-text storage.
                 sql("ALTER TABLE probe.docs DROP INDEX body")
                 sql("ALTER TABLE probe.docs ADD FULLTEXT(body) WITH PARSER ngram")

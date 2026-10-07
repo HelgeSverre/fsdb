@@ -106,9 +106,13 @@ type private Token =
     { Text: string
       Key: string }
 
+type private Document =
+    { Fields: Token[][]
+      Tokenizer: Tokenizer }
+
 type Index<'id when 'id: comparison> =
     private
-        { Documents: Map<'id, Token[][]>
+        { Documents: Map<'id, Document>
           Postings: Map<string, Map<'id, int>>
           PrefixPostings: Map<string, Map<'id, int>>
           Collation: Collation
@@ -142,6 +146,12 @@ let private isSearchable tokenizer (token: Token) =
     | Ngrams size ->
         runeLength token.Text = size && not (containsNgramStopword token.Text)
 
+/// Boolean terms can address postings created with an earlier ngram size.
+let private isBooleanSearchable tokenizer token =
+    match tokenizer with
+    | Words -> isSearchable Words token
+    | Ngrams _ -> not (containsNgramStopword token.Text)
+
 let private prefixKeys (collation: Collation) (token: Token) =
     let mutable length = 0
     [| for rune in token.Text.EnumerateRunes() do
@@ -165,15 +175,19 @@ let private emptyIndexWith tokenizer (collation: Collation) : Index<'id> =
 
 let emptyIndex collation = emptyIndexWith Words collation
 
+/// Selects the tokenizer for queries and future writes, retaining existing postings.
+let internal withTokenizer tokenizer (index: Index<'id>) =
+    { index with Tokenizer = tokenizer }
+
 let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
     match Map.tryFind id index.Documents with
     | None -> index
-    | Some fields ->
-        let tokens = Array.concat fields
+    | Some document ->
+        let tokens = Array.concat document.Fields
         let frequencies = tokens |> Array.countBy _.Key
         let prefixes =
             tokens
-            |> Array.filter (isSearchable index.Tokenizer)
+            |> Array.filter (isSearchable document.Tokenizer)
             |> Array.collect (prefixKeys index.Collation)
             |> Array.countBy (fun key -> key)
 
@@ -221,7 +235,7 @@ let addDocumentFields (id: 'id) (texts: string list) (index: Index<'id>) : Index
             index.PrefixPostings
 
     { index with
-        Documents = Map.add id fields index.Documents
+        Documents = Map.add id { Fields = fields; Tokenizer = index.Tokenizer } index.Documents
         Postings = postings
         PrefixPostings = prefixPostings }
 
@@ -277,7 +291,7 @@ let private phraseCandidates (index: Index<'id>) (words: Token[]) =
     words
     // InnoDB omits short terms and stopwords from postings but retains their
     // positions after the first searchable word in a phrase.
-    |> Array.filter (isSearchable index.Tokenizer)
+    |> Array.filter (isBooleanSearchable index.Tokenizer)
     |> Array.distinctBy _.Key
     |> Array.map (fun word ->
         index.Postings
@@ -379,7 +393,7 @@ let private naturalClauseDocuments (index: Index<'id>) = function
     | NaturalPhrase words ->
         phraseCandidates index words
         |> Set.filter (fun id ->
-            index.Documents.[id] |> Array.exists (fun field -> exactPhraseMatches field words))
+            index.Documents.[id].Fields |> Array.exists (fun field -> exactPhraseMatches field words))
 
 /// Matching terms retain their row sets separately from query occurrence counts.
 /// Repeated query words increase MySQL's document frequency, not a row's TF.
@@ -632,7 +646,7 @@ let private parseBooleanQuery tokenizer (collation: Collation) (query: string) :
                         let term =
                             match tokenizer with
                             | Words -> BWord(w, prefix)
-                            | Ngrams size when prefix && runeLength w.Text < size -> BWord(w, true)
+                            | Ngrams size when runeLength w.Text < size -> BWord(w, prefix)
                             | Ngrams _ ->
                                 let words = tokensWith tokenizer collation w.Text |> Array.skipWhile (isSearchable tokenizer >> not)
                                 match words with
@@ -739,11 +753,8 @@ let rec private evalTerm
     (term: BoolTerm)
     : Map<'id, float> =
     match term with
-    | BWord(term, false) when not (isSearchable index.Tokenizer term) ->
-        // Stopwords and sub-minimum tokens are never in InnoDB's index, so
-        // a plain boolean term for one can't match anything — `+was`
-        // excludes every row (oracle-verified). Phrases and proximity below
-        // still see them: position data counts every token.
+    | BWord(term, false) when not (isBooleanSearchable index.Tokenizer term) ->
+        // Rejected words can still occupy positions inside a longer phrase.
         Map.empty
     | BWord(term, false) ->
         termScoresWithin candidateIds index term.Key
@@ -764,7 +775,7 @@ let rec private evalTerm
 
         let terms =
             words
-            |> Array.filter (isSearchable index.Tokenizer)
+            |> Array.filter (isBooleanSearchable index.Tokenizer)
             |> Array.distinctBy _.Key
             |> Array.choose (fun word ->
                 index.Postings
@@ -775,7 +786,7 @@ let rec private evalTerm
 
         candidates
         |> Seq.choose (fun id ->
-            let fields = index.Documents.[id]
+            let fields = index.Documents.[id].Fields
             let matches =
                 match proximity with
                 | None -> fields |> Array.exists (fun tokens -> exactPhraseMatches tokens words)
@@ -842,7 +853,7 @@ let internal tryFlatBooleanScoresDictionaryWithin
     |> Option.map (fun terms ->
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key index.PrefixPostings
-            elif isSearchable index.Tokenizer term then Map.tryFind term.Key index.Postings
+            elif isBooleanSearchable index.Tokenizer term then Map.tryFind term.Key index.Postings
             else None
 
         let postings =
@@ -988,8 +999,9 @@ let private expansionScoresWithinOption candidateIds (index: Index<'id>) (query:
         |> Map.toArray
         |> Array.sortByDescending snd
         |> Array.truncate queryExpansionLimit
-        |> Array.collect (fun (id, _) -> Array.concat index.Documents.[id])
-        |> Array.filter (isSearchable index.Tokenizer)
+        |> Array.collect (fun (id, _) ->
+            let document = index.Documents.[id]
+            Array.concat document.Fields |> Array.filter (isSearchable document.Tokenizer))
         |> Array.map _.Key
 
     match clauseQuery with

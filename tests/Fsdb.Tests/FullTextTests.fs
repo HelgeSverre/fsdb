@@ -29,6 +29,20 @@ let tests =
               Expect.equal (tokenize "O'Brien's DB_2, 'quoted'") [| "o'brien's"; "db_2"; "quoted" |] "apostrophes and underscore"
               Expect.equal (tokenize "") [||] "empty"
 
+          testCase "ngram size changes retain historical postings during writes"
+          <| fun _ ->
+              let original = buildIndexWithTokenizer (Ngrams 2) defaultCollation [ 1, "生日快乐"; 2, "生日" ]
+              let changed = original |> withTokenizer (Ngrams 3) |> addDocument 3 "生日快乐"
+              let ids scores = scores |> Map.keys |> Seq.toList
+              Expect.equal (naturalScores changed "生日快" |> ids) [ 3 ] "new writes use the new size"
+              Expect.equal (booleanScores changed "生日" |> ids) [ 1; 2 ] "short boolean words can find historical postings"
+              Expect.equal (booleanScores changed "\"生日\"" |> ids) [ 1; 2 ] "quoted short words find historical postings"
+              let deleted = changed |> removeDocument 2
+              Expect.equal (booleanScores deleted "生*" |> ids) [ 1; 3 ] "removal clears historical prefix postings"
+              let replaced = deleted |> addDocument 1 "中文检索"
+              Expect.equal (booleanScores replaced "生*" |> ids) [ 3 ] "replacement clears the old generation"
+              Expect.equal (naturalScores replaced "中文检" |> ids) [ 1 ] "replacement uses the current generation"
+
           testCase "full-text terms follow collation case and accent sensitivity"
           <| fun _ ->
               let aiCi = tryFind "utf8mb4_0900_ai_ci" |> Option.get
