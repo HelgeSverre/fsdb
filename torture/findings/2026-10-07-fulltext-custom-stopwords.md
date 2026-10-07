@@ -134,8 +134,10 @@ Physical rebuilds still apply the selected rules to every document.
 
 The core regressions cover mixed ngram sizes and stopword policies, active-rule
 changes, reconstruction, prefix removal, transaction merging, and metadata rename
-versus physical rebuild. Custom source resolution, custom-list encoding, WAL
-reload context, and query lookup across changed custom policies remain open.
+versus physical rebuild. [Ordinary word lookups](2026-10-07-fulltext-word-stopword-postings.md)
+also preserve historical postings when active filtering changes, including after
+snapshot recovery. Custom source resolution, custom-list encoding, WAL reload
+context, and the remaining custom query semantics remain open.
 
 ## Snapshot history
 

@@ -475,7 +475,9 @@ nested calls and errors ([oracle](torture/findings/2026-10-07-stored-function-se
 
 Natural-language, boolean, and query-expansion modes use MySQL 8.4's
 oracle-verified TF × IDF² scoring with its epsilon floor and built-in stopword
-list. Boolean syntax covers
+list. Word stopwords are filtered when indexing; ordinary queries can still
+match surviving collation-equivalent or historical postings
+([oracle evidence](torture/findings/2026-10-07-fulltext-word-stopword-postings.md)). Boolean syntax covers
 `+ - > < ~ word* "phrases" @N proximity ()` with depth cap; blind
 relevance-feedback expansion and bare WHERE-MATCH relevance ordering are also
 supported.

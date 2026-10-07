@@ -23,7 +23,33 @@ let private closeTo (expected: float) (actual: float) (label: string) =
 let tests =
     testList
         "fulltext"
-        [ testCase "document indexing rules survive reconstruction and active policy changes"
+        [ testCase "word lookups use indexed collation equivalents of stopped spellings"
+          <| fun _ ->
+              let index = buildIndexWith defaultCollation [ 1, "the"; 2, "thé"; 3, "THE"; 4, "tHe"; 5, "zzzz" ]
+              for query in [ "the"; "thé"; "THE"; "the the" ] do
+                  for scores in [ naturalScores index query; booleanScores index query; expansionScores index query ] do
+                      Expect.equal (scores |> Map.keys |> Seq.toList) [ 2 ] "only the indexed accented spelling contributes a posting"
+              closeTo (log10 5.0 ** 2.0) (naturalScores index "the").[2] "filtered spellings do not inflate document frequency"
+              for scores in
+                  [ tryNaturalSingleTermScoresDictionaryInView None (readView index) "the"
+                    tryFlatBooleanScoresDictionaryInView None (readView index) "the" ] do
+                  Expect.equal ((Option.get scores).Keys |> Seq.toList) [ 2 ] "optimized lookups obey the same posting boundary"
+              Expect.equal (naturalScores index "\"the zzzz\"" |> Map.keys |> Seq.toList) [ 5 ] "phrase anchors still omit a leading stopword"
+              Expect.equal (booleanScores index "th*" |> Map.keys |> Seq.toList) [ 2 ] "prefixes omit literal stopped documents"
+
+          testCase "word lookups retain old postings after active stopwords change"
+          <| fun _ ->
+              let unfiltered = { Tokenizer = Words; Stopwords = StopwordPolicy.Disabled }
+              let filtered = { unfiltered with Stopwords = StopwordPolicy.BuiltIn }
+              let index =
+                  buildIndexWithDocumentSettings unfiltered defaultCollation [ 1, unfiltered, [ "the" ]; 2, unfiltered, [ "zzzz" ] ]
+                  |> withIndexingRules filtered
+                  |> addDocument 3 "the"
+              for scores in [ naturalScores index "the"; booleanScores index "the"; expansionScores index "the" ] do
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1 ] "new filtering does not hide or recreate historical postings"
+              Expect.isEmpty (naturalScores (removeDocument 1 index) "the") "removing the historical document does not expose a filtered newer document"
+
+          testCase "document indexing rules survive reconstruction and active policy changes"
           <| fun _ ->
               let filtered = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
               let unfiltered = { filtered with Stopwords = StopwordPolicy.Disabled }

@@ -185,6 +185,36 @@ let tests =
               TestSupport.Sql.executeDefault recovered "INSERT INTO docs VALUES(5,'ab')" |> ignore
               Expect.equal (TestSupport.Sql.executeDefault recovered query |> rows) [ [ Some "1" ]; [ Some "3" ] ] "future writes use active rules"
 
+          testCase "snapshot word lookups retain historical postings after filtering changes"
+          <| fun _ ->
+              let dir = TestSupport.directory "fulltext-word-policy-history"
+              let store = Storage.create ()
+              let run = TestSupport.Sql.executeDefault store
+              run "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body))" |> ignore
+              run "INSERT INTO docs VALUES(1,'the'),(2,'the'),(3,'zzzz')" |> ignore
+              let database = store.Catalog.[Storage.defaultDatabase]
+              let table = database.["docs"]
+              let filtered: FullText.IndexingRules =
+                  { Tokenizer = FullText.Words; Stopwords = FullText.StopwordPolicy.BuiltIn }
+              let documents =
+                  table.RowsArray.Indexed
+                  |> Seq.mapi (fun position (id, _) ->
+                      let rules = if position = 0 then { filtered with Stopwords = FullText.StopwordPolicy.Disabled } else filtered
+                      id, rules, [ if position < 2 then "the" else "zzzz" ])
+              let index = FullText.buildIndexWithDocumentSettings filtered Collation.defaultCollation documents
+              Storage.setCatalog store (store.Catalog |> Map.add Storage.defaultDatabase (database |> Map.add "docs" { table with FullTextIndexes = Map.ofList [ "ft", index ] }))
+              Persistence.snapshotNow dir store
+              let recovered = Persistence.load dir
+              let run = TestSupport.Sql.executeDefault recovered
+              run "INSERT INTO docs VALUES(4,'the')" |> ignore
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE"; "WITH QUERY EXPANSION" ] do
+                  Expect.equal
+                      (run ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('the' {mode}) ORDER BY id") |> rows)
+                      [ [ Some "1" ] ]
+                      "saved postings survive while newer filtered rows stay absent"
+              run "DELETE FROM docs WHERE id=1" |> ignore
+              Expect.isEmpty (run "SELECT id FROM docs WHERE MATCH(body) AGAINST('the')" |> rows) "removal respects historical document rules"
+
           testCase "snapshots preserve fulltext stopword policies for empty and populated indexes"
           <| fun _ ->
               let run = TestSupport.Sql.executeDefault

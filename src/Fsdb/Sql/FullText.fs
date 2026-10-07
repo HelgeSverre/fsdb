@@ -184,9 +184,11 @@ let private containsNgramStopword policy (text: string) =
     policy = StopwordPolicy.BuiltIn
     && (stopwords |> Set.exists (fun word -> lower.Contains(word, StringComparison.Ordinal)))
 
-let private isSearchableWord policy (token: Token) =
-    token.Text.Length >= minTokenLength
-    && token.Text.Length <= maxTokenLength
+let private hasSearchableWordLength (token: Token) =
+    token.Text.Length >= minTokenLength && token.Text.Length <= maxTokenLength
+
+let private isSearchableWord policy token =
+    hasSearchableWordLength token
     && (policy = StopwordPolicy.Disabled || not (Set.contains (token.Text.ToLowerInvariant()) stopwords))
 
 /// A token that survives the configured length and stopword rules.
@@ -201,6 +203,15 @@ let private isBooleanSearchable rules token =
     match rules.Tokenizer with
     | Words -> isSearchable rules token
     | Ngrams _ -> not (containsNgramStopword rules.Stopwords token.Text)
+
+/// Exact word lookups can reach older postings or an indexed collation equivalent.
+let private isBooleanLookup rules token =
+    match rules.Tokenizer with
+    | Words -> hasSearchableWordLength token
+    | Ngrams _ -> isBooleanSearchable rules token
+
+let private indexedTokens (document: Document) =
+    Array.concat document.Fields |> Array.filter (isSearchable document.Rules)
 
 let private prefixKeys (collation: Collation) (token: Token) =
     let mutable length = 0
@@ -246,11 +257,10 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
     match Map.tryFind id index.Documents with
     | None -> index
     | Some document ->
-        let tokens = Array.concat document.Fields
+        let tokens = indexedTokens document
         let frequencies = tokens |> Array.countBy _.Key
         let prefixes =
             tokens
-            |> Array.filter (isSearchable document.Rules)
             |> Array.collect (prefixKeys index.Collation)
             |> Array.countBy (fun key -> key)
 
@@ -269,12 +279,7 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
 
 let private addDocumentData id (document: Document) (index: Index<'id>) =
     let index = removeDocument id index
-    let tokenizer = document.Rules.Tokenizer
-    let tokens = Array.concat document.Fields
-    let postingTokens =
-        match tokenizer with
-        | Words -> tokens
-        | Ngrams _ -> tokens |> Array.filter (isSearchable document.Rules)
+    let postingTokens = indexedTokens document
 
     let postings =
         postingTokens
@@ -286,8 +291,7 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
             index.Postings
 
     let prefixPostings =
-        tokens
-        |> Array.filter (isSearchable document.Rules)
+        postingTokens
         |> Array.collect (prefixKeys index.Collation)
         |> Array.countBy (fun key -> key)
         |> Array.fold
@@ -437,7 +441,7 @@ let private naturalTerms (view: ReadView<'id>) (query: string) : string[] =
     let tokens = queryTokens view query
     let terms =
         match view.Rules.Tokenizer with
-        | Words -> tokens |> Array.filter (isSearchable view.Rules)
+        | Words -> tokens |> Array.filter hasSearchableWordLength
         // A stopped spelling can still match an indexed collation equivalent.
         | Ngrams _ -> tokens
 
@@ -471,7 +475,7 @@ type private NaturalClause =
 
 let private naturalWordClauses (view: ReadView<'id>) (query: string) =
     let words text = tokensWith Words view.Collation text
-    let plain text = words text |> Array.filter (isSearchableWord view.Rules.Stopwords) |> Array.map (fun word -> NaturalWord word.Key)
+    let plain text = words text |> Array.filter hasSearchableWordLength |> Array.map (fun word -> NaturalWord word.Key)
     let clauses = ResizeArray<NaturalClause>()
     let mutable start = 0
     while start < query.Length do
@@ -499,7 +503,7 @@ let private needsNaturalWordEvaluation (view: ReadView<'id>) (query: string) =
     | Words ->
         if query.Contains '"' then true
         else
-            let terms = queryTokens view query |> Array.filter (isSearchableWord view.Rules.Stopwords)
+            let terms = queryTokens view query |> Array.filter hasSearchableWordLength
             terms.Length <> (terms |> Array.distinctBy _.Key).Length
 
 type private NaturalMatches<'id when 'id: comparison> =
@@ -881,7 +885,7 @@ let rec private evalTerm
     (term: BoolTerm)
     : Map<'id, float> =
     match term with
-    | BWord(term, false) when not (isBooleanSearchable view.Rules term) ->
+    | BWord(term, false) when not (isBooleanLookup view.Rules term) ->
         // Rejected words can still occupy positions inside a longer phrase.
         Map.empty
     | BWord(term, false) ->
@@ -983,7 +987,7 @@ let internal tryFlatBooleanScoresDictionaryInView
     |> Option.map (fun terms ->
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key view.PrefixPostings
-            elif isBooleanSearchable view.Rules term then Map.tryFind term.Key view.Postings
+            elif isBooleanLookup view.Rules term then Map.tryFind term.Key view.Postings
             else None
 
         let postings =
@@ -1135,7 +1139,7 @@ let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: st
         |> Array.truncate queryExpansionLimit
         |> Array.collect (fun (id, _) ->
             let document = view.Documents.[id]
-            Array.concat document.Fields |> Array.filter (isSearchable document.Rules))
+            indexedTokens document)
         |> Array.map _.Key
 
     match clauseQuery with
