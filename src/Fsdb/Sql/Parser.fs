@@ -2744,17 +2744,34 @@ module private ParsedTableOptions =
 type private HashPartitionOption =
     | PartitionComment of string
     | PartitionEngine of string
+    | PartitionMaxRows of int64
+    | PartitionMinRows of int64
+    | PartitionNodeGroup of uint16 option
 
 let private hashPartitionDefinitions =
+    let rowHint =
+        puint64 .>> ws >>= fun value ->
+            if value <= uint64 System.Int64.MaxValue then preturn (int64 value)
+            else fail "partition row hint exceeds signed 64-bit range"
+    let nodeGroup =
+        puint64 .>> ws |>> fun value ->
+            let group = uint16 (value &&& 65535UL)
+            if group = System.UInt16.MaxValue then None else Some group
     let option =
         (keyword "COMMENT" >>. opt (sym "=") >>. stringLit |>> (toText >> Option.defaultValue "" >> PartitionComment))
         <|> (keyword "ENGINE" >>. opt (sym "=") >>. identOrString |>> PartitionEngine)
+        <|> (keyword "MAX_ROWS" >>. opt (sym "=") >>. rowHint |>> PartitionMaxRows)
+        <|> (keyword "MIN_ROWS" >>. opt (sym "=") >>. rowHint |>> PartitionMinRows)
+        <|> (keyword "NODEGROUP" >>. opt (sym "=") >>. nodeGroup |>> PartitionNodeGroup)
     let definition =
         keyword "PARTITION" >>. identifier .>>. many option
         |>> fun (name, options) ->
             { Name = name
               Comment = options |> List.choose (function PartitionComment comment -> Some comment | _ -> None) |> List.tryLast |> Option.defaultValue ""
-              RequestedEngines = options |> List.choose (function PartitionEngine engine -> Some engine | _ -> None) }
+              RequestedEngines = options |> List.choose (function PartitionEngine engine -> Some engine | _ -> None)
+              MaxRows = options |> List.choose (function PartitionMaxRows rows -> Some rows | _ -> None) |> List.tryLast |> Option.defaultValue 0L
+              MinRows = options |> List.choose (function PartitionMinRows rows -> Some rows | _ -> None) |> List.tryLast |> Option.defaultValue 0L
+              NodeGroup = options |> List.choose (function PartitionNodeGroup group -> Some group | _ -> None) |> List.tryLast |> Option.flatten }
     between (sym "(") (sym ")") (sepBy1 definition (sym ","))
 
 let private hashPartitionOption: Parser<TableOption, unit> =

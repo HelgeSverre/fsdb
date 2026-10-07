@@ -2649,12 +2649,12 @@ let tests =
               attach dir store
               let session = Fsdb.Session.create 1 store
               for sql in
-                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) ENGINE=InnoDB PARTITION BY HASH(id) (PARTITION First ENGINE=InnoDB COMMENT 'alpha',PARTITION Second COMMENT 'beta')"
+                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) ENGINE=InnoDB PARTITION BY HASH(id) (PARTITION First ENGINE=InnoDB COMMENT 'alpha',PARTITION Second COMMENT 'beta' MAX_ROWS=9223372036854775807 MIN_ROWS=10 NODEGROUP=0)"
                     "INSERT INTO named_hash VALUES(0),(1),(2),(3),(4),(5)"
                     "ALTER TABLE named_hash ADD PARTITION PARTITIONS 1"
                     "ALTER TABLE named_hash COALESCE PARTITION 1"
                     "ALTER TABLE named_hash REORGANIZE PARTITION First INTO (PARTITION Renamed COMMENT 'changed')"
-                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third ENGINE=InnoDB COMMENT 'gamma')" ] do
+                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third ENGINE=InnoDB COMMENT 'gamma' MAX_ROWS=30 MIN_ROWS=20 NODEGROUP=7)" ] do
                   match handle session sql |> snd with
                   | Err(code, message) -> failtestf "%s: %d %s" sql code message
                   | _ -> ()
@@ -2670,10 +2670,28 @@ let tests =
                       (table.Partitioning |> Option.map (fun partitioning -> partitioning.OrderedDefinitions |> List.map _.Comment))
                       (Some [ "changed"; "beta"; "gamma" ])
                       "partition comments survive replay and snapshots"
+                  Expect.equal
+                      (table.Partitioning |> Option.map (fun partitioning -> partitioning.OrderedDefinitions |> List.map (fun definition -> definition.MaxRows, definition.MinRows, definition.NodeGroup)))
+                      (Some [ 0L, 0L, None; System.Int64.MaxValue, 10L, Some 0us; 30L, 20L, Some 7us ])
+                      "partition hints survive CREATE and ALTER replay and snapshots"
               let recovered = load dir
               verify recovered
               snapshotNow dir recovered
               verify (load dir)
+
+          testCase "partition comment formats recover with default row hints"
+          <| fun _ ->
+              let snapshot = Convert.FromBase64String "RlNOSwEAAAAEZnNkYgEAAAAJb2xkX25hbWVkCW9sZF9uYW1lZAEAAAACaWQEAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAABAgJpZAIAAAAAAQIAAAAFRmlyc3QFYWxwaGEGU2Vjb25kBGJldGF0nPxUfSTfCAEAAAAAAAAAAAAAAAAAAAAAAAAAgwAAAAAAAAAcfpIW"
+              let wal = Convert.FromBase64String "WQAAAGLYrNojBGZzZGIDCW9sZF9uYW1lZAEAAAACaWQEAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAECAmlkAgAAAAABAgAAAAVGaXJzdAVhbHBoYQZTZWNvbmQEYmV0YQ=="
+              for snapshotBytes, walBytes in [ snapshot, [||]; [||], wal ] do
+                  let dir = tempDataDir ()
+                  if snapshotBytes.Length > 0 then File.WriteAllBytes(snapshotPath dir, snapshotBytes)
+                  if walBytes.Length > 0 then File.WriteAllBytes(walPath dir, walBytes)
+                  let table = (load dir).Catalog.[defaultDatabase].[normalizeTableName "old_named"]
+                  Expect.equal
+                      (table.Partitioning |> Option.map (fun partitioning -> partitioning.OrderedDefinitions |> List.map (fun definition -> definition.Name, definition.Comment, definition.MaxRows, definition.MinRows, definition.NodeGroup)))
+                      (Some [ "First", "alpha", 0L, 0L, None; "Second", "beta", 0L, 0L, None ])
+                      "FSNK and V10 WAL retain comments and default absent hints"
 
           testCase "name-only partition formats recover with empty comments"
           <| fun _ ->

@@ -1,6 +1,6 @@
 # HASH partition names and reorganization
 
-Status: named definitions, comments, engine validation, explicit-name addition,
+Status: named definitions, comments, row hints, node groups, engine validation, explicit-name addition,
 and named/no-list reorganization are covered by regressions. Other partition-option clauses and
 physical pruning remain open. The regression baseline `e9c0a7bd` rejected explicit
 names and both reorganization forms with 1064 / 42000.
@@ -45,9 +45,9 @@ partition.
 ## Implementation and validation
 
 `HashPartitioning` retains optional ordered definitions alongside its count.
-Each definition contains a name and comment. These definitions feed
+Each definition contains a name, comment, row hints, and optional node group. These definitions feed
 reorganization, ADD/COALESCE, selection, truncation, metadata, and rendering.
-Snapshot format FSNK and schema WAL version 10 persist them; count-only
+Snapshot format FSNL and schema WAL version 11 persist them; count-only
 records continue to synthesize `p0`…`pN`, and name-only records receive empty
 comments.
 
@@ -56,18 +56,17 @@ regression also exposed an indexed ordering path that returned the entire
 table despite `PARTITION(...)`; ordered reads, counts, and joins now verify
 the selected rows.
 
-The root gate passes 2,947 tests. Dedicated recovery tests cover named WAL and
+The root gate passes 2,949 tests. Dedicated recovery tests cover named WAL and
 snapshot recovery plus count-only V7 WAL and FSNI snapshots, and captured name-only V9 WAL and FSNJ snapshots. The native oracle
 passes. The compatibility lane passes 49 cases / 5,117 steps with zero
-differences at `20261007T120955700-55629/contracts`. The durability lane passes
-at `20261007T121015817-55796/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
+differences at `20261007T121829324-63496/contracts`. The durability lane passes
+at `20261007T121849821-63699/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
 including acknowledged commits across 12 crash restarts.
 
 ## Remaining boundary
 
-Native MySQL retains `MAX_ROWS`, `MIN_ROWS`, `NODEGROUP`, and `TABLESPACE`
-options; fsdb still refuses these clauses. Physical pruning remains a separate
-performance gap.
+Native MySQL retains `TABLESPACE` options; fsdb still refuses these clauses.
+Physical pruning remains a separate performance gap.
 
 ## Explicit-name additions
 
@@ -158,7 +157,7 @@ retain names and comments without changing the persistence format.
 
 ## Row hints and node groups
 
-Status: open. Baseline `fd771308` rejects each of `MAX_ROWS=100`,
+Status: covered by regressions. Baseline `fd771308` rejected each of `MAX_ROWS=100`,
 `MIN_ROWS=10`, and `NODEGROUP=7` in a partition definition with 1064 / 42000.
 The maintained [hints oracle](../scripts/hash-partition-hints-oracle.py) passes
 on disposable native MySQL 8.4.11:
@@ -185,3 +184,8 @@ named REORGANIZE clears omitted values in replacement definitions. No-list
 REORGANIZE retains the first partition's options. The oracle checks all six
 fixture rows after each alteration. These are retained schema properties;
 accepting their syntax without storing them would still diverge from MySQL.
+
+Snapshot FSNL and schema WAL version 11 persist row hints and node groups.
+Captured FSNK and V10 WAL fixtures verify that older comments remain readable
+with zero hints and a default node group. Recovery regressions cover options
+from both CREATE and ADD, alongside names, comments, and partition row selection.

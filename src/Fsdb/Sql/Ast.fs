@@ -720,7 +720,10 @@ type AlterLock =
 type HashPartitionDefinition =
     { Name: string
       Comment: string
-      RequestedEngines: string list }
+      RequestedEngines: string list
+      MaxRows: int64
+      MinRows: int64
+      NodeGroup: uint16 option }
 
 /// One `ALTER TABLE` action; a statement carries a list of these since
 /// MySQL (and Laravel) commonly comma-separates several in one `ALTER
@@ -768,7 +771,7 @@ type HashPartitioning =
 
     member this.OrderedDefinitions =
         this.Definitions
-        |> Option.defaultWith (fun () -> [ for index in 0u .. this.Count - 1u -> { Name = sprintf "p%d" index; Comment = ""; RequestedEngines = [] } ])
+        |> Option.defaultWith (fun () -> [ for index in 0u .. this.Count - 1u -> { Name = sprintf "p%d" index; Comment = ""; RequestedEngines = []; MaxRows = 0L; MinRows = 0L; NodeGroup = None } ])
 
     member this.OrderedNames = this.OrderedDefinitions |> List.map _.Name
 

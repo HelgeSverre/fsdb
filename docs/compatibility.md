@@ -487,8 +487,14 @@ requests and validate explicit versus inferred defaults. Mixed engines return
 `NO_ENGINE_SUBSTITUTION`, including substitution warnings. ALTER cannot change
 a partitioned table to a nonpartitionable engine.
 
-`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Partition row
-hints, node group, and tablespace clauses remain unsupported.
+`MAX_ROWS`, `MIN_ROWS`, and `NODEGROUP` survive CREATE, ADD, rendering, and
+recovery. Zero row hints are omitted from rendered definitions. Node groups
+retain their low 16 bits; 65535 denotes the default, while zero is explicit.
+Named reorganization clears omitted options, and no-list reorganization keeps
+the first partition's options. These values do not change physical storage.
+
+`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Partition
+tablespace clauses remain unsupported.
 
 ## Check constraints
 

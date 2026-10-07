@@ -18,7 +18,38 @@ let private (|ProcedureResult|_|) =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "HASH partition engines preserve defaults and validation precedence"
+        [ testCase "HASH partition row hints and node groups survive alterations"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "%s: %d %s" sql code message
+                  | result -> result
+              run "CREATE TABLE hints(id INT) PARTITION BY HASH(id) (PARTITION a MAX_ROWS=100 MIN_ROWS=10 NODEGROUP=65536,PARTITION b NODEGROUP=65535)" |> ignore
+              run "CREATE TABLE boundary_hints(id INT) PARTITION BY HASH(id) (PARTITION a MAX_ROWS=9223372036854775807 MIN_ROWS=9223372036854775807 NODEGROUP=18446744073709551615)" |> ignore
+              let rendered () =
+                  match run "SHOW CREATE TABLE hints" with
+                  | ResultSet(_, [ [ _; Some sql ] ]) -> sql
+                  | other -> failtestf "unexpected SHOW CREATE: %A" other
+              Expect.stringContains (rendered ()) "NODEGROUP = 0 MAX_ROWS = 100 MIN_ROWS = 10" "retained and normalized options"
+              match Fsdb.Parser.parse (rendered ()) with
+              | Ok _ -> ()
+              | Error error -> failtestf "rendered hints must parse: %A" error
+              Expect.equal (run "SELECT NODEGROUP FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='hints' ORDER BY PARTITION_ORDINAL_POSITION")
+                  (ResultSet([ "NODEGROUP" ], [ [ Some "0" ]; [ Some "default" ] ])) "zero differs from default"
+              run "ALTER TABLE hints ADD PARTITION (PARTITION c MIN_ROWS 20 MAX_ROWS 10 MAX_ROWS 30 NODEGROUP 7)" |> ignore
+              Expect.stringContains (rendered ()) "NODEGROUP = 7 MAX_ROWS = 30 MIN_ROWS = 20" "last option wins"
+              run "ALTER TABLE hints COALESCE PARTITION 1" |> ignore
+              run "ALTER TABLE hints REORGANIZE PARTITION" |> ignore
+              Expect.stringContains (rendered ()) "MAX_ROWS = 100 MIN_ROWS = 10" "no-list keeps first options"
+              run "ALTER TABLE hints REORGANIZE PARTITION a INTO (PARTITION d)" |> ignore
+              Expect.isFalse ((rendered ()).Contains "MAX_ROWS") "named replacement clears omitted hints"
+              for option in [ "MAX_ROWS=9223372036854775808"; "MIN_ROWS=-1"; "NODEGROUP=18446744073709551616" ] do
+                  match handle session ("ALTER TABLE hints ADD PARTITION (PARTITION n " + option + ")") |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "%s: expected syntax error, got %A" option other
+
+          testCase "HASH partition engines preserve defaults and validation precedence"
           <| fun _ ->
               for tableEngine, first, second, expected in
                   [ "", "", "", None

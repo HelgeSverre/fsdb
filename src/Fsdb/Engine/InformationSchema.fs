@@ -2129,7 +2129,7 @@ let private partitionsColumns =
 let private partitionsRows (catalog: Catalog) : Value[] list =
     allTables catalog
     |> List.collect (fun (dbName, t) ->
-        let row partitionName ordinal methodName expression comment rowCount =
+        let row partitionName ordinal methodName expression comment nodeGroup rowCount =
             [| vs "def"
                vs dbName
                vs t.OriginalName
@@ -2153,11 +2153,11 @@ let private partitionsRows (catalog: Catalog) : Value[] list =
                VNull
                VNull
                vs comment
-               vs (if partitionName = VNull then "" else "default")
+               vs nodeGroup
                VNull |]
 
         match t.Partitioning with
-        | None -> [ row VNull VNull VNull VNull "" t.RowsArray.Length ]
+        | None -> [ row VNull VNull VNull VNull "" "" t.RowsArray.Length ]
         | Some partitioning ->
             let counts = Array.zeroCreate<int> (int partitioning.Count)
 
@@ -2179,6 +2179,7 @@ let private partitionsRows (catalog: Catalog) : Value[] list =
                       (vs (if partitioning.Linear then "LINEAR HASH" else "HASH"))
                       (vs (exprToSql partitioning.Expression))
                       definition.Comment
+                      (definition.NodeGroup |> Option.map string |> Option.defaultValue "default")
                       counts.[int index] ])
 
 // ---------------------------------------------------------------------------
@@ -3881,7 +3882,10 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                      definitions
                      |> List.map (fun definition ->
                          let comment = if definition.Comment = "" then "" else sprintf " COMMENT = '%s'" (showCreateString definition.Comment)
-                         "PARTITION " + backtick definition.Name + comment)
+                         let nodeGroup = definition.NodeGroup |> Option.map (sprintf " NODEGROUP = %d") |> Option.defaultValue ""
+                         let maxRows = if definition.MaxRows = 0L then "" else sprintf " MAX_ROWS = %d" definition.MaxRows
+                         let minRows = if definition.MinRows = 0L then "" else sprintf " MIN_ROWS = %d" definition.MinRows
+                         "PARTITION " + backtick definition.Name + nodeGroup + maxRows + minRows + comment)
                      |> String.concat ", "
                      |> sprintf "(%s)"))
         |> Option.defaultValue ""

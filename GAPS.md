@@ -118,7 +118,7 @@ refuses it through the prepared-statement protocol.
 | Table maintenance | `CHECKSUM TABLE` uses a stable fsdb row checksum rather than MySQL's engine-specific value; supported `FLUSH` forms operate on fsdb state rather than InnoDB internals | low | divergence |
 | ALTER execution | Accepted changes publish one immutable root; MySQL's COPY/INPLACE/INSTANT algorithms and lock durations do not exist | low | divergence |
 | Storage engines | Known engine names still use fsdb's shared InnoDB-shaped row store; physical DATA/INDEX DIRECTORY placement is rejected unless `NO_DIR_IN_CREATE` discards it | low | divergence |
-| HASH partitions | Named HASH/LINEAR HASH definitions, comments, and reorganization use the shared row store; InnoDB engine clauses and default inference are validated; row hints, node group, tablespace, and physical pruning remain absent ([oracle](torture/findings/2026-10-07-hash-partition-reorganization.md)) | low | divergence/refusal |
+| HASH partitions | Named HASH/LINEAR HASH definitions, comments, and reorganization use the shared row store; InnoDB engine clauses and default inference are validated, and row hints and node groups are retained; tablespace clauses and physical pruning remain absent ([oracle](torture/findings/2026-10-07-hash-partition-reorganization.md)) | low | divergence/refusal |
 | Administration and replication | Replication source, binlog purge/reset, plugin/component installation, instance, and tablespace statements are unsupported | low | refusal |
 | EXPLAIN | JSON/TREE expose the logical plan without MySQL's cost model; ANALYZE reports aggregate rather than per-iterator observations | low | divergence |
 
