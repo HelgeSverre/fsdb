@@ -96,7 +96,7 @@ fall into a few groups:
 | Concern | Options |
 |---|---|
 | Listener | `--listen`, `--port` / `-p` |
-| Storage | `--data-dir`, `--ngram-token-size`, `--innodb-ft-enable-stopword` |
+| Storage | `--data-dir`, `--ngram-token-size`, `--innodb-ft-enable-stopword`, `--innodb-ft-user-stopword-table`, `--innodb-ft-server-stopword-table` |
 | Option files | `--defaults-file` |
 | TLS | `--ssl-cert`, `--ssl-key`, `--ssl-ca`, `--require-secure-transport` |
 | Server files | `--secure-file-priv` |
@@ -124,7 +124,7 @@ rebuild them at the current token size.
 ### Full-text stopwords
 
 `--innodb-ft-enable-stopword=OFF` (or `innodb_ft_enable_stopword=OFF` in an
-option file) disables built-in stopword filtering for new full-text indexes.
+option file) disables stopword filtering for new full-text indexes.
 The default is ON. A bare option enables filtering; `--skip-innodb-ft-enable-stopword`
 disables it. Command-line values override option files, and the last stopword
 option wins. MySQL startup parsing enables filtering for `1`, `ON`, or `TRUE`
@@ -133,10 +133,23 @@ more strictly.
 
 The startup value seeds GLOBAL and SESSION `innodb_ft_enable_stopword`.
 Embedded hosts can use `Db.withFullTextStopwords false` before opening connections.
-Existing indexes retain their captured policy across session changes and restart;
+Existing postings retain their captured filtering across session changes and restart;
 new indexes and physical rebuilds use the current setting. Adding another full-text
-index to an existing full-text table inherits that table's policy. Custom stopword
-tables are not supported.
+index to an existing full-text table inherits that table's policy.
+
+`--innodb-ft-user-stopword-table=database/table` selects a custom list for new
+sessions. `--innodb-ft-server-stopword-table=database/table` supplies the server
+fallback when no session source is set. Both support option-file entries and
+runtime SQL `SET`; embedded hosts can use `Db.withFullTextStopwordTables` with
+`{ UserTable = Some "database/table"; ServerTable = None }`. The permanent source
+table's first column must be named `value` and have type `VARCHAR`.
+
+Custom lists replace the built-in list. Startup accepts literal source names
+before tables are available; invalid sources fall back to built-ins when an
+index is built. SQL `SET` instead rejects invalid references. Editing a loaded
+source does not change its indexes immediately. Restart reloads remembered
+sources for future writes while retaining historical postings. See the
+[verified behavior and remaining boundaries](torture/findings/2026-10-07-fulltext-custom-stopwords.md).
 
 ### Option files
 

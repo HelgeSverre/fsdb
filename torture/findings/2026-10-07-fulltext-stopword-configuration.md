@@ -3,7 +3,8 @@
 Status: implemented for GLOBAL/SESSION `innodb_ft_enable_stopword` and the
 maintained word/ngram DDL matrix. The setting defaults to ON. Indexes retain their
 captured policy across later session changes, writes, WAL replay, and snapshots.
-Startup options seed both variable scopes. Custom stopword tables remain open.
+Startup options seed both variable scopes. Custom source selection is covered
+by the [custom-source oracle](2026-10-07-fulltext-custom-stopwords.md).
 
 Run the [native oracle](../scripts/fulltext-stopword-oracle.py) with `mysqld`,
 `mysql`, and `mysqladmin` on PATH:

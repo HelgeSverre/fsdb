@@ -198,6 +198,67 @@ let tests =
                   Expect.equal (TestSupport.Sql.executeDefault updated (query "the") |> rows) [ [ Some "1" ]; [ Some "2" ] ] "updates capture a newly loaded custom policy"
                   Expect.equal (TestSupport.Sql.executeDefault updated (query "cobalt") |> rows) [ [ Some "3" ] ] "replay removes the replaced document's old posting"
 
+          testCase "custom stopword startup options consume literal source names"
+          <| fun _ ->
+              for name in [ "innodb-ft-user-stopword-table"; "innodb_ft_server_stopword_table" ] do
+                  for value in [ None; Some ""; Some "probe/words"; Some "missing"; Some "NULL"; Some "123" ] do
+                      match StorageOptions.fromEntries [ entry name value ] with
+                      | Ok(settings, remaining) ->
+                          Expect.isEmpty remaining "native startup accepts source names before tables are available"
+                          let tables = settings.FullTextStopwordTables
+                          let actual = if name.Contains "user" then tables.UserTable else tables.ServerTable
+                          Expect.equal actual value "empty, NULL text, and absent arguments remain distinct"
+                      | Error error -> failtest error
+
+          testCase "custom stopword command-line parsing preserves empty and absent values in order"
+          <| fun _ ->
+              let parsed =
+                  Program.parseArguments
+                      [| "--innodb-ft-user-stopword-table="
+                         "--innodb-ft-user-stopword-table=probe/words"
+                         "--innodb-ft-user-stopword-table"
+                         "--innodb-ft-server-stopword-table="
+                         "--innodb-ft-server-stopword-table=NULL" |]
+              Expect.equal (parsed.GetAllResults())
+                  [ Program.Innodb_Ft_User_Stopword_Table(Some "")
+                    Program.Innodb_Ft_User_Stopword_Table(Some "probe/words")
+                    Program.Innodb_Ft_User_Stopword_Table None
+                    Program.Innodb_Ft_Server_Stopword_Table(Some "")
+                    Program.Innodb_Ft_Server_Stopword_Table(Some "NULL") ] "empty values must not collapse into absent values or alter precedence"
+
+          testCase "custom stopword startup sources survive builder order and resolve when indexes are created"
+          <| fun _ ->
+              for configureFirst in [ false; true ] do
+                  for userSource in [ None; Some "fsdb/words"; Some "missing"; Some ""; Some "NULL" ] do
+                      let dir = TestSupport.directory "fulltext-startup-sources"
+                      let tables : StorageOptions.StopwordTables =
+                          { UserTable = userSource; ServerTable = Some "fsdb/words" }
+                      let configure = Db.withFullTextStopwordTables tables
+                      let db =
+                          if configureFirst then Db.create () |> configure |> Db.withDataDir dir
+                          else Db.create () |> Db.withDataDir dir |> configure
+                      let connection = Db.connect db
+                      let run sql =
+                          match connection.Query sql with
+                          | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                          | result -> result
+                      Expect.equal (run "SELECT @@GLOBAL.innodb_ft_user_stopword_table,@@SESSION.innodb_ft_user_stopword_table,@@GLOBAL.innodb_ft_server_stopword_table" |> rows)
+                          [ [ userSource; userSource; tables.ServerTable ] ] "startup seeds both user scopes and the global server source"
+                      for sql in
+                          [ "CREATE TABLE words(value VARCHAR(30))"
+                            "INSERT INTO words VALUES('orchard')"
+                            "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))"
+                            "INSERT INTO docs VALUES(1,'orchard'),(2,'the'),(3,'cobalt')" ] do
+                          run sql |> ignore
+                      let custom = userSource = None || userSource = Some "fsdb/words"
+                      let query word = $"SELECT id FROM docs WHERE MATCH(body) AGAINST('{word}') ORDER BY id"
+                      Expect.equal (run (query "orchard") |> rows) (if custom then [] else [ [ Some "1" ] ]) "an invalid user source bypasses the server source"
+                      Expect.equal (run (query "the") |> rows) (if custom then [ [ Some "2" ] ] else []) "custom sources replace built-ins"
+                      let recovered = Db.create () |> Db.withDataDir dir |> Db.connect
+                      Expect.equal (recovered.Query "SELECT @@SESSION.innodb_ft_user_stopword_table,@@GLOBAL.innodb_ft_server_stopword_table" |> rows)
+                          [ [ None; None ] ] "startup selection is not persisted as a variable"
+                      Expect.equal (recovered.Query (query "orchard") |> rows) (run (query "orchard") |> rows) "index policy survives independently"
+
           testCase "stopword startup values follow MySQL boolean parsing"
           <| fun _ ->
               for value, enabled in
@@ -223,7 +284,7 @@ let tests =
                         entry "ngram_token_size" (Some "3"); other ]
                   Expect.equal
                       (StorageOptions.fromEntries entries)
-                      (Ok({ NgramTokenSize = 3; FullTextStopwordsEnabled = enabled }, [ other ]))
+                      (Ok({ StorageOptions.defaults with NgramTokenSize = 3; FullTextStopwordsEnabled = enabled }, [ other ]))
                       name
 
           testCase "startup stopword settings survive builder order without reinterpreting saved indexes"

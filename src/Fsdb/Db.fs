@@ -30,6 +30,10 @@ let private configureFullTextStopwords enabled (store: Storage.Store) =
     store.FullTextStopwordsEnabled <- enabled
     Session.setGlobalVariable store "innodb_ft_enable_stopword" (Some(if enabled then "ON" else "OFF"))
 
+let private configureFullTextStopwordTables (tables: StorageOptions.StopwordTables) store =
+    Session.setGlobalVariable store "innodb_ft_user_stopword_table" tables.UserTable
+    Session.setGlobalVariable store "innodb_ft_server_stopword_table" tables.ServerTable
+
 /// Opts into durability under `dataDir`. Loads whatever
 /// state is already there (a snapshot plus any WAL entries after it, or
 /// nothing for a fresh directory) and subscribes the result to keep writing
@@ -41,6 +45,9 @@ let withDataDir (dataDir: string) (db: Db) : Db =
     Storage.configureNgramTokenSize db.Store.NgramTokenSize store
     let stopwordsEnabled = Session.tryGlobalVariable db.Store "innodb_ft_enable_stopword" <> Some(Some "OFF")
     configureFullTextStopwords stopwordsEnabled store
+    configureFullTextStopwordTables
+        { UserTable = Session.tryGlobalVariable db.Store "innodb_ft_user_stopword_table" |> Option.flatten
+          ServerTable = Session.tryGlobalVariable db.Store "innodb_ft_server_stopword_table" |> Option.flatten } store
     Persistence.attach dataDir store
     { db with Store = store; DataDir = Some dataDir }
 
@@ -54,6 +61,11 @@ let withNgramTokenSize (size: int) (db: Db) : Db =
 /// Existing indexes retain their captured policy until rebuilt.
 let withFullTextStopwords (enabled: bool) (db: Db) : Db =
     configureFullTextStopwords enabled db.Store
+    db
+
+/// Seeds custom stopword sources before opening sessions; tables are resolved when indexes are built.
+let withFullTextStopwordTables (tables: StorageOptions.StopwordTables) (db: Db) : Db =
+    configureFullTextStopwordTables tables db.Store
     db
 
 /// Routes fsdb's diagnostic output (connection drops, WAL replay warnings,

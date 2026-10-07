@@ -46,6 +46,25 @@ describes a single VARCHAR column named `value` and the `database/table` referen
 syntax. The native oracle establishes the more permissive behavior for trailing
 columns, and the case-sensitive requirement for the first column's name.
 
+## Startup selection
+
+The [startup oracle](../scripts/fulltext-stopword-startup-oracle.py) verifies
+`--innodb-ft-user-stopword-table` and `--innodb-ft-server-stopword-table` against
+native MySQL 8.4.11. Startup stores literal names without validating the source:
+the table can be created after the server starts. A missing argument supplies
+NULL, `=` supplies an empty string, and `=NULL` supplies the four-character text.
+Invalid sources fall back to built-ins when an index is built; an invalid user
+source still bypasses a valid server source. Later values override earlier ones.
+
+Fsdb accepts the same command-line options and option-file entries.
+`Db.withFullTextStopwordTables` seeds the variables before sessions are opened,
+both before and after `Db.withDataDir`. Startup variables are not persisted;
+index sources and historical postings have their own recovery lifetime.
+The executable smoke matrix checks both source flags, empty and absent values,
+repeated arguments, option-file settings, CLI overrides, and recovery against
+the same expected scopes and search results. `--help` and `--version` succeed.
+Argu's empty equals-assignment boundary has a parser regression.
+
 ## Precedence and capture
 
 Enabled filtering uses the SESSION user table when configured, otherwise the
@@ -157,7 +176,7 @@ includes all three terms in the new index. A subsequent insert excludes `cobalt`
 Fsdb eagerly reloads sources during recovery, so its added index excludes
 `cobalt` even on this cold path. This lazy-loading distinction remains a gap.
 
-Custom startup options, additional ALTER variants, query expansion, and more
+Additional ALTER variants, query expansion, and more
 source charset/collation combinations remain outside this verified matrix.
 
 ## Indexing-rule foundation
@@ -200,15 +219,15 @@ or replay WAL tags `0x1C` and `0x1D`.
 The complete native oracle passes, including the same-datadir restart sequence
 and searches in natural and Boolean modes after each transition.
 
-The indexing-rule and snapshot changes pass `just check` with 2,915 tests and no build
+The indexing-rule and snapshot changes pass `just check` with 2,918 tests and no build
 warnings or errors. The existing stopword configuration matrix passes on fsdb.
 All 47 MySQL contracts (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T080825333-4375/contracts`.
+`torture/artifacts/runs/20261007T081648185-5907/contracts`.
 
-The durability lane passes 12 crash restarts, preserving all 109 acknowledged
+The durability lane passes 12 crash restarts, preserving all 106 acknowledged
 commits and transaction boundaries, with checkpoint, WAL-tail, snapshot, schema,
 and torn-tail checks:
-`torture/artifacts/runs/20261007T080835114-4484/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T081658373-5963/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
 
 The SQL wire matrix agrees for InnoDB source validation, precedence, loaded-list
 lifetime, physical rebuild, collation, phrases, and ngram filtering. No known-gap

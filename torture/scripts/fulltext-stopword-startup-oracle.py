@@ -30,11 +30,11 @@ def check_options():
 
 
 @contextlib.contextmanager
-def server(data, socket, log, value):
+def server(data, socket, log, value, options=()):
     process = subprocess.Popen(
         ["mysqld", "--no-defaults", "--datadir=" + str(data), "--socket=" + socket,
          "--skip-networking", "--mysqlx=0", "--innodb-buffer-pool-size=64M",
-         "--innodb-redo-log-capacity=64M", "--innodb-ft-enable-stopword=" + value],
+         "--innodb-redo-log-capacity=64M", "--innodb-ft-enable-stopword=" + value, *options],
         stdout=log, stderr=subprocess.STDOUT)
     try:
         for _ in range(150):
@@ -93,7 +93,55 @@ def check_restart():
             raise
 
 
+def custom_startup_cases():
+    for variable in ["user", "server"]:
+        for value in [None, "", "probe/words", "missing", "NULL", "123"]:
+            option = "--innodb-ft-" + variable + "-stopword-table" + ("=" + value if value is not None else "")
+            yield [option], value if variable == "user" else None, value if variable == "server" else None
+    yield ["--innodb-ft-server-stopword-table=probe/words", "--innodb-ft-user-stopword-table=missing"], "missing", "probe/words"
+    yield ["--innodb-ft-user-stopword-table=missing", "--innodb-ft-user-stopword-table=probe/words"], "probe/words", None
+
+
+def verify_custom_startup(client, user, server_source):
+    expect("startup source scopes", client.query(
+        "SELECT COALESCE(CONCAT('[',@@GLOBAL.innodb_ft_user_stopword_table,']'),'absent'),"
+        "COALESCE(CONCAT('[',@@SESSION.innodb_ft_user_stopword_table,']'),'absent'),"
+        "COALESCE(CONCAT('[',@@GLOBAL.innodb_ft_server_stopword_table,']'),'absent')"),
+        "\t".join("absent" if value is None else "[" + value + "]" for value in [user, user, server_source]))
+    client.query("CREATE DATABASE IF NOT EXISTS probe;CREATE TABLE IF NOT EXISTS probe.words(value VARCHAR(30));"
+                 "DELETE FROM probe.words;INSERT INTO probe.words VALUES('orchard');"
+                 "DROP TABLE IF EXISTS probe.docs;"
+                 "CREATE TABLE probe.docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body));"
+                 "INSERT INTO probe.docs VALUES(1,'orchard'),(2,'the'),(3,'cobalt')")
+    custom = (user if user is not None else server_source) == "probe/words"
+    for word, expected in [("orchard", "NULL" if custom else "1"), ("the", "2" if custom else "NULL"), ("cobalt", "3")]:
+        expect("startup source " + word, client.query(
+            "SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.docs WHERE MATCH(body) AGAINST('" + word + "')"), expected)
+
+
+def check_custom_startup():
+    with tempfile.TemporaryDirectory(prefix="fsdb-custom-stopword-startup-") as directory:
+        root = pathlib.Path(directory)
+        data = root / "data"
+        data.mkdir()
+        log_path = root / "server.log"
+        try:
+            with log_path.open("w") as log:
+                subprocess.run(["mysqld", "--no-defaults", "--initialize-insecure",
+                                "--datadir=" + str(data), "--innodb-redo-log-capacity=64M",
+                                "--innodb-buffer-pool-size=64M"], stdout=log, stderr=subprocess.STDOUT, check=True)
+                for options, user, server_source in custom_startup_cases():
+                    with server(data, str(root / "mysql.sock"), log, "ON", options) as client:
+                        print(" ".join(options), flush=True)
+                        expect("version", client.query("SELECT VERSION()"), "8.4.11")
+                        verify_custom_startup(client, user, server_source)
+        except Exception:
+            print(log_path.read_text(), flush=True)
+            raise
+
+
 if __name__ == "__main__":
     check_options()
     check_restart()
+    check_custom_startup()
     print("Full-text stopword startup oracle passed", flush=True)

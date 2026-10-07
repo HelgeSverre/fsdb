@@ -14,6 +14,8 @@ type Arguments =
     | [<EqualsAssignment>] Skip_Innodb_Ft_Enable_Stopword of ignored: string option
     | [<EqualsAssignment>] Disable_Innodb_Ft_Enable_Stopword of ignored: string option
     | [<EqualsAssignment>] Enable_Innodb_Ft_Enable_Stopword of ignored: string option
+    | [<EqualsAssignment>] Innodb_Ft_User_Stopword_Table of source: string option
+    | [<EqualsAssignment>] Innodb_Ft_Server_Stopword_Table of source: string option
     | Ssl_Cert of path: string
     | Ssl_Key of path: string
     | Ssl_Ca of path: string
@@ -37,6 +39,8 @@ type Arguments =
             | Skip_Innodb_Ft_Enable_Stopword _
             | Disable_Innodb_Ft_Enable_Stopword _ -> "disable initial full-text stopword filtering"
             | Enable_Innodb_Ft_Enable_Stopword _ -> "enable initial full-text stopword filtering"
+            | Innodb_Ft_User_Stopword_Table _ -> "initial session full-text stopword source (=database/table)"
+            | Innodb_Ft_Server_Stopword_Table _ -> "initial server full-text stopword source (=database/table)"
             | Ssl_Cert _ -> "PEM server certificate for TLS"
             | Ssl_Key _ -> "PEM private key for TLS"
             | Ssl_Ca _ -> "PEM certificate authorities trusted for TLS clients"
@@ -50,6 +54,15 @@ type Arguments =
 
 let private parser =
     ArgumentParser.Create<Arguments>(programName = "fsdb", errorHandler = ProcessExiter())
+
+let internal parseArguments argv =
+    // Argu accepts an empty separate argument but rejects an empty equals assignment.
+    let arguments =
+        argv |> Array.collect (function
+            | "--innodb-ft-user-stopword-table=" -> [| "--innodb-ft-user-stopword-table"; "" |]
+            | "--innodb-ft-server-stopword-table=" -> [| "--innodb-ft-server-stopword-table"; "" |]
+            | argument -> [| argument |])
+    parser.Parse arguments
 
 /// `--listen` takes an IP address ("0.0.0.0", "::"), with "localhost" as the
 /// one spelled-out convenience.
@@ -72,7 +85,7 @@ let private fsdbVersion =
 
 [<EntryPoint>]
 let main argv =
-    let results = parser.Parse argv
+    let results = parseArguments argv
 
     if results.Contains <@ Version @> then
         printfn "fsdb %s (MySQL protocol %s)" fsdbVersion Protocol.ServerVersion
@@ -93,6 +106,8 @@ let main argv =
             let commandLineEntries =
                 [ for argument in results.GetAllResults() do
                       match argument with
+                      | Innodb_Ft_User_Stopword_Table value -> yield commandLineEntry "innodb_ft_user_stopword_table" value
+                      | Innodb_Ft_Server_Stopword_Table value -> yield commandLineEntry "innodb_ft_server_stopword_table" value
                       | Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "innodb_ft_enable_stopword" value
                       | Skip_Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "skip_innodb_ft_enable_stopword" value
                       | Disable_Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "disable_innodb_ft_enable_stopword" value
@@ -153,6 +168,7 @@ let main argv =
                 Db.create ()
                 |> Db.withNgramTokenSize storageOptions.NgramTokenSize
                 |> Db.withFullTextStopwords storageOptions.FullTextStopwordsEnabled
+                |> Db.withFullTextStopwordTables storageOptions.FullTextStopwordTables
 
             let db =
                 match results.TryGetResult Data_Dir with
