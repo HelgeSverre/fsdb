@@ -189,3 +189,36 @@ Snapshot FSNL and schema WAL version 11 persist row hints and node groups.
 Captured FSNK and V10 WAL fixtures verify that older comments remain readable
 with zero hints and a default node group. Recovery regressions cover options
 from both CREATE and ADD, alongside names, comments, and partition row selection.
+
+## Partition tablespaces
+
+Status: open. Baseline `b1153190` rejects a partition declaration of
+`TABLESPACE=innodb_file_per_table` with 1064 / 42000. The maintained
+[tablespace oracle](../scripts/hash-partition-tablespace-oracle.py) passes on
+native MySQL 8.4.11 with the disposable server's default file-per-table setup.
+
+```sh
+python3 torture/scripts/hash-partition-tablespace-oracle.py
+```
+
+The identifier `innodb_file_per_table` is accepted with optional equals and
+backticks. String literals fail with 1064. Names are case-sensitive:
+`INNODB_FILE_PER_TABLE` and an absent name return 3510 / HY000. Both
+`innodb_system` and `innodb_temporary` return 1478 / HY000 because a partitioned
+table cannot occupy a shared tablespace. Repeated clauses use the last name;
+an earlier absent name does not cause failure when overwritten.
+
+A declaration belongs to the partition that received it, but SHOW CREATE
+renders `TABLESPACE = innodb_file_per_table` on every partition while any
+explicit declaration survives. Reorganizing the declaring partition without
+a tablespace clears that declaration; reorganizing another partition does
+not. No-list reorganization retains the first partition's declaration.
+ADD without a declaration preserves existing state, and ADD with one causes
+all partitions to render it. `INFORMATION_SCHEMA.PARTITIONS.TABLESPACE_NAME`
+remains NULL throughout these cases.
+
+A duplicate ADD name precedes a missing tablespace (1517), and an unknown
+REORGANIZE source precedes it (1507). Otherwise a missing tablespace in ADD
+returns 3510. Rejected CREATE publishes no table; rejected ALTER preserves
+all fixture rows and existing rendering. General tablespace administration
+and physical placement remain distinct unsupported capabilities.
