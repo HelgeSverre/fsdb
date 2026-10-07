@@ -1217,7 +1217,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               SecurityType = view.SecurityType }
             | Some(FromTable source)
                 when not select.Joins.IsEmpty
-                     && (select.Joins |> List.forall (fun join -> join.Kind = InnerJoin))
+                     && (select.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin))
                      && (select.Joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false))
                      && hasWritableShape select
                      && select.OrderBy.IsEmpty
@@ -7268,6 +7268,7 @@ and private sourcePredicatesForInnerJoins
            |> List.forall (fun join ->
                match join.Kind with
                | InnerJoin
+               | StraightJoin
                | CrossJoin
                | NaturalJoin -> true
                | _ -> false)
@@ -7531,7 +7532,7 @@ and private tryIndexedJoinProbe
     (equiKeys: (int * int) list)
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
-    | (InnerJoin | NaturalJoin | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin), _, Some table, _ :: _
+    | (InnerJoin | StraightJoin | NaturalJoin | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin), _, Some table, _ :: _
         when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe table rightColumns
@@ -7585,7 +7586,7 @@ and private innerJoinChainPreservesLeftOrder
         | [] -> true
         | join :: remaining ->
             match join.Kind, join.Using, sourceFor join.Table with
-            | InnerJoin, [], Some right ->
+            | (InnerJoin | StraightJoin), [], Some right ->
                 let leftColumns = resolved |> List.collect snd
                 let joinedSources = resolved @ [ right.Qualifier, right.Table.Columns ]
                 let ranges = qualifierRanges joinedSources
@@ -7729,7 +7730,7 @@ and private applyLateralJoin
     (alias: string)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Kind, join.Using with
-    | (InnerJoin | CrossJoin | LeftJoin), [] ->
+    | (InnerJoin | StraightJoin | CrossJoin | LeftJoin), [] ->
         let leftRows = rowsSoFar |> List.ofSeq
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
         let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer
@@ -7821,7 +7822,7 @@ and private expandJsonTableJoinRows
     : Result<ColumnDef list * 'Result seq * string list, QueryResult> =
     match join.Kind, validateJsonTableAllocationBounds columns with
     | _, Error error -> Error error
-    | (InnerJoin | CrossJoin | LeftJoin), Ok joinColumns ->
+    | (InnerJoin | StraightJoin | CrossJoin | LeftJoin), Ok joinColumns ->
         let newSources = sourcesSoFar @ [ alias, joinColumns ]
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
         let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer
@@ -8324,6 +8325,7 @@ and private applyResolvedJoin
             let combinedRows =
                 match join.Kind with
                 | InnerJoin
+                | StraightJoin
                 | CrossJoin
                 | NaturalJoin -> matchedCombined
                 | LeftJoin
@@ -8502,7 +8504,7 @@ and private applyResolvedJoin
                     |> Seq.map (fun (rowId, right) -> rowId, readRight right)
 
                 match join.Kind, exactKey, residualConjuncts with
-                | (InnerJoin | NaturalJoin), true, [] ->
+                | (InnerJoin | StraightJoin | NaturalJoin), true, [] ->
                     let candidates =
                         seq {
                             for left in rowsSoFar do
@@ -8511,7 +8513,7 @@ and private applyResolvedJoin
                         }
 
                     Ok(newSources, candidates, coalesceNames)
-                | (InnerJoin | NaturalJoin), _, _ ->
+                | (InnerJoin | StraightJoin | NaturalJoin), _, _ ->
                     seq {
                         for left in rowsSoFar do
                             for _, right in rightRowsFor left do
@@ -8590,7 +8592,7 @@ and private applyResolvedJoin
                 let buildOnLeft = leftIndexed.Value.Length <= rightCount
 
                 match join.Kind, residualConjuncts with
-                | (InnerJoin | CrossJoin | NaturalJoin), [] ->
+                | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), [] ->
                     // Nothing here needs to see every match up front: `INNER`/
                     // `CROSS`/`NATURAL` keep only matched pairs (no
                     // unmatched-side padding to compute, unlike `LEFT`/
@@ -8636,7 +8638,7 @@ and private applyResolvedJoin
                 let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
                 match join.Kind, isConstantTrue effectiveOn with
-                | (InnerJoin | CrossJoin | NaturalJoin), true ->
+                | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), true ->
                     let combined =
                         seq {
                             for left in rowsSoFar do
@@ -8757,6 +8759,7 @@ and private applyMutationJoin
                 let rows =
                     match join.Kind with
                     | InnerJoin
+                    | StraightJoin
                     | CrossJoin
                     | NaturalJoin -> matchedRows
                     | LeftJoin
@@ -15342,7 +15345,7 @@ and private fullTextJoinBounds (sources: FullTextPhysicalSource list) (select: S
         && (select.Where |> Option.forall (validReferences completeScope))
         && scopedJoins
            |> List.forall (fun (visible, join) ->
-               (join.Kind = InnerJoin || join.Kind = CrossJoin)
+               (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin)
                && join.Using.IsEmpty
                && validReferences visible join.On)
     if not eligible then Map.empty

@@ -143,6 +143,24 @@ let tests =
                     | Select { StraightJoin = true; Joins = [ _ ] } -> ()
                     | other -> failtestf "expected StraightJoin = true, got %A" other
 
+                testCase "table STRAIGHT_JOIN accepts ON, USING, or no condition"
+                <| fun _ ->
+                    for sql in [ "SELECT * FROM t STRAIGHT_JOIN u"; "SELECT * FROM t STRAIGHT_JOIN u ON u.id=t.id"; "SELECT * FROM t STRAIGHT_JOIN u USING(id)" ] do
+                        let statement = parseOk sql
+                        let options: SqlText.ViewRenderOptions =
+                            { DefaultSchema = "test"; IncludeSchema = false; RelationColumns = fun _ _ -> Some [ "id" ] }
+                        let rendered = SqlText.viewDefinition options statement |> Option.defaultWith (fun () -> failtest "expected rendered SELECT")
+                        for parsed in [ statement; parseOk rendered ] do
+                            match parsed with
+                            | Select { Joins = [ { Kind = StraightJoin } ] } -> ()
+                            | other -> failtestf "expected preserved straight join, got %A" other
+
+                testCase "left-parenthesized join chains retain their association"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM ((a LEFT JOIN b ON a.id=b.id)) JOIN c ON c.id=a.id" with
+                    | Select { From = Some(FromTable { Table = "a" }); Joins = [ { Kind = LeftJoin }; { Kind = InnerJoin } ] } -> ()
+                    | other -> failtestf "expected the left-associated chain, got %A" other
+
                 testCase "FROM db.table AS alias parses a qualified, aliased TableRef"
                 <| fun _ ->
                     Expect.equal

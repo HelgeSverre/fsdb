@@ -69,6 +69,7 @@ let tests =
               execute "INSERT INTO shadow VALUES(42)" |> ignore
               for joins, bound in
                   [ "JOIN owners o ON o.id=d.owner_id", "o.id=42"
+                    "STRAIGHT_JOIN owners o ON o.id=d.owner_id", "o.id=42"
                     "JOIN owners o ON o.id=d.owner_id JOIN bounds b ON b.id=o.id", "42=b.id"
                     "JOIN owners o ON o.id=d.owner_id AND 42=o.id", "TRUE"
                     "CROSS JOIN owners o", "o.id=d.owner_id AND o.id=42"
@@ -690,16 +691,13 @@ let tests =
               Expect.equal calls 4 "the reordered unique join evaluates only the surviving row"
               let reorderedCalls = calls
 
-              calls <- 0
-
-              let pinnedJoinedSearch =
-                  TestSupport.Sql.execute
-                      store
-                      registry
-                      "SELECT STRAIGHT_JOIN d.id, TOUCH(o.id) FROM owners o JOIN docs d ON d.id = o.id WHERE MATCH(d.body) AGAINST('needle') AND TOUCH(o.id) = d.id LIMIT 1"
-
-              Expect.equal (ids pinnedJoinedSearch) [ "82" ] "STRAIGHT_JOIN preserves the result"
-              Expect.isGreaterThan calls reorderedCalls "STRAIGHT_JOIN retains the written source order"
+              for query in
+                  [ "SELECT STRAIGHT_JOIN d.id, TOUCH(o.id) FROM owners o JOIN docs d ON d.id = o.id WHERE MATCH(d.body) AGAINST('needle') AND TOUCH(o.id) = d.id LIMIT 1"
+                    "SELECT d.id, TOUCH(o.id) FROM owners o STRAIGHT_JOIN docs d ON d.id = o.id WHERE MATCH(d.body) AGAINST('needle') AND TOUCH(o.id) = d.id LIMIT 1" ] do
+                  calls <- 0
+                  let pinnedJoinedSearch = TestSupport.Sql.execute store registry query
+                  Expect.equal (ids pinnedJoinedSearch) [ "82" ] "STRAIGHT_JOIN preserves the result"
+                  Expect.isGreaterThan calls reorderedCalls "STRAIGHT_JOIN retains the written source order"
 
               run store "DELETE FROM owners WHERE id = 82" |> ignore
               calls <- 0

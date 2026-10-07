@@ -26,6 +26,37 @@ let tests =
                   Expect.equal rows [ [ Some "widget"; Some "5" ]; [ Some "gadget"; Some "9" ] ] "each row joined to itself"
               | other -> failtestf "expected a joined resultset, got %A" other
 
+          testCase "table STRAIGHT_JOIN supports reads, views, and joined mutations"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE straight_left(id INT PRIMARY KEY,v INT)" |> ignore
+              runDefault store "CREATE TABLE straight_right(id INT PRIMARY KEY)" |> ignore
+              runDefault store "INSERT INTO straight_left VALUES(1,10),(2,20),(3,30)" |> ignore
+              runDefault store "INSERT INTO straight_right VALUES(2),(3)" |> ignore
+              let expectRows sql expected =
+                  match runDefault store sql with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "expected rows, got %A" other
+              expectRows "SELECT COUNT(*) FROM straight_left a STRAIGHT_JOIN straight_right b" [ [ Some "6" ] ]
+              expectRows "SELECT id FROM straight_left a STRAIGHT_JOIN straight_right b USING(id) ORDER BY id" [ [ Some "2" ]; [ Some "3" ] ]
+              Expect.equal
+                  (runDefault store "CREATE VIEW straight_view AS SELECT a.id,a.v FROM straight_left a STRAIGHT_JOIN straight_right b ON a.id=b.id")
+                  (Affected 0UL)
+                  "the join constraint survives a view definition"
+              expectRows "SELECT IS_UPDATABLE FROM information_schema.views WHERE TABLE_NAME='straight_view'" [ [ Some "YES" ] ]
+              for sql in
+                  [ "UPDATE straight_view SET v=v+1 WHERE id=2"
+                    "UPDATE straight_left a STRAIGHT_JOIN straight_right b ON a.id=b.id SET a.v=a.v+1 WHERE b.id=3"
+                    "DELETE a FROM straight_left a STRAIGHT_JOIN straight_right b ON a.id=b.id WHERE b.id=3" ] do
+                  Expect.equal (runDefault store sql) (Affected 1UL) "one matching row changes"
+              expectRows "SELECT id,v FROM straight_left ORDER BY id" [ [ Some "1"; Some "10" ]; [ Some "2"; Some "21" ] ]
+              expectRows
+                  "SELECT a.id,x.n FROM straight_left a STRAIGHT_JOIN LATERAL (SELECT a.v+1 AS n) x ON TRUE ORDER BY a.id"
+                  [ [ Some "1"; Some "11" ]; [ Some "2"; Some "22" ] ]
+              expectRows
+                  "SELECT a.id,j.n FROM straight_left a STRAIGHT_JOIN JSON_TABLE(JSON_ARRAY(a.v),'$[*]' COLUMNS(n INT PATH '$')) j ON TRUE ORDER BY a.id"
+                  [ [ Some "1"; Some "10" ]; [ Some "2"; Some "21" ] ]
+
           testCase "inner joins reorder around unambiguous bare columns unless STRAIGHT_JOIN pins order"
           <| fun _ ->
               let store = newStore ()
@@ -62,6 +93,11 @@ let tests =
                   (explainedTables (sql.Replace("SELECT ", "SELECT STRAIGHT_JOIN ")))
                   [ "base_rows"; "large_rows"; "small_rows" ]
                   "STRAIGHT_JOIN preserves source order"
+
+              Expect.equal
+                  (explainedTables (sql.Replace("JOIN large_rows", "STRAIGHT_JOIN large_rows")))
+                  [ "base_rows"; "large_rows"; "small_rows" ]
+                  "a table STRAIGHT_JOIN prevents reordering across its boundary"
 
               Expect.equal
                   (explainedTables (sql.Replace("SELECT marker", "SELECT *")))

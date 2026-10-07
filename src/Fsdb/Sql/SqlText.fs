@@ -466,6 +466,7 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
                         let joinText =
                             match join.Kind with
                             | InnerJoin -> "join"
+                            | StraightJoin -> "straight_join"
                             | LeftJoin -> "left join"
                             | RightJoin -> "right join"
                             | CrossJoin -> "cross join"

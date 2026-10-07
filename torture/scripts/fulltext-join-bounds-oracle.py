@@ -60,6 +60,37 @@ def verify(client, _):
         error = re.search(r"ERROR (\d+)", result.stderr)
         native["expect"](label, error.group(1) if error else result.stdout, expected_code)
 
+    native["expect"]("STRAIGHT_JOIN with USING", client.query(
+        "SELECT d.id FROM docs d STRAIGHT_JOIN owners o USING(id) ORDER BY d.id"), "42\n43\n97")
+    native["expect"]("parenthesized STRAIGHT_JOIN", client.query(
+        "SELECT COUNT(*) FROM ((docs d STRAIGHT_JOIN owners o ON o.id=d.owner_id))"), "30")
+    native["expect"]("STRAIGHT_JOIN without ON", client.query(
+        "SELECT COUNT(*) FROM docs d STRAIGHT_JOIN owners o"), "3000")
+    native["expect"]("STRAIGHT_JOIN with ON", client.query(
+        "SELECT COUNT(*) FROM docs d STRAIGHT_JOIN owners o ON o.id=d.owner_id"), "30")
+
+    client.query("CREATE TABLE straight_left(id INT PRIMARY KEY,v INT);"
+                 "CREATE TABLE straight_right(id INT PRIMARY KEY);"
+                 "INSERT INTO straight_left VALUES(1,10),(2,20),(3,30);"
+                 "INSERT INTO straight_right VALUES(2),(3);"
+                 "CREATE VIEW straight_view AS SELECT a.id,a.v FROM straight_left a "
+                 "STRAIGHT_JOIN straight_right b ON a.id=b.id")
+    native["expect"]("STRAIGHT_JOIN view is updatable", client.query(
+        "SELECT IS_UPDATABLE FROM information_schema.views WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='straight_view'"), "YES")
+    native["expect"]("STRAIGHT_JOIN view update", client.query(
+        "UPDATE straight_view SET v=v+1 WHERE id=2;SELECT ROW_COUNT()"), "1")
+    native["expect"]("STRAIGHT_JOIN update", client.query(
+        "UPDATE straight_left a STRAIGHT_JOIN straight_right b ON a.id=b.id SET a.v=a.v+1 WHERE b.id=3;SELECT ROW_COUNT()"), "1")
+    native["expect"]("STRAIGHT_JOIN delete", client.query(
+        "DELETE a FROM straight_left a STRAIGHT_JOIN straight_right b ON a.id=b.id WHERE b.id=3;SELECT ROW_COUNT()"), "1")
+    native["expect"]("STRAIGHT_JOIN mutation rows", client.query(
+        "SELECT id,v FROM straight_left ORDER BY id"), "1\t10\n2\t21")
+
+    native["expect"]("STRAIGHT_JOIN LATERAL", client.query(
+        "SELECT a.id,x.n FROM straight_left a STRAIGHT_JOIN LATERAL (SELECT a.v+1 AS n) x ON TRUE ORDER BY a.id"), "1\t11\n2\t22")
+    native["expect"]("STRAIGHT_JOIN JSON_TABLE", client.query(
+        "SELECT a.id,j.n FROM straight_left a STRAIGHT_JOIN JSON_TABLE(JSON_ARRAY(a.v),'$[*]' COLUMNS(n INT PATH '$')) j ON TRUE ORDER BY a.id"), "1\t10\n2\t21")
+
     client.query("CREATE TABLE names(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,body TEXT,KEY(k),FULLTEXT(body));"
                  "CREATE TABLE labels(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci);"
                  "INSERT INTO names VALUES(1,'①','needle'),(2,'1','needle'),(3,'other','ordinary');"
@@ -72,6 +103,23 @@ def verify(client, _):
     native["expect"]("numeric text IN without MATCH", client.query(prefix + "o.k IN (1,NULL) ORDER BY d.id"), "1\n2")
     native["expect"]("numeric text IN with MATCH", client.query(prefix + "o.k IN (1,NULL)" + suffix), "2")
     native["expect"]("string text bound", client.query(prefix + "o.k='1'" + suffix), "1\n2")
+
+    for source, fulltext, expected_ids, filter_owner in [
+        ("names d JOIN labels o", False, "1\n2", "o"),
+        ("names d JOIN labels o", True, "2", "d"),
+        ("names d STRAIGHT_JOIN labels o", False, "2", "d"),
+        ("names d STRAIGHT_JOIN labels o", True, "2", "d"),
+        ("labels o STRAIGHT_JOIN names d", False, "1\n2", "o"),
+        ("labels o STRAIGHT_JOIN names d", True, "1\n2", "o"),
+    ]:
+        query = ("SELECT d.id FROM " + source + " ON o.k=d.k WHERE o.k IN (1,NULL)"
+                 + (" AND MATCH(d.body) AGAINST('needle')" if fulltext else "")
+                 + " ORDER BY d.id")
+        label = source + (" with MATCH" if fulltext else " without MATCH")
+        native["expect"](label, client.query(query), expected_ids)
+        plan = client.query("EXPLAIN FORMAT=TREE " + query)
+        native["expect"](label + " filter owner", f"({filter_owner}.k in (1,NULL))" in plan, True)
+        print(plan, flush=True)
 
     client.query("INSERT INTO names VALUES(4,'missing','needle')")
     native["expect"]("outer join retains unmatched rows", client.query(

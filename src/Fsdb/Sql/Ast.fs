@@ -548,6 +548,8 @@ and JsonTableColumn =
 /// (SQL's standard outer-join semantics either way).
 and JoinKind =
     | InnerJoin
+    /// Inner matching with the written left source preceding the right source.
+    | StraightJoin
     | LeftJoin
     | RightJoin
     | CrossJoin

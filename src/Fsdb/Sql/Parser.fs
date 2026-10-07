@@ -583,6 +583,7 @@ let private reservedWords =
           "regexp"
           "cast"
           "join"
+          "straight_join"
           "inner"
           "left"
           "right"
@@ -3873,6 +3874,7 @@ let private joinKind: Parser<JoinKind, unit> =
     <|> (keyword "LEFT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% LeftJoin)
     <|> (keyword "RIGHT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% RightJoin)
     <|> (keyword "JOIN" >>% InnerJoin)
+    <|> (keyword "STRAIGHT_JOIN" >>% StraightJoin)
 
 /// `CROSS JOIN (table | (SELECT ...) AS alias)` — no `ON` at all; encoded
 /// with the always-true `Lit (VInt 1L)` condition so `Executor.applyJoin`
@@ -3917,7 +3919,8 @@ let private joinClause: Parser<Join, unit> =
              | NaturalJoin
              | NaturalLeftJoin
              | NaturalRightJoin -> preturn { Kind = kind; Table = table; On = Lit(VInt 1L); Using = [] }
-             | InnerJoin ->
+             | InnerJoin
+             | StraightJoin ->
                  (keyword "ON" >>. expr |>> fun onExpr -> { Kind = kind; Table = table; On = onExpr; Using = [] })
                  <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols })
                  <|> preturn { Kind = kind; Table = table; On = Lit(VInt 1L); Using = [] }
@@ -3926,6 +3929,16 @@ let private joinClause: Parser<Join, unit> =
                  (keyword "ON" >>. expr |>> fun onExpr -> { Kind = kind; Table = table; On = onExpr; Using = [] })
                  <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols })
              | CrossJoin -> fail "CROSS JOIN is parsed separately")
+
+/// Parentheses around a left join chain preserve its existing association.
+/// A grouped right operand needs a join tree rather than this flat chain.
+let private fromJoinChain, fromJoinChainRef = createParserForwardedToRef<FromItem * Join list, unit> ()
+
+fromJoinChainRef.Value <-
+    (attempt (fromItem |>> fun source -> source, [])
+     <|> between (sym "(") (sym ")") fromJoinChain)
+    .>>. many joinClause
+    |>> fun ((source, innerJoins), outerJoins) -> source, innerJoins @ outerJoins
 
 /// `GROUP BY expr, ... [WITH ROLLUP]` — the flag rides along with the keys
 /// since it only ever qualifies them.
@@ -3998,7 +4011,7 @@ let private selectHead =
 
 selectStmtRecordRef.Value <-
     (keyword "SELECT" >>. selectHead
-     .>>. opt (keyword "FROM" >>. fromItem .>>. many joinClause)
+     .>>. opt (keyword "FROM" >>. fromJoinChain)
      .>>. opt (keyword "WHERE" >>. expr)
      .>>. opt groupByClause
      .>>. opt havingClause

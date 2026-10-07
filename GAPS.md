@@ -77,6 +77,12 @@ sources, `JSON_TABLE`, expression subqueries, set operations, windows, rollups,
 and ordinary or recursive query-scoped CTEs. CTEs can lead UPDATE or DELETE and
 appear within set-operation branches.
 
+Both the SELECT modifier and table-level `STRAIGHT_JOIN` preserve written join
+order. The table form accepts ON, USING, or no condition and works in reads,
+joined mutations, and updatable views. Parentheses around the left FROM chain
+preserve its association and allow rendered join definitions to parse back
+([oracle and regressions](torture/findings/2026-10-07-straight-joins.md)).
+
 DDL covers databases, tables, indexes, views, triggers, users, grants,
 `CREATE TABLE ... AS SELECT`, temporary tables, `TRUNCATE`, and `RENAME TABLE`.
 Multi-pair renames resolve from left to right and publish atomically. Base
@@ -183,6 +189,7 @@ or locking retain the general SELECT pipeline.
 |---|---|---|---|---|
 | Secondary-index access paths | ref/eq_ref/range/index-merge scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, grouping, supported unary functional compositions, compatible functional-result ranges, fully covered OR unions, and cost-effective AND intersections use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; competing access families, complete OR unions, and selective AND intersections use observed cardinalities; general expression folding, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
+| Mixed-type join filters | numeric `IN` conditions can move between collation-equivalent text keys as join order changes | keeps the original comparison domain; the [controlled join-order case](torture/findings/2026-10-07-fulltext-join-bounds.md#mixed-type-in-remains-open) differs when MySQL transfers the filter to the other key, with or without MATCH | medium (result membership) | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/index_merge/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings, index unions and intersections, and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once; common correlated equality/range shapes and compatible functional probes over physical or pass-through projected sources use maintained indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
@@ -521,7 +528,6 @@ and assignments.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, indexed `IN`, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; [equality chains](torture/findings/2026-10-07-fulltext-join-bounds.md) propagate compatible equality, range, and literal `IN` bounds across inner/cross joins without shrinking the relevance corpus; mixed comparison domains and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
-| Mixed-type join filters | a numeric `IN` on a text join key can change result membership when MATCH is present | preserves the same collation-based join result with and without MATCH; the [numeric IN case](torture/findings/2026-10-07-fulltext-join-bounds.md#mixed-type-in-remains-open) returns an extra row compared with native MySQL | medium (result membership) | divergence |
 | Transaction relevance | MySQL uses an approximate global table-row estimate for ranking | visibility cases agree; fsdb uses the committed corpus count rather than estimates that remain changed after rollback until ANALYZE ([controlled oracle](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary)); follows the deliberate statistics policy in section 16 | high (relevance correctness) | deliberate divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); MeCab remains open ([oracle and regressions](torture/findings/2026-10-07-ngram-fulltext.md)) | medium (for CJK) | partial |
 
