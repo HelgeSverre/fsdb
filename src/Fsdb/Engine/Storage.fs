@@ -2912,23 +2912,30 @@ let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
         group.Name, entries)
     |> Map.ofList
 
-let private buildFullTextIndexes tokenizerFor (table: Table) : FullTextIndexes =
+let private buildFullTextIndexesWithStopwords stopwordsFor tokenizerFor (table: Table) : FullTextIndexes =
     fullTextKeyGroups table
     |> List.map (fun group ->
         group.Name,
         (table.RowsArray.Indexed
          |> Seq.map (fun (rowId, row) ->
              rowId, tokenizerFor group.Name rowId group.Tokenizer, fullTextFields group.Indices row)
-         |> FullText.buildIndexWithDocumentTokenizers group.Tokenizer group.CollationSpec))
+         |> FullText.buildIndexWithDocumentSettings (stopwordsFor group.Name) group.Tokenizer group.CollationSpec))
     |> Map.ofList
+
+let private buildFullTextIndexes tokenizerFor table =
+    buildFullTextIndexesWithStopwords (fun _ -> FullText.StopwordPolicy.BuiltIn) tokenizerFor table
 
 let private rebuildFullTextIndexes table =
     buildFullTextIndexes (fun _ _ tokenizer -> tokenizer) table
 
-let internal restoreFullTextIndexes (tokenizers: Map<string, Map<RowId, FullText.Tokenizer>>) table =
+let internal restoreFullTextIndexesWithStopwords stopwords (tokenizers: Map<string, Map<RowId, FullText.Tokenizer>>) table =
     let tokenizerFor name rowId fallback =
         tokenizers |> Map.tryFind name |> Option.bind (Map.tryFind rowId) |> Option.defaultValue fallback
-    buildFullTextIndexes tokenizerFor table
+    let stopwordsFor name = Map.tryFind name stopwords |> Option.defaultValue FullText.StopwordPolicy.BuiltIn
+    buildFullTextIndexesWithStopwords stopwordsFor tokenizerFor table
+
+let internal restoreFullTextIndexes tokenizers table =
+    restoreFullTextIndexesWithStopwords Map.empty tokenizers table
 
 let private documentTokenizerFrom (source: Table) sourceRowIds indexName rowId fallback =
     let sourceRowId = sourceRowIds |> Map.tryFind rowId |> Option.defaultValue rowId

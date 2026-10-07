@@ -27,7 +27,8 @@ let private preparedXaSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x39uy |] // "F
 let private taggedIndexSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x41uy |] // "FSNA" (format 10)
 let private stableRowIdSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x42uy |] // "FSNB" (format 11)
 let private preparedXaLockSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x43uy |] // "FSNC" (format 12)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x44uy |] // "FSND" (format 13)
+let private fullTextTokenizerSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x44uy |] // "FSND" (format 13)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x45uy |] // "FSNE" (format 14)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -41,7 +42,8 @@ type private SnapshotFormat =
       TaggedIndexColumns: bool
       StableRowIds: bool
       PreparedXaLocks: bool
-      FullTextTokenizers: bool }
+      FullTextTokenizers: bool
+      FullTextStopwords: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -55,7 +57,8 @@ let private legacySnapshotFormat =
       TaggedIndexColumns = false
       StableRowIds = false
       PreparedXaLocks = false
-      FullTextTokenizers = false }
+      FullTextTokenizers = false
+      FullTextStopwords = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -90,8 +93,11 @@ let private stableRowIdSnapshotFormat =
 let private preparedXaLockSnapshotFormat =
     { stableRowIdSnapshotFormat with PreparedXaLocks = true }
 
-let private currentSnapshotFormat =
+let private fullTextTokenizerSnapshotFormat =
     { preparedXaLockSnapshotFormat with FullTextTokenizers = true }
+
+let private currentSnapshotFormat =
+    { fullTextTokenizerSnapshotFormat with FullTextStopwords = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -100,6 +106,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = fullTextTokenizerSnapshotMagic then
+        Some fullTextTokenizerSnapshotFormat
     elif header = preparedXaLockSnapshotMagic then
         Some preparedXaLockSnapshotFormat
     elif header = stableRowIdSnapshotMagic then
@@ -1531,6 +1539,11 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
     w.WriteInt64LE t.NextAutoId
     if format.StableRowIds then w.WriteInt32LE t.RowsArray.NextRowId
     w.WriteInt32LE t.RowsArray.Length
+    if format.FullTextStopwords then
+        for index in t.Indexes |> List.filter (fun index -> index.Kind.IsFullText) do
+            match FullText.activeStopwords t.FullTextIndexes.[index.Name] with
+            | FullText.StopwordPolicy.BuiltIn -> w.WriteByte 0uy
+            | FullText.StopwordPolicy.Disabled -> w.WriteByte 1uy
 
 /// Writes the catalog straight to `s`, flushing the `Writer` every chunk so a
 /// multi-GB snapshot never materializes as one `byte[]`. Rows are the only
@@ -1625,6 +1638,18 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let rowCount = r.ReadInt32LE()
 
     let fullTextNames = indexes |> List.filter (fun index -> index.Kind.IsFullText) |> List.map _.Name
+    let stopwords =
+        if format.FullTextStopwords then
+            fullTextNames
+            |> List.map (fun name ->
+                let policy =
+                    match r.ReadByte() with
+                    | 0uy -> FullText.StopwordPolicy.BuiltIn
+                    | 1uy -> FullText.StopwordPolicy.Disabled
+                    | _ -> failwith "Persistence: invalid full-text stopword policy"
+                name, policy)
+            |> Map.ofList
+        else Map.empty
     let mutable tokenizers = Map.empty
     let readRow rowId =
         let row = decodeRowBin r
@@ -1662,7 +1687,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
           FullTextIndexes = Map.empty
           SpatialIndexes = Map.empty }
 
-    reindexTableWithFullTextIndexes (restoreFullTextIndexes tokenizers table) table
+    reindexTableWithFullTextIndexes (restoreFullTextIndexesWithStopwords stopwords tokenizers table) table
 
 /// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or
 /// CRC doesn't match what's actually on disk — the guard `load` needs before

@@ -46,8 +46,16 @@ removal and seed selection, preserving the rules used to build stored postings.
 Focused tests cover word and ngram searches, optimized dictionary paths, writes,
 removal, prefix maintenance, and retained minimum word length. The native oracle
 also verifies natural-language and query-expansion behavior. Production storage
-constructors still select the built-in policy; session settings and persisted
-configuration have not yet been connected.
+constructors still select the built-in policy; session settings, DDL policy
+selection, and WAL configuration context have not yet been connected.
+
+Snapshot format 14 (`FSNE`) stores one policy byte per full-text index in index
+definition order, including indexes without rows. Recovery combines that policy
+with each document's historical tokenizer. Tests cover mixed word/ngram policies,
+empty and populated indexes, and writes after recovery. A fixture produced by the
+format-13 writer verifies that `FSND` loads with built-in stopwords and retains
+its ngram postings. Earlier formats remain readable; older binaries cannot read
+`FSNE` snapshots.
 
 The effective filtering policy must be retained with the index state and used by
 both writes and queries. DDL must preserve or replace that state according to the
@@ -61,7 +69,11 @@ configuration remains open; no known-gap suppression is included.
 
 ## Verification
 
-The native stopword oracle passes. `just check` passes all 2,883 tests without
+The native stopword oracle passes. `just check` passes all 2,885 tests without
 build warnings or errors. The natural-phrase oracle and all 47 contracts
 (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T050412911-75529/contracts`.
+`torture/artifacts/runs/20261007T051057405-76759/contracts`.
+
+The durability lane passes with 12 crash restarts and all 67 acknowledged commits
+recovered, including checkpoint, WAL-tail, and torn-tail checks:
+`torture/artifacts/runs/20261007T051145109-76815/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

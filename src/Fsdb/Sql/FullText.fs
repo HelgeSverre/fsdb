@@ -328,10 +328,15 @@ let internal buildIndexWithStopwords policy tokenizer collation documents =
 let internal documentTokenizer id (index: Index<'id>) =
     index.Documents |> Map.tryFind id |> Option.map _.Tokenizer
 
-let internal buildIndexWithDocumentTokenizers tokenizer collation documents =
+let internal activeStopwords (index: Index<'id>) = index.Stopwords
+
+let internal buildIndexWithDocumentSettings stopwords tokenizer collation documents =
     documents
     |> Seq.fold (fun index (id, documentTokenizer, fields) ->
-        addDocumentFieldsWith documentTokenizer id fields index) (emptyIndexWith StopwordPolicy.BuiltIn tokenizer collation)
+        addDocumentFieldsWith documentTokenizer id fields index) (emptyIndexWith stopwords tokenizer collation)
+
+let internal buildIndexWithDocumentTokenizers tokenizer collation documents =
+    buildIndexWithDocumentSettings StopwordPolicy.BuiltIn tokenizer collation documents
 
 let buildIndexWithFields tokenizer (collation: Collation) (documents: ('id * string list) seq) : Index<'id> =
     documents

@@ -13,7 +13,53 @@ let private rows = function
 
 let tests =
     testList "storage options"
-        [ testCase "ngram startup values follow MySQL integer parsing and bounds"
+        [ testCase "snapshots preserve fulltext stopword policies for empty and populated indexes"
+          <| fun _ ->
+              let run = TestSupport.Sql.executeDefault
+              for populated in [ false; true ] do
+                  for wordPolicy, ngramPolicy in
+                      [ FullText.StopwordPolicy.Disabled, FullText.StopwordPolicy.BuiltIn
+                        FullText.StopwordPolicy.BuiltIn, FullText.StopwordPolicy.Disabled ] do
+                      let dir = TestSupport.directory "fulltext-stopwords"
+                      let store = Storage.create ()
+                      run store "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,other TEXT,FULLTEXT KEY z_word(body),FULLTEXT KEY a_ngram(other) WITH PARSER ngram)" |> ignore
+                      if populated then run store "INSERT INTO docs VALUES(1,'the','ab')" |> ignore
+                      let database = store.Catalog.[Storage.defaultDatabase]
+                      let table = database.["docs"]
+                      let policies = Map.ofList [ "z_word", wordPolicy; "a_ngram", ngramPolicy ]
+                      let indexes = Storage.restoreFullTextIndexesWithStopwords policies Map.empty table
+                      Storage.setCatalog store (store.Catalog |> Map.add Storage.defaultDatabase (database |> Map.add "docs" { table with FullTextIndexes = indexes }))
+                      Persistence.snapshotNow dir store
+                      let recovered = Persistence.load dir
+                      let recoveredTable = recovered.Catalog.[Storage.defaultDatabase].["docs"]
+                      for name, expected in Map.toList policies do
+                          Expect.equal (FullText.activeStopwords recoveredTable.FullTextIndexes.[name]) expected "policy survives in index-definition order, even without rows"
+                      Expect.equal (run recovered "INSERT INTO docs VALUES(2,'the','ab')") (Affected 1UL) "insert after recovery"
+                      for column, term, policy in [ "body", "the", wordPolicy; "other", "ab", ngramPolicy ] do
+                          let expected =
+                              if policy = FullText.StopwordPolicy.BuiltIn then []
+                              elif populated then [ [ Some "1" ]; [ Some "2" ] ]
+                              else [ [ Some "2" ] ]
+                          Expect.equal
+                              (run recovered ($"SELECT id FROM docs WHERE MATCH({column}) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id") |> rows)
+                              expected
+                              "recovered postings and new writes use the saved policy"
+
+          testCase "FSND fulltext snapshots default to built-in stopwords"
+          <| fun _ ->
+              let dir = TestSupport.directory "fulltext-fsnd"
+              // Produced by the format-13 writer: one ngram row and no stopword metadata.
+              let snapshot = System.Convert.FromBase64String "RlNORAEAAAAEZnNkYgEAAAAKbGVnYWN5X2Z0cwpsZWdhY3lfZnRzAQAAAARib2R5CQEAAAAAAAESdXRmOG1iNF8wOTAwX2FpX2NpAAAAAAEAAAACZnQBAAAABwBOOmJvZHkAAQMFbmdyYW0AAAAAAAAAABId5NVBJN8IAQAAAAAAAAABAAAAAQAAAAAAAAABAAAABAznlJ/ml6Xlv6vkuZACAAAAAKIAAAAAAAAAEAsCZA=="
+              System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, "snapshot.fsdb"), snapshot)
+              let recovered = Persistence.load dir
+              let index = recovered.Catalog.[Storage.defaultDatabase].["legacy_fts"].FullTextIndexes.["ft"]
+              Expect.equal (FullText.activeStopwords index) FullText.StopwordPolicy.BuiltIn "legacy policy"
+              Expect.equal
+                  (TestSupport.Sql.executeDefault recovered "SELECT body FROM legacy_fts WHERE MATCH(body) AGAINST('生日' IN BOOLEAN MODE)" |> rows)
+                  [ [ Some "生日快乐" ] ]
+                  "historical tokenizer data still decodes"
+
+          testCase "ngram startup values follow MySQL integer parsing and bounds"
           <| fun _ ->
               Expect.equal (StorageOptions.fromEntries []) (Ok(StorageOptions.defaults, [])) "default size"
               for value, expected in [ "-1", 1; "0", 1; "1", 1; "2", 2; "3", 3; "10", 10; "11", 10; "3k", 10; "4294967296", 10 ] do
