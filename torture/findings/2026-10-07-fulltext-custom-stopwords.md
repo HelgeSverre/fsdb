@@ -53,7 +53,12 @@ variable alone therefore cannot implement this feature correctly.
 
 NULL and empty entries have no effect in the tested word corpus. Entries are
 whole values, not tokenized phrases: `cobalt red` does not exclude `cobalt`.
-Leading/trailing spaces remain significant under the tested default collation.
+Leading/trailing spaces remain significant under the default NO PAD collation.
+PAD SPACE source collations retain their padding semantics: a custom `a `
+entry under `utf8mb4_bin` excludes `ab` grams, while the same entry under
+`utf8mb4_0900_ai_ci` does not. Source collation expansions also apply to
+ngram substrings: custom `ss` and `ß` each exclude both `ss` and `ßx` under
+`utf8mb4_0900_ai_ci`.
 For a size-2 ngram index, stopword `a` excludes `ab`, while the longer stopword
 `abc` excludes neither `ab` nor `bc`.
 
@@ -118,8 +123,9 @@ by restart and ordinary inserts cannot be reconstructed from that wrapper alone.
 Query lookup must keep old postings reachable after the write policy changes,
 while phrase handling still observes stopword semantics.
 
-The policy type still supports only built-in/disabled filtering. Custom lists,
-remembered source names, and reload context remain necessary for these histories. Accepting the system variables before
+The policy type supports captured custom lists as well as built-in/disabled
+filtering. Remembered source names and reload context remain necessary for
+these histories. Accepting the system variables before
 those paths are connected would claim behavior the engine does not provide.
 Custom startup options, additional ALTER variants, query expansion, and more
 source charset/collation combinations remain outside this verified matrix.
@@ -136,37 +142,41 @@ The core regressions cover mixed ngram sizes and stopword policies, active-rule
 changes, reconstruction, prefix removal, transaction merging, and metadata rename
 versus physical rebuild. [Ordinary word lookups](2026-10-07-fulltext-word-stopword-postings.md)
 also preserve historical postings when active filtering changes, including after
-snapshot recovery. Custom source resolution, custom-list encoding, WAL reload
-context, and the remaining custom query semantics remain open.
+snapshot recovery. Custom lists capture literal words and their source collation;
+compiled keys filter words and ngram substrings. Empty lists
+replace the defaults, and phrases use custom words for anchor selection.
+Custom source resolution, WAL reload context, and remaining custom query
+semantics remain open.
 
 ## Snapshot history
 
-Format 15 (`FSNF`) stores a deduplicated rule table for each full-text index,
+Format 16 (`FSNG`) stores a deduplicated rule table for each full-text index,
 followed by a length-encoded rule reference for each document. Rule entries pair
 the tokenizer with the stopword policy. Active policies remain in the index
 metadata, including for empty indexes; startup token-size selection keeps its
 existing behavior independently of historical document tokenizers.
 
-Recovery preserves mixed ngram sizes and built-in/disabled policies within one
-index. Rule counts are bounded by the row count plus one active rule; missing
+Custom policy entries store the source collation name and literal word list;
+recovery reconstructs collation keys. Recovery preserves mixed ngram sizes and
+built-in, disabled, or custom policies within one index. Rule counts are bounded by the row count plus one active rule; missing
 or out-of-range document references are rejected. Regressions cover mixed
 histories, subsequent writes, and malformed references with a valid checksum.
-Real format-13 and format-14 fixtures verify backward reading. Older fsdb binaries
-cannot read `FSNF`; the WAL format is unchanged.
+Real format-13, format-14, and format-15 fixtures verify backward reading. Older
+fsdb binaries cannot read `FSNG`; the WAL format is unchanged.
 
 ## Verification
 
 The complete native oracle passes, including the same-datadir restart sequence
 and searches in natural and Boolean modes after each transition.
 
-The indexing-rule and snapshot changes pass `just check` with 2,897 tests and no build
+The indexing-rule and snapshot changes pass `just check` with 2,909 tests and no build
 warnings or errors. The existing stopword configuration matrix passes on fsdb.
 All 47 MySQL contracts (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T061108753-84784/contracts`.
+`torture/artifacts/runs/20261007T065304309-90018/contracts`.
 
-The durability lane passes 12 crash restarts, preserving all 67 acknowledged
+The durability lane passes 12 crash restarts, preserving all 60 acknowledged
 commits and transaction boundaries, with checkpoint, WAL-tail, snapshot, schema,
 and torn-tail checks:
-`torture/artifacts/runs/20261007T061124411-84821/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T065328243-90037/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
 
 Custom SQL variables remain unavailable and no known-gap suppression is added.

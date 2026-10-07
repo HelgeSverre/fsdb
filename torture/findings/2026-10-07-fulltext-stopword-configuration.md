@@ -58,16 +58,18 @@ commit observers. Legacy schema events retain enabled filtering. Recovery tests
 cover both WAL-only and checkpointed histories, including disabled stopwords
 combined with a non-default ngram size. Older binaries cannot replay this tag.
 
-Snapshot format 15 (`FSNF`) retains the active policy per full-text index and a
+Snapshot format 16 (`FSNG`) retains the active policy per full-text index and a
 shared table of historical tokenizer/stopword rules. Each row refers to the rules
 used for its postings, so reconstruction preserves mixed document histories.
-Empty indexes retain their active policy. Invalid policies, tokenizer values,
+Custom policies include literal source words and their collation. Empty indexes
+retain their active policy. Invalid policies, tokenizer values,
 rule-table lengths, and document references are rejected.
 
 Format 14 (`FSNE`) supplies its per-index policy to every document; format 13
-(`FSND`) supplies built-in filtering. Fixtures produced by both older writers
+(`FSND`) supplies built-in filtering. Format 15 (`FSNF`) retains per-document
+rules for built-in/disabled policies. Fixtures produced by all three older writers
 verify those paths. Earlier formats remain readable; older binaries cannot read
-`FSNF` snapshots. The WAL format is unchanged by the snapshot-rule extension.
+`FSNG` snapshots. The WAL format is unchanged by the snapshot-rule extension.
 
 Regressions verify GLOBAL values seed new sessions without changing existing
 sessions, reject invalid boolean values, and retain policy across reopening.

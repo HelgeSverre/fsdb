@@ -29,7 +29,8 @@ let private stableRowIdSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x42uy |] // "
 let private preparedXaLockSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x43uy |] // "FSNC" (format 12)
 let private fullTextTokenizerSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x44uy |] // "FSND" (format 13)
 let private fullTextStopwordSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x45uy |] // "FSNE" (format 14)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x46uy |] // "FSNF" (format 15)
+let private fullTextDocumentRulesSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x46uy |] // "FSNF" (format 15)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x47uy |] // "FSNG" (format 16)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -111,6 +112,8 @@ let private snapshotTrailerSize = 12
 
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
+        Some currentSnapshotFormat
+    elif header = fullTextDocumentRulesSnapshotMagic then
         Some currentSnapshotFormat
     elif header = fullTextStopwordSnapshotMagic then
         Some fullTextStopwordSnapshotFormat
@@ -1529,11 +1532,22 @@ let private replayWal (store: Store) (walPath: string) : int64 =
 let private encodeStopwordPolicy (w: Writer) = function
     | FullText.StopwordPolicy.BuiltIn -> w.WriteByte 0uy
     | FullText.StopwordPolicy.Disabled -> w.WriteByte 1uy
+    | FullText.StopwordPolicy.Custom words ->
+        let collation, words = FullText.customStopwordContents words
+        w.WriteByte 2uy
+        writeStr w collation
+        writeStrList w words
 
 let private decodeStopwordPolicy (r: #IReader) =
     match r.ReadByte() with
     | 0uy -> FullText.StopwordPolicy.BuiltIn
     | 1uy -> FullText.StopwordPolicy.Disabled
+    | 2uy ->
+        let name = readStr r
+        let collation =
+            Collation.tryFind name
+            |> Option.defaultWith (fun () -> failwith "Persistence: invalid stopword source collation")
+        readStrList r |> FullText.customStopwords collation
     | _ -> failwith "Persistence: invalid full-text stopword policy"
 
 let private encodeTokenizer (w: Writer) = function

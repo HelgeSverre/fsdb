@@ -30,10 +30,26 @@ type Tokenizer =
     | Words
     | Ngrams of size: int
 
+type internal StopwordList =
+    private
+        { CollationName: string
+          Words: Set<string>
+          Keys: Set<string> }
+
 [<RequireQualifiedAccess>]
 type internal StopwordPolicy =
     | BuiltIn
     | Disabled
+    | Custom of StopwordList
+
+let internal customStopwords (collation: Collation) words =
+    let words = words |> Seq.filter (String.IsNullOrEmpty >> not) |> Set.ofSeq
+    StopwordPolicy.Custom
+        { CollationName = collation.Name
+          Words = words
+          Keys = words |> Seq.map collation.KeyOf |> Set.ofSeq }
+
+let internal customStopwordContents words = words.CollationName, Set.toList words.Words
 
 /// Rules captured by a document when its postings are built.
 type internal IndexingRules =
@@ -186,17 +202,37 @@ let private tokensWith tokenizer collation text =
 
 let private runeLength (text: string) = text.EnumerateRunes() |> Seq.length
 
+let private customStopwordMatcher words =
+    let collation = Collation.tryFind words.CollationName |> Option.get
+    fun text -> Set.contains (collation.KeyOf text) words.Keys
+
+let private isStopword policy (text: string) =
+    match policy with
+    | StopwordPolicy.Disabled -> false
+    | StopwordPolicy.BuiltIn -> Set.contains (text.ToLowerInvariant()) stopwords
+    | StopwordPolicy.Custom words -> customStopwordMatcher words text
+
 let private containsNgramStopword policy (text: string) =
-    let lower = text.ToLowerInvariant()
-    policy = StopwordPolicy.BuiltIn
-    && (stopwords |> Set.exists (fun word -> lower.Contains(word, StringComparison.Ordinal)))
+    match policy with
+    | StopwordPolicy.Disabled -> false
+    | StopwordPolicy.BuiltIn ->
+        let lower = text.ToLowerInvariant()
+        stopwords |> Set.exists (fun word -> lower.Contains(word, StringComparison.Ordinal))
+    | StopwordPolicy.Custom words ->
+        let matches = customStopwordMatcher words
+        let runes = text.EnumerateRunes() |> Seq.map string |> Seq.toArray
+        seq {
+            for start in 0 .. runes.Length - 1 do
+                for finish in start .. runes.Length - 1 do
+                    yield String.Concat(runes.[start .. finish])
+        }
+        |> Seq.exists matches
 
 let private hasSearchableWordLength (token: Token) =
     token.Text.Length >= minTokenLength && token.Text.Length <= maxTokenLength
 
 let private isSearchableWord policy token =
-    hasSearchableWordLength token
-    && (policy = StopwordPolicy.Disabled || not (Set.contains (token.Text.ToLowerInvariant()) stopwords))
+    hasSearchableWordLength token && not (isStopword policy token.Text)
 
 /// A token that survives the configured length and stopword rules.
 let private isSearchable rules (token: Token) =

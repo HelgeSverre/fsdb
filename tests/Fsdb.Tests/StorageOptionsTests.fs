@@ -149,6 +149,43 @@ let tests =
               run "ALTER TABLE docs ENGINE=InnoDB" |> ignore
               Expect.isEmpty (run query |> rows) "physical rebuild replaces all historical rules"
 
+          testCase "snapshots preserve custom stopword lists and each document's loaded policy"
+          <| fun _ ->
+              let dir = TestSupport.directory "fulltext-custom-history"
+              let store = Storage.create ()
+              let run = TestSupport.Sql.executeDefault store
+              run "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body))" |> ignore
+              run "INSERT INTO docs VALUES(1,'orchard cobalt the'),(2,'orchard cobalt the'),(3,'zzzz')" |> ignore
+              let database = store.Catalog.[Storage.defaultDatabase]
+              let table = database.["docs"]
+              let oldRules: FullText.IndexingRules =
+                  { Tokenizer = FullText.Words
+                    Stopwords = FullText.customStopwords Collation.defaultCollation [ "orchard" ] }
+              let currentRules =
+                  { oldRules with Stopwords = FullText.customStopwords (Collation.tryFind "utf8mb4_bin" |> Option.get) [ "cobalt" ] }
+              let documents =
+                  table.RowsArray.Indexed
+                  |> Seq.mapi (fun position (id, _) ->
+                      id, (if position = 0 then oldRules else currentRules), [ if position < 2 then "orchard cobalt the" else "zzzz" ])
+                  |> Seq.toList
+              let index = FullText.buildIndexWithDocumentSettings currentRules Collation.defaultCollation documents
+              Storage.setCatalog store (store.Catalog |> Map.add Storage.defaultDatabase (database |> Map.add "docs" { table with FullTextIndexes = Map.ofList [ "ft", index ] }))
+              Persistence.snapshotNow dir store
+              let recovered = Persistence.load dir
+              let restored = recovered.Catalog.[Storage.defaultDatabase].["docs"].FullTextIndexes.["ft"]
+              Expect.equal (FullText.activeRules restored) currentRules "active source collation and words survive"
+              for id, rules, _ in documents do
+                  Expect.equal (FullText.documentRules id restored) (Some rules) "historical lists survive independently"
+              let run = TestSupport.Sql.executeDefault recovered
+              run "INSERT INTO docs VALUES(4,'orchard cobalt the')" |> ignore
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                  Expect.equal (run ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('orchard' {mode}) ORDER BY id") |> rows)
+                      [ [ Some "2" ]; [ Some "4" ] ] "future writes use the active list"
+                  Expect.equal (run ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('cobalt' {mode}) ORDER BY id") |> rows)
+                      [ [ Some "1" ] ] "old postings remain searchable"
+              run "DELETE FROM docs WHERE id=1" |> ignore
+              Expect.isEmpty (run "SELECT id FROM docs WHERE MATCH(body) AGAINST('cobalt')" |> rows) "removal uses the captured custom list"
+
           testCase "snapshots preserve mixed historical indexing rules within one fulltext index"
           <| fun _ ->
               let dir = TestSupport.directory "fulltext-rule-history"
@@ -221,7 +258,8 @@ let tests =
               for populated in [ false; true ] do
                   for wordPolicy, ngramPolicy in
                       [ FullText.StopwordPolicy.Disabled, FullText.StopwordPolicy.BuiltIn
-                        FullText.StopwordPolicy.BuiltIn, FullText.StopwordPolicy.Disabled ] do
+                        FullText.StopwordPolicy.BuiltIn, FullText.StopwordPolicy.Disabled
+                        FullText.customStopwords Collation.defaultCollation [], FullText.customStopwords Collation.defaultCollation [] ] do
                       let dir = TestSupport.directory "fulltext-stopwords"
                       let store = Storage.create ()
                       run store "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,other TEXT,FULLTEXT KEY z_word(body),FULLTEXT KEY a_ngram(other) WITH PARSER ngram)" |> ignore
@@ -246,6 +284,19 @@ let tests =
                               (run recovered ($"SELECT id FROM docs WHERE MATCH({column}) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id") |> rows)
                               expected
                               "recovered postings and new writes use the saved policy"
+
+          testCase "FSNF snapshots retain historical indexing rules"
+          <| fun _ ->
+              let dir = TestSupport.directory "fulltext-fsnf"
+              // Produced by the format-15 writer with disabled stopwords and one ngram row.
+              let snapshot = System.Convert.FromBase64String "RlNORgEAAAAEZnNkYgEAAAAKbGVnYWN5X2Z0cwpsZWdhY3lfZnRzAQAAAARib2R5CQEAAAAAAAESdXRmOG1iNF8wOTAwX2FpX2NpAAAAAAEAAAACZnQBAAAABwBOOmJvZHkAAQMFbmdyYW0AAAAAAAAAAOQvwmlPJN8IAQAAAAAAAAABAAAAAQAAAAEBAAAAAgEAAAAAAQAAAAQCYWIAAAAAAJ8AAAAAAAAAFWXOrg=="
+              System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, "snapshot.fsdb"), snapshot)
+              let recovered = Persistence.load dir
+              let index = recovered.Catalog.[Storage.defaultDatabase].["legacy_fts"].FullTextIndexes.["ft"]
+              Expect.equal (FullText.activeStopwords index) FullText.StopwordPolicy.Disabled "legacy active policy"
+              Expect.equal
+                  (TestSupport.Sql.executeDefault recovered "SELECT body FROM legacy_fts WHERE MATCH(body) AGAINST('ab' IN BOOLEAN MODE)" |> rows)
+                  [ [ Some "ab" ] ] "legacy document rule table remains readable"
 
           testCase "FSNE snapshots retain their index stopword policy for every document"
           <| fun _ ->
@@ -278,7 +329,7 @@ let tests =
               Persistence.snapshotNow dir store
               let path = System.IO.Path.Combine(dir, "snapshot.fsdb")
               let bytes = System.IO.File.ReadAllBytes path
-              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNF" "rule references use the new snapshot format"
+              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNG" "rule references use the current snapshot format"
               let trailerSize, preparedCountSize = 12, 4
               let lastRuleReference = bytes.Length - trailerSize - preparedCountSize - 1
               for invalid in [ 250uy; 251uy ] do

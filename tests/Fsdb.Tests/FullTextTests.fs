@@ -23,7 +23,62 @@ let private closeTo (expected: float) (actual: float) (label: string) =
 let tests =
     testList
         "fulltext"
-        [ testCase "binary exact phrases verify folded text at original anchor positions"
+        [ testCase "custom stopwords use the source collation after indexed token normalization"
+          <| fun _ ->
+              let names = [ "utf8mb4_0900_ai_ci"; "utf8mb4_0900_as_cs"; "utf8mb4_bin" ]
+              for source in names do
+                  let policy = customStopwords (tryFind source |> Option.get) [ "Orchard"; "café" ]
+                  for target in names do
+                      let index = buildIndexWithStopwords policy Words (tryFind target |> Option.get)
+                                      [ 1, [ "orchard" ]; 2, [ "Orchard" ]; 3, [ "ORCHARD" ]
+                                        4, [ "cafe" ]; 5, [ "café" ]; 6, [ "CAFÉ" ]; 7, [ "the" ] ]
+                      for query in [ "orchard"; "Orchard"; "ORCHARD" ] do
+                          let expected =
+                              if source = names.Head then []
+                              elif target <> "utf8mb4_bin" then [ 1; 2; 3 ]
+                              elif query = "orchard" then [ 1 ]
+                              elif query = "ORCHARD" then [ 3 ]
+                              else []
+                          Expect.equal (naturalScores index query |> Map.keys |> Seq.toList) expected "source collation filters indexed spellings"
+                      for query in [ "cafe"; "café"; "CAFÉ" ] do
+                          let expected =
+                              if source = names.Head then []
+                              elif target = names.Head || query = "cafe" then [ 4 ]
+                              elif target = "utf8mb4_bin" && query = "CAFÉ" then [ 6 ]
+                              else []
+                          Expect.equal (naturalScores index query |> Map.keys |> Seq.toList) expected "source accent sensitivity and target lookup remain distinct"
+                      Expect.equal (naturalScores index "the" |> Map.keys |> Seq.toList) [ 7 ] "custom lists replace built-in words"
+
+          testCase "custom ngram stopwords match substrings with source collation expansions and padding"
+          <| fun _ ->
+              let documents = [ 1, [ "ab" ]; 2, [ "Ab" ]; 3, [ "AB" ]; 4, [ "áb" ]; 5, [ "ss" ]; 6, [ "ßx" ]; 7, [ "zz" ] ]
+              for source, word, expected in
+                  [ "utf8mb4_0900_ai_ci", "A", [ 5; 6; 7 ]
+                    "utf8mb4_0900_ai_ci", "ss", [ 1; 2; 3; 4; 7 ]
+                    "utf8mb4_0900_ai_ci", "ß", [ 1; 2; 3; 4; 7 ]
+                    "utf8mb4_0900_as_cs", "A", [ 1; 2; 3; 4; 5; 6; 7 ]
+                    "utf8mb4_bin", "a ", [ 4; 5; 6; 7 ]
+                    "utf8mb4_0900_ai_ci", "a ", [ 1; 2; 3; 4; 5; 6; 7 ]
+                    "utf8mb4_0900_ai_ci", "abc", [ 1; 2; 3; 4; 5; 6; 7 ] ] do
+                  let policy = customStopwords (tryFind source |> Option.get) [ word ]
+                  let index = buildIndexWithStopwords policy (Ngrams 2) defaultCollation documents
+                  Expect.equal (naturalScores index "ab Ab AB áb ss ßx zz" |> Map.keys |> Seq.toList) expected "substring filtering observes the source collation"
+
+          testCase "custom word lists replace defaults and control phrase anchors"
+          <| fun _ ->
+              let documents = [ 1, [ "orchard cobalt" ]; 2, [ "other cobalt" ]; 3, [ "the cobalt" ]; 4, [ "orchard the cobalt" ]; 5, [ "zzzz" ] ]
+              let policy = customStopwords defaultCollation [ "orchard" ]
+              let index = buildIndexWithStopwords policy Words defaultCollation documents
+              for score in [ naturalScores; booleanScores ] do
+                  Expect.equal (score index "\"orchard cobalt\"" |> Map.keys |> Seq.toList) [ 1; 2; 3; 4 ] "custom stopwords do not anchor a phrase"
+                  Expect.equal (score index "\"orchard the cobalt\"" |> Map.keys |> Seq.toList) [ 3; 4 ] "built-in stopwords become searchable phrase anchors"
+              Expect.isEmpty (booleanScores index "+orchard +cobalt") "a required custom stopword has no postings"
+              Expect.isEmpty (booleanScores index "orch*") "prefixes exclude filtered documents"
+              let empty = customStopwords defaultCollation [ null; "" ]
+              let index = buildIndexWithStopwords empty Words defaultCollation documents
+              Expect.equal (naturalScores index "the" |> Map.keys |> Seq.toList) [ 3; 4 ] "empty lists disable default filtering"
+
+          testCase "binary exact phrases verify folded text at original anchor positions"
           <| fun _ ->
               let documents =
                   [ 1, "orchard cobalt"; 2, "Orchard Cobalt"; 3, "ORCHARD COBALT"

@@ -161,12 +161,32 @@ def phrases(client):
             expect(f"custom phrase {term} {mode}", matching(client, term, mode=mode), ids)
 
 
+def ngram_source_collation(client):
+    for source, word, expected in [
+        ("utf8mb4_0900_ai_ci", "A", "5,6,7"),
+        ("utf8mb4_0900_ai_ci", "ss", "1,2,3,4,7"),
+        ("utf8mb4_0900_ai_ci", "ß", "1,2,3,4,7"),
+        ("utf8mb4_0900_as_cs", "A", "1,2,3,4,5,6,7"),
+        ("utf8mb4_bin", "a ", "4,5,6,7"),
+        ("utf8mb4_0900_ai_ci", "a ", "1,2,3,4,5,6,7"),
+        ("utf8mb4_0900_ai_ci", "abc", "1,2,3,4,5,6,7"),
+    ]:
+        client.query("SET SESSION innodb_ft_user_stopword_table=NULL;DROP TABLE probe.docs;DROP TABLE probe.words;"
+                     f"CREATE TABLE probe.words(value VARCHAR(30) COLLATE {source});"
+                     f"INSERT INTO probe.words VALUES('{word}');SET SESSION innodb_ft_user_stopword_table='probe/words';"
+                     "CREATE TABLE probe.docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_0900_ai_ci,FULLTEXT ft(body) WITH PARSER ngram);"
+                     "INSERT INTO probe.docs VALUES(1,'ab'),(2,'Ab'),(3,'AB'),(4,'áb'),(5,'ss'),(6,'ßx'),(7,'zz')")
+        expect(f"ngram source {source}, word {word!r}",
+               matching(client, "ab Ab AB áb ss ßx zz", mode="IN NATURAL LANGUAGE MODE"), expected)
+
+
 def verify(client, other):
     validation(client, other)
     precedence(client)
     capture_and_rebuild(client)
     collation_and_contents(client)
     phrases(client)
+    ngram_source_collation(client)
 
 
 def restart_lifetime():
