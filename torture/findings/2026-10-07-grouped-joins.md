@@ -377,3 +377,14 @@ references through the shared query pipeline under a non-executing planning
 probe. The mutation oracle checks acceptance, missing-column and inner-ON
 errors, and unchanged target rows. Plan costs and engine-specific iterator
 annotations remain outside this compatibility check.
+
+Derived tables nested inside scalar or LATERAL queries retain their enclosing
+query context, including derived JOIN operands. Independent sources keep their
+statement memoization. Ordinary derived tables still reject same-query sibling
+references; the native oracle reports 1109 for that invalid form, while fsdb's
+1054 diagnostic remains a difference.
+
+Additional native metadata fixtures retain the source default flag through
+materialized preceding sources, chained LATERAL projections, GROUP BY, and
+DISTINCT. Materialization alone does not clear a correlated output's default
+flag.

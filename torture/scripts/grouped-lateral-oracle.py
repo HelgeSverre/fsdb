@@ -10,6 +10,16 @@ oracle = runpy.run_path(str(pathlib.Path(__file__).with_name("fulltext-transacti
 def verify(client, _writer):
     client.query("USE probe;CREATE TABLE a(id INT);CREATE TABLE b(id INT);"
                  "INSERT INTO a VALUES(1),(2);INSERT INTO b VALUES(1),(3)")
+    for query, expected in [
+        ("SELECT d.id FROM a JOIN LATERAL (SELECT x.id FROM (SELECT a.id AS id) x) d ON 1 ORDER BY a.id", "1\n2"),
+        ("SELECT (SELECT x.id FROM (SELECT a.id AS id) x) AS id FROM a ORDER BY a.id", "1\n2"),
+        ("SELECT d.id FROM a JOIN LATERAL (SELECT x.id FROM b JOIN (SELECT a.id AS id) x ON 1) d ON 1 ORDER BY a.id", "1\n1\n2\n2"),
+        ("SELECT d.id FROM a JOIN (b JOIN LATERAL (SELECT x.id FROM (SELECT a.id AS id) x) d ON 1) ON 1 ORDER BY a.id", "1\n1\n2\n2"),
+    ]:
+        oracle["expect"]("nested correlation: " + query, client.query(query), expected)
+    invalid = "SELECT x.id FROM a JOIN (SELECT a.id AS id) x ON 1"
+    result = subprocess.run([*client.process.args, "-e", "USE probe;" + invalid], capture_output=True, text=True, check=False)
+    oracle["expect"]("ordinary sibling dependency", "ERROR 1109 (42S02)" in result.stderr, True)
     for source, first_row in [
         ("b JOIN LATERAL (SELECT b.id+1 AS v) d ON 1", "1\t1\t2"),
         ("b JOIN LATERAL (SELECT a.id+b.id AS v) d ON 1", "1\t1\t2"),

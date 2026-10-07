@@ -7515,6 +7515,15 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
         let memo = (currentStatementMemo ()).FromSubqueries
         getMemoized memo item (fun () -> resolveFromSubquery store registry dbName item None)
 
+and private resolveFromItemWithOuter store registry dbName outer item =
+    let rec visibleColumns (context: EvalContext) =
+        let local = context.Qualifiers |> Map.toList |> List.map (fun (qualifier, (columns, _)) -> qualifier, columns)
+        local @ (context.Outer |> Option.map visibleColumns |> Option.defaultValue [])
+    match item, outer with
+    | FromSubquery _, Some context when sourceReferencesPreceding store dbName (visibleColumns context) item ->
+        resolveFromSubquery store registry dbName item outer
+    | _ -> resolveFromItem store registry dbName item
+
 and private resolveFromSubquery
     (store: Store)
     (registry: Registry)
@@ -8037,7 +8046,7 @@ and private tryIndexedPreservedRightProbe
         equiKeys |> tryIndexProbe table leftColumns
     | _ -> None
 
-and private groupReferencesPreceding store dbName (preceding: (string * ColumnDef list) list) item =
+and private sourceReferencesPreceding store dbName (preceding: (string * ColumnDef list) list) item =
     let columnsOf item =
         FromItem.leaves item |> List.choose (fun source ->
             FromItem.tryQualifier source |> Option.map (fun qualifier ->
@@ -8078,9 +8087,7 @@ and private groupReferencesPreceding store dbName (preceding: (string * ColumnDe
             let dependsOnPreceding = found || sourceReferencesPreceding visible join.Table
             dependsOnPreceding, columnsOf join.Table @ visible) initial
         |> fst
-    match item with
-    | FromJoinGroup(source, joins) -> groupReferencesPreceding [] source joins
-    | _ -> false
+    sourceReferencesPreceding [] item
 
 and private applyDependentJoinGroup
     store registry dbName scope sourceOverrides sourcePredicates consumption
@@ -8129,7 +8136,7 @@ and private applyJoin
     | FromLateral(body, alias) -> applyLateralJoin store registry dbName scope consumption state leftOperand join body alias
     | FromJoinGroup _ when
         join.Kind <> RightJoin && join.Kind <> NaturalRightJoin
-        && groupReferencesPreceding store dbName (fst state) join.Table ->
+        && sourceReferencesPreceding store dbName (fst state) join.Table ->
         applyDependentJoinGroup store registry dbName scope sourceOverrides sourcePredicates consumption state leftOperand join
     | _ -> applyResolvedJoin store registry dbName scope sourceOverrides sourcePredicates leftPhysicalTable consumption state leftOperand join
 
@@ -8664,7 +8671,7 @@ and private prepareJoinSource
                         resolveFromItem store registry dbName item
                         |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None))
             | _ ->
-                resolveFromItem store registry dbName item
+                resolveFromItemWithOuter store registry dbName scope.QueryOuter item
                 |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
 
         |> Result.bind (fun (columns, rows, physicalTable) ->
@@ -9124,7 +9131,7 @@ and private applyMutationJoin
     match join.Table with
     | FromJoinGroup _ when
         join.Kind <> RightJoin && join.Kind <> NaturalRightJoin
-        && groupReferencesPreceding store dbName (sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)) join.Table ->
+        && sourceReferencesPreceding store dbName (sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)) join.Table ->
         let prepare outer =
             prepareMutationJoinSource store registry dbName { scope with LateralOuter = Some outer } sourceOverrides join.Table
         applyDependentMutationJoin store registry dbName scope (sourcesSoFar, rowsSoFar) leftOperand join prepare
@@ -10545,7 +10552,7 @@ and private runUnlockedSelectStmt
             match projectedLookup with
             | Some(columns, rows) -> runArbitrary columns rows None select
             | None ->
-                match resolveFromItem store registry dbName fromItem with
+                match resolveFromItemWithOuter store registry dbName outer fromItem with
                 | Error e -> e, [], []
                 | Ok(columns, rows) -> runArbitrary columns rows None select
 

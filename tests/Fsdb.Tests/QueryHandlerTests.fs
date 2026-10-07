@@ -49,7 +49,25 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "EXPLAIN validates lateral mutation sources without writing"
+        [ testCase "nested derived sources retain enclosing query correlation"
+          <| fun _ ->
+              let run = queryFixture
+                            [ "CREATE TABLE a(id INT)"
+                              "CREATE TABLE b(id INT)"
+                              "INSERT INTO a VALUES(1),(2)"
+                              "INSERT INTO b VALUES(1)" ]
+              for query in
+                  [ "SELECT d.id FROM a JOIN LATERAL (SELECT x.id FROM (SELECT a.id AS id) x) d ON 1 ORDER BY a.id"
+                    "SELECT d.id FROM a JOIN LATERAL (SELECT x.id FROM b JOIN (SELECT a.id AS id) x ON 1) d ON 1 ORDER BY a.id"
+                    "SELECT (SELECT x.id FROM (SELECT a.id AS id) x) AS id FROM a ORDER BY a.id"
+                    "SELECT d.id FROM a JOIN (b JOIN LATERAL (SELECT x.id FROM (SELECT a.id AS id) x) d ON 1) ON 1 ORDER BY a.id" ] do
+                  Expect.equal (run query)
+                      (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) query
+              match run "SELECT x.id FROM a JOIN (SELECT a.id AS id) x ON 1" with
+              | Err _ -> ()
+              | other -> failtestf "ordinary derived source cannot see a sibling: %A" other
+
+          testCase "EXPLAIN validates lateral mutation sources without writing"
           <| fun _ ->
               let run = queryFixture
                             [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"
