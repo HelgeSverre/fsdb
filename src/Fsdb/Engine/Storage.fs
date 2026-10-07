@@ -7161,6 +7161,14 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     | None -> { partitioning with Count = partitioning.Count + count }
                     | Some _ -> partitioning.WithNames names
                 { table with Partitioning = Some resized }, None)
+    | AddNamedHashPartitions added ->
+        match table.Partitioning with
+        | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
+        | Some partitioning when uint32 added.Length > 8192u - partitioning.Count ->
+            Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
+        | Some partitioning ->
+            validatePartitionNames (partitioning.OrderedNames @ added)
+            |> Result.map (fun names -> { table with Partitioning = Some(partitioning.WithNames names) }, None)
     | CoalesceHashPartitions count ->
         match table.Partitioning with
         | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))

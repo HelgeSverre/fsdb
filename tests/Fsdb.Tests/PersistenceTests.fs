@@ -2653,7 +2653,8 @@ let tests =
                     "INSERT INTO named_hash VALUES(0),(1),(2),(3),(4),(5)"
                     "ALTER TABLE named_hash ADD PARTITION PARTITIONS 1"
                     "ALTER TABLE named_hash COALESCE PARTITION 1"
-                    "ALTER TABLE named_hash REORGANIZE PARTITION First INTO (PARTITION Renamed)" ] do
+                    "ALTER TABLE named_hash REORGANIZE PARTITION First INTO (PARTITION Renamed)"
+                    "ALTER TABLE named_hash ADD PARTITION (PARTITION Third)" ] do
                   match handle session sql |> snd with
                   | Err(code, message) -> failtestf "%s: %d %s" sql code message
                   | _ -> ()
@@ -2661,10 +2662,10 @@ let tests =
                   let session = Fsdb.Session.create 2 recovered
                   Expect.equal
                       (handle session "SELECT id FROM named_hash PARTITION(renamed) ORDER BY id" |> snd)
-                      (ResultSet([ "id" ], [ [ Some "0" ]; [ Some "2" ]; [ Some "4" ] ]))
-                      "renamed partition retains its row mapping"
+                      (ResultSet([ "id" ], [ [ Some "0" ]; [ Some "3" ] ]))
+                      "renamed partition follows the expanded row mapping"
                   let table = recovered.Catalog.[defaultDatabase].[normalizeTableName "named_hash"]
-                  Expect.equal (table.Partitioning |> Option.map _.OrderedNames) (Some [ "Renamed"; "Second" ]) "ordered names survive"
+                  Expect.equal (table.Partitioning |> Option.map _.OrderedNames) (Some [ "Renamed"; "Second"; "Third" ]) "ordered names survive"
               let recovered = load dir
               verify recovered
               snapshotNow dir recovered

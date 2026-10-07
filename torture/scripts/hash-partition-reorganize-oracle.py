@@ -80,5 +80,45 @@ def verify(client, _writer):
     ), "0,1,2,3,4,5")
 
 
+    verify_additions(client)
+
+
+def verify_additions(client):
+    for method in ["HASH", "LINEAR HASH"]:
+        cases = [
+            ("(PARTITION Third)", None, "p0,p1,Third", "2,5" if method == "HASH" else "2"),
+            ("(PARTITION Third,PARTITION Fourth)", None, "p0,p1,Third,Fourth", "2"),
+            ("(PARTITION p0)", (1517, "HY000"), "p0,p1", None),
+            ("(PARTITION Third,PARTITION third)", (1517, "HY000"), "p0,p1", None),
+            ("PARTITIONS 1 (PARTITION Third)", (1064, "42000"), "p0,p1", None),
+            ("PARTITIONS 2 (PARTITION Third)", (1064, "42000"), "p0,p1", None),
+        ]
+        for suffix, error, expected_names, selected_rows in cases:
+            client.query(
+                "DROP TABLE probe.h;CREATE TABLE probe.h(id INT PRIMARY KEY) "
+                f"PARTITION BY {method}(id) PARTITIONS 2;"
+                "INSERT INTO probe.h VALUES(0),(1),(2),(3),(4),(5)"
+            )
+            sql = "ALTER TABLE h ADD PARTITION " + suffix
+            result = subprocess.run(
+                [*client.process.args, "-e", "USE probe;" + sql + ";SELECT ROW_COUNT()"],
+                capture_output=True, text=True, check=False,
+            )
+            if error is None:
+                expect(method + " " + sql, result.returncode, 0)
+                expect("affected rows", result.stdout.strip(), "0")
+                expect("redistributed rows", client.query(
+                    "SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.h PARTITION(third)"
+                ), selected_rows)
+            else:
+                match = re.search(r"ERROR (\d+) \((\w+)\)", result.stderr)
+                actual = (int(match[1]), match[2]) if match else None
+                expect(method + " " + sql, actual, error)
+            expect("partition names after addition", names(client), expected_names)
+            expect("rows after addition", client.query(
+                "SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.h"
+            ), "0,1,2,3,4,5")
+
+
 if __name__ == "__main__":
     oracle["run"](verify)

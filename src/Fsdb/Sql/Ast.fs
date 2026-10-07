@@ -749,6 +749,7 @@ type AlterAction =
     /// (never below what existing rows already require, like InnoDB).
     | SetAutoIncrement of value: int64
     | AddHashPartitions of count: uint32
+    | AddNamedHashPartitions of names: string list
     | CoalesceHashPartitions of count: uint32
     | ReorganizeHashPartitions of replacement: (string list * string list) option
     | DropPartitions of names: string list

@@ -918,6 +918,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | AddHashPartitions count when format.Partitions -> w.WriteByte 0x13uy; w.WriteInt32LE(int32 count)
     | CoalesceHashPartitions count when format.Partitions -> w.WriteByte 0x14uy; w.WriteInt32LE(int32 count)
     | SetAlterAlgorithm AlgorithmCopy -> w.WriteByte 0x15uy
+    | AddNamedHashPartitions names when format.PartitionNames -> w.WriteByte 0x17uy; writeStrList w names
     | ReorganizeHashPartitions replacement when format.PartitionNames ->
         w.WriteByte 0x16uy
         writeBool w replacement.IsSome
@@ -933,6 +934,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | SetRowFormat _
     | SetTableComment _ -> failwith "Persistence: unsupported ALTER action reached a SchemaChanged event"
     | AddHashPartitions _
+    | AddNamedHashPartitions _
     | ReorganizeHashPartitions _
     | CoalesceHashPartitions _ -> failwith "Persistence: partition ALTER action requires the current WAL format"
 
@@ -961,6 +963,7 @@ let private decodeAlterAction (format: SnapshotFormat) (columnNames: Set<string>
     | 0x13uy when format.Partitions -> AddHashPartitions(uint32 (r.ReadInt32LE()))
     | 0x14uy when format.Partitions -> CoalesceHashPartitions(uint32 (r.ReadInt32LE()))
     | 0x15uy -> SetAlterAlgorithm AlgorithmCopy
+    | 0x17uy when format.PartitionNames -> AddNamedHashPartitions(readStrList r)
     | 0x16uy when format.PartitionNames ->
         ReorganizeHashPartitions(if readBool r then Some(readStrList r, readStrList r) else None)
     | _ -> AddPrimaryKey(readStrList r |> List.map (decodeIndexColumn format columnNames))
@@ -1096,6 +1099,8 @@ let private KindWithFullTextStopwordSettings = 0x1Duy
 let private KindWithFullTextWordLengths = 0x1Euy
 let private KindSchemaChangedV8 = 0x1Fuy
 let private KindSchemaChangedAtV8 = 0x20uy
+let private KindSchemaChangedV9 = 0x21uy
+let private KindSchemaChangedAtV9 = 0x22uy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1271,11 +1276,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteLenEncString table
         w.WriteInt64LE nextId
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV8
+        w.WriteByte KindSchemaChangedV9
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV8
+        w.WriteByte KindSchemaChangedAtV9
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
@@ -1422,10 +1427,10 @@ let rec private decodeEventAt
     | k when k = KindSchemaChangedAtV7 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement fullTextStopwordSourceSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
-    | k when k = KindSchemaChangedV8 ->
+    | k when k = KindSchemaChangedV8 || k = KindSchemaChangedV9 ->
         let db = str ()
         SchemaChanged(db, decodeStatement currentSnapshotFormat (columnsForTable db) r)
-    | k when k = KindSchemaChangedAtV8 ->
+    | k when k = KindSchemaChangedAtV8 || k = KindSchemaChangedAtV9 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement currentSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindXaPrepared ->

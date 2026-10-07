@@ -1378,6 +1378,13 @@ let tests =
                     | AlterTable("p", [ AddHashPartitions 2u; CoalesceHashPartitions 1u ]) -> ()
                     | other -> failtestf "expected HASH partition growth actions, got %A" other
 
+                    for sql in
+                        [ "ALTER TABLE p ADD PARTITION PARTITIONS 1 (PARTITION Third)"
+                          "ALTER TABLE p ADD PARTITION PARTITIONS 2 (PARTITION Third)" ] do
+                        match parse sql with
+                        | Error _ -> ()
+                        | other -> failtestf "expected count-plus-names syntax rejection, got %A" other
+
                     match parseOk "ALTER TABLE p DROP PARTITION p0,p2" with
                     | AlterTable("p", [ DropPartitions [ "p0"; "p2" ] ]) -> ()
                     | other -> failtestf "expected named partition removal, got %A" other

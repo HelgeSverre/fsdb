@@ -1,8 +1,8 @@
 # HASH partition names and reorganization
 
-Status: named definitions and named/no-list reorganization are covered by
-regressions. Explicit-name addition, partition-option clauses, and physical
-pruning remain open. The regression baseline `e9c0a7bd` rejected explicit
+Status: named definitions, explicit-name addition, and named/no-list
+reorganization are covered by regressions. Partition-option clauses and
+physical pruning remain open. The regression baseline `e9c0a7bd` rejected explicit
 names and both reorganization forms with 1064 / 42000.
 
 ## Oracle
@@ -46,7 +46,7 @@ partition.
 
 `HashPartitioning` retains optional ordered names alongside its count. The
 same names feed reorganization, ADD/COALESCE, selection, truncation, metadata,
-and rendering. Snapshot format FSNJ and schema WAL version 8 persist them;
+and rendering. Snapshot format FSNJ and schema WAL version 9 persist them;
 count-only snapshots and WAL records continue to synthesize `p0`…`pN`.
 
 Partition-qualified sources retain the partition-aware read path. The failing
@@ -54,17 +54,30 @@ regression also exposed an indexed ordering path that returned the entire
 table despite `PARTITION(...)`; ordered reads, counts, and joins now verify
 the selected rows.
 
-The root gate passes 2,943 tests. Dedicated recovery tests cover named WAL and
+The root gate passes 2,944 tests. Dedicated recovery tests cover named WAL and
 snapshot recovery plus count-only V7 WAL and FSNI snapshots. The native oracle
 passes. The compatibility lane passes 49 cases / 5,117 steps with zero
-differences at `20261007T112224871-7410/contracts`. The durability lane passes
-at `20261007T112253084-7612/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
+differences at `20261007T113119060-18198/contracts`. The durability lane passes
+at `20261007T113138610-18520/durability-seed101-workers4-ops100-restarts8-checkpoint16`,
 including acknowledged commits across 12 crash restarts.
 
 ## Remaining boundary
 
-Native MySQL also accepts `ADD PARTITION (PARTITION Third)` and partition
-options such as `COMMENT 'x'`; fsdb still refuses those forms. The maintained
-oracle includes explicit-name addition and verifies that a subsequent no-list
-reorganization retains the first name and every row. Physical pruning remains
-a separate performance gap.
+Native MySQL accepts partition options such as `COMMENT 'x'`; fsdb still
+refuses these clauses. Physical pruning remains a separate performance gap.
+
+## Explicit-name additions
+
+The baseline `0e0cb8b6` refused `ADD PARTITION (PARTITION Third)`. The regression
+covers one or several added names, case-insensitive collisions with existing
+or newly added names, preserved metadata after rejection, and durable names.
+The native oracle also verifies that mixing `PARTITIONS n` with a name list
+fails with 1064 / 42000, and that successful additions report zero affected
+rows.
+
+For rows 0 through 5, expanding two partitions to three puts rows 2 and 5 in
+`Third` under HASH, but only row 2 under LINEAR HASH. Both methods put row 2
+there after expanding to four partitions. The maintained oracle checks these
+row mappings and verifies that no-list reorganization retains the first name
+and every row. Older WAL versions remain readable; snapshots retain format
+FSNJ because the stored partition representation is unchanged.

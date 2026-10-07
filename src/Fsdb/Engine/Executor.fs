@@ -18893,6 +18893,7 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         | SetAutoIncrement _
         | SetRowFormat _ -> onlineAlgorithms
         | AddHashPartitions _
+        | AddNamedHashPartitions _
         | CoalesceHashPartitions _
         | ReorganizeHashPartitions _
         | DropPartitions _
@@ -18979,7 +18980,7 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
     elif
         hasExecutionOption
         && operations
-           |> List.exists (function AddHashPartitions _ | CoalesceHashPartitions _ | ReorganizeHashPartitions _ | DropPartitions _ | TruncatePartitions _ -> true | _ -> false)
+           |> List.exists (function AddHashPartitions _ | AddNamedHashPartitions _ | CoalesceHashPartitions _ | ReorganizeHashPartitions _ | DropPartitions _ | TruncatePartitions _ -> true | _ -> false)
     then
         Some(Err(1064, "You have an error in your SQL syntax"))
     elif algorithm = AlgorithmInstant && lockMode <> LockDefault then

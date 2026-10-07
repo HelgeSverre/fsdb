@@ -134,6 +134,25 @@ let tests =
                     execute "ALTER TABLE p TRUNCATE PARTITION renamed" |> ignore
                     rows "SELECT id FROM p ORDER BY id" [ [ Some "1" ]; [ Some "3" ]; [ Some "5" ] ]
 
+                testCase "explicit HASH partition additions append names and redistribute rows"
+                <| fun _ ->
+                    for method, expected in [ "HASH", [ [ Some "2" ]; [ Some "5" ] ]; "LINEAR HASH", [ [ Some "2" ] ] ] do
+                        let store = newStore ()
+                        runDefault store (sprintf "CREATE TABLE p(id INT PRIMARY KEY) PARTITION BY %s(id) PARTITIONS 2" method) |> ignore
+                        runDefault store "INSERT INTO p VALUES(0),(1),(2),(3),(4),(5)" |> ignore
+                        Expect.equal (runDefault store "ALTER TABLE p ADD PARTITION (PARTITION Third)") (Affected 0UL) "named addition succeeds"
+                        match runDefault store "SELECT id FROM p PARTITION(third) ORDER BY id" with
+                        | ResultSet(_, rows) -> Expect.equal rows expected "existing rows follow the expanded hash map"
+                        | other -> failtestf "expected selected rows, got %A" other
+                        for addition in [ "PARTITION p0"; "PARTITION Fourth,PARTITION fourth" ] do
+                            match runDefault store ("ALTER TABLE p ADD PARTITION (" + addition + ")") with
+                            | Err(1517, _) -> ()
+                            | other -> failtestf "expected duplicate name rejection, got %A" other
+                        match runDefault store "SELECT PARTITION_NAME FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='p' ORDER BY PARTITION_ORDINAL_POSITION" with
+                        | ResultSet(_, rows) -> Expect.equal rows [ [ Some "p0" ]; [ Some "p1" ]; [ Some "Third" ] ] "rejected additions leave all names intact"
+                        | other -> failtestf "expected partition metadata, got %A" other
+                        Expect.equal (runDefault store "ALTER TABLE p ADD PARTITION (PARTITION Fourth,PARTITION Fifth)") (Affected 0UL) "multiple explicit names append atomically"
+
                 testCase "HASH reorganization validates contiguous names and preserves rows"
                 <| fun _ ->
                     for method in [ "HASH"; "LINEAR HASH" ] do

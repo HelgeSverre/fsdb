@@ -3179,7 +3179,8 @@ let private alterHashPartitions: Parser<AlterAction, unit> =
             | value when value > uint64 UInt32.MaxValue -> fail "the number of partitions is too large"
             | value -> preturn (uint32 value)
 
-    (attempt (keyword "ADD" >>. keyword "PARTITION" >>. keyword "PARTITIONS") >>. count |>> AddHashPartitions)
+    (attempt (keyword "ADD" >>. keyword "PARTITION")
+     >>. ((keyword "PARTITIONS" >>. count |>> AddHashPartitions) <|> (hashPartitionNames |>> AddNamedHashPartitions)))
     <|> (attempt (keyword "COALESCE" >>. keyword "PARTITION") >>. count |>> CoalesceHashPartitions)
     <|> (attempt (keyword "REORGANIZE" >>. keyword "PARTITION")
          >>. opt (sepBy1 identifier (sym ",") .>> keyword "INTO" .>>. hashPartitionNames)

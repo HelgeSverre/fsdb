@@ -457,9 +457,10 @@ duration does not apply.
 partition count and optional explicit names. Generated names use `p0`…`pN`;
 explicit names retain their spelling in `information_schema.PARTITIONS` and
 `SHOW CREATE TABLE`, with case-insensitive `PARTITION (...)` selection.
-`ALTER TABLE ... ADD PARTITION PARTITIONS n` and `COALESCE PARTITION n` update
-the logical map while preserving surviving names. Generated-name collisions
-are rejected.
+`ALTER TABLE ... ADD PARTITION PARTITIONS n`, explicit additions such as
+`ADD PARTITION (PARTITION next_name)`, and `COALESCE PARTITION n` update the
+logical map while preserving surviving names. Duplicate names, including
+generated-name collisions, are rejected atomically.
 
 `REORGANIZE PARTITION old_names INTO (PARTITION new_name, ...)` replaces the
 names of a consecutive set without changing its size. The no-list form
@@ -474,8 +475,8 @@ partition pruning or separate storage. `ANALYZE`, `CHECK`, `OPTIMIZE`, and
 rows. `TRUNCATE PARTITION` removes rows from named partitions without firing
 DELETE triggers and preserves the table's AUTO_INCREMENT counter.
 
-`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Explicit-name
-`ADD PARTITION` and per-partition options such as comments remain unsupported.
+`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Per-partition
+options such as comments remain unsupported.
 
 ## Check constraints
 
