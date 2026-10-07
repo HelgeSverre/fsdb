@@ -49,7 +49,32 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "lateral results preserve binary collation through correlation and UNION"
+        [ testCase "JSON_TABLE natural and right joins share read and mutation rules"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"
+                        "INSERT INTO a VALUES(1,0),(2,0)" ]
+              for join, values in
+                  [ "NATURAL JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(id INT PATH '$')) j", [ "1"; "2" ]
+                    "NATURAL LEFT JOIN JSON_TABLE('[1]','$[*]' COLUMNS(id INT PATH '$')) j", [ "1"; "2" ]
+                    "NATURAL RIGHT JOIN JSON_TABLE('[1,3]','$[*]' COLUMNS(id INT PATH '$')) j", [ "1"; "3" ] ] do
+                  Expect.equal (run ("SELECT id FROM a " + join + " ORDER BY id"))
+                      (ResultSet([ "id" ], values |> List.map (fun value -> [ Some value ]))) join
+              Expect.equal
+                  (run "SELECT a.id,j.id FROM a RIGHT JOIN JSON_TABLE('[1,3]','$[*]' COLUMNS(id INT PATH '$')) j ON a.id=j.id ORDER BY j.id")
+                  (ResultSet([ "id"; "id" ], [ [ Some "1"; Some "1" ]; [ None; Some "3" ] ])) "right padding"
+              match run "SELECT * FROM a RIGHT JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(id INT PATH '$')) j ON 1" with
+              | Err(1109, _) -> ()
+              | other -> failtestf "invalid right dependency: %A" other
+              Expect.equal (run "UPDATE a NATURAL JOIN JSON_TABLE('[1]','$[*]' COLUMNS(id INT PATH '$')) j SET a.n=7")
+                  (Affected 1UL) "natural update"
+              Expect.equal (run "UPDATE a RIGHT JOIN JSON_TABLE('[2,3]','$[*]' COLUMNS(id INT PATH '$')) j ON a.id=j.id SET a.n=8")
+                  (Affected 1UL) "right update skips padded targets"
+              Expect.equal (run "SELECT * FROM a ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "7" ]; [ Some "2"; Some "8" ] ])) "stored targets"
+
+          testCase "lateral results preserve binary collation through correlation and UNION"
           <| fun _ ->
               let run =
                   queryFixture

@@ -8064,7 +8064,9 @@ and private applyJoin
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Table with
-    | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName scope state join source path columns alias
+    | FromJsonTable _ when join.Kind = RightJoin || join.Kind = NaturalRightJoin ->
+        applyResolvedJoin store registry dbName scope sourceOverrides sourcePredicates leftPhysicalTable consumption state leftOperand join
+    | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName scope state leftOperand join source path columns alias
     | FromLateral(body, alias) -> applyLateralJoin store registry dbName scope consumption state leftOperand join body alias
     | FromJoinGroup _ when
         join.Kind <> RightJoin && join.Kind <> NaturalRightJoin
@@ -8137,6 +8139,7 @@ and private expandJsonTableJoinRows
     (rowsSoFar: 'Row seq)
     (flatRow: 'Row -> Value[])
     (combine: 'Row -> Value[] -> 'Result)
+    (leftOperand: FromItem option)
     (join: Join)
     (source: Expr)
     (path: string)
@@ -8146,31 +8149,19 @@ and private expandJsonTableJoinRows
     let outer = scope.QueryOuter
     match join.Kind, validateJsonTableAllocationBounds columns with
     | _, Error error -> Error error
-    | (InnerJoin | StraightJoin | CrossJoin | LeftJoin), Ok joinColumns ->
+    | (InnerJoin | StraightJoin | CrossJoin | LeftJoin | NaturalJoin | NaturalLeftJoin), Ok joinColumns ->
         let newSources = sourcesSoFar @ [ alias, joinColumns ]
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
         let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) scope.LateralOuter
         let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) (qualifierRanges newSources) outer
 
-        namedEquiKeys combinedColumnsSoFar joinColumns join.Using
-        |> Result.bind (fun usingKeys ->
-            let leftKeyIndices = usingKeys |> List.map fst |> Array.ofList
-            let rightKeyIndices = usingKeys |> List.map snd |> Array.ofList
-            let keyComparer =
-                SqlValueKeyComparer(joinKeyCollations combinedColumnsSoFar joinColumns usingKeys, true)
-                :> System.Collections.Generic.IEqualityComparer<Value[]>
+        let coalesceNames =
+            match join.Kind with
+            | NaturalJoin | NaturalLeftJoin -> naturalCommonNames combinedColumnsSoFar joinColumns
+            | _ -> join.Using
 
-            let usingMatches (left: Value[]) (right: Value[]) =
-                if usingKeys.IsEmpty then
-                    true
-                else
-                    match
-                        readEquiKeyOf store combinedColumnsSoFar leftKeyIndices left,
-                        readEquiKeyOf store joinColumns rightKeyIndices right
-                    with
-                    | Some leftKey, Some rightKey -> keyComparer.Equals(leftKey, rightKey)
-                    | _ -> false
-
+        resolvedJoinCondition sourcesSoFar [ alias, joinColumns ] leftOperand join
+        |> Result.bind (fun effectiveOn ->
             let rec qualifierInScope (ctx: EvalContext) (qualifier: string) =
                 ctx.Qualifiers.ContainsKey(qualifier.ToLowerInvariant())
                 || (ctx.Outer |> Option.exists (fun outerCtx -> qualifierInScope outerCtx qualifier))
@@ -8197,17 +8188,16 @@ and private expandJsonTableJoinRows
                     jsonTableRows doc path columns
                     |> Result.bind (fun jtRows ->
                         jtRows
-                        |> List.filter (usingMatches left)
                         |> traverse (fun right ->
                             let combined = Array.append left right
 
-                            evalExpr { ctxFor combined with Clause = OnClause } join.On
+                            evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
                             |> Result.map (fun value -> combine row combined, truthy value = Some true))
                         |> Result.mapError Err
                         |> Result.map (fun checkedRows ->
                             let matches = checkedRows |> List.filter snd |> List.map fst
 
-                            if matches.IsEmpty && join.Kind = LeftJoin then
+                            if matches.IsEmpty && (join.Kind = LeftJoin || join.Kind = NaturalLeftJoin) then
                                 [ combine row (Array.append left (Array.create joinColumns.Length VNull)) ]
                             else
                                 matches))
@@ -8215,9 +8205,9 @@ and private expandJsonTableJoinRows
             rowsSoFar
             |> List.ofSeq
             |> traverse expandLeft
-            |> Result.map (fun expanded -> joinColumns, (expanded |> List.concat |> Seq.ofList), join.Using))
+            |> Result.map (fun expanded -> joinColumns, (expanded |> List.concat |> Seq.ofList), coalesceNames))
     | _ ->
-        Error(Err(1064, "JSON_TABLE only supports comma-join, CROSS JOIN, [INNER] JOIN ... ON, and LEFT JOIN ... ON"))
+        Error(Err(1064, "a dependent JSON_TABLE source cannot preserve the right operand"))
 
 /// `applyJoin`'s JSON_TABLE branch — MySQL's lateral semantics: the source
 /// expression re-evaluates against each left row. NULL documents and empty
@@ -8228,6 +8218,7 @@ and private applyJsonTableJoin
     (dbName: string)
     (scope: JoinEvaluationScope)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
+    (leftOperand: FromItem option)
     (join: Join)
     (source: Expr)
     (path: string)
@@ -8243,6 +8234,7 @@ and private applyJsonTableJoin
         rowsSoFar
         id
         (fun _ combined -> combined)
+        leftOperand
         join
         source
         path
@@ -9068,7 +9060,7 @@ and private applyMutationJoin
     match join.Table with
     | FromLateral _ ->
         Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
-    | FromJsonTable(source, path, columns, alias) ->
+    | FromJsonTable(source, path, columns, alias) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
         let sourceColumns = sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)
 
         expandJsonTableJoinRows
@@ -9080,6 +9072,7 @@ and private applyMutationJoin
             rowsSoFar
             snd
             (fun (identities, _) combined -> identities @ [ None ], combined)
+            leftOperand
             join
             source
             path
@@ -9118,13 +9111,13 @@ and private applyMutationJoin
                 |> Result.map (fun (columns, rows, identityOf) ->
                     [ { Qualifier = qualifier; PhysicalTable = Some tableRef; Columns = columns } ],
                     rows |> List.map (fun row -> [ identityOf row ], row))
-            | FromSubquery(_, qualifier) ->
+            | FromSubquery(_, qualifier)
+            | FromJsonTable(_, _, _, qualifier) ->
                 resolveFromSubquery store registry dbName source None
                 |> Result.map (fun (columns, rows) ->
                     [ { Qualifier = qualifier; PhysicalTable = None; Columns = columns } ],
                     rows |> List.map (fun row -> [ None ], row))
-            | FromLateral _
-            | FromJsonTable _ -> failwith "applyMutationJoin: lateral source handled above"
+            | FromLateral _ -> failwith "applyMutationJoin: lateral source handled above"
 
         match resolved with
         | Error e -> Error e

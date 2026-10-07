@@ -320,3 +320,13 @@ comparison and COLLATION for local-source projections, direct correlated
 projections, and correlated UNION ALL bodies. Every UNION branch receives the
 same outer context, including the first branch. Broader computed metadata and
 optimizer-dependent materialization behavior remain subject to verification.
+
+## JSON_TABLE natural and right joins
+
+The [JSON_TABLE join oracle](../scripts/json-table-join-oracle.py) covers
+correlated NATURAL joins, NATURAL LEFT padding, independent RIGHT and NATURAL
+RIGHT sources, and rejection of a right source referencing its left operand.
+NATURAL/USING matching uses the shared logical join-condition resolver.
+Independent right sources use the ordinary read or mutation matcher. Native
+UPDATE fixtures verify affected rows and stored targets, including skipping
+NULL-padded targets. Broader dependent mutation combinations remain uncovered.
