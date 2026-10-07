@@ -2220,6 +2220,13 @@ type private EvalContext =
       /// instead of a projection.
       Clause: Clause }
 
+type private JoinEvaluationScope =
+    { QueryOuter: EvalContext option
+      LateralOuter: EvalContext option }
+
+let private joinEvaluationScope outer =
+    { QueryOuter = outer; LateralOuter = outer }
+
 type private ResolvedJoinSource =
     { Sources: (string * ColumnDef list) list
       Columns: ColumnDef list
@@ -7456,7 +7463,7 @@ and private resolveFromSubquery
     : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
     | FromJoinGroup _ ->
-        prepareJoinSource store registry dbName outer Map.empty Map.empty item
+        prepareJoinSource store registry dbName (joinEvaluationScope outer) Map.empty Map.empty item
         |> Result.map (fun source -> source.Columns, List.ofSeq source.Rows)
     | FromTable _
     | FromJsonTable _ -> resolveFromItem store registry dbName item
@@ -7967,7 +7974,7 @@ and private applyJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
-    (outer: EvalContext option)
+    (scope: JoinEvaluationScope)
     (sourceOverrides: JoinSourceOverrides)
     (sourcePredicates: Map<string, Expr>)
     (leftPhysicalTable: Table option)
@@ -7977,9 +7984,9 @@ and private applyJoin
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Table with
-    | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName outer state join source path columns alias
-    | FromLateral(body, alias) -> applyLateralJoin store registry dbName outer state join body alias
-    | _ -> applyResolvedJoin store registry dbName outer sourceOverrides sourcePredicates leftPhysicalTable consumption state leftOperand join
+    | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName scope state join source path columns alias
+    | FromLateral(body, alias) -> applyLateralJoin store registry dbName scope state join body alias
+    | _ -> applyResolvedJoin store registry dbName scope sourceOverrides sourcePredicates leftPhysicalTable consumption state leftOperand join
 
 /// `applyJoin`'s LATERAL branch — the derived table re-runs once per left
 /// row, with that row (over the columns joined so far) as its outer context,
@@ -7994,20 +8001,21 @@ and private applyLateralJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
-    (outer: EvalContext option)
+    (scope: JoinEvaluationScope)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     (body: SelectOrUnion)
     (alias: string)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    let outer = scope.QueryOuter
     match join.Kind, join.Using with
     | (InnerJoin | StraightJoin | CrossJoin | LeftJoin), [] ->
         let leftRows = rowsSoFar |> List.ofSeq
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
-        let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer
+        let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) scope.LateralOuter
 
         let runBody (leftRow: Value[] option) : Result<ColumnDef list * Value[] list, QueryResult> =
-            let bodyOuter = leftRow |> Option.map leftCtxFor |> Option.orElse outer
+            let bodyOuter = leftRow |> Option.map leftCtxFor |> Option.orElse scope.LateralOuter
 
             match body with
             | PlainSelect select ->
@@ -8084,7 +8092,7 @@ and private expandJsonTableJoinRows
     (store: Store)
     (registry: Registry)
     (dbName: string)
-    (outer: EvalContext option)
+    (scope: JoinEvaluationScope)
     (sourcesSoFar: (string * ColumnDef list) list)
     (rowsSoFar: 'Row seq)
     (flatRow: 'Row -> Value[])
@@ -8095,12 +8103,13 @@ and private expandJsonTableJoinRows
     (columns: JsonTableColumn list)
     (alias: string)
     : Result<ColumnDef list * 'Result seq * string list, QueryResult> =
+    let outer = scope.QueryOuter
     match join.Kind, validateJsonTableAllocationBounds columns with
     | _, Error error -> Error error
     | (InnerJoin | StraightJoin | CrossJoin | LeftJoin), Ok joinColumns ->
         let newSources = sourcesSoFar @ [ alias, joinColumns ]
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
-        let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer
+        let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) scope.LateralOuter
         let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) (qualifierRanges newSources) outer
 
         namedEquiKeys combinedColumnsSoFar joinColumns join.Using
@@ -8177,7 +8186,7 @@ and private applyJsonTableJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
-    (outer: EvalContext option)
+    (scope: JoinEvaluationScope)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     (source: Expr)
@@ -8189,7 +8198,7 @@ and private applyJsonTableJoin
         store
         registry
         dbName
-        outer
+        scope
         sourcesSoFar
         rowsSoFar
         id
@@ -8528,19 +8537,20 @@ and private prepareJoinSource
     (store: Store)
     (registry: Registry)
     (dbName: string)
-    (outer: EvalContext option)
+    (scope: JoinEvaluationScope)
     (sourceOverrides: JoinSourceOverrides)
     (sourcePredicates: Map<string, Expr>)
     (item: FromItem)
     : Result<ResolvedJoinSource, QueryResult> =
+    let outer = scope.QueryOuter
     match item with
     | FromItem.Grouped(source, joins) ->
-        prepareJoinSource store registry dbName outer sourceOverrides Map.empty source
+        prepareJoinSource store registry dbName scope sourceOverrides Map.empty source
         |> Result.bind (fun initial ->
             joins
             |> List.fold (fun state join ->
                 state |> Result.bind (fun (sources, rows, leftOperand) ->
-                    applyJoin store registry dbName outer sourceOverrides Map.empty None ConsumesAllRows (sources, rows) (Some leftOperand) join
+                    applyJoin store registry dbName scope sourceOverrides Map.empty None ConsumesAllRows (sources, rows) (Some leftOperand) join
                     |> Result.map (fun (sources, rows, _) -> sources, rows, FromJoinGroup(leftOperand, [ join ]))))
                 (Ok(initial.Sources, initial.Rows, source)))
         |> Result.map (fun (sources, rows, _) ->
@@ -8622,7 +8632,7 @@ and private applyResolvedJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
-    (outer: EvalContext option)
+    (scope: JoinEvaluationScope)
     (sourceOverrides: JoinSourceOverrides)
     (sourcePredicates: Map<string, Expr>)
     (leftPhysicalTable: Table option)
@@ -8631,7 +8641,8 @@ and private applyResolvedJoin
     (leftOperand: FromItem option)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
-    let joinSource = prepareJoinSource store registry dbName outer sourceOverrides sourcePredicates join.Table
+    let outer = scope.QueryOuter
+    let joinSource = prepareJoinSource store registry dbName scope sourceOverrides sourcePredicates join.Table
 
     match joinSource with
     | Error e -> Error e
@@ -9009,7 +9020,7 @@ and private applyMutationJoin
             store
             registry
             dbName
-            None
+            (joinEvaluationScope None)
             sourceColumns
             rowsSoFar
             snd
@@ -10247,7 +10258,7 @@ and private runUnlockedSelectStmt
                 match prepared with
                 | Error error -> error, [], []
                 | Ok(baseRows, select) ->
-                    let applyPlannedJoin = applyJoin store registry dbName outer Map.empty pushedWhere
+                    let applyPlannedJoin = applyJoin store registry dbName (joinEvaluationScope outer) Map.empty pushedWhere
 
                     let initial = Ok(([ baseQualifier, baseColumns ], baseRows, basePhysicalTable), fromItem)
 
@@ -16069,7 +16080,7 @@ and private runFullTextSelect
                                 |> Result.bind (fun ((resolved, rows), leftOperand) ->
                                     let rewrittenJoin = Join.mapConditions sub join
 
-                                    applyJoin store registry dbName outer overrides sourcePredicates None joinConsumption (resolved, rows) (Some leftOperand) rewrittenJoin
+                                    applyJoin store registry dbName (joinEvaluationScope outer) overrides sourcePredicates None joinConsumption (resolved, rows) (Some leftOperand) rewrittenJoin
                                     |> Result.map (fun (sources, rows, _) -> (sources, rows), FromJoinGroup(leftOperand, [ join ]))))
                             initial
 
