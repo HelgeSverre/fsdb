@@ -1,8 +1,7 @@
 # Ngram startup sizing and recovery
 
-Status: partial. Startup configuration and mixed-size recovery are implemented;
-common metadata DDL preserves postings, while metadata-only MODIFY/CHANGE
-column definitions remain open.
+Status: implemented for the maintained startup, mixed-size DDL, and recovery
+contracts. Additional algorithm and constraint combinations remain unverified.
 
 The native MySQL 8.4.11 [oracle](../scripts/ngram-size-oracle.py) starts a
 private disposable server, retains its data directory across restarts, and
@@ -44,8 +43,8 @@ indexing context in an event wrapper; legacy records continue to mean size 2.
 Changing only the startup constant would silently retokenize historical data
 and disagree with the observed recovery behavior.
 
-Completing configurable sizing requires preserving postings for metadata-only
-MODIFY/CHANGE column definitions across size changes. Prepared-XA publication
+Metadata-only MODIFY/CHANGE column definitions preserve historical postings.
+Prepared-XA publication
 retains each document's recorded tokenizer through live commit, WAL replay,
 and snapshots. The [prepared-XA oracle](2026-10-07-ngram-xa-recovery.md) records
 missing pending ngram postings after MySQL restart even without a token-size
@@ -138,9 +137,14 @@ physical rebuild intent as a COPY action in WAL ALTER tag 0x15. Older binaries
 cannot replay this new tag. The regression covers live queries, WAL replay, and
 snapshot recovery for the maintained matrix.
 
-An additional native probe confirms that `MODIFY body TEXT COMMENT 'changed'`
-and `CHANGE body renamed_body TEXT` preserve postings when the original column
-is nullable TEXT. fsdb still rebuilds these column definitions; this remains open.
+The maintained oracle and regression cover unchanged MODIFY definitions,
+comment/default edits, CHANGE column renames, unchanged versus moved positions,
+nullability, and collation changes. fsdb classifies each action using the column's
+before/after storage definition and position, so metadata edits retain historical
+document tokenizers. VARCHAR widening preserves postings when its maximum encoded
+length uses the same one- or two-byte length prefix; widening across 255 bytes
+rebuilds. The matrix exercises both boundaries with utf8mb4 columns and verifies
+live, WAL, and snapshot results.
 Foreign-key/check enforcement combinations and explicit algorithm variants need
 further coverage before claiming complete DDL parity.
 
@@ -149,10 +153,10 @@ further coverage before claiming complete DDL parity.
 On 2026-10-07, `just check` passes 2,871 tests with no build warnings or errors.
 The native DDL oracle and executable startup/restart check pass. Native MySQL 8.4.11 validation
 passes 47 contract cases and all 5,007 differential steps, with no differences:
-`torture/artifacts/runs/20261007T034239394-62861/contracts/manifest.json`.
+`torture/artifacts/runs/20261007T035453735-64873/contracts/manifest.json`.
 
 The durability lane with seed 101, four workers, 100 operations per worker,
 eight requested restarts, and checkpoint interval 16 passes. All 12 total
 crash/restart checks preserve acknowledged commits and transaction boundaries,
 including schema state, WAL tail, snapshots, and torn-tail repair. Artifact:
-`torture/artifacts/runs/20261007T034321656-63019/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T035550767-64918/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

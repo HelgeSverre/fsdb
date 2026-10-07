@@ -63,6 +63,20 @@ def run():
         raise RuntimeError("MySQL did not become ready")
 
     cases = [
+        ("varchar_small", "MODIFY body VARCHAR(21)"),
+        ("varchar_large", "MODIFY body VARCHAR(300)"),
+        ("varchar_cross", "MODIFY body VARCHAR(300)"),
+        ("modify_same", "MODIFY body TEXT"),
+        ("modify_comment", "MODIFY body TEXT COMMENT 'changed'"),
+        ("change_name", "CHANGE body renamed_body TEXT"),
+        ("modify_default", "MODIFY extra INT DEFAULT 4"),
+        ("modify_extra_comment", "MODIFY extra INT COMMENT 'changed'"),
+        ("modify_nullable", "MODIFY body TEXT NOT NULL"),
+        ("modify_order", "MODIFY body TEXT AFTER id"),
+        ("modify_same_order", "MODIFY body TEXT AFTER extra"),
+        ("modify_extra_type", "MODIFY extra BIGINT"),
+        ("modify_collation", "MODIFY body TEXT COLLATE utf8mb4_0900_as_cs"),
+        ("modify_charset", "MODIFY body TEXT CHARACTER SET utf8mb4"),
         ("comment", "COMMENT='changed'"),
         ("add_check", "ADD CONSTRAINT added CHECK(extra>=0)"),
         ("visibility", "ALTER INDEX existing INVISIBLE"),
@@ -89,7 +103,8 @@ def run():
             start(2, log)
             sql("CREATE DATABASE probe CHARACTER SET utf8mb4")
             for name, action in cases:
-                sql(f"CREATE TABLE probe.{name}(id INT PRIMARY KEY AUTO_INCREMENT, extra INT DEFAULT 0, body TEXT, KEY existing(extra), FULLTEXT KEY ft(body) WITH PARSER ngram)")
+                body_type = {"varchar_small": "VARCHAR(20)", "varchar_cross": "VARCHAR(20)", "varchar_large": "VARCHAR(200)"}.get(name, "TEXT")
+                sql(f"CREATE TABLE probe.{name}(id INT PRIMARY KEY AUTO_INCREMENT, extra INT DEFAULT 0, body {body_type}, KEY existing(extra), FULLTEXT KEY ft(body) WITH PARSER ngram)")
                 sql(f"INSERT INTO probe.{name}(id,body) VALUES(1,'生日快乐')")
             stop()
             start(3, log)
@@ -99,9 +114,9 @@ def run():
                     sql(f"ALTER TABLE probe.{name} ADD FULLTEXT KEY second(body) WITH PARSER ngram")
                 sql(f"ALTER TABLE probe.{name} {action}")
                 table = "renamed_table" if name == "rename_table" else name
-                column = "renamed_body" if name == "rename_column" else "body"
+                column = "renamed_body" if name in {"rename_column", "change_name"} else "body"
                 result = sql(f"SELECT (SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.{table} WHERE MATCH({column}) AGAINST('生日' IN BOOLEAN MODE)), (SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.{table} WHERE MATCH({column}) AGAINST('生日快' IN BOOLEAN MODE))")
-                rebuilt = name in {"add_check", "comment_copy", "rowformat", "add_column", "drop_column", "modify_body", "engine"}
+                rebuilt = name in {"varchar_cross", "modify_nullable", "modify_order", "modify_extra_type", "modify_collation", "add_check", "comment_copy", "rowformat", "add_column", "drop_column", "modify_body", "engine"}
                 expected = "NULL\t1,2" if rebuilt else "1\t2"
                 assert result == expected, (name, expected, result)
                 print(name, result, flush=True)

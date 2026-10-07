@@ -53,7 +53,7 @@ let tests =
 
           testCase "ngram ALTER preserves postings for metadata and rebuilds for physical changes"
           <| fun _ ->
-              for action, column, table, rebuilt in
+              let textCases =
                   [ "COMMENT='changed'", "body", "docs", false
                     "COMMENT='changed', ALGORITHM=COPY", "body", "docs", true
                     "RENAME INDEX ft TO renamed", "body", "docs", false
@@ -68,15 +68,32 @@ let tests =
                     "ADD COLUMN added INT", "body", "docs", true
                     "DROP COLUMN extra", "body", "docs", true
                     "MODIFY body MEDIUMTEXT", "body", "docs", true
+                    "MODIFY body TEXT", "body", "docs", false
+                    "MODIFY body TEXT COMMENT 'changed'", "body", "docs", false
+                    "CHANGE body renamed_body TEXT", "renamed_body", "docs", false
+                    "MODIFY extra INT DEFAULT 4", "body", "docs", false
+                    "MODIFY extra INT COMMENT 'changed'", "body", "docs", false
+                    "MODIFY body TEXT NOT NULL", "body", "docs", true
+                    "MODIFY body TEXT AFTER id", "body", "docs", true
+                    "MODIFY body TEXT AFTER extra", "body", "docs", false
+                    "MODIFY extra BIGINT", "body", "docs", true
+                    "MODIFY body TEXT COLLATE utf8mb4_0900_as_cs", "body", "docs", true
+                    "MODIFY body TEXT CHARACTER SET utf8mb4", "body", "docs", false
                     "ALTER COLUMN extra SET DEFAULT 3", "body", "docs", false
                     "AUTO_INCREMENT=20", "body", "docs", false
                     "ENGINE=InnoDB", "body", "docs", true
                     "ROW_FORMAT=DYNAMIC", "body", "docs", true
-                    "DROP INDEX ft, ADD FULLTEXT KEY ft(body) WITH PARSER ngram", "body", "docs", false ] do
+                    "DROP INDEX ft, ADD FULLTEXT KEY ft(body) WITH PARSER ngram", "body", "docs", false ]
+              let cases =
+                  (textCases |> List.map (fun (action, column, table, rebuilt) -> action, column, table, rebuilt, "TEXT"))
+                  @ [ "MODIFY body VARCHAR(21)", "body", "docs", false, "VARCHAR(20)"
+                      "MODIFY body VARCHAR(300)", "body", "docs", false, "VARCHAR(200)"
+                      "MODIFY body VARCHAR(300)", "body", "docs", true, "VARCHAR(20)" ]
+              for action, column, table, rebuilt, initialBodyType in cases do
                   let dir = TestSupport.directory "ngram-alter"
                   let initial = Db.create () |> Db.withDataDir dir
                   let connection = Db.connect initial
-                  Expect.equal (connection.Query "CREATE TABLE docs(id INT PRIMARY KEY AUTO_INCREMENT,extra INT DEFAULT 0,body TEXT,KEY existing(extra),FULLTEXT KEY ft(body) WITH PARSER ngram)") (Affected 0UL) "create"
+                  Expect.equal (connection.Query (sprintf "CREATE TABLE docs(id INT PRIMARY KEY AUTO_INCREMENT,extra INT DEFAULT 0,body %s,KEY existing(extra),FULLTEXT KEY ft(body) WITH PARSER ngram)" initialBodyType)) (Affected 0UL) "create"
                   Expect.equal (connection.Query "INSERT INTO docs(id,body) VALUES(1,'生日快乐')") (Affected 1UL) "historical write"
                   let changed = Db.create () |> Db.withDataDir dir |> Db.withNgramTokenSize 3
                   let connection = Db.connect changed

@@ -7018,7 +7018,36 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
     | DropCheck _
     | SetCheckEnforced _ -> Ok(table, None)
 
-let private alterPreservesFullText = function
+let private columnStorageDefinition (column: ColumnDef) =
+    let charset = column.Charset |> Option.defaultValue "utf8mb4"
+    let charset = Charset.tryFind charset |> Option.map _.Name |> Option.defaultValue charset
+    { column with
+        Name = ""
+        Comment = ""
+        Default = None
+        Collation = Some((Collation.findOrDefault column.Collation).Name)
+        Charset = Some charset }
+
+let private columnChangePreservesFullText (before: Table) (after: Table) oldName newName =
+    match resolveColumn before.Columns oldName, resolveColumn after.Columns newName with
+    | Ok oldPosition, Ok newPosition when oldPosition = newPosition ->
+        let previous = columnStorageDefinition before.Columns.[oldPosition]
+        let current = columnStorageDefinition after.Columns.[newPosition]
+        let sameStorageType =
+            match previous.Type, current.Type with
+            | TVarchar oldLength, TVarchar newLength when newLength >= oldLength ->
+                let bytesPerCharacter = previous.Charset |> Option.bind Charset.maxBytes |> Option.defaultValue 4
+                // MySQL widening is metadata-only while the one-/two-byte length prefix is unchanged.
+                let usesLongLength length = int64 length * int64 bytesPerCharacter > 255L
+                usesLongLength oldLength = usesLongLength newLength
+            | oldType, newType -> oldType = newType
+
+        sameStorageType && { previous with Type = current.Type } = current
+    | _ -> false
+
+let private alterPreservesFullText before after = function
+    | ModifyColumn(column, _) -> columnChangePreservesFullText before after column.Name column.Name
+    | ChangeColumn(oldName, column, _) -> columnChangePreservesFullText before after oldName column.Name
     | RenameTo _
     | RenameColumnTo _
     | RenameIndex _
@@ -7115,7 +7144,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                         validation
                         |> Result.bind (fun () -> applyAlterAction (temporalCoercionMode store) tbl action)
                         |> Result.map (fun (tbl', newKey) ->
-                            (newKey |> Option.defaultValue key), tbl', preserveFullText && alterPreservesFullText action))
+                            (newKey |> Option.defaultValue key), tbl', preserveFullText && alterPreservesFullText tbl tbl' action))
 
                 let validateAutoIncrementKey (_, finalTable: Table, _) =
                     let indexed column =
