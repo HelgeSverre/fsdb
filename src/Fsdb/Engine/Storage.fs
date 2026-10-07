@@ -261,7 +261,7 @@ type Table =
       /// primary, unique, and non-unique keys.
       SecondaryOrder: SecondaryOrder
       /// FULLTEXT indexes retain token postings and row-local positions.
-      /// They are derived from rows and rebuilt after persistence recovery.
+      /// Recovery reconstructs postings using each document's saved tokenizer.
       FullTextIndexes: FullTextIndexes
       /// SPATIAL indexes retain immutable minimum-bounding-rectangle entries.
       SpatialIndexes: SpatialIndexes }
@@ -2894,14 +2894,23 @@ let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
         group.Name, entries)
     |> Map.ofList
 
-let private rebuildFullTextIndexes (table: Table) : FullTextIndexes =
+let private buildFullTextIndexes tokenizerFor (table: Table) : FullTextIndexes =
     fullTextKeyGroups table
     |> List.map (fun group ->
         group.Name,
         (table.RowsArray.Indexed
-         |> Seq.map (fun (rowId, row) -> rowId, fullTextFields group.Indices row)
-         |> FullText.buildIndexWithFields group.Tokenizer group.CollationSpec))
+         |> Seq.map (fun (rowId, row) ->
+             rowId, tokenizerFor group.Name rowId group.Tokenizer, fullTextFields group.Indices row)
+         |> FullText.buildIndexWithDocumentTokenizers group.Tokenizer group.CollationSpec))
     |> Map.ofList
+
+let private rebuildFullTextIndexes table =
+    buildFullTextIndexes (fun _ _ tokenizer -> tokenizer) table
+
+let internal restoreFullTextIndexes (tokenizers: Map<string, Map<RowId, FullText.Tokenizer>>) table =
+    let tokenizerFor name rowId fallback =
+        tokenizers |> Map.tryFind name |> Option.bind (Map.tryFind rowId) |> Option.defaultValue fallback
+    buildFullTextIndexes tokenizerFor table
 
 let private rebuildSpatialIndexes (table: Table) : SpatialIndexes =
     spatialKeyGroups table
@@ -2929,17 +2938,18 @@ let private reindexCallCountLocal = System.Threading.AsyncLocal<int>()
 
 let reindexCallCount () = reindexCallCountLocal.Value
 
-/// Public because snapshot loading restores stored rows without persisting
-/// derived indexes. WAL replay maintains them incrementally, then performs
-/// one final rebuild so older snapshot formats remain compatible.
-let reindexTable (table: Table) : Table =
+let internal reindexTableWithFullTextIndexes fullTextIndexes (table: Table) : Table =
     reindexCallCountLocal.Value <- reindexCallCountLocal.Value + 1
     { table with
         UniqueIndex = rebuildUniqueIndex table
         SecondaryIndex = rebuildSecondaryIndex table
         SecondaryOrder = withoutIndexExpressionDiagnostics (fun () -> rebuildSecondaryOrder table)
-        FullTextIndexes = rebuildFullTextIndexes table
+        FullTextIndexes = fullTextIndexes
         SpatialIndexes = rebuildSpatialIndexes table }
+
+/// Rebuilds all indexes from the current rows and definitions.
+let reindexTable (table: Table) : Table =
+    reindexTableWithFullTextIndexes (rebuildFullTextIndexes table) table
 
 let private sameTableSchema (left: Table) (right: Table) =
     left.OriginalName = right.OriginalName
@@ -10069,7 +10079,7 @@ let appendRowsForReplay (store: Store) (dbName: string) (tableName: string) (row
 
     changeTableForReplay store dbName tableName append onMissing
 
-/// Rebuilds derived indexes after loading a snapshot and its WAL tail because index structures are not persisted.
+/// Rebuilds row indexes while retaining full-text state maintained during replay.
 let reindexAllForReplay (store: Store) : unit =
     for KeyValue(_, slot) in store.Databases do
-        slot.Value <- slot.Value |> Map.map (fun _ table -> reindexTable table)
+        slot.Value <- slot.Value |> Map.map (fun _ table -> reindexTableWithFullTextIndexes table.FullTextIndexes table)

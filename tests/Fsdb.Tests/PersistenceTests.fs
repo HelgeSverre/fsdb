@@ -1854,6 +1854,37 @@ let tests =
               snapshotNow dir recovered
               load dir |> verify
 
+          testCase "snapshots retain mixed ngram document tokenizers"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              let session = Fsdb.Session.create 1 store
+              handle session "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY z_ngram(body) WITH PARSER ngram,FULLTEXT KEY a_words(body))" |> ignore
+              handle session "INSERT INTO docs VALUES(1,'生日快乐'),(2,'生日')" |> ignore
+              let table = store.Catalog.[defaultDatabase].["docs"]
+              let changed =
+                  { table with FullTextIndexes = table.FullTextIndexes |> Map.change "z_ngram" (Option.map (Fsdb.FullText.withTokenizer (Fsdb.FullText.Ngrams 3))) }
+              setCatalog store (store.Catalog |> Map.add defaultDatabase (store.Catalog.[defaultDatabase] |> Map.add "docs" changed))
+              handle session "INSERT INTO docs VALUES(3,'生日快乐')" |> ignore
+              let verify (recovered: Store) =
+                  let index = recovered.Catalog.[defaultDatabase].["docs"].FullTextIndexes.["z_ngram"] |> Fsdb.FullText.withTokenizer (Fsdb.FullText.Ngrams 3)
+                  let matches = Fsdb.FullText.naturalScores index "生日快" |> Map.keys |> Seq.toList
+                  let third = recovered.Catalog.[defaultDatabase].["docs"].RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt 3L) |> fst
+                  Expect.equal matches [ third ] "historical size-2 rows stay distinct from size-3 rows"
+              verify store
+              snapshotNow dir store
+              let recovered = load dir
+              verify recovered
+              snapshotNow dir recovered
+              let checkpointed = load dir
+              verify checkpointed
+              attach dir checkpointed
+              let session = Fsdb.Session.create 2 checkpointed
+              Expect.equal (handle session "INSERT INTO docs VALUES(4,'生日快乐')" |> snd) (Affected 1UL) "WAL tail insert"
+              let replayed = load dir
+              verify replayed
+              Expect.equal replayed.Catalog.[defaultDatabase].["docs"].RowsArray.Length 4 "WAL tail survives recovery"
+
           testCase "scheduled events execute after WAL recovery"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -2457,6 +2488,24 @@ let tests =
                       Expect.equal column.Comment "" (table + " has no historical column comment")
                       Expect.equal reloaded.Catalog.[defaultDatabase].[normalizeTableName table].TableComment "" (table + " has no historical table comment")
                   | other -> failtestf "expected legacy table '%s' to load, got %A" table other
+
+          testCase "FSNC snapshots retain rows without tokenizer metadata"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              let session = Fsdb.Session.create 1 store
+              handle session "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT)" |> ignore
+              handle session "INSERT INTO docs VALUES(1,'legacy row')" |> ignore
+              snapshotNow dir store
+              // Tables without FULLTEXT retain the FSNC row encoding.
+              let bytes = File.ReadAllBytes(snapshotPath dir)
+              bytes.[3] <- byte 'C'
+              File.WriteAllBytes(snapshotPath dir, bytes)
+              let session = Fsdb.Session.create 2 (load dir)
+              Expect.equal
+                  (handle session "SELECT id,body FROM docs" |> snd)
+                  (ResultSet([ "id"; "body" ], [ [ Some "1"; Some "legacy row" ] ]))
+                  "previous format remains readable"
 
           testCase "FSNA snapshots remain readable after stable row identities"
           <| fun _ ->

@@ -35,15 +35,15 @@ exploratory MySQL run; the maintained oracle uses separate statements.
 
 fsdb's in-memory full-text documents retain their indexing tokenizer separately
 from the active tokenizer for queries and future writes. Removal and replacement
-use that historical tokenizer when clearing prefix postings. Recovery still
-reconstructs all postings from rows, and neither WAL nor snapshots retain the
-tokenization context of individual indexed rows.
+use that historical tokenizer when clearing prefix postings. Snapshot format
+FSND retains each indexed row's tokenizer and reconstructs
+postings with that historical context. WAL records still lack the indexing
+context needed for writes made under a different startup setting.
 Changing only the startup constant would silently retokenize historical data
 and disagree with the observed recovery behavior.
 
-Configurable sizing needs a distinction between current query tokenization
-and persisted indexing state, including mixed generations after new writes.
-Index rebuilds must deliberately replace that state. The same distinction
+Completing configurable sizing requires indexing context in WAL events and
+startup-option integration. Index rebuilds must deliberately replace that state. The same distinction
 will matter when implementing configurable stopwords. Default-size snapshots
 must remain readable, and reported system variables must agree with the
 active startup configuration.
@@ -62,7 +62,40 @@ The maintained native oracle also checks quoted historical lookup and prefix
 removal inside a rolled-back transaction. This covers the engine foundation;
 startup options and persistence remain open.
 
-Validation on 2026-10-07: `just check` passes 2,859 tests with no build
-warnings or errors. The extended six-restart native oracle passes. Existing
-contracts pass 45 cases and 4,978 steps with zero differences; the manifest is
-`torture/artifacts/runs/20261007T014753317-42751/contracts/manifest.json`.
+
+## Snapshot recovery
+
+FSND (format 13) stores one tokenizer byte per full-text index per row, in
+index-definition order. Rows without full-text indexes retain their previous
+encoding. The row stream and checksum still cover the tokenizer bytes; no
+separate unbounded posting buffer is written. FSNC and earlier snapshots
+remain readable. Older fsdb binaries cannot read FSND snapshots.
+
+Recovery rebuilds full-text postings once from the rows and their saved
+context, then preserves the postings maintained by WAL replay. The
+`snapshots retain mixed ngram document tokenizers` regression covers multiple
+indexes with different declaration and name order, mixed token sizes,
+snapshot-of-snapshot recovery, and a subsequent WAL-tail insert. It failed
+before tokenizer metadata was retained. A separate regression verifies FSNC
+row recovery without tokenizer metadata.
+
+Startup-option and WAL-context integration remain open. Historical snapshot
+and WAL formats predate configurable sizing and must continue to mean size 2,
+even when a future server starts with another configured size.
+
+## Validation
+
+On 2026-10-07, `just check` passes 2,861 tests with no build warnings or errors.
+An earlier full run hit the unchanged 20 ms primary-key timing limit under
+host load; its focused tests and the full rerun pass without changing the
+threshold. The mixed-tokenizer and FSNC regressions also pass independently.
+
+The native oracle and 45 contract cases pass; all 4,978 differential steps
+match MySQL. Manifest:
+`torture/artifacts/runs/20261007T020019554-45012/contracts/manifest.json`.
+
+The durability lane with seed 101, four workers, 100 operations per worker,
+eight requested restarts, and checkpoint interval 16 passes. Its 12 total
+crash/restart checks preserve every acknowledged commit, transaction
+boundaries, schema state, WAL tail, snapshots, and torn-tail repair. Artifact:
+`torture/artifacts/runs/20261007T020049923-45294/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

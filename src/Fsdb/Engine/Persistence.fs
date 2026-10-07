@@ -26,7 +26,8 @@ let private spatialReferenceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x38uy |]
 let private preparedXaSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x39uy |] // "FSN9"
 let private taggedIndexSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x41uy |] // "FSNA" (format 10)
 let private stableRowIdSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x42uy |] // "FSNB" (format 11)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x43uy |] // "FSNC" (format 12)
+let private preparedXaLockSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x43uy |] // "FSNC" (format 12)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x44uy |] // "FSND" (format 13)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -39,7 +40,8 @@ type private SnapshotFormat =
       PreparedXas: bool
       TaggedIndexColumns: bool
       StableRowIds: bool
-      PreparedXaLocks: bool }
+      PreparedXaLocks: bool
+      FullTextTokenizers: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -52,7 +54,8 @@ let private legacySnapshotFormat =
       PreparedXas = false
       TaggedIndexColumns = false
       StableRowIds = false
-      PreparedXaLocks = false }
+      PreparedXaLocks = false
+      FullTextTokenizers = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -84,8 +87,11 @@ let private taggedIndexSnapshotFormat =
 let private stableRowIdSnapshotFormat =
     { taggedIndexSnapshotFormat with StableRowIds = true }
 
-let private currentSnapshotFormat =
+let private preparedXaLockSnapshotFormat =
     { stableRowIdSnapshotFormat with PreparedXaLocks = true }
+
+let private currentSnapshotFormat =
+    { preparedXaLockSnapshotFormat with FullTextTokenizers = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -94,6 +100,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = preparedXaLockSnapshotMagic then
+        Some preparedXaLockSnapshotFormat
     elif header = stableRowIdSnapshotMagic then
         Some stableRowIdSnapshotFormat
     elif header = taggedIndexSnapshotMagic then
@@ -1476,6 +1484,22 @@ let private replayWal (store: Store) (walPath: string) : int64 =
 
 // Snapshots share the WAL row codec and publish through an atomic rename.
 
+let private encodeDocumentTokenizers (w: Writer) rowId indexes =
+    for index in indexes do
+        match FullText.documentTokenizer rowId index with
+        | Some FullText.Words -> w.WriteByte 0uy
+        | Some(FullText.Ngrams size) when size >= 1 && size <= 10 -> w.WriteByte(byte size)
+        | _ -> invalidOp "Persistence: missing or invalid full-text document tokenizer"
+
+let private decodeDocumentTokenizers names (r: #IReader) =
+    names |> List.map (fun name ->
+        let tokenizer =
+            match r.ReadByte() with
+            | 0uy -> FullText.Words
+            | size when size <= 10uy -> FullText.Ngrams(int size)
+            | _ -> failwith "Persistence: invalid full-text document tokenizer"
+        name, tokenizer)
+
 let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : unit =
     writeStr w t.OriginalName
     w.WriteInt32LE(List.length t.Columns)
@@ -1529,12 +1553,17 @@ let private writeStore (s: FileStream) (store: Store) : unit =
             |> Map.iter (fun tableKey table ->
                 writeStr w tableKey
                 encodeTableMeta currentSnapshotFormat w table
+                let fullTextIndexes =
+                    table.Indexes |> List.filter (fun index -> index.Kind.IsFullText)
+                    |> List.map (fun index -> table.FullTextIndexes.[index.Name])
 
                 for rowId, row in table.RowsArray.Indexed do
                     if currentSnapshotFormat.StableRowIds then
                         w.WriteInt32LE(RowId.value rowId)
 
                     encodeRowBin w row
+                    if currentSnapshotFormat.FullTextTokenizers then
+                        encodeDocumentTokenizers w rowId fullTextIndexes
 
                     if w.Count >= (1 <<< 20) then
                         flush ()))
@@ -1580,14 +1609,26 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let nextRowId = if format.StableRowIds then Some(r.ReadInt32LE()) else None
     let rowCount = r.ReadInt32LE()
 
+    let fullTextNames = indexes |> List.filter (fun index -> index.Kind.IsFullText) |> List.map _.Name
+    let mutable tokenizers = Map.empty
+    let readRow rowId =
+        let row = decodeRowBin r
+        if format.FullTextTokenizers then
+            for name, tokenizer in decodeDocumentTokenizers fullTextNames r do
+                tokenizers <- tokenizers |> Map.change name (fun existing ->
+                    existing |> Option.defaultValue Map.empty |> Map.add rowId tokenizer |> Some)
+        row
+
     let rows =
         match nextRowId with
         | Some next ->
-            List.init rowCount (fun _ -> RowId.create (r.ReadInt32LE()), decodeRowBin r)
+            List.init rowCount (fun _ ->
+                let rowId = RowId.create (r.ReadInt32LE())
+                rowId, readRow rowId)
             |> RowStore.restore next
-        | None -> List.init rowCount (fun _ -> decodeRowBin r) |> RowStore.ofSeq
+        | None -> List.init rowCount (fun rowId -> readRow (RowId.create rowId)) |> RowStore.ofSeq
 
-    reindexTable
+    let table =
         { OriginalName = originalName
           SchemaRevision = 0L
           Columns = columns
@@ -1605,6 +1646,8 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
           SecondaryOrder = Map.empty
           FullTextIndexes = Map.empty
           SpatialIndexes = Map.empty }
+
+    reindexTableWithFullTextIndexes (restoreFullTextIndexes tokenizers table) table
 
 /// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or
 /// CRC doesn't match what's actually on disk — the guard `load` needs before

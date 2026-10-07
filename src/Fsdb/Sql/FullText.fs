@@ -204,15 +204,15 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
             Postings = postings
             PrefixPostings = prefixPostings }
 
-let addDocumentFields (id: 'id) (texts: string list) (index: Index<'id>) : Index<'id> =
+let private addDocumentFieldsWith tokenizer (id: 'id) (texts: string list) (index: Index<'id>) : Index<'id> =
     let index = removeDocument id index
     // Phrase positions retain tokens omitted from ngram postings.
-    let fields = texts |> List.map (tokensWith index.Tokenizer index.Collation) |> List.toArray
+    let fields = texts |> List.map (tokensWith tokenizer index.Collation) |> List.toArray
     let tokens = Array.concat fields
     let postingTokens =
-        match index.Tokenizer with
+        match tokenizer with
         | Words -> tokens
-        | Ngrams _ -> tokens |> Array.filter (isSearchable index.Tokenizer)
+        | Ngrams _ -> tokens |> Array.filter (isSearchable tokenizer)
 
     let postings =
         postingTokens
@@ -225,7 +225,7 @@ let addDocumentFields (id: 'id) (texts: string list) (index: Index<'id>) : Index
 
     let prefixPostings =
         tokens
-        |> Array.filter (isSearchable index.Tokenizer)
+        |> Array.filter (isSearchable tokenizer)
         |> Array.collect (prefixKeys index.Collation)
         |> Array.countBy (fun key -> key)
         |> Array.fold
@@ -235,14 +235,27 @@ let addDocumentFields (id: 'id) (texts: string list) (index: Index<'id>) : Index
             index.PrefixPostings
 
     { index with
-        Documents = Map.add id { Fields = fields; Tokenizer = index.Tokenizer } index.Documents
+        Documents = Map.add id { Fields = fields; Tokenizer = tokenizer } index.Documents
         Postings = postings
         PrefixPostings = prefixPostings }
 
+let addDocumentFields id texts (index: Index<'id>) =
+    addDocumentFieldsWith index.Tokenizer id texts index
+
 let addDocument id text index = addDocumentFields id [ text ] index
 
+let internal documentTokenizer id (index: Index<'id>) =
+    index.Documents |> Map.tryFind id |> Option.map _.Tokenizer
+
+let internal buildIndexWithDocumentTokenizers tokenizer collation documents =
+    documents
+    |> Seq.fold (fun index (id, documentTokenizer, fields) ->
+        addDocumentFieldsWith documentTokenizer id fields index) (emptyIndexWith tokenizer collation)
+
 let buildIndexWithFields tokenizer (collation: Collation) (documents: ('id * string list) seq) : Index<'id> =
-    documents |> Seq.fold (fun index (id, fields) -> addDocumentFields id fields index) (emptyIndexWith tokenizer collation)
+    documents
+    |> Seq.map (fun (id, fields) -> id, tokenizer, fields)
+    |> buildIndexWithDocumentTokenizers tokenizer collation
 
 let buildIndexWithTokenizer tokenizer collation documents =
     documents |> Seq.map (fun (id, text) -> id, [ text ]) |> buildIndexWithFields tokenizer collation
