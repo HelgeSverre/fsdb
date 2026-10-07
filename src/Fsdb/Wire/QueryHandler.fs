@@ -3505,6 +3505,8 @@ let rec private filterTemporaryEvent keys event =
     let isTemporary db table = Set.contains (CatalogOverlay.tableKey db table) keys
 
     match event with
+    | WithFullTextWordLengths(lengths, inner) ->
+        filterTemporaryEvent keys inner |> Option.map (fun retained -> WithFullTextWordLengths(lengths, retained))
     | WithNgramTokenSize(size, inner) ->
         filterTemporaryEvent keys inner |> Option.map (fun retained -> WithNgramTokenSize(size, retained))
     | WithStopwordFiltering(enabled, inner) ->

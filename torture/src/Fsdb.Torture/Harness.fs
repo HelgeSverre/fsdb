@@ -199,6 +199,7 @@ module CommitEvents =
 
     let rec summarize =
         function
+        | WithFullTextWordLengths(_, event)
         | WithNgramTokenSize(_, event)
         | WithStopwordFiltering(_, event)
         | WithFullTextStopwordSettings(_, event)

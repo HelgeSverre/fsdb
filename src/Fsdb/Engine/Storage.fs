@@ -316,6 +316,7 @@ type TransactionLockClaim =
     | ExclusiveKeyLock of database: string * table: string * key: string
 
 type CommitEvent =
+    | WithFullTextWordLengths of lengths: StorageOptions.WordLengths * event: CommitEvent
     | WithNgramTokenSize of size: int * event: CommitEvent
     | WithStopwordFiltering of enabled: bool * event: CommitEvent
     | WithFullTextStopwordSettings of settings: FullText.StopwordSettings * event: CommitEvent
@@ -488,6 +489,7 @@ type Store =
       mutable ForeignKeyChecks: bool
       /// Re-derived from session variables before each statement.
       mutable ExecutionSettings: ExecutionSettings
+      mutable FullTextWordLengths: StorageOptions.WordLengths
       mutable NgramTokenSize: int
       mutable FullTextStopwordsEnabled: bool
       /// Resolved once if a statement builds full-text postings.
@@ -618,6 +620,7 @@ let internal requiresImmediateAutoIncrementPublication (store: Store) =
     hasCommitConsumer store
 
 let rec private eventRollbackWork = function
+    | WithFullTextWordLengths(_, event)
     | WithNgramTokenSize(_, event)
     | WithStopwordFiltering(_, event)
     | WithFullTextStopwordSettings(_, event)
@@ -669,6 +672,7 @@ let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent li
         observerError |> Option.iter raise
 
 let rec private observerEvent = function
+    | WithFullTextWordLengths(_, event)
     | WithNgramTokenSize(_, event)
     | WithStopwordFiltering(_, event)
     | WithFullTextStopwordSettings(_, event)
@@ -681,6 +685,14 @@ let rec private observerEvent = function
         XaPrepared(xid, validateWholeSnapshot, lockClaims, List.map observerEvent events)
     | XaCommitted(xid, events) -> XaCommitted(xid, List.map observerEvent events)
     | event -> event
+
+let private captureFullTextWordLengths lengths event captured =
+    match event with
+    | RowsInserted _ | RowsUpdated _ | RowsDeleted _
+    | RowsUpdatedById _ | RowsDeletedById _
+    | SchemaChanged _ | SchemaChangedAt _ when lengths <> StorageOptions.defaultWordLengths ->
+        WithFullTextWordLengths(lengths, captured)
+    | _ -> captured
 
 let private captureNgramTokenSize size event =
     match event with
@@ -717,7 +729,10 @@ let private captureFullTextStopwords (store: Store) event captured =
 let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
     let events =
         events |> List.map (fun event ->
-            let captured = captureNgramTokenSize store.NgramTokenSize event |> captureFullTextStopwords store event
+            let captured =
+                captureNgramTokenSize store.NgramTokenSize event
+                |> captureFullTextWordLengths store.FullTextWordLengths event
+                |> captureFullTextStopwords store event
             match event with
             | SchemaChanged _ | SchemaChangedAt _ when not store.FullTextStopwordsEnabled ->
                 WithStopwordFiltering(false, captured)
@@ -761,6 +776,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
 
     { Databases = databases
       ForeignKeyChecks = store.ForeignKeyChecks
+      FullTextWordLengths = store.FullTextWordLengths
       NgramTokenSize = store.NgramTokenSize
       FullTextStopwordsEnabled = store.FullTextStopwordsEnabled
       FullTextStopwordSettings = store.FullTextStopwordSettings
@@ -3066,16 +3082,19 @@ let reindexTable (table: Table) : Table =
 let private withTableNgramTokenSize size table =
     { table with FullTextIndexes = table.FullTextIndexes |> Map.map (fun _ index -> FullText.withNgramTokenSize size index) }
 
-let private reindexTableWithFullTextSettings size (settings: FullText.StopwordSettings) table =
+let private withTableWordLengths lengths table =
+    { table with FullTextIndexes = table.FullTextIndexes |> Map.map (fun _ index -> FullText.withWordLengths lengths index) }
+
+let private reindexTableWithFullTextSettings size lengths (settings: FullText.StopwordSettings) table =
     let rulesFor _ _ (rules: FullText.IndexingRules) =
         let tokenizer =
             match rules.Tokenizer with
-            | FullText.Words -> FullText.Words
+            | FullText.Words _ -> FullText.Words lengths
             | FullText.Ngrams _ -> FullText.Ngrams size
         { rules with Tokenizer = tokenizer }
     let indexes =
         buildFullTextIndexesWithStopwords (fun _ -> settings.Policy) rulesFor table
-        |> Map.map (fun _ index -> index |> FullText.withNgramTokenSize size |> FullText.withStopwordSource settings.Source)
+        |> Map.map (fun _ index -> index |> FullText.withNgramTokenSize size |> FullText.withWordLengths lengths |> FullText.withStopwordSource settings.Source)
     reindexTableWithFullTextIndexes indexes table
 
 let internal deferFullTextStopwordReload (store: Store) =
@@ -4578,6 +4597,7 @@ let create () : Store =
     { Databases = databases
       ForeignKeyChecks = true
       ExecutionSettings = ExecutionSettings.defaults
+      FullTextWordLengths = StorageOptions.defaultWordLengths
       NgramTokenSize = FullText.ngramTokenSize
       FullTextStopwordsEnabled = true
       FullTextStopwordSettings = lazy { Source = None; Policy = FullText.StopwordPolicy.BuiltIn }
@@ -6395,7 +6415,7 @@ let createTableSeeded
                                               FullTextIndexes = Map.empty
                                               SpatialIndexes = Map.empty }
 
-                                        let database = Map.add key (reindexTableWithFullTextSettings store.NgramTokenSize (fullTextStopwordSettings store) table) db
+                                        let database = Map.add key (reindexTableWithFullTextSettings store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) table) db
                                         invalidateAutoIncrementCounter store dbName tableName
                                         Ok(setCatalogDatabase dbName database catalog, (createTime, columns))
 
@@ -6541,7 +6561,7 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
                     )
                 | _ ->
                     let createTime = DateTime.Now
-                    let table = reindexTableWithFullTextSettings store.NgramTokenSize (fullTextStopwordSettings store) { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
+                    let table = reindexTableWithFullTextSettings store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
                     let database = Map.add address.Table table db
                     invalidateAutoIncrementCounter store dbName tableName
                     Ok(setCatalogDatabase address.Database database catalog, createTime)))
@@ -7180,9 +7200,9 @@ let private alterPreservesFullText before after = function
     | SetAlterLock _ -> true
     | _ -> false
 
-let private reindexAfterAlter size settings actions preserveFullText before after =
+let private reindexAfterAlter size lengths settings actions preserveFullText before after =
     if not preserveFullText then
-        reindexTableWithFullTextSettings size settings after
+        reindexTableWithFullTextSettings size lengths settings after
     else
         let renameSource sources = function
             | RenameIndex(oldName, newName) ->
@@ -7199,7 +7219,7 @@ let private reindexAfterAlter size settings actions preserveFullText before afte
         let sources = List.fold renameSource originalSources actions
 
         let tokenizerAtSize = function
-            | FullText.Words -> FullText.Words
+            | FullText.Words _ -> FullText.Words lengths
             | FullText.Ngrams _ -> FullText.Ngrams size
 
         let sourceNames =
@@ -7234,7 +7254,7 @@ let private reindexAfterAlter size settings actions preserveFullText before afte
         let indexes =
             buildFullTextIndexesWithStopwords (fun name -> (settingsFor name).Policy) rulesFor after
             |> Map.map (fun name index ->
-                let index = index |> FullText.withNgramTokenSize size |> FullText.withStopwordSource (settingsFor name).Source
+                let index = index |> FullText.withNgramTokenSize size |> FullText.withWordLengths lengths |> FullText.withStopwordSource (settingsFor name).Source
                 sourceFor name
                 |> Option.map (fun source -> FullText.withStopwordStateFrom source index)
                 |> Option.defaultValue index)
@@ -7299,7 +7319,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 |> Result.bind (fun state -> validateAutoIncrementKey state |> Result.map (fun () -> state))
                 |> Result.map (fun (finalKey, finalTable, preserveFullText) ->
                     let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
-                    let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize (fullTextStopwordSettings store) actions preserveFullText table finalTable)
+                    let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) actions preserveFullText table finalTable)
                     let updatedCatalog = setCatalogDatabase dbName database catalog
                     invalidateAutoIncrementCounter store dbName origKey
                     invalidateAutoIncrementCounter store dbName finalKey
@@ -10117,7 +10137,7 @@ let private changeTableForReplay
     | true, slot ->
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
-        | Some table -> slot.Value <- slot.Value |> Map.add key (withTableNgramTokenSize store.NgramTokenSize table |> change)
+        | Some table -> slot.Value <- slot.Value |> Map.add key (withTableNgramTokenSize store.NgramTokenSize table |> withTableWordLengths store.FullTextWordLengths |> change)
 
 let internal setFullTextStopwordsForReplay store database table policies onMissing =
     let policies = Map.ofList policies
@@ -10369,6 +10389,12 @@ let reindexAllForReplay (store: Store) : unit =
         slot.Value <- slot.Value |> Map.map (fun _ table -> reindexTableWithFullTextIndexes table.FullTextIndexes table)
 
 /// Startup-only configuration; existing documents retain their indexing tokenizer.
+let internal configureFullTextWordLengths lengths (store: Store) =
+    if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
+    store.FullTextWordLengths <- lengths
+    for KeyValue(_, slot) in store.Databases do
+        slot.Value <- slot.Value |> Map.map (fun _ table -> withTableWordLengths lengths table)
+
 let internal configureNgramTokenSize size (store: Store) =
     if size < 1 || size > 10 then invalidArg "size" "Ngram token size must be between 1 and 10"
     store.NgramTokenSize <- size

@@ -14,17 +14,19 @@ module Fsdb.FullText
 open System
 open Fsdb.Collation
 
-/// Minimum indexed word length; ngram indexes use their configured token size.
-let minTokenLength = 3
+/// Default minimum indexed word length; ngram indexes use their configured token size.
+let minTokenLength = StorageOptions.defaultWordLengths.Minimum
 
 /// `@@innodb_ft_max_token_size`'s default.
-let maxTokenLength = 84
+let maxTokenLength = StorageOptions.defaultWordLengths.Maximum
 
 let ngramTokenSize = StorageOptions.defaults.NgramTokenSize
 
 type Tokenizer =
-    | Words
+    | Words of StorageOptions.WordLengths
     | Ngrams of size: int
+
+let defaultTokenizer = Words StorageOptions.defaultWordLengths
 
 type StopwordList =
     private
@@ -57,7 +59,7 @@ type internal IndexingRules =
       Stopwords: StopwordPolicy }
 
 let tryTokenizer = function
-    | None -> Some Words
+    | None -> Some defaultTokenizer
     | Some name when String.Equals(name, "ngram", StringComparison.OrdinalIgnoreCase) -> Some(Ngrams ngramTokenSize)
     | Some _ -> None
 
@@ -119,7 +121,7 @@ let private ngrams size (text: string) =
 
 let private rawTokensWith tokenizer text =
     match tokenizer with
-    | Words -> rawTokens text
+    | Words _ -> rawTokens text
     | Ngrams size -> ngrams size text
 
 let tokenize (text: string) : string[] = rawTokens text |> Array.map _.ToLowerInvariant()
@@ -249,32 +251,32 @@ let private containsNgramStopword policy (text: string) =
         }
         |> Seq.exists matches
 
-let private hasSearchableWordLength (token: Token) =
-    token.Text.Length >= minTokenLength && token.Text.Length <= maxTokenLength
+let private hasSearchableWordLength (lengths: StorageOptions.WordLengths) (token: Token) =
+    token.Text.Length >= lengths.Minimum && token.Text.Length <= lengths.Maximum
 
 // Short query spellings can address longer indexed collation equivalents.
-let private hasLookupWordLength (token: Token) = token.Text.Length <= maxTokenLength
+let private hasLookupWordLength (lengths: StorageOptions.WordLengths) (token: Token) = token.Text.Length <= lengths.Maximum
 
-let private isSearchableWord policy token =
-    hasSearchableWordLength token && not (isStopword policy token.Text)
+let private isSearchableWord lengths policy token =
+    hasSearchableWordLength lengths token && not (isStopword policy token.Text)
 
 /// A token that survives the configured length and stopword rules.
 let private isSearchable rules (token: Token) =
     match rules.Tokenizer with
-    | Words -> isSearchableWord rules.Stopwords token
+    | Words lengths -> isSearchableWord lengths rules.Stopwords token
     | Ngrams size ->
         runeLength token.Text = size && not (containsNgramStopword rules.Stopwords token.Text)
 
 /// Boolean terms can address postings created with an earlier ngram size.
 let private isBooleanSearchable rules token =
     match rules.Tokenizer with
-    | Words -> isSearchable rules token
+    | Words _ -> isSearchable rules token
     | Ngrams _ -> not (containsNgramStopword rules.Stopwords token.Text)
 
 /// Exact word lookups can reach older postings or an indexed collation equivalent.
-let private isBooleanLookup rules token =
+let private isExactLookup rules token =
     match rules.Tokenizer with
-    | Words -> hasLookupWordLength token
+    | Words lengths -> hasLookupWordLength lengths token
     | Ngrams _ -> isBooleanSearchable rules token
 
 let private indexedTokens (document: Document) =
@@ -303,7 +305,7 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       StopwordSource = None
       StopwordReload = None }
 
-let emptyIndex collation = emptyIndexWith StopwordPolicy.BuiltIn Words collation
+let emptyIndex collation = emptyIndexWith StopwordPolicy.BuiltIn defaultTokenizer collation
 
 let internal stopwordSource (index: Index<'id>) = index.StopwordSource
 
@@ -332,8 +334,13 @@ let internal activeTokenizer (index: Index<'id>) = index.Rules.Tokenizer
 
 let internal withNgramTokenSize size (index: Index<'id>) =
     match index.Rules.Tokenizer with
-    | Words -> index
+    | Words _ -> index
     | Ngrams _ -> withTokenizer (Ngrams size) index
+
+let internal withWordLengths lengths (index: Index<'id>) =
+    match index.Rules.Tokenizer with
+    | Words _ -> withTokenizer (Words lengths) index
+    | Ngrams _ -> index
 
 let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
     match Map.tryFind id index.Documents with
@@ -458,7 +465,7 @@ let buildIndexWithFields tokenizer (collation: Collation) (documents: ('id * str
 let buildIndexWithTokenizer tokenizer collation documents =
     documents |> Seq.map (fun (id, text) -> id, [ text ]) |> buildIndexWithFields tokenizer collation
 
-let buildIndexWith collation documents = buildIndexWithTokenizer Words collation documents
+let buildIndexWith collation documents = buildIndexWithTokenizer defaultTokenizer collation documents
 
 let buildCorpusWith (collation: Collation) (docs: string seq) : Corpus =
     let documents = docs |> Seq.indexed |> Array.ofSeq
@@ -533,7 +540,7 @@ let private naturalTerms (view: ReadView<'id>) (query: string) : string[] =
     let tokens = queryTokens view query
     let terms =
         match view.Rules.Tokenizer with
-        | Words -> tokens |> Array.filter hasLookupWordLength
+        | Words lengths -> tokens |> Array.filter (hasLookupWordLength lengths)
         // A stopped spelling can still match an indexed collation equivalent.
         | Ngrams _ -> tokens
 
@@ -566,8 +573,8 @@ type private NaturalClause =
     | NaturalPhrase of Token[]
 
 let private naturalWordClauses (view: ReadView<'id>) (query: string) =
-    let words text = tokensWith Words view.Collation text
-    let plain text = words text |> Array.filter hasLookupWordLength |> Array.map (fun word -> NaturalWord word.Key)
+    let words text = tokensWith view.Rules.Tokenizer view.Collation text
+    let plain text = words text |> Array.filter (isExactLookup view.Rules) |> Array.map (fun word -> NaturalWord word.Key)
     let clauses = ResizeArray<NaturalClause>()
     let mutable start = 0
     while start < query.Length do
@@ -579,23 +586,23 @@ let private naturalWordClauses (view: ReadView<'id>) (query: string) =
         else
             clauses.AddRange(plain (query.Substring(start, opening - start)))
             words (query.Substring(opening + 1, closing - opening - 1))
-            |> Array.skipWhile (isSearchableWord view.Rules.Stopwords >> not)
+            |> Array.skipWhile (isSearchable view.Rules >> not)
             |> NaturalPhrase
             |> clauses.Add
             start <- closing + 1
     clauses.ToArray()
 
-let private naturalClauseKeys policy = function
+let private naturalClauseKeys rules = function
     | NaturalWord key -> [| key |]
-    | NaturalPhrase words -> words |> Array.filter (isSearchableWord policy) |> Array.map _.Key
+    | NaturalPhrase words -> words |> Array.filter (isSearchable rules) |> Array.map _.Key
 
 let private needsNaturalWordEvaluation (view: ReadView<'id>) (query: string) =
     match view.Rules.Tokenizer with
     | Ngrams _ -> false
-    | Words ->
+    | Words _ ->
         if query.Contains '"' then true
         else
-            let terms = queryTokens view query |> Array.filter hasLookupWordLength
+            let terms = queryTokens view query |> Array.filter (isExactLookup view.Rules)
             terms.Length <> (terms |> Array.distinctBy _.Key).Length
 
 type private NaturalMatches<'id when 'id: comparison> =
@@ -621,12 +628,12 @@ let private naturalWordMatches candidateIds (view: ReadView<'id>) clauses =
         let ids = candidateIds |> Option.map (Set.intersect ids) |> Option.defaultValue ids
         if ids.IsEmpty then matches
         else
-            naturalClauseKeys view.Rules.Stopwords clause
+            naturalClauseKeys view.Rules clause
             |> Array.fold (fun matches key ->
                 Map.change key (fun previous ->
                     Some(Set.union ids (Option.defaultValue Set.empty previous))) matches) matches
 
-    { Occurrences = clauses |> Array.collect (naturalClauseKeys view.Rules.Stopwords) |> Array.countBy id |> Map.ofArray
+    { Occurrences = clauses |> Array.collect (naturalClauseKeys view.Rules) |> Array.countBy id |> Map.ofArray
       Documents = clauses |> Array.fold addClause Map.empty }
 
 let private scoreNaturalWordMatches (view: ReadView<'id>) matches =
@@ -785,7 +792,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
     let phraseWords phrase =
         let words =
             match tokenizer with
-            | Words -> tokensWith tokenizer collation phrase
+            | Words _ -> tokensWith tokenizer collation phrase
             | Ngrams size ->
                 rawTokens phrase
                 |> Array.collect (fun word ->
@@ -795,7 +802,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
         words
         |> Array.skipWhile (fun word ->
             match tokenizer with
-            | Words -> not (isSearchable rules word)
+            | Words _ -> not (isSearchable rules word)
             | Ngrams _ -> containsNgramStopword policy word.Text)
 
     // Cap parenthesis nesting so a query like "((((...))))" with thousands
@@ -858,7 +865,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                     // MySQL's ngram phrases ignore the proximity suffix.
                     let proximity =
                         match tokenizer with
-                        | Words -> proximity
+                        | Words _ -> proximity
                         | Ngrams _ -> None
 
                     acc.Add(op, BPhrase(words, proximity))
@@ -869,7 +876,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                     if w.Text.Length > 0 then
                         let term =
                             match tokenizer with
-                            | Words -> BWord(w, prefix)
+                            | Words _ -> BWord(w, prefix)
                             | Ngrams size when runeLength w.Text < size -> BWord(w, prefix)
                             | Ngrams _ ->
                                 let words = tokensWith tokenizer collation w.Text |> Array.skipWhile (isSearchable rules >> not)
@@ -977,7 +984,7 @@ let rec private evalTerm
     (term: BoolTerm)
     : Map<'id, float> =
     match term with
-    | BWord(term, false) when not (isBooleanLookup view.Rules term) ->
+    | BWord(term, false) when not (isExactLookup view.Rules term) ->
         // Rejected words can still occupy positions inside a longer phrase.
         Map.empty
     | BWord(term, false) ->
@@ -1056,7 +1063,11 @@ let private tryRepeatedWordScores candidateIds (view: ReadView<'id>) nodes =
         nodes |> List.choose (function
             | (Optional | Must as operator), BWord(word, false) -> Some(operator, word)
             | _ -> None)
-    if view.Rules.Tokenizer <> Words
+    let isNgram =
+        match view.Rules.Tokenizer with
+        | Ngrams _ -> true
+        | Words _ -> false
+    if isNgram
        || words.Length <> nodes.Length
        || (words |> List.distinctBy (snd >> _.Key)).Length = words.Length then
         None
@@ -1067,13 +1078,13 @@ let private tryRepeatedWordScores candidateIds (view: ReadView<'id>) nodes =
                 if operator <> Must then candidates
                 else
                     let ids =
-                        if isBooleanLookup view.Rules word then
+                        if isExactLookup view.Rules word then
                             view.Postings |> Map.tryFind word.Key
                             |> Option.map (Map.keys >> Set.ofSeq) |> Option.defaultValue Set.empty
                         else Set.empty
                     intersectCandidates candidates (Some ids))
         words
-        |> List.choose (fun (_, word) -> if isBooleanLookup view.Rules word then Some(NaturalWord word.Key) else None)
+        |> List.choose (fun (_, word) -> if isExactLookup view.Rules word then Some(NaturalWord word.Key) else None)
         |> List.toArray
         |> naturalWordMatches candidates view
         |> scoreNaturalWordMatches view
@@ -1107,7 +1118,7 @@ let internal tryFlatBooleanScoresDictionaryInView
     let scoreTerms terms =
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key view.PrefixPostings
-            elif isBooleanLookup view.Rules term then Map.tryFind term.Key view.Postings
+            elif isExactLookup view.Rules term then Map.tryFind term.Key view.Postings
             else None
 
         let postings =
@@ -1265,7 +1276,12 @@ let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: st
         |> Map.toArray
         |> Array.collect (fun (id, _) ->
             let document = view.Documents.[id]
-            indexedTokens document)
+            // Seed words are extracted again using the current length settings.
+            let rules =
+                match view.Rules.Tokenizer with
+                | Words _ -> { document.Rules with Tokenizer = view.Rules.Tokenizer }
+                | Ngrams _ -> document.Rules
+            indexedTokens { document with Rules = rules })
         |> Array.map _.Key
 
     match clauseQuery with

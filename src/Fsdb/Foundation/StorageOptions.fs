@@ -1,18 +1,32 @@
 module Fsdb.StorageOptions
 
+type WordLengths =
+    { Minimum: int
+      Maximum: int }
+
+let defaultWordLengths = { Minimum = 3; Maximum = 84 }
+
 type StopwordTables =
     { UserTable: string option
       ServerTable: string option }
 
 type Settings =
-    { NgramTokenSize: int
+    { FullTextWordLengths: WordLengths
+      NgramTokenSize: int
       FullTextStopwordsEnabled: bool
       FullTextStopwordTables: StopwordTables }
 
 let defaults =
-    { NgramTokenSize = 2
+    { FullTextWordLengths = defaultWordLengths
+      NgramTokenSize = 2
       FullTextStopwordsEnabled = true
       FullTextStopwordTables = { UserTable = None; ServerTable = None } }
+
+let internal normalizeMinimumWordLength size = int (max 0L (min 16L size))
+let internal normalizeMaximumWordLength size = int (max 10L (min 84L size))
+
+let internal validWordLengths lengths =
+    lengths.Minimum >= 0 && lengths.Minimum <= 16 && lengths.Maximum >= 10 && lengths.Maximum <= 84
 
 let internal normalizeNgramTokenSize size = int (max 1L (min 10L size))
 
@@ -38,6 +52,19 @@ let fromEntries (entries: OptionFile.Entry list) =
             { settings with FullTextStopwordTables = { settings.FullTextStopwordTables with UserTable = entry.Value } }, remaining, errors
         | "innodb_ft_server_stopword_table" ->
             { settings with FullTextStopwordTables = { settings.FullTextStopwordTables with ServerTable = entry.Value } }, remaining, errors
+        | "innodb_ft_min_token_size" | "innodb_ft_max_token_size" ->
+            match entry.Value |> Option.bind OptionFile.tryParseUnsignedSize with
+            | Some size ->
+                let bounded = int64 (min 84UL size)
+                let lengths =
+                    if name = "innodb_ft_min_token_size" then
+                        { settings.FullTextWordLengths with Minimum = normalizeMinimumWordLength bounded }
+                    else
+                        { settings.FullTextWordLengths with Maximum = normalizeMaximumWordLength bounded }
+                { settings with FullTextWordLengths = lengths }, remaining, errors
+            | None ->
+                let error = sprintf "%s:%d: %s requires an unsigned size with an optional K, M, G, T, P or E suffix" entry.Source entry.Line name
+                settings, remaining, error :: errors
         | "ngram_token_size" ->
             match entry.Value |> Option.bind OptionFile.tryParseSize with
             | Some size -> { settings with NgramTokenSize = normalizeNgramTokenSize size }, remaining, errors

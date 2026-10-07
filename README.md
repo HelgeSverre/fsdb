@@ -96,7 +96,7 @@ fall into a few groups:
 | Concern | Options |
 |---|---|
 | Listener | `--listen`, `--port` / `-p` |
-| Storage | `--data-dir`, `--ngram-token-size`, `--innodb-ft-enable-stopword`, `--innodb-ft-user-stopword-table`, `--innodb-ft-server-stopword-table` |
+| Storage | `--data-dir`, `--ngram-token-size`, `--innodb-ft-min-token-size`, `--innodb-ft-max-token-size`, `--innodb-ft-enable-stopword`, `--innodb-ft-user-stopword-table`, `--innodb-ft-server-stopword-table` |
 | Option files | `--defaults-file` |
 | TLS | `--ssl-cert`, `--ssl-key`, `--ssl-ca`, `--require-secure-transport` |
 | Server files | `--secure-file-priv` |
@@ -120,6 +120,22 @@ rebuild the index at the current size. Common metadata ALTER operations, includi
 renames through MODIFY/CHANGE, preserve postings. Physical changes such as
 nullability, collation, column reordering, and VARCHAR length-prefix expansion
 rebuild them at the current token size.
+
+### Full-text word lengths
+
+`--innodb-ft-min-token-size 1` and `--innodb-ft-max-token-size 40` select ordinary
+word lengths at startup. Option files use `innodb_ft_min_token_size` and
+`innodb_ft_max_token_size`; command-line values override them. Defaults are 3
+and 84. MySQL clamps the minimum to 0–16 and the maximum to 10–84 independently.
+The GLOBAL variables report these values and remain read-only. Embedded hosts
+can call `Db.withFullTextWordLengths { Minimum = 1; Maximum = 40 }` before
+opening connections.
+
+Existing postings retain their original lengths across WAL and snapshot
+recovery. New text and rebuilt indexes use the current bounds. Exact lookups
+ignore the minimum but honor the maximum; Boolean prefixes can still reach
+older long words. Query expansion extracts seed words using the current bounds.
+Ngram indexes use their own token size.
 
 ### Full-text stopwords
 

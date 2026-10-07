@@ -31,7 +31,8 @@ let private fullTextTokenizerSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x44uy |
 let private fullTextStopwordSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x45uy |] // "FSNE" (format 14)
 let private fullTextDocumentRulesSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x46uy |] // "FSNF" (format 15)
 let private fullTextCustomStopwordSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x47uy |] // "FSNG" (format 16)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x48uy |] // "FSNH" (format 17)
+let private fullTextStopwordSourceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x48uy |] // "FSNH" (format 17)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x49uy |] // "FSNI" (format 18)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -117,7 +118,7 @@ let private currentSnapshotFormat =
 let private snapshotTrailerSize = 12
 
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
-    if header = snapshotMagic then
+    if header = snapshotMagic || header = fullTextStopwordSourceSnapshotMagic then
         Some currentSnapshotFormat
     elif header = fullTextDocumentRulesSnapshotMagic || header = fullTextCustomStopwordSnapshotMagic then
         Some fullTextDocumentRulesSnapshotFormat
@@ -1073,6 +1074,17 @@ let private KindWithNgramTokenSize = 0x1Auy
 let private KindWithStopwordFiltering = 0x1Buy
 let private KindWithFullTextStopwords = 0x1Cuy
 let private KindWithFullTextStopwordSettings = 0x1Duy
+let private KindWithFullTextWordLengths = 0x1Euy
+
+let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
+    if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
+    w.WriteByte(byte lengths.Minimum)
+    w.WriteByte(byte lengths.Maximum)
+
+let private decodeWordLengths (r: #IReader) =
+    let lengths: StorageOptions.WordLengths = { Minimum = int (r.ReadByte()); Maximum = int (r.ReadByte()) }
+    if not (StorageOptions.validWordLengths lengths) then failwith "Persistence: invalid full-text word lengths"
+    lengths
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -1178,6 +1190,10 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
     | WithStopwordFiltering(enabled, event) ->
         w.WriteByte KindWithStopwordFiltering
         writeBool w enabled
+        encodeEvent w event
+    | WithFullTextWordLengths(lengths, event) ->
+        w.WriteByte KindWithFullTextWordLengths
+        encodeWordLengths w lengths
         encodeEvent w event
     | WithNgramTokenSize(size, event) ->
         if size < 1 || size > 10 then invalidArg "size" "Invalid WAL ngram token size"
@@ -1292,6 +1308,9 @@ let rec private decodeEventAt
     | k when k = KindWithStopwordFiltering ->
         let enabled = readBool r
         WithStopwordFiltering(enabled, decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
+    | k when k = KindWithFullTextWordLengths ->
+        let lengths = decodeWordLengths r
+        WithFullTextWordLengths(lengths, decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
     | k when k = KindWithNgramTokenSize ->
         let size = int (r.ReadByte())
         if size < 1 || size > 10 then failwith "Persistence: invalid WAL ngram token size"
@@ -1501,6 +1520,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         applyEventAt (depth + 1) store event
     | WithStopwordFiltering(enabled, event) ->
         applyEventAt (depth + 1) { store with FullTextStopwordsEnabled = enabled } event
+    | WithFullTextWordLengths(lengths, event) ->
+        applyEventAt (depth + 1) { store with FullTextWordLengths = lengths } event
     | WithNgramTokenSize(size, event) ->
         applyEventAt (depth + 1) { store with NgramTokenSize = size } event
     | RowsInserted(db, table, rows) ->
@@ -1542,7 +1563,7 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
     | XaRolledBack xid -> store.PreparedXas.TryRemove xid |> ignore
 
 let private applyEvent (store: Store) (event: CommitEvent) : unit =
-    applyEventAt 0 { store with NgramTokenSize = FullText.ngramTokenSize } event
+    applyEventAt 0 { store with NgramTokenSize = FullText.ngramTokenSize; FullTextWordLengths = StorageOptions.defaultWordLengths } event
 
 /// Replays every complete record in `walPath` into `store`, returning the
 /// byte offset just past the last successfully applied record. A torn final
@@ -1587,14 +1608,18 @@ let private replayWal (store: Store) (walPath: string) : int64 =
 // Snapshots share the WAL row codec and publish through an atomic rename.
 
 let private encodeTokenizer (w: Writer) = function
-    | FullText.Words -> w.WriteByte 0uy
+    | FullText.Words lengths when lengths = StorageOptions.defaultWordLengths -> w.WriteByte 0uy
+    | FullText.Words lengths ->
+        w.WriteByte 11uy
+        encodeWordLengths w lengths
     | FullText.Ngrams size when size >= 1 && size <= 10 -> w.WriteByte(byte size)
     | _ -> invalidOp "Persistence: invalid full-text document tokenizer"
 
 let private decodeTokenizer (r: #IReader) =
     match r.ReadByte() with
-    | 0uy -> FullText.Words
+    | 0uy -> FullText.defaultTokenizer
     | size when size <= 10uy -> FullText.Ngrams(int size)
+    | 11uy -> FullText.Words(decodeWordLengths r)
     | _ -> failwith "Persistence: invalid full-text document tokenizer"
 
 let private encodeRuleTables (w: Writer) indexes =
@@ -2037,6 +2062,7 @@ let load (dataDir: string) : Store =
             fs.SetLength goodOffset
 
     configureNgramTokenSize store.NgramTokenSize store
+    configureFullTextWordLengths store.FullTextWordLengths store
     deferFullTextStopwordReload store
     restorePreparedXaLocks store
     store

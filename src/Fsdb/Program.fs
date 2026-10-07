@@ -9,6 +9,8 @@ type Arguments =
     | Listen of address: string
     | Data_Dir of path: string
     | Defaults_File of path: string
+    | [<EqualsAssignmentOrSpaced>] Innodb_Ft_Min_Token_Size of size: string
+    | [<EqualsAssignmentOrSpaced>] Innodb_Ft_Max_Token_Size of size: string
     | Ngram_Token_Size of size: string
     | [<EqualsAssignment>] Innodb_Ft_Enable_Stopword of enabled: string option
     | [<EqualsAssignment>] Skip_Innodb_Ft_Enable_Stopword of ignored: string option
@@ -34,6 +36,8 @@ type Arguments =
             | Listen _ -> "bind address (default 127.0.0.1)"
             | Data_Dir _ -> "persist trusted server state here (WAL + snapshots); omit for in-memory"
             | Defaults_File _ -> "read server settings from a my.cnf-style file's [mysqld] section"
+            | Innodb_Ft_Min_Token_Size _ -> "minimum indexed word length, clamped to 0–16 (default 3)"
+            | Innodb_Ft_Max_Token_Size _ -> "maximum indexed word length, clamped to 10–84 (default 84)"
             | Ngram_Token_Size _ -> "ngram token size, clamped to 1–10 (default 2)"
             | Innodb_Ft_Enable_Stopword _ -> "initial full-text stopword filtering (default ON); accepts =ON or =OFF"
             | Skip_Innodb_Ft_Enable_Stopword _
@@ -106,6 +110,8 @@ let main argv =
             let commandLineEntries =
                 [ for argument in results.GetAllResults() do
                       match argument with
+                      | Innodb_Ft_Min_Token_Size value -> yield commandLineEntry "innodb_ft_min_token_size" (Some value)
+                      | Innodb_Ft_Max_Token_Size value -> yield commandLineEntry "innodb_ft_max_token_size" (Some value)
                       | Innodb_Ft_User_Stopword_Table value -> yield commandLineEntry "innodb_ft_user_stopword_table" value
                       | Innodb_Ft_Server_Stopword_Table value -> yield commandLineEntry "innodb_ft_server_stopword_table" value
                       | Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "innodb_ft_enable_stopword" value
@@ -167,6 +173,7 @@ let main argv =
             let db =
                 Db.create ()
                 |> Db.withNgramTokenSize storageOptions.NgramTokenSize
+                |> Db.withFullTextWordLengths storageOptions.FullTextWordLengths
                 |> Db.withFullTextStopwords storageOptions.FullTextStopwordsEnabled
                 |> Db.withFullTextStopwordTables storageOptions.FullTextStopwordTables
 

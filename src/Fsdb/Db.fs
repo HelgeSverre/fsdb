@@ -43,6 +43,7 @@ let private configureFullTextStopwordTables (tables: StorageOptions.StopwordTabl
 let withDataDir (dataDir: string) (db: Db) : Db =
     let store = Persistence.load dataDir
     Storage.configureNgramTokenSize db.Store.NgramTokenSize store
+    Storage.configureFullTextWordLengths db.Store.FullTextWordLengths store
     let stopwordsEnabled = Session.tryGlobalVariable db.Store "innodb_ft_enable_stopword" <> Some(Some "OFF")
     configureFullTextStopwords stopwordsEnabled store
     configureFullTextStopwordTables
@@ -50,6 +51,14 @@ let withDataDir (dataDir: string) (db: Db) : Db =
           ServerTable = Session.tryGlobalVariable db.Store "innodb_ft_server_stopword_table" |> Option.flatten } store
     Persistence.attach dataDir store
     { db with Store = store; DataDir = Some dataDir }
+
+/// Selects word lengths before opening sessions; existing postings retain their original bounds.
+let withFullTextWordLengths (lengths: StorageOptions.WordLengths) (db: Db) : Db =
+    let normalized: StorageOptions.WordLengths =
+        { Minimum = StorageOptions.normalizeMinimumWordLength (int64 lengths.Minimum)
+          Maximum = StorageOptions.normalizeMaximumWordLength (int64 lengths.Maximum) }
+    Storage.configureFullTextWordLengths normalized db.Store
+    db
 
 /// Selects the ngram size (clamped to 1–10) before opening sessions or serving traffic.
 /// Existing postings retain their original tokenizer until the index is rebuilt.

@@ -1854,6 +1854,54 @@ let tests =
               snapshotNow dir recovered
               load dir |> verify
 
+          testCase "prepared XA word publication preserves historical bounds after restart"
+          <| fun _ ->
+              for preparedMinimum, currentMinimum in [ 1, 3; 3, 1 ] do
+                  for checkpoint in [ false; true ] do
+                      for updateExisting in [ false; true ] do
+                          let dir = tempDataDir ()
+                          let lengths minimum: Fsdb.StorageOptions.WordLengths = { Minimum = minimum; Maximum = 84 }
+                          let recover minimum =
+                              let store = load dir
+                              configureFullTextWordLengths (lengths minimum) store
+                              store
+                          let store = recover preparedMinimum
+                          attach dir store
+                          let execute session sql =
+                              let next, result = handle session sql
+                              TestSupport.Sql.expectOk result sql
+                              next
+                          let session = Fsdb.Session.create 1 store
+                          let session = execute session "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))"
+                          let session = execute session "INSERT INTO docs VALUES(1,'xy')"
+                          let insert = "INSERT INTO docs VALUES(2,'zzzz')"
+                          let session = if updateExisting then execute session insert else session
+                          let session = execute session "XA START 'word-lengths'"
+                          let session = if updateExisting then session else execute session insert
+                          let session = execute session "UPDATE docs SET body='xy' WHERE id=2"
+                          let session = execute session "XA END 'word-lengths'"
+                          execute session "XA PREPARE 'word-lengths'" |> ignore
+                          if checkpoint then snapshotNow dir store
+                          let recovered = recover currentMinimum
+                          attach dir recovered
+                          let session = Fsdb.Session.create 2 recovered
+                          let session = execute session "INSERT INTO docs VALUES(3,'xy')"
+                          let session = execute session "XA COMMIT 'word-lengths'"
+                          execute session "INSERT INTO docs VALUES(4,'xy')" |> ignore
+                          let verify (store: Store) =
+                              let table = store.Catalog.[defaultDatabase].["docs"]
+                              let index = table.FullTextIndexes.["ft"]
+                              let secondId = table.RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt 2L) |> fst
+                              Expect.equal (Fsdb.FullText.documentTokenizer secondId index) (Some(Fsdb.FullText.Words(lengths preparedMinimum))) "prepared write retains its rules"
+                              Expect.equal (Fsdb.FullText.activeTokenizer index) (Fsdb.FullText.Words(lengths currentMinimum)) "new writes retain startup rules"
+                              let matches = Fsdb.FullText.naturalScores index "xy" |> Map.keys |> Seq.map (fun id -> table.RowsArray.TryFind id |> Option.get |> Array.head) |> Seq.sort |> Seq.toList
+                              let expected = if preparedMinimum = 1 then [ VInt 1L; VInt 2L ] else [ VInt 3L; VInt 4L ]
+                              Expect.equal matches expected "publication and recovery agree"
+                          verify recovered
+                          recover currentMinimum |> verify
+                          snapshotNow dir recovered
+                          recover currentMinimum |> verify
+
           testCase "prepared XA ngram publication agrees with recovery after size changes"
           <| fun _ ->
               let scenarios =
@@ -1898,7 +1946,7 @@ let tests =
                       let secondId = table.RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt 2L) |> fst
                       Expect.equal (Fsdb.FullText.documentTokenizer secondId index) (Some(Fsdb.FullText.Ngrams preparedSize)) context
                       Expect.equal (Fsdb.FullText.activeTokenizer index) (Fsdb.FullText.Ngrams currentSize) context
-                      Expect.equal (Fsdb.FullText.documentTokenizer secondId table.FullTextIndexes.["words"]) (Some Fsdb.FullText.Words) context
+                      Expect.equal (Fsdb.FullText.documentTokenizer secondId table.FullTextIndexes.["words"]) (Some Fsdb.FullText.defaultTokenizer) context
                       let matches size =
                           let term = if size = 3 then "生日快" else "生日"
                           let queryIndex = Fsdb.FullText.withTokenizer (Fsdb.FullText.Ngrams size) index

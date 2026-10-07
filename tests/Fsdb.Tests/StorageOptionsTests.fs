@@ -446,7 +446,7 @@ let tests =
               let database = store.Catalog.[Storage.defaultDatabase]
               let table = database.["docs"]
               let oldRules: FullText.IndexingRules =
-                  { Tokenizer = FullText.Words
+                  { Tokenizer = FullText.defaultTokenizer
                     Stopwords = FullText.customStopwords Collation.defaultCollation [ "orchard" ] }
               let currentRules =
                   { oldRules with Stopwords = FullText.customStopwords (Collation.tryFind "utf8mb4_bin" |> Option.get) [ "cobalt" ] }
@@ -519,7 +519,7 @@ let tests =
               let database = store.Catalog.[Storage.defaultDatabase]
               let table = database.["docs"]
               let filtered: FullText.IndexingRules =
-                  { Tokenizer = FullText.Words; Stopwords = FullText.StopwordPolicy.BuiltIn }
+                  { Tokenizer = FullText.defaultTokenizer; Stopwords = FullText.StopwordPolicy.BuiltIn }
               let documents =
                   table.RowsArray.Indexed
                   |> Seq.mapi (fun position (id, _) ->
@@ -630,7 +630,7 @@ let tests =
               Persistence.snapshotNow dir store
               let path = System.IO.Path.Combine(dir, "snapshot.fsdb")
               let bytes = System.IO.File.ReadAllBytes path
-              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNH" "rule references use the current snapshot format"
+              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNI" "rule references use the current snapshot format"
               let trailerSize, preparedCountSize = 12, 4
               let lastRuleReference = bytes.Length - trailerSize - preparedCountSize - 1
               for invalid in [ 250uy; 251uy ] do
@@ -654,6 +654,135 @@ let tests =
                   (TestSupport.Sql.executeDefault recovered "SELECT body FROM legacy_fts WHERE MATCH(body) AGAINST('生日' IN BOOLEAN MODE)" |> rows)
                   [ [ Some "生日快乐" ] ]
                   "historical tokenizer data still decodes"
+
+          testCase "word length CLI accepts spaced and equals assignments"
+          <| fun _ ->
+              for arguments in
+                  [ [| "--innodb-ft-min-token-size=1"; "--innodb-ft-max-token-size=10" |]
+                    [| "--innodb-ft-min-token-size"; "1"; "--innodb-ft-max-token-size"; "10" |] ] do
+                  let parsed = Program.parseArguments arguments
+                  Expect.equal (parsed.GetResult Program.Innodb_Ft_Min_Token_Size) "1" "minimum"
+                  Expect.equal (parsed.GetResult Program.Innodb_Ft_Max_Token_Size) "10" "maximum"
+
+          testCase "word startup lengths follow independent MySQL bounds and option precedence"
+          <| fun _ ->
+              for value, minimum, maximum in [ "-1", 0, 10; "0", 0, 10; "1", 1, 10; "10", 10, 10; "16", 16, 16; "100", 16, 84; "1K", 16, 84; "64MB", 16, 84; "1T", 16, 84; "1e2", 16, 84
+                                               "K", 0, 10; "-abc", 0, 10; " 1", 1, 10; "+1", 1, 10; "18446744073709551615", 16, 84 ] do
+                  let expected = { StorageOptions.defaults with FullTextWordLengths = { Minimum = minimum; Maximum = maximum } }
+                  Expect.equal
+                      (StorageOptions.fromEntries [ entry "innodb-ft-min-token-size" (Some value); entry "innodb_ft_max_token_size" (Some value) ])
+                      (Ok(expected, [])) value
+              let other = entry "max_allowed_packet" (Some "64M")
+              Expect.equal
+                  (StorageOptions.fromEntries [ entry "innodb_ft_min_token_size" (Some "1"); other; entry "LOOSE-INNODB-FT-MIN-TOKEN-SIZE" (Some "4") ])
+                  (Ok({ StorageOptions.defaults with FullTextWordLengths = { Minimum = 4; Maximum = 84 } }, [ other ])) "last assignment wins"
+              for name in [ "innodb_ft_min_token_size"; "innodb_ft_max_token_size" ] do
+                  for value in [ None; Some ""; Some "abc"; Some "3.0"; Some "1 "; Some "+"; Some "16E"; Some "9223372036854775807K"; Some "18446744073709551616" ] do
+                      match StorageOptions.fromEntries [ entry name value ] with
+                      | Error message -> Expect.stringContains message "test.cnf:7" "invalid values identify their source"
+                      | Ok _ -> failtestf "accepted %s=%A" name value
+
+          testCase "word startup settings report per-store read-only values and leave ngrams independent"
+          <| fun _ ->
+              let defaults = Db.create () |> Db.connect
+              let configured = Db.create () |> Db.withFullTextWordLengths { Minimum = 99; Maximum = -1 } |> Db.connect
+              Expect.equal (configured.Query "SELECT @@innodb_ft_min_token_size,@@GLOBAL.innodb_ft_max_token_size" |> rows)
+                  [ [ Some "16"; Some "10" ] ] "bounds clamp independently"
+              Expect.equal (defaults.Query "SELECT @@innodb_ft_min_token_size,@@innodb_ft_max_token_size" |> rows)
+                  [ [ Some "3"; Some "84" ] ] "another store retains defaults"
+              for variable in [ "innodb_ft_min_token_size"; "innodb_ft_max_token_size" ] do
+                  for sql, code in [ $"SELECT @@SESSION.{variable}", 1238; $"SET GLOBAL {variable}=4", 1238; $"SET SESSION {variable}=4", 1229 ] do
+                      match configured.Query sql |> errorInfo with
+                      | Some error -> Expect.equal (error.Code, error.State) (code, "HY000") sql
+                      | None -> failtestf "accepted %s" sql
+              configured.Query "CREATE TABLE grams(id INT,body TEXT,FULLTEXT ft(body) WITH PARSER ngram)" |> TestSupport.Sql.expectOk <| "ngram table"
+              configured.Query "INSERT INTO grams VALUES(1,'生日快乐')" |> TestSupport.Sql.expectOk <| "ngram row"
+              Expect.equal (configured.Query "SELECT id FROM grams WHERE MATCH(body) AGAINST('生日')" |> rows) [ [ Some "1" ] ] "word lengths do not filter ngrams"
+
+          testCase "word startup builder retains historical lengths through WAL and snapshots"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  for beforeDataDir in [ false; true ] do
+                      let dir = TestSupport.directory "word-startup"
+                      let openDb lengths =
+                          let db = Db.create () |> Db.withFullTextStopwords false
+                          if beforeDataDir then db |> Db.withFullTextWordLengths lengths |> Db.withDataDir dir
+                          else db |> Db.withDataDir dir |> Db.withFullTextWordLengths lengths
+                      let broad = { StorageOptions.WordLengths.Minimum = 1; StorageOptions.WordLengths.Maximum = 84 }
+                      let restricted = { broad with Minimum = 3; Maximum = 10 }
+                      let query (connection: Db.Connection) mode term =
+                          connection.Query ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}'{mode}) ORDER BY id") |> rows
+                      let expected ids = ids |> List.map (fun id -> [ Some(string id) ])
+                      let verify connection longIds orchardIds =
+                          for mode in [ ""; " IN BOOLEAN MODE" ] do
+                              Expect.equal (query connection mode "xy") (expected [ 1 ]) "historical short posting"
+                              Expect.equal (query connection mode "abcdefghijk") (expected longIds) "current lookup maximum"
+                              Expect.equal (query connection mode "orchard") (expected orchardIds) "current writes"
+                          Expect.equal (query connection " IN BOOLEAN MODE" "abc*") (expected [ 2 ]) "prefix bypasses maximum"
+                      let initial = openDb broad
+                      let connection = Db.connect initial
+                      connection.Query "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body))" |> TestSupport.Sql.expectOk <| "create"
+                      connection.Query "INSERT INTO docs VALUES(1,'xy'),(2,'abcdefghijk'),(3,'orchard'),(4,'zzzz')" |> TestSupport.Sql.expectOk <| "initial rows"
+                      verify connection [ 2 ] [ 3 ]
+                      if checkpoint then Persistence.snapshotNow dir initial.Store
+                      let changed = openDb restricted
+                      let connection = Db.connect changed
+                      connection.Query "BEGIN" |> ignore
+                      connection.Query "INSERT INTO docs VALUES(5,'xy abcdefghijk orchard')" |> TestSupport.Sql.expectOk <| "transactional write"
+                      connection.Query "COMMIT" |> TestSupport.Sql.expectOk <| "commit"
+                      verify connection [] [ 3; 5 ]
+                      if checkpoint then Persistence.snapshotNow dir changed.Store
+                      let recovered = openDb restricted
+                      verify (Db.connect recovered) [] [ 3; 5 ]
+                      let restored = openDb broad
+                      verify (Db.connect restored) [ 2 ] [ 3; 5 ]
+                      Persistence.snapshotNow dir restored.Store
+                      verify (openDb broad |> Db.connect) [ 2 ] [ 3; 5 ]
+
+          testCase "word lengths preserve metadata postings and rebuild changed text across recovery"
+          <| fun _ ->
+              let cases =
+                  [ "metadata", [ "ALTER TABLE metadata COMMENT='words'" ], true
+                    "physical", [ "ALTER TABLE physical ADD COLUMN extra INT" ], false
+                    "replacement", [ "ALTER TABLE replacement DROP INDEX ft"; "ALTER TABLE replacement ADD FULLTEXT ft(body)" ], false
+                    "other", [ "UPDATE other SET other=2 WHERE id=1" ], true
+                    "changed", [ "UPDATE changed SET body='xy orchard' WHERE id=1" ], false ]
+              for checkpoint in [ false; true ] do
+                  let dir = TestSupport.directory "word-rebuild"
+                  let openDb minimum = Db.create () |> Db.withFullTextStopwords false |> Db.withFullTextWordLengths { Minimum = minimum; Maximum = 10 } |> Db.withDataDir dir
+                  let initial = openDb 1
+                  let connection = Db.connect initial
+                  for name, _, _ in cases do
+                      connection.Query ($"CREATE TABLE {name}(id INT PRIMARY KEY,other INT,body TEXT,FULLTEXT ft(body))") |> TestSupport.Sql.expectOk <| "create"
+                      connection.Query ($"INSERT INTO {name} VALUES(1,1,'xy'),(2,1,'zzzz')") |> TestSupport.Sql.expectOk <| "seed"
+                  if checkpoint then Persistence.snapshotNow dir initial.Store
+                  let changed = openDb 3
+                  let connection = Db.connect changed
+                  for _, statements, _ in cases do
+                      for sql in statements do connection.Query sql |> TestSupport.Sql.expectOk <| sql
+                  let verify (connection: Db.Connection) =
+                      for name, _, retained in cases do
+                          let expected = if retained then [ [ Some "1" ] ] else []
+                          Expect.equal (connection.Query ($"SELECT id FROM {name} WHERE MATCH(body) AGAINST('xy*' IN BOOLEAN MODE)") |> rows) expected name
+                  verify connection
+                  verify (openDb 3 |> Db.connect)
+                  Persistence.snapshotNow dir changed.Store
+                  verify (openDb 1 |> Db.connect)
+
+          testCase "format 17 word snapshots recover default historical bounds"
+          <| fun _ ->
+              let dir = TestSupport.directory "fulltext-fsnh"
+              // Produced by the format-17 writer with default word lengths.
+              let snapshot = System.Convert.FromBase64String "RlNOSAEAAAAEZnNkYgEAAAAMbGVnYWN5X3dvcmRzDGxlZ2FjeV93b3JkcwIAAAACaWQEAAAAAAEAAAAAAAAABGJvZHkJAQAAAAAAARJ1dGY4bWI0XzA5MDBfYWlfY2kAAAAAAgAAAAdQUklNQVJZAQAAAAUATjppZAEBAAJmdAEAAAAHAE46Ym9keQABAQAAAAAAAAAAKHHjjGIk3wgBAAAAAAAAAAEAAAABAAAAAAABAAAAAAAAAAAAAgAAAAEBAAAAAAAAAAQKb3JjaGFyZCB4eQAAAAAA1AAAAAAAAABhLEJo"
+              System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, "snapshot.fsdb"), snapshot)
+              let db = Db.create () |> Db.withFullTextWordLengths { Minimum = 1; Maximum = 84 } |> Db.withDataDir dir
+              let connection = Db.connect db
+              Expect.equal (connection.Query "SELECT id FROM legacy_words WHERE MATCH(body) AGAINST('orchard')" |> rows) [ [ Some "1" ] ] "old word retained"
+              Expect.isEmpty (connection.Query "SELECT id FROM legacy_words WHERE MATCH(body) AGAINST('xy')" |> rows) "lowering the minimum does not index old short words"
+              connection.Query "INSERT INTO legacy_words VALUES(2,'xy')" |> TestSupport.Sql.expectOk <| "new short word"
+              Persistence.snapshotNow dir db.Store
+              let recovered = Db.create () |> Db.withDataDir dir |> Db.connect
+              Expect.equal (recovered.Query "SELECT id FROM legacy_words WHERE MATCH(body) AGAINST('xy')" |> rows) [ [ Some "2" ] ] "mixed rules survive the new snapshot format"
 
           testCase "ngram startup values follow MySQL integer parsing and bounds"
           <| fun _ ->

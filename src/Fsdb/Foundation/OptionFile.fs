@@ -21,6 +21,38 @@ type Parsed =
 /// option names are case-insensitive.
 let normalizeName (name: string) = name.Trim().Replace('-', '_').ToLowerInvariant()
 
+/// MySQL unsigned startup options clamp negative spellings and inspect only the first suffix character.
+let internal tryParseUnsignedSize (text: string) : uint64 option =
+    let text = text.TrimStart(' ', '\t', '\r', '\n', '\u000b', '\u000c')
+    if text.StartsWith "-" then Some 0UL
+    elif text = "" then None
+    else
+        let start = if text.[0] = '+' then 1 else 0
+        let mutable finish = start
+        while finish < text.Length && text.[finish] >= '0' && text.[finish] <= '9' do
+            finish <- finish + 1
+        let number =
+            if finish = 0 then Some 0UL
+            elif finish = start then None
+            else
+                match UInt64.TryParse(text.Substring(start, finish - start), Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
+                | true, value -> Some value
+                | _ -> None
+        let multiplier =
+            if finish = text.Length then Some 1UL
+            else
+                match Char.ToUpperInvariant text.[finish] with
+                | 'K' -> Some(1UL <<< 10)
+                | 'M' -> Some(1UL <<< 20)
+                | 'G' -> Some(1UL <<< 30)
+                | 'T' -> Some(1UL <<< 40)
+                | 'P' -> Some(1UL <<< 50)
+                | 'E' -> Some(1UL <<< 60)
+                | _ -> None
+        match number, multiplier with
+        | Some value, Some multiplier when value <= UInt64.MaxValue / multiplier -> Some(value * multiplier)
+        | _ -> None
+
 /// MySQL's size suffixes: `64M`, `16K`, `1G`. Plain digits pass through.
 /// Deliberately strict — `64MB` and `64 megs` are errors, not a guess.
 let internal tryParseSize (text: string) : int64 option =

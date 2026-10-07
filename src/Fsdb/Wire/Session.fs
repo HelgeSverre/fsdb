@@ -114,6 +114,8 @@ let defaultVariables: Map<string, string option> =
 let private liveDefaults (store: Store) : Map<string, string option> =
     Limits.variables ()
     |> List.fold (fun m (name, value) -> Map.add name (Some value) m) defaultVariables
+    |> Map.add "innodb_ft_min_token_size" (Some(string store.FullTextWordLengths.Minimum))
+    |> Map.add "innodb_ft_max_token_size" (Some(string store.FullTextWordLengths.Maximum))
     |> Map.add "ngram_token_size" (Some(string store.NgramTokenSize))
 
 /// GLOBAL overrides share Store.Lock identity and expire with the store.

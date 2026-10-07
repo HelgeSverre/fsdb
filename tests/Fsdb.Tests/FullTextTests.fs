@@ -29,7 +29,7 @@ let tests =
               for source in names do
                   let policy = customStopwords (tryFind source |> Option.get) [ "Orchard"; "café" ]
                   for target in names do
-                      let index = buildIndexWithStopwords policy Words (tryFind target |> Option.get)
+                      let index = buildIndexWithStopwords policy defaultTokenizer (tryFind target |> Option.get)
                                       [ 1, [ "orchard" ]; 2, [ "Orchard" ]; 3, [ "ORCHARD" ]
                                         4, [ "cafe" ]; 5, [ "café" ]; 6, [ "CAFÉ" ]; 7, [ "the" ] ]
                       for query in [ "orchard"; "Orchard"; "ORCHARD" ] do
@@ -48,6 +48,39 @@ let tests =
                               else []
                           Expect.equal (naturalScores index query |> Map.keys |> Seq.toList) expected "source accent sensitivity and target lookup remain distinct"
                       Expect.equal (naturalScores index "the" |> Map.keys |> Seq.toList) [ 7 ] "custom lists replace built-in words"
+
+          testCase "word bounds preserve old postings while new writes use current lengths"
+          <| fun _ ->
+              let broad = Words { Minimum = 1; Maximum = 84 }
+              let restricted = Words { Minimum = 3; Maximum = 10 }
+              let initial = buildIndexWithStopwords StopwordPolicy.Disabled broad defaultCollation
+                                [ 1, [ "xy" ]; 2, [ "abcdefghijk" ]; 3, [ "orchard" ]; 4, [ "zzzz" ] ]
+              let changed = initial |> withTokenizer restricted |> addDocument 5 "xy abcdefghijk orchard"
+              let restored = changed |> withTokenizer broad
+              let ids scores = scores |> Map.keys |> Seq.toList
+              for index, longIds, orchardIds in [ initial, [ 2 ], [ 3 ]; changed, [], [ 3; 5 ]; restored, [ 2 ], [ 3; 5 ] ] do
+                  for score in [ naturalScores; booleanScores ] do
+                      Expect.equal (score index "xy" |> ids) [ 1 ] "exact lookup ignores the current minimum"
+                      Expect.equal (score index "abcdefghijk" |> ids) longIds "exact lookup observes the current maximum"
+                      Expect.equal (score index "orchard" |> ids) orchardIds "new writes use current indexing bounds"
+                  Expect.equal (booleanScores index "xy*" |> ids) [ 1 ] "prefix reaches old short postings"
+                  Expect.equal (booleanScores index "abc*" |> ids) [ 2 ] "prefix reaches old long postings"
+
+          testCase "query expansion filters historical seed text using current word bounds"
+          <| fun _ ->
+              let broad = Words { Minimum = 1; Maximum = 84 }
+              let restricted = Words { Minimum = 3; Maximum = 10 }
+              let original = buildIndexWithStopwords StopwordPolicy.Disabled broad defaultCollation
+                                 [ 1, [ "orchard xy abcdefghijk" ]; 2, [ "xy" ]; 3, [ "abcdefghijk" ]; 4, [ "zzzz" ] ]
+              let ids index = expansionScores index "orchard" |> Map.keys |> Seq.toList
+              Expect.equal (ids original) [ 1; 2; 3 ] "original seed bounds"
+              let changed = original |> withTokenizer restricted
+              Expect.equal (ids changed) [ 1 ] "seed extraction honors current bounds"
+              Expect.equal (changed |> withTokenizer broad |> ids) [ 1; 2; 3 ] "restoring bounds restores expansion"
+              let narrow = buildIndexWithStopwords StopwordPolicy.Disabled restricted defaultCollation
+                               [ 1, [ "orchard xy abcdefghijk" ]; 4, [ "zzzz" ] ]
+              let widened = narrow |> withTokenizer broad |> addDocument 2 "xy" |> addDocument 3 "abcdefghijk"
+              Expect.equal (ids widened) [ 1; 2; 3 ] "newly permitted seed words reach newer postings"
 
           testCase "custom ngram stopwords match substrings with source collation expansions and padding"
           <| fun _ ->
@@ -68,14 +101,14 @@ let tests =
           <| fun _ ->
               let documents = [ 1, [ "orchard cobalt" ]; 2, [ "other cobalt" ]; 3, [ "the cobalt" ]; 4, [ "orchard the cobalt" ]; 5, [ "zzzz" ] ]
               let policy = customStopwords defaultCollation [ "orchard" ]
-              let index = buildIndexWithStopwords policy Words defaultCollation documents
+              let index = buildIndexWithStopwords policy defaultTokenizer defaultCollation documents
               for score in [ naturalScores; booleanScores ] do
                   Expect.equal (score index "\"orchard cobalt\"" |> Map.keys |> Seq.toList) [ 1; 2; 3; 4 ] "custom stopwords do not anchor a phrase"
                   Expect.equal (score index "\"orchard the cobalt\"" |> Map.keys |> Seq.toList) [ 3; 4 ] "built-in stopwords become searchable phrase anchors"
               Expect.isEmpty (booleanScores index "+orchard +cobalt") "a required custom stopword has no postings"
               Expect.isEmpty (booleanScores index "orch*") "prefixes exclude filtered documents"
               let empty = customStopwords defaultCollation [ null; "" ]
-              let index = buildIndexWithStopwords empty Words defaultCollation documents
+              let index = buildIndexWithStopwords empty defaultTokenizer defaultCollation documents
               Expect.equal (naturalScores index "the" |> Map.keys |> Seq.toList) [ 3; 4 ] "empty lists disable default filtering"
 
           testCase "binary exact phrases verify folded text at original anchor positions"
@@ -86,7 +119,7 @@ let tests =
                     6, "orchard cobalt Orchard Cobalt"; 7, "zzzz" ]
               for name in [ "utf8mb4_bin"; "utf8mb4_0900_bin" ] do
                   let collation = tryFind name |> Option.get
-                  for tokenizer in [ Words; Ngrams 2 ] do
+                  for tokenizer in [ defaultTokenizer; Ngrams 2 ] do
                       let rules = { Tokenizer = tokenizer; Stopwords = StopwordPolicy.Disabled }
                       let index =
                           buildIndexWithDocumentSettings rules collation
@@ -96,7 +129,7 @@ let tests =
                       for query in [ "\"Orchard cobalt\""; "\"orchard Cobalt\""; "\"Orchard Cobalt\"" ] do
                           Expect.isEmpty (booleanScores index query) "uppercase query tokens fail multi-token verification"
                       match tokenizer with
-                      | Words ->
+                      | Words _ ->
                           Expect.equal (naturalScores index "\"orchard cobalt\"" |> ids) [ 1; 5; 6 ] "natural phrases use the same verifier"
                           Expect.equal (booleanScores index "\"Orchard\"" |> ids) [ 2; 4; 6 ] "a single quoted token keeps binary lookup semantics"
                           Expect.equal (booleanScores index "\"Orchard Cobalt\" @10" |> ids) [ 2; 6 ] "proximity uses original postings"
@@ -122,7 +155,7 @@ let tests =
           testCase "nonbinary full-text collations fold case for words and ngrams"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get
-              for tokenizer in [ Words; Ngrams 2 ] do
+              for tokenizer in [ defaultTokenizer; Ngrams 2 ] do
                   let rules = { Tokenizer = tokenizer; Stopwords = StopwordPolicy.Disabled }
                   let index =
                       buildIndexWithDocumentSettings rules collation
@@ -188,7 +221,7 @@ let tests =
 
           testCase "word lookups retain old postings after active stopwords change"
           <| fun _ ->
-              let unfiltered = { Tokenizer = Words; Stopwords = StopwordPolicy.Disabled }
+              let unfiltered = { Tokenizer = defaultTokenizer; Stopwords = StopwordPolicy.Disabled }
               let filtered = { unfiltered with Stopwords = StopwordPolicy.BuiltIn }
               let index =
                   buildIndexWithDocumentSettings unfiltered defaultCollation [ 1, unfiltered, [ "the" ]; 2, unfiltered, [ "zzzz" ] ]
@@ -236,7 +269,7 @@ let tests =
 
           testCase "stopword policy applies to word and ngram queries and later writes"
           <| fun _ ->
-              for tokenizer, term in [ Words, "the"; Ngrams 2, "ab" ] do
+              for tokenizer, term in [ defaultTokenizer, "the"; Ngrams 2, "ab" ] do
                   let documents = [ 1, [ term ]; 2, [ "zzzz" ]; 3, [ term ] ]
                   let enabled = buildIndexWithStopwords StopwordPolicy.BuiltIn tokenizer defaultCollation documents
                   let disabled = buildIndexWithStopwords StopwordPolicy.Disabled tokenizer defaultCollation documents
@@ -255,7 +288,7 @@ let tests =
 
           testCase "disabling stopwords does not disable word length rules"
           <| fun _ ->
-              let index = buildIndexWithStopwords StopwordPolicy.Disabled Words defaultCollation [ 1, [ "a the orchard" ]; 2, [ "orchard" ] ]
+              let index = buildIndexWithStopwords StopwordPolicy.Disabled defaultTokenizer defaultCollation [ 1, [ "a the orchard" ]; 2, [ "orchard" ] ]
               Expect.isEmpty (naturalScores index "a") "minimum token length still applies"
               Expect.equal (naturalScores index "the" |> Map.keys |> Seq.toList) [ 1 ] "the length-eligible stopword is searchable"
 
@@ -273,7 +306,7 @@ let tests =
 
           testCase "read visibility retains committed term frequencies for word and ngram scores"
           <| fun _ ->
-              for tokenizer, term, other in [ Words, "orchard", "cobalt"; Ngrams 2, "生日", "中文" ] do
+              for tokenizer, term, other in [ defaultTokenizer, "orchard", "cobalt"; Ngrams 2, "生日", "中文" ] do
                   let index = buildIndexWithTokenizer tokenizer defaultCollation [ 1, term; 2, term; 3, other ]
                   let view = readView index |> restrictReadView (Set.ofList [ 2; 3 ])
                   let expected = log10(3.0 / 2.0) ** 2.0
