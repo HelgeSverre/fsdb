@@ -2013,35 +2013,35 @@ let rec internal exprLabel (expr: Expr) : string =
             |> Option.map (fun qualifier -> qualifier + "." + column.Name)
             |> Option.defaultValue column.Name
 
-        sprintf "match (%s) against (%s)" (cols |> List.map columnLabel |> String.concat ",") (exprLabel q)
+        sprintf "match (%s) against (%s)" (cols |> List.map columnLabel |> String.concat ",") (expressionLabelFragment q)
     | Placeholder _ -> "?"
     | UserVariable variable -> variable.Sql
     | SystemVariable(scope, variable) -> "@@" + (scope |> Option.map (fun value -> value + ".") |> Option.defaultValue "") + variable
-    | AssignUserVariable(variable, value) -> variable.Sql + ":=" + exprLabel value
+    | AssignUserVariable(variable, value) -> variable.Sql + ":=" + expressionLabelFragment value
     | Col name -> name
     | QualifiedCol(_, col) -> col
     | FuncCall(name, [ Lit(VString label); _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) -> label
-    | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToUpperInvariant()) (args |> List.map exprLabel |> String.concat ", ")
-    | Row values -> sprintf "(%s)" (values |> List.map exprLabel |> String.concat ", ")
-    | BinOp(op, a, b) -> sprintf "%s %s %s" (exprLabel a) (opSymbol op) (exprLabel b)
+    | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToUpperInvariant()) (args |> List.map expressionLabelFragment |> String.concat ", ")
+    | Row values -> sprintf "(%s)" (values |> List.map expressionLabelFragment |> String.concat ", ")
+    | BinOp(op, a, b) -> sprintf "%s %s %s" (expressionLabelFragment a) (opSymbol op) (expressionLabelFragment b)
     | RuntimeExpression e -> exprLabel e
-    | Neg e -> sprintf "-(%s)" (exprLabel e)
-    | Not e -> sprintf "not(%s)" (exprLabel e)
-    | IsNull e -> sprintf "(%s is null)" (exprLabel e)
-    | IsNotNull e -> sprintf "(%s is not null)" (exprLabel e)
-    | IsTrue e -> sprintf "(%s is true)" (exprLabel e)
-    | IsFalse e -> sprintf "(%s is false)" (exprLabel e)
-    | Like(e, p, _, _) -> sprintf "(%s like %s)" (exprLabel e) (exprLabel p)
-    | Regexp(e, p) -> sprintf "(%s regexp %s)" (exprLabel e) (exprLabel p)
-    | In(e, xs) -> sprintf "(%s in (%s))" (exprLabel e) (xs |> List.map exprLabel |> String.concat ",")
-    | InSubquery(e, _) -> sprintf "(%s in (...))" (exprLabel e)
+    | Neg e -> sprintf "-(%s)" (expressionLabelFragment e)
+    | Not e -> sprintf "not(%s)" (expressionLabelFragment e)
+    | IsNull e -> sprintf "(%s is null)" (expressionLabelFragment e)
+    | IsNotNull e -> sprintf "(%s is not null)" (expressionLabelFragment e)
+    | IsTrue e -> sprintf "(%s is true)" (expressionLabelFragment e)
+    | IsFalse e -> sprintf "(%s is false)" (expressionLabelFragment e)
+    | Like(e, p, _, _) -> sprintf "(%s like %s)" (expressionLabelFragment e) (expressionLabelFragment p)
+    | Regexp(e, p) -> sprintf "(%s regexp %s)" (expressionLabelFragment e) (expressionLabelFragment p)
+    | In(e, xs) -> sprintf "(%s in (%s))" (expressionLabelFragment e) (xs |> List.map expressionLabelFragment |> String.concat ",")
+    | InSubquery(e, _) -> sprintf "(%s in (...))" (expressionLabelFragment e)
     | QuantifiedComparison(e, op, quantifier, _) ->
         let quantifierName = match quantifier with Any -> "any" | All -> "all"
-        sprintf "%s %s %s (...)" (exprLabel e) (opSymbol op) quantifierName
-    | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprLabel e) (exprLabel lo) (exprLabel hi)
-    | Cast(e, _) -> sprintf "cast(%s as ...)" (exprLabel e)
+        sprintf "%s %s %s (...)" (expressionLabelFragment e) (opSymbol op) quantifierName
+    | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (expressionLabelFragment e) (expressionLabelFragment lo) (expressionLabelFragment hi)
+    | Cast(e, _) -> sprintf "cast(%s as ...)" (expressionLabelFragment e)
     | Collate(e, _) -> exprLabel e
-    | Distinct e -> sprintf "distinct %s" (exprLabel e)
+    | Distinct e -> sprintf "distinct %s" (expressionLabelFragment e)
     | OrderBy(e, _) -> exprLabel e
     | Case _ -> "case"
     | Star None -> "*"
@@ -2050,24 +2050,33 @@ let rec internal exprLabel (expr: Expr) : string =
     | Exists _ -> "exists"
     | Subquery _ -> "(...)"
 
+and private expressionLabelFragment expression =
+    match expression with
+    | Lit(VString text) -> "'" + text.Replace(@"\", @"\\").Replace("'", "''") + "'"
+    | QualifiedCol(qualifier, name) -> qualifier + "." + name
+    | RuntimeExpression inner -> expressionLabelFragment inner
+    | FuncCall(name, arguments) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) ->
+        sprintf "%s(%s)" (name.ToUpperInvariant()) (arguments |> List.map expressionLabelFragment |> String.concat ", ")
+    | _ -> exprLabel expression
+
 /// The `fn(args)` half of a window call's default column name — MySQL
 /// echoes the query's own source text there, which the parser doesn't keep,
 /// so this reconstructs it in MySQL's own lowercase spelling.
 and private windowFnLabel (fn: WindowFn) : string =
-    let args = List.map exprLabel >> String.concat ","
+    let args = List.map expressionLabelFragment >> String.concat ","
 
     match fn with
     | WinRowNumber -> "row_number()"
     | WinRank dense -> (if dense then "dense_rank" else "rank") + "()"
     | WinPercentRank -> "percent_rank()"
     | WinCumeDist -> "cume_dist()"
-    | WinNTile n -> sprintf "ntile(%s)" (exprLabel n)
+    | WinNTile n -> sprintf "ntile(%s)" (expressionLabelFragment n)
     | WinLagLead(lead, e, offset, deflt) ->
         sprintf "%s(%s)" (if lead then "lead" else "lag") (args (e :: (Option.toList offset @ Option.toList deflt)))
-    | WinFirstValue e -> sprintf "first_value(%s)" (exprLabel e)
-    | WinLastValue e -> sprintf "last_value(%s)" (exprLabel e)
+    | WinFirstValue e -> sprintf "first_value(%s)" (expressionLabelFragment e)
+    | WinLastValue e -> sprintf "last_value(%s)" (expressionLabelFragment e)
     | WinNthValue(e, n) -> sprintf "nth_value(%s)" (args [ e; n ])
-    | WinAggregate(name, args) -> exprLabel (FuncCall(name, args))
+    | WinAggregate(name, args) -> expressionLabelFragment (FuncCall(name, args))
 
 and private overLabel (over: OverClause) : string =
     match over with
@@ -2078,16 +2087,16 @@ and private overLabel (over: OverClause) : string =
             | UnboundedPreceding -> "unbounded preceding"
             | UnboundedFollowing -> "unbounded following"
             | CurrentRow -> "current row"
-            | BoundPreceding e -> sprintf "%s preceding" (exprLabel e)
-            | BoundFollowing e -> sprintf "%s following" (exprLabel e)
+            | BoundPreceding e -> sprintf "%s preceding" (expressionLabelFragment e)
+            | BoundFollowing e -> sprintf "%s following" (expressionLabelFragment e)
 
         [ if not spec.PartitionBy.IsEmpty then
-              yield "partition by " + (spec.PartitionBy |> List.map exprLabel |> String.concat ",")
+              yield "partition by " + (spec.PartitionBy |> List.map expressionLabelFragment |> String.concat ",")
           if not spec.OrderBy.IsEmpty then
               yield
                   "order by "
                   + (spec.OrderBy
-                     |> List.map (fun (e, dir) -> exprLabel e + (if dir = Desc then " desc" else ""))
+                     |> List.map (fun (e, dir) -> expressionLabelFragment e + (if dir = Desc then " desc" else ""))
                      |> String.concat ",")
           match spec.Frame with
           | Some frame ->

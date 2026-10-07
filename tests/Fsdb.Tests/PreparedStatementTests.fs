@@ -33,7 +33,26 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "qualified reference diagnostics distinguish isolated and enclosing scopes"
+        [ testCase "expression labels retain nested literal quotes and qualifiers"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              handle session "CREATE TABLE a(id INT)" |> ignore
+              handle session "INSERT INTO a VALUES(1)" |> ignore
+              for sql, label, value in
+                  [ "SELECT CONCAT('a', 'b')", "CONCAT('a', 'b')", "ab"
+                    "SELECT COALESCE(NULL, 'a')", "COALESCE(NULL, 'a')", "a"
+                    "SELECT 'a' = 'b'", "'a' = 'b'", "0"
+                    "SELECT 'a'", "a", "a"
+                    "SELECT CONCAT('it''s', 'x')", "CONCAT('it''s', 'x')", "it'sx"
+                    @"SELECT CONCAT('a\\b', 'x')", @"CONCAT('a\\b', 'x')", @"a\bx"
+                    "SELECT a.id + 1 FROM a", "a.id + 1", "2"
+                    "SELECT a.id FROM a", "id", "1" ] do
+                  Expect.equal (handle session sql |> snd) (ResultSet([ label ], [ [ Some value ] ])) sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map _.Name) [ label ] ("prepared label: " + sql)
+
+          testCase "qualified reference diagnostics distinguish isolated and enclosing scopes"
           <| fun _ ->
               let session = relationNameSession ()
               for sql, code, message in
@@ -556,6 +575,7 @@ let tests =
               let session = create 1 (Fsdb.Storage.create ())
               for sql, names in
                   [ "SELECT ?, ABS(?), ? + 1", [ "?"; "ABS(?)"; "? + 1" ]
+                    "SELECT CONCAT(?, 'b')", [ "CONCAT(?, 'b')" ]
                     "SELECT d.`?` FROM (SELECT ?) d", [ "?" ]
                     "WITH c AS (SELECT ?) SELECT * FROM c", [ "?" ]
                     "SELECT ? UNION ALL SELECT ?", [ "?" ]
