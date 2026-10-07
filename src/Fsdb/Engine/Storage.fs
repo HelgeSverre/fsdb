@@ -7018,6 +7018,66 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
     | DropCheck _
     | SetCheckEnforced _ -> Ok(table, None)
 
+let private alterPreservesFullText = function
+    | RenameTo _
+    | RenameColumnTo _
+    | RenameIndex _
+    | AddIndex _
+    | DropIndexAction _
+    | SetIndexVisibility _
+    | DropForeignKey _
+    | SetDefault _
+    | SetTableComment _
+    | SetAutoIncrement _
+    | SetAlterAlgorithm(AlgorithmDefault | AlgorithmInstant | AlgorithmInplace)
+    | SetAlterLock _ -> true
+    | _ -> false
+
+let private reindexAfterAlter size actions before after =
+    if not (List.forall alterPreservesFullText actions) then
+        reindexTableWithNgramTokenSize size after
+    else
+        let renameSource sources = function
+            | RenameIndex(oldName, newName) ->
+                let oldName, newName = oldName.ToLowerInvariant(), newName.ToLowerInvariant()
+                let source = sources |> Map.tryFind oldName
+                sources |> Map.remove oldName |> Map.change newName (fun _ -> source)
+            | _ -> sources
+
+        // A same-definition DROP/ADD in one ALTER retains the original index.
+        let originalSources =
+            fullTextKeyGroups before
+            |> List.map (fun group -> group.Name.ToLowerInvariant(), group)
+            |> Map.ofList
+        let sources = List.fold renameSource originalSources actions
+
+        let tokenizerAtSize = function
+            | FullText.Words -> FullText.Words
+            | FullText.Ngrams _ -> FullText.Ngrams size
+
+        let sourceNames =
+            fullTextKeyGroups after
+            |> List.choose (fun group ->
+                sources
+                |> Map.tryFind (group.Name.ToLowerInvariant())
+                |> Option.filter (fun source ->
+                    source.Indices = group.Indices
+                    && source.CollationSpec.Name = group.CollationSpec.Name
+                    && tokenizerAtSize source.Tokenizer = tokenizerAtSize group.Tokenizer)
+                |> Option.map (fun source -> group.Name, source.Name))
+            |> Map.ofList
+
+        let tokenizerFor name rowId fallback =
+            let fallback = tokenizerAtSize fallback
+            match sourceNames |> Map.tryFind name with
+            | Some sourceName -> documentTokenizerFrom before Map.empty sourceName rowId fallback
+            | None -> fallback
+
+        let indexes =
+            buildFullTextIndexes tokenizerFor after
+            |> Map.map (fun _ index -> FullText.withNgramTokenSize size index)
+        reindexTableWithFullTextIndexes indexes after
+
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
@@ -7074,12 +7134,9 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 actions
                 |> List.fold step (Ok(origKey, table))
                 |> Result.bind (fun state -> validateAutoIncrementKey state |> Result.map (fun () -> state))
-                // Column positions/count may have shifted (`ADD`/`DROP`/
-                // `MODIFY COLUMN`), so a full rebuild rather than an
-                // incremental patch — ALTER isn't a hot path.
                 |> Result.map (fun (finalKey, finalTable) ->
                     let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
-                    let database = Map.remove origKey db |> Map.add finalKey (reindexTableWithNgramTokenSize store.NgramTokenSize finalTable)
+                    let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize actions table finalTable)
                     let updatedCatalog = setCatalogDatabase dbName database catalog
                     invalidateAutoIncrementCounter store dbName origKey
                     invalidateAutoIncrementCounter store dbName finalKey

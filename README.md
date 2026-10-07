@@ -116,8 +116,9 @@ Embedded hosts can call `Db.withNgramTokenSize` before opening connections.
 
 Changing the size preserves existing postings across WAL and snapshot recovery;
 new writes use the selected size. Separate DROP INDEX and ADD FULLTEXT statements
-rebuild the index at the current size. Metadata-only ALTER TABLE preservation
-across size changes remains an open compatibility gap.
+rebuild the index at the current size. Common metadata ALTER operations preserve postings; comment-only MODIFY and
+name-only CHANGE column definitions still rebuild them and remain compatibility
+gaps.
 
 ### Option files
 

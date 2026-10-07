@@ -51,6 +51,58 @@ let tests =
                   | result -> failtestf "expected read-only variable error, got %A" result
               Expect.equal (two.Query "SELECT @@ngram_token_size" |> rows) [ [ Some "2" ] ] "other store remains unchanged"
 
+          testCase "ngram ALTER preserves postings for metadata and rebuilds for physical changes"
+          <| fun _ ->
+              for action, column, table, rebuilt in
+                  [ "COMMENT='changed'", "body", "docs", false
+                    "COMMENT='changed', ALGORITHM=COPY", "body", "docs", true
+                    "RENAME INDEX ft TO renamed", "body", "docs", false
+                    "DROP INDEX second, RENAME INDEX ft TO second", "body", "docs", false
+                    "RENAME COLUMN body TO renamed_body", "renamed_body", "docs", false
+                    "RENAME TO renamed_table", "body", "renamed_table", false
+                    "ADD INDEX extra_id(extra)", "body", "docs", false
+                    "ADD FULLTEXT KEY second(body) WITH PARSER ngram", "body", "docs", false
+                    "ALTER INDEX existing INVISIBLE", "body", "docs", false
+                    "ADD CONSTRAINT nonnegative CHECK(extra>=0)", "body", "docs", true
+                    "DROP INDEX existing", "body", "docs", false
+                    "ADD COLUMN added INT", "body", "docs", true
+                    "DROP COLUMN extra", "body", "docs", true
+                    "MODIFY body MEDIUMTEXT", "body", "docs", true
+                    "ALTER COLUMN extra SET DEFAULT 3", "body", "docs", false
+                    "AUTO_INCREMENT=20", "body", "docs", false
+                    "ENGINE=InnoDB", "body", "docs", true
+                    "ROW_FORMAT=DYNAMIC", "body", "docs", true
+                    "DROP INDEX ft, ADD FULLTEXT KEY ft(body) WITH PARSER ngram", "body", "docs", false ] do
+                  let dir = TestSupport.directory "ngram-alter"
+                  let initial = Db.create () |> Db.withDataDir dir
+                  let connection = Db.connect initial
+                  Expect.equal (connection.Query "CREATE TABLE docs(id INT PRIMARY KEY AUTO_INCREMENT,extra INT DEFAULT 0,body TEXT,KEY existing(extra),FULLTEXT KEY ft(body) WITH PARSER ngram)") (Affected 0UL) "create"
+                  Expect.equal (connection.Query "INSERT INTO docs(id,body) VALUES(1,'生日快乐')") (Affected 1UL) "historical write"
+                  let changed = Db.create () |> Db.withDataDir dir |> Db.withNgramTokenSize 3
+                  let connection = Db.connect changed
+                  Expect.equal (connection.Query "INSERT INTO docs(id,body) VALUES(2,'生日快乐')") (Affected 1UL) "current write"
+                  if action.StartsWith "DROP INDEX second" then
+                      Expect.equal (connection.Query "ALTER TABLE docs ADD FULLTEXT KEY second(body) WITH PARSER ngram") (Affected 0UL) "new destination index"
+                  Expect.equal (connection.Query ("ALTER TABLE docs " + action)) (Affected 0UL) action
+                  let verify (connection: Db.Connection) =
+                      for term, expected in
+                          [ "生日", (if rebuilt then [] else [ [ Some "1" ] ])
+                            "生日快", (if rebuilt then [ [ Some "1" ]; [ Some "2" ] ] else [ [ Some "2" ] ]) ] do
+                          let sql = sprintf "SELECT id FROM %s WHERE MATCH(%s) AGAINST('%s' IN BOOLEAN MODE) ORDER BY id" table column term
+                          Expect.equal (connection.Query sql |> rows) expected (action + ": " + term)
+                  verify connection
+                  let recovered = Db.create () |> Db.withDataDir dir |> Db.withNgramTokenSize 3
+                  verify (Db.connect recovered)
+                  Persistence.snapshotNow dir recovered.Store
+                  let checkpointed = Db.create () |> Db.withDataDir dir |> Db.withNgramTokenSize 3 |> Db.connect
+                  verify checkpointed
+                  if action.StartsWith "ADD FULLTEXT" then
+                      Expect.equal (checkpointed.Query "ALTER TABLE docs DROP INDEX ft") (Affected 0UL) "drop historical index"
+                      Expect.equal
+                          (checkpointed.Query "SELECT id FROM docs WHERE MATCH(body) AGAINST('生日快' IN BOOLEAN MODE) ORDER BY id" |> rows)
+                          [ [ Some "1" ]; [ Some "2" ] ]
+                          "new index tokenizes every row with the current size"
+
           testCase "ngram startup builder preserves historical postings through WAL and snapshots"
           <| fun _ ->
               for checkpoint in [ false; true ] do

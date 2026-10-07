@@ -879,6 +879,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | SetIndexVisibility(name, visible) -> w.WriteByte 0x12uy; writeStr w name; writeBool w visible
     | AddHashPartitions count when format.Partitions -> w.WriteByte 0x13uy; w.WriteInt32LE(int32 count)
     | CoalesceHashPartitions count when format.Partitions -> w.WriteByte 0x14uy; w.WriteInt32LE(int32 count)
+    | SetAlterAlgorithm AlgorithmCopy -> w.WriteByte 0x15uy
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _
@@ -916,6 +917,7 @@ let private decodeAlterAction (format: SnapshotFormat) (columnNames: Set<string>
     | 0x12uy -> SetIndexVisibility(readStr r, readBool r)
     | 0x13uy when format.Partitions -> AddHashPartitions(uint32 (r.ReadInt32LE()))
     | 0x14uy when format.Partitions -> CoalesceHashPartitions(uint32 (r.ReadInt32LE()))
+    | 0x15uy -> SetAlterAlgorithm AlgorithmCopy
     | _ -> AddPrimaryKey(readStrList r |> List.map (decodeIndexColumn format columnNames))
 
 let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) : unit =

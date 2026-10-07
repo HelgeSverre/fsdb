@@ -20254,6 +20254,20 @@ let rec executeAs
 
             let crossesDatabases = not (sameObjectName db finalDb)
 
+            let copyRequested =
+                actions
+                |> List.choose (function SetAlterAlgorithm algorithm -> Some algorithm | _ -> None)
+                |> List.tryLast
+                |> Option.contains AlgorithmCopy
+
+            let rebuildRequested =
+                copyRequested
+                || (actions |> List.exists (function
+                    | SetEngine _
+                    | SetRowFormat _
+                    | AddCheck _ -> true
+                    | _ -> false))
+
             let physicalActions =
                 actions
                 |> List.choose (function
@@ -20268,6 +20282,9 @@ let rec executeAs
                     | RenameTo _ when crossesDatabases -> None
                     | RenameTo _ -> Some(RenameTo finalTable)
                     | action -> Some action)
+                // Retain physical rebuild intent through publication and WAL replay.
+                |> fun operations ->
+                    if rebuildRequested then operations @ [ SetAlterAlgorithm AlgorithmCopy ] else operations
 
             let partitionTruncation =
                 actions
