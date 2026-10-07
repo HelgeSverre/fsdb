@@ -9404,14 +9404,21 @@ let tests =
               use start = new Threading.ManualResetEventSlim(false)
 
               let commit session =
-                  System.Threading.Tasks.Task.Run(fun () ->
-                      ready.Signal() |> ignore
-                      start.Wait()
-                      handle session "COMMIT" |> snd)
+                  // Pool saturation must not determine whether both publishers reach the barrier.
+                  System.Threading.Tasks.Task.Factory.StartNew(
+                      (fun () ->
+                          ready.Signal() |> ignore
+                          start.Wait()
+                          handle session "COMMIT" |> snd),
+                      Threading.CancellationToken.None,
+                      System.Threading.Tasks.TaskCreationOptions.LongRunning,
+                      System.Threading.Tasks.TaskScheduler.Default)
 
               let commits = [| commit first; commit second |]
-              Expect.isTrue (ready.Wait(TimeSpan.FromSeconds 2.0)) "both transactions are ready to publish"
-              start.Set()
+              try
+                  Expect.isTrue (ready.Wait(TimeSpan.FromSeconds 2.0)) "both transactions are ready to publish"
+              finally
+                  start.Set()
               commits |> Array.map (fun task -> task :> System.Threading.Tasks.Task) |> System.Threading.Tasks.Task.WaitAll
               Expect.equal (commits |> Array.map _.Result |> Array.toList) [ Affected 0UL; Affected 0UL ] "both commits succeed"
 
