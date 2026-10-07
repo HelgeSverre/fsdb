@@ -42,6 +42,10 @@ type StopwordPolicy =
     | Disabled
     | Custom of StopwordList
 
+type StopwordSettings =
+    { Source: string option
+      Policy: StopwordPolicy }
+
 let internal customStopwords (collation: Collation) words =
     let words = words |> Seq.filter (String.IsNullOrEmpty >> not) |> Set.ofSeq
     StopwordPolicy.Custom
@@ -142,7 +146,8 @@ type Index<'id when 'id: comparison> =
           Postings: Map<string, Map<'id, int>>
           PrefixPostings: Map<string, Map<'id, int>>
           Collation: Collation
-          Rules: IndexingRules }
+          Rules: IndexingRules
+          StopwordSource: string option }
 
 /// Query state is separate from the index maintained for future commits.
 type internal ReadView<'id when 'id: comparison> =
@@ -275,9 +280,19 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       Postings = Map.empty
       PrefixPostings = Map.empty
       Collation = collation
-      Rules = { Tokenizer = tokenizer; Stopwords = policy } }
+      Rules = { Tokenizer = tokenizer; Stopwords = policy }
+      StopwordSource = None }
 
 let emptyIndex collation = emptyIndexWith StopwordPolicy.BuiltIn Words collation
+
+let internal stopwordSource (index: Index<'id>) = index.StopwordSource
+
+let internal withStopwordSource source (index: Index<'id>) =
+    { index with StopwordSource = source }
+
+let internal stopwordSettings (index: Index<'id>) =
+    { Source = index.StopwordSource; Policy = index.Rules.Stopwords }
+
 
 /// Selects rules for queries and future writes, retaining each document's history.
 let internal withIndexingRules rules (index: Index<'id>) =

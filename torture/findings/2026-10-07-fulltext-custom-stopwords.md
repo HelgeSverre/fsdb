@@ -1,7 +1,8 @@
 # Custom full-text stopword tables
 
-Status: open. Fsdb implements built-in stopword enable/disable settings, but does
-not expose `innodb_ft_user_stopword_table` or `innodb_ft_server_stopword_table`.
+Status: runtime SQL selection and recovery implemented for InnoDB sources.
+`innodb_ft_user_stopword_table` and `innodb_ft_server_stopword_table` validate
+references, select captured lists, and retain index sources across recovery.
 The [native oracle](../scripts/fulltext-custom-stopword-oracle.py) records
 validation, precedence, collation, index lifetime, and restart behavior on
 MySQL 8.4.11. It uses disposable native servers and data directories:
@@ -14,7 +15,11 @@ python3 torture/scripts/fulltext-custom-stopword-oracle.py
 
 Both variables default to NULL. The server variable has GLOBAL scope; the user
 variable has GLOBAL and SESSION scopes. Setting the user variable globally seeds
-new sessions without changing existing sessions.
+new sessions without changing existing sessions. `SHOW` renders NULL table
+settings as empty text and reads the current GLOBAL server source. Invalid
+SESSION assignment to the server variable reports the scope error before
+validating the value. A session source does not require SELECT privilege on
+the source table, as verified with a separate account.
 
 | Operation | Native result |
 |---|---|
@@ -29,6 +34,12 @@ new sessions without changing existing sessions.
 | Name the column uppercase `VALUE` | Error 1231, 42000 |
 | Use CHAR, TEXT, INT, or VARBINARY for `value` | Error 1231, 42000 |
 | Reference a MyISAM table, temporary table, or view | Error 1231, 42000 |
+
+The MyISAM validation row describes native MySQL. Fsdb's existing
+[storage-engine substitution](../../GAPS.md) uses its InnoDB-shaped store for
+recognized engine names, so a table requested as MyISAM is still an InnoDB
+source in fsdb. The wire comparison covers the InnoDB validation matrix and
+keeps this engine boundary explicit.
 
 The [MySQL variable documentation](https://dev.mysql.com/doc/refman/8.4/en/innodb-parameters.html#sysvar_innodb_ft_user_stopword_table)
 describes a single VARCHAR column named `value` and the `database/table` reference
@@ -108,18 +119,27 @@ The custom variables themselves return NULL after restart. The index remembers
 its source independently, reloads that source for future writes, and falls back
 to built-in filtering if the source is gone. Old postings are not rebuilt. A
 newly excluded word such as `cobalt` remains searchable in old postings.
+A source missing when an index is first built is not remembered: recreating
+that table before restart leaves built-in filtering active.
 
 ## Storage requirements
 
-Custom support needs distinct representations for the remembered source, the
-active write policy, and each document's historical indexing rules. Persisting
-only a table name or one word set per index would not reproduce the restart
-sequence above. Snapshot reconstruction must retain historical postings even
-when the active custom list changes.
+An index stores its remembered source separately from its active write policy
+and each document's historical rules. Session selection is resolved lazily once
+when a statement needs the list, so index construction and its WAL event capture
+the same words. Metadata index rename retains the source; a physical rebuild
+captures the selected settings again. Recovery restores historical postings,
+then reloads remembered sources for future writes. A missing remembered source
+selects built-in filtering without rebuilding old postings.
+
+WAL tag `0x1D` captures the source and loaded policy around DDL. It composes
+with the existing ngram and disabled-filtering contexts. Public commit observers
+and temporary-table filtering unwrap these contexts.
 
 WAL recovery must also distinguish writes before and after a source reload.
-WAL tag `0x1C` wraps insert/update batches with each full-text index's loaded
-stopword policy. Replay selects those active policies before applying the rows;
+WAL tag `0x1C` wraps insert/update batches and ALTER events with each full-text
+index's loaded stopword policy. Replay selects those active policies before
+applying the mutation;
 existing document rules retain their own historical lists. The wrapper composes
 with ngram-size context and transaction envelopes. Temporary-table filtering and
 commit observers unwrap it consistently. This records a return to built-in
@@ -128,10 +148,15 @@ list was loaded by an earlier DDL event.
 Query lookup must keep old postings reachable after the write policy changes,
 while phrase handling still observes stopword semantics.
 
-The policy type supports captured custom lists as well as built-in/disabled
-filtering. Remembered source names and source reload remain necessary for
-these histories. Accepting the system variables before
-those paths are connected would claim behavior the engine does not provide.
+The native restart oracle also adds a second index after changing the source
+from `orchard` to `cobalt`. Querying the original index first loads the new list:
+the added index excludes `cobalt` and includes `orchard` and `the`. Fsdb matches
+this path, including a further WAL recovery before any ordinary row write.
+When ADD FULLTEXT is the first access to a cold table after restart, MySQL instead
+includes all three terms in the new index. A subsequent insert excludes `cobalt`.
+Fsdb eagerly reloads sources during recovery, so its added index excludes
+`cobalt` even on this cold path. This lazy-loading distinction remains a gap.
+
 Custom startup options, additional ALTER variants, query expansion, and more
 source charset/collation combinations remain outside this verified matrix.
 
@@ -150,15 +175,15 @@ also preserve historical postings when active filtering changes, including after
 snapshot recovery. Custom lists capture literal words and their source collation;
 compiled keys filter words and ngram substrings. Empty lists
 replace the defaults, and phrases use custom words for anchor selection.
-Custom source resolution, remembered table names, source reload, and remaining
-custom query semantics remain open.
+The SQL lifecycle regression covers both WAL-only and checkpointed histories,
+source edits, source removal, index rename, and a further restart after fallback.
 
 ## Snapshot history
 
-Format 16 (`FSNG`) stores a deduplicated rule table for each full-text index,
+Format 17 (`FSNH`) stores a deduplicated rule table for each full-text index,
 followed by a length-encoded rule reference for each document. Rule entries pair
 the tokenizer with the stopword policy. Active policies remain in the index
-metadata, including for empty indexes; startup token-size selection keeps its
+metadata alongside the remembered source, including for empty indexes; startup token-size selection keeps its
 existing behavior independently of historical document tokenizers.
 
 Custom policy entries store the source collation name and literal word list;
@@ -166,22 +191,25 @@ recovery reconstructs collation keys. Recovery preserves mixed ngram sizes and
 built-in, disabled, or custom policies within one index. Rule counts are bounded by the row count plus one active rule; missing
 or out-of-range document references are rejected. Regressions cover mixed
 histories, subsequent writes, and malformed references with a valid checksum.
-Real format-13, format-14, and format-15 fixtures verify backward reading. Older
-fsdb binaries cannot read `FSNG` or replay WAL tag `0x1C`.
+Real format-13 through format-16 fixtures verify backward reading. Earlier
+formats supply no remembered source. Older fsdb binaries cannot read `FSNH`
+or replay WAL tags `0x1C` and `0x1D`.
 
 ## Verification
 
 The complete native oracle passes, including the same-datadir restart sequence
 and searches in natural and Boolean modes after each transition.
 
-The indexing-rule and snapshot changes pass `just check` with 2,910 tests and no build
+The indexing-rule and snapshot changes pass `just check` with 2,915 tests and no build
 warnings or errors. The existing stopword configuration matrix passes on fsdb.
 All 47 MySQL contracts (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T073035493-93186/contracts`.
+`torture/artifacts/runs/20261007T080825333-4375/contracts`.
 
-The durability lane passes 12 crash restarts, preserving all 108 acknowledged
+The durability lane passes 12 crash restarts, preserving all 109 acknowledged
 commits and transaction boundaries, with checkpoint, WAL-tail, snapshot, schema,
 and torn-tail checks:
-`torture/artifacts/runs/20261007T073045471-93209/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T080835114-4484/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
 
-Custom SQL variables remain unavailable and no known-gap suppression is added.
+The SQL wire matrix agrees for InnoDB source validation, precedence, loaded-list
+lifetime, physical rebuild, collation, phrases, and ngram filtering. No known-gap
+suppression is added.

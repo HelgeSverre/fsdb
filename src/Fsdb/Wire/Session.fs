@@ -107,6 +107,8 @@ let defaultVariables: Map<string, string option> =
           "sql_generate_invisible_primary_key", "OFF" ]
         |> Map.map (fun _ v -> Some v)
         |> Map.add "secure_file_priv" None
+        |> Map.add "innodb_ft_user_stopword_table" None
+        |> Map.add "innodb_ft_server_stopword_table" None
 
 /// Recomputes defaults so configured limits and reported values cannot drift.
 let private liveDefaults (store: Store) : Map<string, string option> =

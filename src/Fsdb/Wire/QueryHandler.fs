@@ -262,11 +262,15 @@ let private isGlobalScope (scope: string) : bool =
 let private isSessionScope (scope: string) : bool =
     scope.IndexOf("SESSION", StringComparison.OrdinalIgnoreCase) >= 0
 
+let private fullTextStopwordTableVariables =
+    Set.ofList [ "innodb_ft_user_stopword_table"; "innodb_ft_server_stopword_table" ]
+
 let private globalScopeOnlyVariables =
     Set.ofList
         [ "activate_all_roles_on_login"
           "connect_timeout"
           "ft_query_expansion_limit"
+          "innodb_ft_server_stopword_table"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
           "ngram_token_size"
@@ -799,13 +803,16 @@ let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string
             |> Map.add "secure_file_priv" (ServerOptions.secureFileVariable session.SecureFiles)
         else
             session.Variables
+            |> Map.add "innodb_ft_server_stopword_table" (Session.tryGlobalVariable session.Store "innodb_ft_server_stopword_table" |> Option.flatten)
 
     let rows =
         source
         |> Map.toList
         |> List.filter (fst >> matches)
         |> List.sortBy fst
-        |> List.map (fun (k, v) -> [ Some k; v ])
+        |> List.map (fun (k, v) ->
+            let value = if fullTextStopwordTableVariables.Contains k then Some(Option.defaultValue "" v) else v
+            [ Some k; value ])
 
     ResultSet([ "Variable_name"; "Value" ], rows)
 
@@ -1078,6 +1085,9 @@ let private setVar =
 
 let private quotedSetLiteral = Regex("^(['\"])(.*)\\1$", RegexOptions.Singleline)
 let private bareSetIdentifier = Regex("^\\w+$")
+
+let private typedSetVariables =
+    Set.union fullTextStopwordTableVariables (Set.ofList [ "max_sp_recursion_depth"; "div_precision_increment" ])
 
 let private literalSetRhs (options: Parser.ParserOptions) (rhs: string) : Value option =
     let rhs = rhs.Trim()
@@ -1576,6 +1586,20 @@ let private systemSetAction
         match TimeZones.resolve session.Store value with
         | Some zone -> Ok(SetVarAction(name, Some(Temporal.sqlTimeZoneText zone), isGlobal), sideEffects)
         | None -> Error(Err(1298, sprintf "Unknown or incorrect time zone: '%s'" value))
+    | Ok(_, _) when name = "innodb_ft_server_stopword_table" && not isGlobal ->
+        Error(Err(1229, sprintf "Variable '%s' is a GLOBAL variable and should be set with SET GLOBAL" name))
+    | Ok(value, sideEffects) when fullTextStopwordTableVariables.Contains name ->
+        let value =
+            if usesDefault then
+                if isGlobal then VNull
+                else Session.tryGlobalVariable session.Store name |> Option.flatten |> Option.map VString |> Option.defaultValue VNull
+            else value
+        match value with
+        | VNull -> Ok(SetVarAction(name, None, isGlobal), sideEffects)
+        | VString source when tryFullTextStopwordTable session.Store source |> Option.isSome ->
+            Ok(SetVarAction(name, Some source, isGlobal), sideEffects)
+        | VString source -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name source))
+        | _ -> Error(Err(1232, sprintf "Incorrect argument type to variable '%s'" name))
     | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" || name = "innodb_ft_enable_stopword" ->
         normalizeOnOff name value
         |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
@@ -1641,7 +1665,7 @@ let private parseSetFragment
                     let usesDefault = rhs.Trim().Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
 
                     let resolved =
-                        if (name = "max_sp_recursion_depth" || name = "div_precision_increment") && not usesDefault then
+                        if typedSetVariables.Contains name && not usesDefault then
                             resolveUserSetRhs session userVariables sql rhs
                         elif name = "max_points_in_geometry" && not usesDefault then
                             match rhs.Trim().ToUpperInvariant() with
@@ -1902,7 +1926,7 @@ let private tryParsePreparedVariableSet options sql =
                         elif rhs.Equals("NULL", StringComparison.OrdinalIgnoreCase) then Some "NULL"
                         elif name = "max_points_in_geometry" && rhs.Equals("TRUE", StringComparison.OrdinalIgnoreCase) then Some "1"
                         elif name = "max_points_in_geometry" && rhs.Equals("FALSE", StringComparison.OrdinalIgnoreCase) then Some "0"
-                        elif bareSetIdentifier.IsMatch rhs && name <> "max_sp_recursion_depth" && name <> "div_precision_increment" then
+                        elif bareSetIdentifier.IsMatch rhs && not (typedSetVariables.Contains name) then
                             Some("'" + rhs + "'")
                         else Some rhs
                     variable (SystemVariableTarget(scope, name)) expression
@@ -3003,6 +3027,11 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             match sessionValue session "innodb_ft_enable_stopword" with
             | Some("OFF" | "0") -> false
             | _ -> true
+        let stopwordSource =
+            sessionValue session "innodb_ft_user_stopword_table"
+            |> Option.orElseWith (fun () -> Session.tryGlobalVariable session.Store "innodb_ft_server_stopword_table" |> Option.flatten)
+        store.FullTextStopwordSettings <- lazy (resolveFullTextStopwords session.Store stopwordSource)
+
 
 
         let registry = registryFor session
@@ -3480,6 +3509,8 @@ let rec private filterTemporaryEvent keys event =
         filterTemporaryEvent keys inner |> Option.map (fun retained -> WithNgramTokenSize(size, retained))
     | WithStopwordFiltering(enabled, inner) ->
         filterTemporaryEvent keys inner |> Option.map (fun retained -> WithStopwordFiltering(enabled, retained))
+    | WithFullTextStopwordSettings(settings, inner) ->
+        filterTemporaryEvent keys inner |> Option.map (fun retained -> WithFullTextStopwordSettings(settings, retained))
     | WithFullTextStopwords(database, table, policies, inner) ->
         filterTemporaryEvent keys inner |> Option.map (fun retained -> WithFullTextStopwords(database, table, policies, retained))
     | RowsInserted(db, table, _)

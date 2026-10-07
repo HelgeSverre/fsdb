@@ -13,7 +13,147 @@ let private rows = function
 
 let tests =
     testList "storage options"
-        [ testCase "WAL captures loaded stopword policies for ordinary writes and transactions"
+        [ testCase "custom stopword assignments validate source shape and report MySQL SQLSTATE"
+          <| fun _ ->
+              let store = Storage.create ()
+              let mutable session = Session.create 1 store
+              let run sql =
+                  let next, result = QueryHandler.handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE TABLE valid_words(value VARCHAR(30),extra INT)"
+                    "CREATE TABLE upper_words(VALUE VARCHAR(30))"
+                    "CREATE TABLE wrong_words(value TEXT)"
+                    "CREATE TABLE second_words(id INT,value VARCHAR(30))"
+                    "CREATE TEMPORARY TABLE temp_words(value VARCHAR(30))" ] do
+                  Expect.equal (run sql) (Affected 0UL) "source setup"
+              for assignment, code, state in
+                  [ "SET SESSION innodb_ft_user_stopword_table=''", 1231, "42000"
+                    "SET SESSION innodb_ft_user_stopword_table=123", 1232, "42000"
+                    "SET SESSION innodb_ft_user_stopword_table='fsdb/missing'", 1231, "42000"
+                    "SET SESSION innodb_ft_user_stopword_table='fsdb/upper_words'", 1231, "42000"
+                    "SET SESSION innodb_ft_user_stopword_table='fsdb/wrong_words'", 1231, "42000"
+                    "SET SESSION innodb_ft_user_stopword_table='fsdb/second_words'", 1231, "42000"
+                    "SET SESSION innodb_ft_user_stopword_table='fsdb/temp_words'", 1231, "42000"
+                    "SET SESSION innodb_ft_server_stopword_table=NULL", 1229, "HY000"
+                    "SET SESSION innodb_ft_server_stopword_table=123", 1229, "HY000"
+                    "SET SESSION innodb_ft_server_stopword_table='missing'", 1229, "HY000" ] do
+                  match run assignment |> errorInfo with
+                  | Some error ->
+                      Expect.equal error.Code code assignment
+                      Expect.equal error.State state "diagnostics and wire errors share the native state"
+                  | None -> failtestf "expected rejected assignment: %s" assignment
+              Expect.equal (run "SET SESSION innodb_ft_user_stopword_table='fsdb/valid_words'") (Affected 0UL) "extra columns after value are accepted"
+              Expect.equal (run "SET SESSION innodb_ft_user_stopword_table=NULL") (Affected 0UL) "NULL restores fallback"
+              Expect.equal (run "SET GLOBAL innodb_ft_server_stopword_table='fsdb/valid_words'") (Affected 0UL) "server source is global"
+              Expect.equal (run "SHOW SESSION VARIABLES LIKE 'innodb_ft_%stopword_table'" |> rows)
+                  [ [ Some "innodb_ft_server_stopword_table"; Some "fsdb/valid_words" ]
+                    [ Some "innodb_ft_user_stopword_table"; Some "" ] ] "SHOW uses the global server value and empty text for NULL"
+
+
+          testCase "custom stopword SQL sources reload for new writes while preserving historical postings"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = TestSupport.directory "fulltext-custom-source"
+                  let connect store =
+                      let mutable session = Session.create 1 store
+                      fun sql ->
+                          let next, result = QueryHandler.handle session sql
+                          session <- next
+                          match result with
+                          | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                          | _ -> result
+                  let store = Persistence.load dir
+                  Persistence.attach dir store
+                  let run = connect store
+                  run "CREATE TABLE words(value VARCHAR(30))" |> ignore
+                  run "INSERT INTO words VALUES('orchard')" |> ignore
+                  run "SET SESSION innodb_ft_user_stopword_table='fsdb/words'" |> ignore
+                  run "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body))" |> ignore
+                  run "INSERT INTO docs VALUES(1,'orchard'),(2,'cobalt'),(3,'the'),(4,'zzzz')" |> ignore
+                  run "DELETE FROM words" |> ignore
+                  run "INSERT INTO words VALUES('cobalt')" |> ignore
+                  let query term = $"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id"
+                  Expect.isEmpty (run (query "orchard") |> rows) "source edits leave loaded policies alone"
+                  if checkpoint then Persistence.snapshotNow dir store
+                  let recovered = Persistence.load dir
+                  Persistence.attach dir recovered
+                  let run = connect recovered
+                  Expect.equal (run "SELECT @@SESSION.innodb_ft_user_stopword_table" |> rows) [ [ None ] ] "settings reset independently of remembered index sources"
+                  run "ALTER TABLE docs RENAME INDEX ft TO renamed" |> ignore
+                  run "INSERT INTO docs VALUES(5,'orchard cobalt the')" |> ignore
+                  Expect.equal (run (query "orchard") |> rows) [ [ Some "5" ] ] "new writes use the reloaded source"
+                  Expect.equal (run (query "cobalt") |> rows) [ [ Some "2" ] ] "old postings remain searchable"
+                  run "DROP TABLE words" |> ignore
+                  if checkpoint then Persistence.snapshotNow dir recovered
+                  let fallback = Persistence.load dir
+                  Persistence.attach dir fallback
+                  let run = connect fallback
+                  run "INSERT INTO docs VALUES(6,'orchard cobalt the')" |> ignore
+                  Expect.equal (run (query "orchard") |> rows) [ [ Some "5" ]; [ Some "6" ] ] "missing source falls back for future writes"
+                  Expect.equal (run (query "cobalt") |> rows) [ [ Some "2" ]; [ Some "6" ] ] "fallback preserves the prior posting history"
+                  Expect.equal (run (query "the") |> rows) [ [ Some "3" ]; [ Some "5" ] ] "built-in filtering resumes only for future writes"
+                  let final = connect (Persistence.load dir)
+                  Expect.equal (final (query "the") |> rows) [ [ Some "3" ]; [ Some "5" ] ] "the complete history survives another WAL replay"
+
+          testCase "adding a full-text index captures the reloaded stopword policy for recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let dir = TestSupport.directory "fulltext-alter-source"
+                  let db = Db.create () |> Db.withDataDir dir
+                  let connection = Db.connect db
+                  for sql in
+                      [ "CREATE TABLE words(value VARCHAR(30))"
+                        "INSERT INTO words VALUES('orchard')"
+                        "SET SESSION innodb_ft_user_stopword_table='fsdb/words'"
+                        "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,other TEXT,FULLTEXT KEY ft(body))"
+                        "INSERT INTO docs VALUES(1,'orchard','orchard'),(2,'cobalt','cobalt'),(3,'the','the')"
+                        "DELETE FROM words"
+                        "INSERT INTO words VALUES('cobalt')" ] do
+                      match connection.Query sql with
+                      | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                      | _ -> ()
+                  let recovered = Persistence.load dir
+                  Persistence.attach dir recovered
+                  if checkpoint then Persistence.snapshotNow dir recovered
+                  let run = TestSupport.Sql.executeDefault recovered
+                  run "SELECT id FROM docs WHERE MATCH(body) AGAINST('orchard')" |> ignore
+                  Expect.equal (run "ALTER TABLE docs ADD FULLTEXT KEY ft_other(other)") (Affected 0UL) "add index after source reload"
+                  let query term = $"SELECT id FROM docs WHERE MATCH(other) AGAINST('{term}') ORDER BY id"
+                  let verify run =
+                      Expect.equal (run (query "orchard") |> rows) [ [ Some "1" ] ] "the new index uses the reloaded list"
+                      Expect.isEmpty (run (query "cobalt") |> rows) "the reloaded stopword is excluded"
+                      Expect.equal (run (query "the") |> rows) [ [ Some "3" ] ] "custom lists replace built-ins"
+                  verify run
+                  verify (TestSupport.Sql.executeDefault (Persistence.load dir))
+
+          testCase "a custom source missing at index creation is not remembered"
+          <| fun _ ->
+              let dir = TestSupport.directory "fulltext-missing-source"
+              let db = Db.create () |> Db.withDataDir dir
+              let connection = Db.connect db
+              for sql in
+                  [ "CREATE TABLE words(value VARCHAR(30))"
+                    "SET SESSION innodb_ft_user_stopword_table='fsdb/words'"
+                    "DROP TABLE words"
+                    "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body))"
+                    "INSERT INTO docs VALUES(1,'orchard the')"
+                    "CREATE TABLE words(value VARCHAR(30))"
+                    "INSERT INTO words VALUES('orchard')" ] do
+                  match connection.Query sql with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+              let recovered = Persistence.load dir
+              let index = recovered.Catalog.[Storage.defaultDatabase].["docs"].FullTextIndexes.["ft"]
+              Expect.equal (FullText.stopwordSource index) None "only a successfully loaded source is remembered"
+              let run = TestSupport.Sql.executeDefault recovered
+              run "INSERT INTO docs VALUES(2,'orchard the')" |> ignore
+              Expect.equal (run "SELECT id FROM docs WHERE MATCH(body) AGAINST('orchard') ORDER BY id" |> rows)
+                  [ [ Some "1" ]; [ Some "2" ] ] "recreated source does not affect the index"
+              Expect.isEmpty (run "SELECT id FROM docs WHERE MATCH(body) AGAINST('the')" |> rows) "built-in filtering remains active"
+
+          testCase "WAL captures loaded stopword policies for ordinary writes and transactions"
           <| fun _ ->
               for checkpoint in [ false; true ] do
                   let dir = TestSupport.directory "fulltext-wal-policy-history"
@@ -330,6 +470,20 @@ let tests =
                               expected
                               "recovered postings and new writes use the saved policy"
 
+          testCase "FSNG snapshots restore policies without a remembered source"
+          <| fun _ ->
+              let dir = TestSupport.directory "fulltext-fsng"
+              // Produced by the format-16 writer with disabled stopwords and one ngram row.
+              let snapshot = System.Convert.FromBase64String "RlNORwEAAAAEZnNkYgEAAAAKbGVnYWN5X2Z0cwpsZWdhY3lfZnRzAQAAAARib2R5CQEAAAAAAAESdXRmOG1iNF8wOTAwX2FpX2NpAAAAAAEAAAACZnQBAAAABwBOOmJvZHkAAQMFbmdyYW0AAAAAAAAAAApdD4ZWJN8IAQAAAAAAAAABAAAAAQAAAAEBAAAAAgEAAAAAAQAAAAQCYWIAAAAAAJ8AAAAAAAAAtz6uCg=="
+              System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, "snapshot.fsdb"), snapshot)
+              let recovered = Persistence.load dir
+              let index = recovered.Catalog.[Storage.defaultDatabase].["legacy_fts"].FullTextIndexes.["ft"]
+              Expect.equal (FullText.stopwordSource index) None "legacy indexes have no source to reload"
+              Expect.equal (FullText.activeStopwords index) FullText.StopwordPolicy.Disabled "legacy policy survives startup"
+              Expect.equal
+                  (TestSupport.Sql.executeDefault recovered "SELECT body FROM legacy_fts WHERE MATCH(body) AGAINST('ab' IN BOOLEAN MODE)" |> rows)
+                  [ [ Some "ab" ] ] "legacy postings remain searchable"
+
           testCase "FSNF snapshots retain historical indexing rules"
           <| fun _ ->
               let dir = TestSupport.directory "fulltext-fsnf"
@@ -374,7 +528,7 @@ let tests =
               Persistence.snapshotNow dir store
               let path = System.IO.Path.Combine(dir, "snapshot.fsdb")
               let bytes = System.IO.File.ReadAllBytes path
-              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNG" "rule references use the current snapshot format"
+              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNH" "rule references use the current snapshot format"
               let trailerSize, preparedCountSize = 12, 4
               let lastRuleReference = bytes.Length - trailerSize - preparedCountSize - 1
               for invalid in [ 250uy; 251uy ] do

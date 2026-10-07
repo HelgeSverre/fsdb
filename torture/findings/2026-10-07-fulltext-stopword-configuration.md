@@ -63,23 +63,26 @@ batches, including transactions and returns to built-in filtering. It shares
 the snapshot policy codec and preserves historical postings when the active
 write policy changes. Older binaries cannot replay this tag.
 
-Snapshot format 16 (`FSNG`) retains the active policy per full-text index and a
+Snapshot format 17 (`FSNH`) retains the active policy per full-text index and a
 shared table of historical tokenizer/stopword rules. Each row refers to the rules
 used for its postings, so reconstruction preserves mixed document histories.
-Custom policies include literal source words and their collation. Empty indexes
+Custom policies include literal source words and their collation; index metadata
+also retains a successfully loaded source for restart. Empty indexes
 retain their active policy. Invalid policies, tokenizer values,
 rule-table lengths, and document references are rejected.
 
 Format 14 (`FSNE`) supplies its per-index policy to every document; format 13
 (`FSND`) supplies built-in filtering. Format 15 (`FSNF`) retains per-document
-rules for built-in/disabled policies. Fixtures produced by all three older writers
+rules for built-in/disabled policies. Format 16 (`FSNG`) adds captured custom
+lists without remembered source names. Fixtures produced by all four older writers
 verify those paths. Earlier formats remain readable; older binaries cannot read
-`FSNG` snapshots. The WAL format is unchanged by the snapshot-rule extension.
+`FSNH` snapshots. The WAL format is unchanged by the snapshot-rule extension.
 
 Regressions verify GLOBAL values seed new sessions without changing existing
 sessions, reject invalid boolean values, and retain policy across reopening.
-Custom stopword tables and additional ALTER variants remain outside the verified
-matrix. No known-gap suppression is included.
+Custom stopword table selection and recovery are covered by the
+[custom-source oracle](2026-10-07-fulltext-custom-stopwords.md). Additional ALTER
+variants remain outside the verified matrix. No known-gap suppression is included.
 
 ## Startup configuration
 

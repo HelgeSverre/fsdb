@@ -30,7 +30,8 @@ let private preparedXaLockSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x43uy |] /
 let private fullTextTokenizerSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x44uy |] // "FSND" (format 13)
 let private fullTextStopwordSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x45uy |] // "FSNE" (format 14)
 let private fullTextDocumentRulesSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x46uy |] // "FSNF" (format 15)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x47uy |] // "FSNG" (format 16)
+let private fullTextCustomStopwordSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x47uy |] // "FSNG" (format 16)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x48uy |] // "FSNH" (format 17)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -46,7 +47,8 @@ type private SnapshotFormat =
       PreparedXaLocks: bool
       FullTextTokenizers: bool
       FullTextStopwords: bool
-      FullTextDocumentRules: bool }
+      FullTextDocumentRules: bool
+      FullTextStopwordSources: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -62,7 +64,8 @@ let private legacySnapshotFormat =
       PreparedXaLocks = false
       FullTextTokenizers = false
       FullTextStopwords = false
-      FullTextDocumentRules = false }
+      FullTextDocumentRules = false
+      FullTextStopwordSources = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -103,8 +106,11 @@ let private fullTextTokenizerSnapshotFormat =
 let private fullTextStopwordSnapshotFormat =
     { fullTextTokenizerSnapshotFormat with FullTextStopwords = true }
 
-let private currentSnapshotFormat =
+let private fullTextDocumentRulesSnapshotFormat =
     { fullTextStopwordSnapshotFormat with FullTextDocumentRules = true }
+
+let private currentSnapshotFormat =
+    { fullTextDocumentRulesSnapshotFormat with FullTextStopwordSources = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -113,8 +119,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
-    elif header = fullTextDocumentRulesSnapshotMagic then
-        Some currentSnapshotFormat
+    elif header = fullTextDocumentRulesSnapshotMagic || header = fullTextCustomStopwordSnapshotMagic then
+        Some fullTextDocumentRulesSnapshotFormat
     elif header = fullTextStopwordSnapshotMagic then
         Some fullTextStopwordSnapshotFormat
     elif header = fullTextTokenizerSnapshotMagic then
@@ -1066,6 +1072,7 @@ let private KindWithNgramTokenSize = 0x1Auy
 [<Literal>]
 let private KindWithStopwordFiltering = 0x1Buy
 let private KindWithFullTextStopwords = 0x1Cuy
+let private KindWithFullTextStopwordSettings = 0x1Duy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -1154,6 +1161,11 @@ let private decodeStopwordPolicy (r: #IReader) =
 
 let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
     match event with
+    | WithFullTextStopwordSettings(settings, event) ->
+        w.WriteByte KindWithFullTextStopwordSettings
+        writeOptStr w settings.Source
+        encodeStopwordPolicy w settings.Policy
+        encodeEvent w event
     | WithFullTextStopwords(database, table, policies, event) ->
         w.WriteByte KindWithFullTextStopwords
         writeStr w database
@@ -1269,6 +1281,10 @@ let rec private decodeEventAt
     let str () = r.ReadLenEncString() |> Option.defaultValue ""
 
     match r.ReadByte() with
+    | k when k = KindWithFullTextStopwordSettings ->
+        let source = readOptStr r
+        let policy = decodeStopwordPolicy r
+        WithFullTextStopwordSettings({ Source = source; Policy = policy }, decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
     | k when k = KindWithFullTextStopwords ->
         let database, table = readStr r, readStr r
         let policies = List.init (r.ReadInt32LE()) (fun _ -> readStr r, decodeStopwordPolicy r)
@@ -1477,6 +1493,9 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         failwith "Persistence: transaction nesting exceeds the apply limit"
 
     match event with
+    | WithFullTextStopwordSettings(settings, event) ->
+        applyEventAt (depth + 1)
+            { store with FullTextStopwordSettings = lazy settings; FullTextStopwordsEnabled = settings.Policy <> FullText.StopwordPolicy.Disabled } event
     | WithFullTextStopwords(database, table, policies, event) ->
         setFullTextStopwordsForReplay store database table policies (Log.diagnostic "fsdb: WAL replay warning: %s")
         applyEventAt (depth + 1) store event
@@ -1626,6 +1645,9 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
     if format.FullTextStopwords then
         for index in t.Indexes |> List.filter (fun index -> index.Kind.IsFullText) do
             encodeStopwordPolicy w (FullText.activeStopwords t.FullTextIndexes.[index.Name])
+    if format.FullTextStopwordSources then
+        for index in t.Indexes |> List.filter (fun index -> index.Kind.IsFullText) do
+            writeOptStr w (FullText.stopwordSource t.FullTextIndexes.[index.Name])
 
 /// Writes the catalog straight to `s`, flushing the `Writer` every chunk so a
 /// multi-GB snapshot never materializes as one `byte[]`. Rows are the only
@@ -1728,6 +1750,10 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
                 name, decodeStopwordPolicy r)
             |> Map.ofList
         else Map.empty
+    let sources =
+        if format.FullTextStopwordSources then
+            fullTextNames |> List.map (fun name -> name, readOptStr r) |> Map.ofList
+        else Map.empty
     let ruleTables =
         if format.FullTextDocumentRules then
             fullTextNames |> List.map (fun name -> name, decodeRuleTable rowCount r)
@@ -1777,7 +1803,10 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
           FullTextIndexes = Map.empty
           SpatialIndexes = Map.empty }
 
-    reindexTableWithFullTextIndexes (restoreFullTextIndexesWithRules stopwords documents table) table
+    let fullTextIndexes =
+        restoreFullTextIndexesWithRules stopwords documents table
+        |> Map.map (fun name index -> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten) index)
+    reindexTableWithFullTextIndexes fullTextIndexes table
 
 /// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or
 /// CRC doesn't match what's actually on disk — the guard `load` needs before
@@ -2008,6 +2037,7 @@ let load (dataDir: string) : Store =
             fs.SetLength goodOffset
 
     configureNgramTokenSize store.NgramTokenSize store
+    reloadFullTextStopwords store
     restorePreparedXaLocks store
     store
 

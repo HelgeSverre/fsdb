@@ -12,6 +12,10 @@ startup = runpy.run_path(str(scripts / "fulltext-stopword-startup-oracle.py"))
 expect = native["expect"]
 
 
+def connection_options(client):
+    return [argument for argument in client.process.args if argument.startswith(("--socket=", "--protocol=", "-h", "-P"))]
+
+
 def matching(client, term, table="docs", mode="IN BOOLEAN MODE", column="body"):
     return client.query(f"SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.{table} "
                         f"WHERE MATCH({column}) AGAINST('{term}' {mode})")
@@ -47,6 +51,8 @@ def validation(client, other):
 
     attempt("SELECT @@SESSION.innodb_ft_server_stopword_table", "1238\tHY000")
     attempt("SET SESSION innodb_ft_server_stopword_table=NULL", "1229\tHY000")
+    attempt("SET SESSION innodb_ft_server_stopword_table=123", "1229\tHY000")
+    attempt("SET SESSION innodb_ft_server_stopword_table='missing'", "1229\tHY000")
     for variable, scope in [("innodb_ft_user_stopword_table", "SESSION"),
                             ("innodb_ft_server_stopword_table", "GLOBAL")]:
         for value, expected in [("NULL", "0"), ("''", "1231\t42000"),
@@ -75,11 +81,18 @@ def validation(client, other):
     client.query("SET GLOBAL innodb_ft_user_stopword_table='probe/valid'")
     expect("GLOBAL leaves existing session alone", other.query(
         "SELECT @@SESSION.innodb_ft_user_stopword_table,@@GLOBAL.innodb_ft_user_stopword_table"), "NULL\tprobe/valid")
-    socket_options = [argument for argument in client.process.args if argument.startswith("--socket=")]
-    with contextlib.closing(native["Client"](socket_options)) as fresh:
+    with contextlib.closing(native["Client"](connection_options(client))) as fresh:
         expect("GLOBAL seeds new session", fresh.query(
             "SELECT @@SESSION.innodb_ft_user_stopword_table,@@GLOBAL.innodb_ft_user_stopword_table"), "probe/valid\tprobe/valid")
     client.query("SET GLOBAL innodb_ft_user_stopword_table=NULL;SET SESSION innodb_ft_user_stopword_table=NULL")
+    expect("SHOW renders unset table settings as empty text", client.query(
+        "SHOW SESSION VARIABLES LIKE 'innodb_ft_%stopword_table'"),
+        "innodb_ft_server_stopword_table\t\ninnodb_ft_user_stopword_table\t")
+    client.query("SET GLOBAL innodb_ft_server_stopword_table='probe/valid'")
+    expect("SHOW SESSION reads the global server source", client.query(
+        "SHOW SESSION VARIABLES LIKE 'innodb_ft_server_stopword_table'"), "innodb_ft_server_stopword_table\tprobe/valid")
+    client.query("SET GLOBAL innodb_ft_server_stopword_table=NULL")
+
 
 
 def precedence(client):
@@ -180,6 +193,20 @@ def ngram_source_collation(client):
                matching(client, "ab Ab AB áb ss ßx zz", mode="IN NATURAL LANGUAGE MODE"), expected)
 
 
+def source_access(client):
+    client.query("CREATE TABLE probe.private_words(value VARCHAR(30));INSERT INTO probe.private_words VALUES('orchard');"
+                 "CREATE USER 'stopword_reader'@'localhost';CREATE DATABASE own_db;"
+                 "GRANT ALL ON own_db.* TO 'stopword_reader'@'localhost'")
+    sql = ("SET SESSION innodb_ft_user_stopword_table='probe/private_words';"
+           "CREATE TABLE own_db.docs(body TEXT,FULLTEXT ft(body));"
+           "INSERT INTO own_db.docs VALUES('orchard'),('cobalt');"
+           "SELECT COUNT(*) FROM own_db.docs WHERE MATCH(body) AGAINST('orchard')")
+    result = subprocess.run(["mysql", "--no-defaults", *connection_options(client), "-ustopword_reader",
+                             "--batch", "--skip-column-names", "-e", sql],
+                            capture_output=True, text=True, check=True)
+    expect("session source does not require SELECT privilege on the source", result.stdout.strip(), "0")
+
+
 def verify(client, other):
     validation(client, other)
     precedence(client)
@@ -187,6 +214,7 @@ def verify(client, other):
     collation_and_contents(client)
     phrases(client)
     ngram_source_collation(client)
+    source_access(client)
 
 
 def restart_lifetime():
@@ -207,6 +235,11 @@ def restart_lifetime():
                                          "INSERT INTO probe.words VALUES('orchard');"
                                          "SET SESSION innodb_ft_user_stopword_table='probe/words'")
                             seed(client)
+                            for table in ["cold_docs", "warm_docs"]:
+                                client.query("CREATE TABLE probe." + table +
+                                             "(id INT PRIMARY KEY,body TEXT,other TEXT,FULLTEXT ft(body));"
+                                             "INSERT INTO probe." + table +
+                                             " VALUES(1,'orchard','orchard'),(2,'cobalt','cobalt'),(3,'the','the')")
                         word_matches(client, "restart " + stage,
                                      ["5", "2", "3,5"] if stage == "dropped" else ["NULL", "2", "3"])
                         if stage == "initial":
@@ -214,12 +247,30 @@ def restart_lifetime():
                         elif stage == "changed":
                             expect("source setting resets but index remembers source", client.query(
                                 "SELECT @@SESSION.innodb_ft_user_stopword_table,@@GLOBAL.innodb_ft_server_stopword_table"), "NULL\tNULL")
+                            for table in ["cold_docs", "warm_docs"]:
+                                if table == "warm_docs":
+                                    client.query("SELECT COUNT(*) FROM probe.warm_docs WHERE MATCH(body) AGAINST('orchard')")
+                                client.query("ALTER TABLE probe." + table + " ADD FULLTEXT ft_other(other)")
+                                for term, expected in [("orchard", "1"), ("cobalt", "2" if table == "cold_docs" else "NULL"), ("the", "3")]:
+                                    expect(table + " added index " + term, client.query(
+                                        "SELECT GROUP_CONCAT(id ORDER BY id) FROM probe." + table +
+                                        " WHERE MATCH(other) AGAINST('" + term + "')"), expected)
                             client.query("INSERT INTO probe.docs VALUES(5,'orchard cobalt the')")
                             word_matches(client, "new writes use reloaded list; old postings remain", ["5", "2", "3,5"])
                             client.query("DROP TABLE probe.words")
                         else:
                             client.query("INSERT INTO probe.docs VALUES(6,'orchard cobalt the')")
                             word_matches(client, "missing source reloads builtin for new writes", ["5,6", "2,6", "3,5"])
+                            client.query("CREATE TABLE probe.words(value VARCHAR(30));"
+                                         "SET SESSION innodb_ft_user_stopword_table='probe/words';DROP TABLE probe.words;"
+                                         "CREATE TABLE probe.missing_docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body));"
+                                         "INSERT INTO probe.missing_docs VALUES(1,'orchard the');"
+                                         "CREATE TABLE probe.words(value VARCHAR(30));INSERT INTO probe.words VALUES('orchard')")
+                with startup["server"](data, str(root / "mysql.sock"), log, "ON") as client:
+                    client.query("INSERT INTO probe.missing_docs VALUES(2,'orchard the')")
+                    expect("missing source at creation is not remembered", matching(client, "orchard", table="missing_docs"), "1,2")
+                    expect("missing source at creation retains builtin", matching(client, "the", table="missing_docs"), "NULL")
+
         except Exception:
             print(log_path.read_text(), flush=True)
             raise
