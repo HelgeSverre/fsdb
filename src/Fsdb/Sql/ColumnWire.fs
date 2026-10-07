@@ -193,6 +193,10 @@ let private sourceColumnFlagMask =
 let withoutSourceColumnFlags (metadata: ColumnMetadata) =
     { metadata with Flags = metadata.Flags &&& ~~~sourceColumnFlagMask }
 
+/// Outer references retain their source default flag but do not expose an index key.
+let withoutKeyColumnFlags (metadata: ColumnMetadata) =
+    { metadata with Flags = metadata.Flags &&& ~~~(sourceColumnFlagMask &&& ~~~NoDefaultValueFlag) }
+
 /// Direct projections retain physical source flags independently of result nullability.
 let withSourceColumnFlags indexes source (metadata: ColumnMetadata) =
     let sourceMetadata = metadataOfTableColumn indexes source

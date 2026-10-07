@@ -88,6 +88,16 @@ let tests =
                     "SELECT a.id,t.id,t.u,t.k FROM a LEFT JOIN t ON a.id=t.id", [ 20483us; 16898us; 20484us; 20488us ]
                     "SELECT id,u,k FROM (SELECT id,u,k FROM t) d", [ 16899us; 20485us; 20489us ]
                     "WITH d AS (SELECT id,u,k FROM t) SELECT id,u,k FROM d", [ 16899us; 20485us; 20489us ]
+                    "SELECT d.id FROM t JOIN LATERAL (SELECT t.id) d ON 1", [ 1us ]
+                    "SELECT d.id FROM t LEFT JOIN LATERAL (SELECT t.id) d ON 1", [ 0us ]
+                    "SELECT d.id FROM a JOIN LATERAL (SELECT a.id) d ON 1", [ 4097us ]
+                    "SELECT d.id FROM a LEFT JOIN LATERAL (SELECT a.id) d ON 1", [ 4096us ]
+                    "SELECT d.id FROM a JOIN LATERAL (SELECT a.id LIMIT 1) d ON 1", [ 4097us ]
+                    "SELECT d.id FROM a LEFT JOIN LATERAL (SELECT a.id LIMIT 1) d ON 1", [ 4096us ]
+                    "SELECT d.id FROM a JOIN (t JOIN LATERAL (SELECT a.id) d ON 1) ON 1", [ 4097us ]
+                    "SELECT d.id FROM a LEFT JOIN (t JOIN LATERAL (SELECT a.id) d ON 1) ON 1", [ 4096us ]
+                    "SELECT d.id FROM a JOIN LATERAL (SELECT t.id FROM t WHERE t.id=a.id) d ON 1", [ 16899us ]
+                    "SELECT d.id FROM a LEFT JOIN LATERAL (SELECT t.id FROM t WHERE t.id=a.id) d ON 1", [ 16898us ]
                     "SELECT id FROM (SELECT id FROM t) d", [ 16899us ]
                     "SELECT id FROM (SELECT DISTINCT id FROM t) d", [ 1us ]
                     "SELECT id FROM (SELECT id FROM t GROUP BY id) d", [ 1us ]
@@ -102,6 +112,8 @@ let tests =
                   let _, columns = preparedMetadata session ast count
                   Expect.equal (columns |> List.map (fun column -> column.Metadata.Flags &&& mask)) expected
                       ("source flags match native COM_STMT_PREPARE: " + sql)
+                  Expect.all (columns |> List.map (fun column -> column.Metadata.TypeId)) (fun ty -> ty = TypeLong)
+                      ("declared INT type survives projection: " + sql)
                   let executed, result = handle session sql
                   match result with
                   | Err(code, message) -> failtestf "%d %s" code message

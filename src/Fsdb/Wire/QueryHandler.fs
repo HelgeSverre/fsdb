@@ -5212,6 +5212,7 @@ let private preparedMetadataCore
                         let metadata =
                             match source with
                             | Some(Executor.MaterializedColumn _) -> ColumnWire.withoutSourceColumnFlags metadata
+                            | Some(Executor.CorrelatedColumn _) -> ColumnWire.withoutKeyColumnFlags metadata
                             | _ -> metadata
 
                         { Name = column.Name

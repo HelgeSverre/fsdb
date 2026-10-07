@@ -365,3 +365,9 @@ probe that suppresses user-variable assignments and stored-function execution.
 The lateral mutation oracle checks unchanged session counters for SELECT and
 UPDATE with LATERAL and JSON_TABLE sources, and verifies that ordinary function
 execution resumes after the probe.
+
+Prepared correlated projections resolve declared column types through their
+outer scopes. The prepared source-flags oracle covers direct and grouped
+LATERAL projections, LEFT joins, and LIMIT materialization. Correlated outputs
+retain source default flags and origin names but do not advertise physical key
+membership. The same origin classification is used by preparation and execution.

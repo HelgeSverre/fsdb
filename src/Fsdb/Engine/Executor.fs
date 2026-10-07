@@ -580,12 +580,14 @@ let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMem
 type ColumnSource =
     | PhysicalColumn of ColumnOrigin
     | MaterializedColumn of ColumnOrigin
+    | CorrelatedColumn of ColumnOrigin
     member source.Origin =
-        match source with PhysicalColumn origin | MaterializedColumn origin -> origin
+        match source with PhysicalColumn origin | MaterializedColumn origin | CorrelatedColumn origin -> origin
 
 let private mapColumnSourceOrigin mapping = function
     | PhysicalColumn origin -> PhysicalColumn(mapping origin)
     | MaterializedColumn origin -> MaterializedColumn(mapping origin)
+    | CorrelatedColumn origin -> CorrelatedColumn(mapping origin)
 
 type private CteBinding =
     { Columns: ColumnDef list
@@ -2788,17 +2790,21 @@ let private sourceForBody (body: SelectStmt) (source: ColumnSource) =
         || not body.GroupBy.IsEmpty || body.Having.IsSome || body.Rollup
         || body.Projections |> List.exists (fun (expression, _) ->
             containsAggregate Functions.builtins expression || not (collectWindowFuncs expression).IsEmpty)
-    if materialized then MaterializedColumn source.Origin else source
+    match source with
+    | CorrelatedColumn _ -> source
+    | _ when materialized -> MaterializedColumn source.Origin
+    | _ -> source
 
 type private OutputColumnSource =
     { Qualifier: string
       Columns: string list
       Origins: ColumnSource option list }
 
-let rec private outputColumnSources
+let rec private outputColumnSourcesInScope
     (store: Store)
     (dbName: string)
     (qualifiers: Map<string, ColumnDef list * int>)
+    (outerSources: OutputColumnSource list)
     (select: SelectStmt)
     : ColumnSource option list =
     let qualifierColumns (qualifier: string) =
@@ -2846,14 +2852,14 @@ let rec private outputColumnSources
     let withQualifier qualifier =
         Option.map (mapColumnSourceOrigin (fun origin -> { origin with Table = qualifier }))
 
-    let rec originsForBody qualifier columns =
+    let rec originsForBody outerSources qualifier columns =
         function
         | PlainSelect body ->
             let sources =
                 (body.From |> Option.toList) @ (body.Joins |> List.map _.Table)
                 |> List.collect sourceColumns
 
-            outputColumnSources store dbName (qualifierRangesOf sources) body
+            outputColumnSourcesInScope store dbName (qualifierRangesOf sources) outerSources body
             |> List.map (Option.map (sourceForBody body))
             |> List.map (withQualifier qualifier)
         | UnionSelect _ ->
@@ -2872,8 +2878,8 @@ let rec private outputColumnSources
           Columns = columns
           Origins = alignOrigins columns origins }
 
-    let rec sourcesOf = function
-        | FromJoinGroup(source, joins) -> sourcesOf source @ (joins |> List.collect (fun join -> sourcesOf join.Table))
+    let rec sourcesOf preceding = function
+        | FromJoinGroup(source, joins) -> collectSources preceding (source :: (joins |> List.map _.Table))
         | FromTable table ->
             let qualifier = table.Alias |> Option.defaultValue table.Table
             let localCte =
@@ -2887,7 +2893,7 @@ let rec private outputColumnSources
                 | columns, _ -> columns
             let origins =
                 if table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) localCtes then
-                    originsForBody qualifier columns localCtes.[table.Table.ToLowerInvariant()].Body
+                    originsForBody outerSources qualifier columns localCtes.[table.Table.ToLowerInvariant()].Body
                 elif table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) (currentCteScope ()) then
                     currentCteScope ()
                     |> Map.tryFind (table.Table.ToLowerInvariant())
@@ -2908,11 +2914,16 @@ let rec private outputColumnSources
                 | Some cte -> namesForBody cte.Body
                 | None -> columns |> List.map _.Name
             [ sourceWithOrigins qualifier names origins ]
-        | FromSubquery(body, alias) | FromLateral(body, alias) ->
-            [ sourceWithOrigins alias (namesForBody body) (originsForBody alias (qualifierColumns alias) body) ]
+        | FromSubquery(body, alias) ->
+            [ sourceWithOrigins alias (namesForBody body) (originsForBody outerSources alias (qualifierColumns alias) body) ]
+        | FromLateral(body, alias) ->
+            [ sourceWithOrigins alias (namesForBody body) (originsForBody (preceding @ outerSources) alias (qualifierColumns alias) body) ]
         | FromJsonTable(_, _, _, alias) -> [ sourceWithOrigins alias (qualifierColumns alias |> List.map _.Name) [] ]
 
-    let sources = sourceItems |> List.collect sourcesOf
+    and collectSources preceding items =
+        items |> List.fold (fun resolved item -> resolved @ sourcesOf (resolved @ preceding) item) []
+
+    let sources = collectSources [] sourceItems
 
     let originAt source index = source.Origins |> List.tryItem index |> Option.defaultValue None
 
@@ -2922,13 +2933,21 @@ let rec private outputColumnSources
         |> List.choose (fun (index, column) ->
             if equalsIgnoreCase column name then Some(originAt source index) else None)
 
-    let byQualifier qualifier name =
+    let byQualifierIn sources qualifier name =
         sources
         |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier qualifier)
         |> Option.bind (fun source ->
             match matchingOrigins source name with
             | [ origin ] -> origin
             | _ -> None)
+
+    let correlated = Option.map (fun (source: ColumnSource) -> CorrelatedColumn source.Origin)
+    let byQualifier qualifier name =
+        let localMatch =
+            sources |> List.exists (fun source ->
+                equalsIgnoreCase source.Qualifier qualifier && (source.Columns |> List.exists (equalsIgnoreCase name)))
+        if localMatch then byQualifierIn sources qualifier name
+        else byQualifierIn outerSources qualifier name |> correlated
 
     let logicalColumns =
         FromItem.logicalSelectColumns
@@ -2947,6 +2966,10 @@ let rec private outputColumnSources
     let byName name =
         match logicalColumns |> Option.map (List.filter (fun column -> equalsIgnoreCase column.Name name)) with
         | Some [ column ] -> logicalOrigin column
+        | Some [] ->
+            outerSources
+            |> List.collect (fun source -> matchingOrigins source name)
+            |> function [ origin ] -> correlated origin | _ -> None
         | _ -> None
 
     let originsForExpression =
@@ -2963,6 +2986,9 @@ let rec private outputColumnSources
         | _ -> [ None ]
 
     select.Projections |> List.collect (fst >> originsForExpression)
+
+let private outputColumnSources store dbName qualifiers select =
+    outputColumnSourcesInScope store dbName qualifiers [] select
 
 let private applyWireOverrides (overrides: ColumnMetadata option list) (types: ColumnMetadata list) : ColumnMetadata list =
     if sameLength overrides types then
@@ -6143,13 +6169,17 @@ and private outputColumnWireOverridesFor
                 |> Option.map (fun value ->
                     let value =
                         match source with
-                        | Some(PhysicalColumn origin) when not rollup ->
+                        | Some(PhysicalColumn origin | CorrelatedColumn origin) when not rollup ->
                             Storage.tableSnapshot ctx.Store origin.Schema origin.OriginalTable
                             |> Result.toOption
                             |> Option.bind (fun table ->
                                 table.Columns
                                 |> List.tryFind (fun column -> equalsIgnoreCase column.Name origin.OriginalName)
-                                |> Option.map (fun column -> ColumnWire.withSourceColumnFlags table.Indexes column value))
+                                |> Option.map (fun column ->
+                                    let metadata = ColumnWire.withSourceColumnFlags table.Indexes column value
+                                    match source with
+                                    | Some(CorrelatedColumn _) -> ColumnWire.withoutKeyColumnFlags metadata
+                                    | _ -> metadata))
                             |> Option.defaultValue value
                         | Some(MaterializedColumn _) -> ColumnWire.withoutSourceColumnFlags value
                         | _ when rollup -> ColumnWire.withoutSourceColumnFlags value
@@ -6897,7 +6927,12 @@ and private describeQueryColumnsChecked
                     sources
                     |> List.map (fun (qualifier, source) -> qualifier, source |> List.map _.Column)
                     |> qualifierRanges
-                let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
+                let contextOfScope (scope: DescribedJoinScope) outer =
+                    let sources = scope.Sources |> List.map (fun (qualifier, descriptors) -> qualifier, descriptors |> List.map _.Column)
+                    let columns = sources |> List.collect snd
+                    contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sources) outer (probeRow columns)
+                let outer = List.foldBack (fun scope outer -> Some(contextOfScope scope outer)) outerScopes None
+                let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers outer (probeRow columns)
 
                 let columnForExpression name expression =
                     match tryColumnDefForExpr context expression with
