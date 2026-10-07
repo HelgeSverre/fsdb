@@ -7033,8 +7033,8 @@ let private alterPreservesFullText = function
     | SetAlterLock _ -> true
     | _ -> false
 
-let private reindexAfterAlter size actions before after =
-    if not (List.forall alterPreservesFullText actions) then
+let private reindexAfterAlter size actions preserveFullText before after =
+    if not preserveFullText then
         reindexTableWithNgramTokenSize size after
     else
         let renameSource sources = function
@@ -7094,7 +7094,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
 
                 let step acc action =
                     acc
-                    |> Result.bind (fun (key, tbl) ->
+                    |> Result.bind (fun (key, tbl, preserveFullText) ->
                         let validation =
                             match action with
                             | AddForeignKey foreignKey ->
@@ -7114,9 +7114,10 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
 
                         validation
                         |> Result.bind (fun () -> applyAlterAction (temporalCoercionMode store) tbl action)
-                        |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
+                        |> Result.map (fun (tbl', newKey) ->
+                            (newKey |> Option.defaultValue key), tbl', preserveFullText && alterPreservesFullText action))
 
-                let validateAutoIncrementKey (_, finalTable: Table) =
+                let validateAutoIncrementKey (_, finalTable: Table, _) =
                     let indexed column =
                         column.PrimaryKey
                         || column.Unique
@@ -7132,11 +7133,11 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                     | None -> Ok()
 
                 actions
-                |> List.fold step (Ok(origKey, table))
+                |> List.fold step (Ok(origKey, table, true))
                 |> Result.bind (fun state -> validateAutoIncrementKey state |> Result.map (fun () -> state))
-                |> Result.map (fun (finalKey, finalTable) ->
+                |> Result.map (fun (finalKey, finalTable, preserveFullText) ->
                     let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
-                    let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize actions table finalTable)
+                    let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize actions preserveFullText table finalTable)
                     let updatedCatalog = setCatalogDatabase dbName database catalog
                     invalidateAutoIncrementCounter store dbName origKey
                     invalidateAutoIncrementCounter store dbName finalKey
