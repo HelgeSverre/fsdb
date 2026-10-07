@@ -35,6 +35,13 @@ def verify(client, _writer):
         )
         oracle["expect"](query, result.stdout.rstrip("\n"), label + "\n" + value)
 
+    for argument, code in [("NULL", 1382), ("-1", 1210), ("-0", 1210), ("1+1", 1210),
+                           ("CONCAT('a','b')", 1210), ("'a' COLLATE utf8mb4_bin", 1210)]:
+        query = "SELECT NAME_CONST(" + argument + ",2)"
+        result = subprocess.run([*client.process.args, "-e", query], capture_output=True, text=True)
+        assert result.returncode != 0, query
+        assert f"ERROR {code} (HY000)" in result.stderr, (query, result.stderr)
+
     for query, (label, value) in zip(queries, expected, strict=True):
         expect_result(query, label, value)
     statement = "PREPARE label_check FROM 'SELECT CONCAT(?, ''b'')';SET @label_value='a';EXECUTE label_check USING @label_value"
@@ -75,6 +82,32 @@ def verify(client, _writer):
         ('SET @`HAS, COMMA`=3,@"DOUBLE-NAME"=1;SELECT @\'sp ace\' := @`HAS, COMMA` + @"DOUBLE-NAME"',
          '@\'sp ace\' := @`HAS, COMMA` + @"DOUBLE-NAME"', "4"),
     ])
+    for argument, label in [
+        ("001", "1"), ("1.00", "1.00"), ("1e0", "1"), ("0x41", "A"), ("X'41'", "A"),
+        ("b'01'", ""), ("true", "1"), ("false", "0"), ("18446744073709551615", "18446744073709551615"),
+        ("' a '", "a "), ("''", ""), ("'a' 'b'", "ab"),
+    ]:
+        expect_result("SELECT NAME_CONST(" + argument + ",2)", label, "2")
+    for expression, label, value in [
+        ("_binary X'41'", "_binary X'41'", "A"),
+        ("(_binary X'41')", "(_binary X'41')", "A"),
+        ("+_binary X'41'", "+_binary X'41'", "A"),
+        ("_binary 0x41", "_binary 0x41", "A"),
+        ("_binary b'01'", "_binary b'01'", "\x01"),
+        ("_binary 0b01", "_binary 0b01", "\x01"),
+        ("0b01", "0b01", "\x01"),
+        ("_BINARY  X'41' /* tail */", "_BINARY  X'41'", "A"),
+        ("(_binary  X'41')", "(_binary  X'41')", "A"),
+        ("_binary /* middle */ X'41'", "_binary /* middle */ X'41'", "A"),
+    ]:
+        expect_result("SELECT " + expression, label, value)
+    for hexadecimal in ["0061", "0161", "0961", "1f61", "2061", "7f61", "c2a061"]:
+        label = "\u00a0a" if hexadecimal == "c2a061" else "a"
+        expect_result("SELECT NAME_CONST(X'" + hexadecimal + "',2)", label, "2")
+    for value, label in [("\x01a", "a"), ("\x7fa", "a"), ("\u00a0a", "\u00a0a")]:
+        expect_result("SELECT '" + value + "'", label, value)
+    expect_result("SELECT NAME_CONST(1,2)+1,NAME_CONST(1,2) AS chosen",
+                  "NAME_CONST(1,2)+1\tchosen", "3\t2")
     client.query("CREATE VIEW labels AS SELECT concat('a','b'),1+2")
     expect_result("SELECT * FROM labels", "concat('a','b')\t1+2", "ab\t3")
     expect_result("SELECT `concat('a','b')`,`1+2` FROM labels", "concat('a','b')\t1+2", "ab\t3")

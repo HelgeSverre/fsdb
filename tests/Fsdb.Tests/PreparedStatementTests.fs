@@ -33,7 +33,53 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "projection labels preserve source spelling and SQL modes"
+        [ testCase "special projection names normalize NAME_CONST literal values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for argument, label in
+                  [ "001", "1"; "1.00", "1.00"; "1e0", "1"; "0x41", "A"; "X'41'", "A"
+                    "b'01'", ""; "true", "1"; "false", "0"; "18446744073709551615", "18446744073709551615"
+                    "' a '", "a "; "''", ""; "'a' 'b'", "ab" ] do
+                  let sql = "SELECT NAME_CONST(" + argument + ",2)"
+                  Expect.equal (handle session sql |> snd) (ResultSet([ label ], [ [ Some "2" ] ])) sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map _.Name) [ label ] ("prepared label: " + sql)
+              Expect.equal (handle session "SELECT NAME_CONST(1,2)+1,NAME_CONST(1,2) AS chosen" |> snd)
+                  (ResultSet([ "NAME_CONST(1,2)+1"; "chosen" ], [ [ Some "3"; Some "2" ] ])) "nested expressions and aliases"
+
+          testCase "special projection names retain introduced binary syntax"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, label, value in
+                  [ "_binary X'41'", "_binary X'41'", "A"
+                    "(_binary X'41')", "(_binary X'41')", "A"
+                    "+_binary X'41'", "+_binary X'41'", "A"
+                    "_binary 0x41", "_binary 0x41", "A"
+                    "_binary b'01'", "_binary b'01'", "\u0001"
+                    "_binary 0b01", "_binary 0b01", "\u0001"
+                    "0b01", "0b01", "\u0001"
+                    "_BINARY  X'41' /* tail */", "_BINARY  X'41'", "A"
+                    "(_binary  X'41')", "(_binary  X'41')", "A"
+                    "_binary /* middle */ X'41'", "_binary /* middle */ X'41'", "A" ] do
+                  let sql = "SELECT " + expression
+                  Expect.equal (handle session sql |> snd) (ResultSet([ label ], [ [ Some value ] ])) sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (columns |> List.map _.Name) [ label ] ("prepared label: " + sql)
+
+          testCase "special projection names trim only ASCII padding"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for hex, label in
+                  [ "0061", "a"; "0161", "a"; "0961", "a"; "1f61", "a"; "2061", "a"; "7f61", "a"; "c2a061", "\u00a0a" ] do
+                  let sql = "SELECT NAME_CONST(X'" + hex + "',2)"
+                  Expect.equal (handle session sql |> snd) (ResultSet([ label ], [ [ Some "2" ] ])) sql
+              for value, label in [ "\u0001a", "a"; "\u007fa", "a"; "\u00a0a", "\u00a0a" ] do
+                  let sql = "SELECT '" + value + "'"
+                  Expect.equal (handle session sql |> snd) (ResultSet([ label ], [ [ Some value ] ])) "string name and value"
+
+          testCase "projection labels preserve source spelling and SQL modes"
           <| fun _ ->
               for mode, sql, label, value in
                   [ "", "SELECT concat('a','b')", "concat('a','b')", "ab"

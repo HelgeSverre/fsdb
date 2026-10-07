@@ -650,6 +650,13 @@ and SelectStmt =
       Locking: LockingRead list }
 
 module Projection =
+    /// MySQL removes leading ASCII whitespace and controls from literal names.
+    let literalName (text: string) =
+        let mutable first = 0
+        while first < text.Length && (text[first] <= ' ' || text[first] = '\u007f') do
+            first <- first + 1
+        text.Substring first
+
     let create expression alias : Projection =
         { Expression = expression; Alias = alias; SourceName = None }
 

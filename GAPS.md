@@ -570,6 +570,11 @@ families without evaluating the statement. Typed numeric builtin and cast
 arguments are coerced before expression evaluation for both protocol and SQL
 prepared statements. `LIMIT` and `OFFSET` retain MySQL's distinct binary-
 protocol and SQL user-variable validation rules.
+Unaliased projection names retain source spelling through SQL modes, prepared
+binding, metadata inference, and view rendering. Literal names and `NAME_CONST`
+follow their value and source-specific rules
+([oracle](torture/findings/2026-10-07-expression-labels.md)).
+
 Each prepared handle retains its derived parameter types independently of the
 binary protocol's cached encodings. Incompatible supplied types rederive the
 whole statement, while compatible executions retain their numeric and temporal
@@ -580,7 +585,7 @@ NULL marker's original expression context.
 |---|---|---|---|---|
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
 | Prepared user-variable typing | direct references retain their prepare-time type and refresh on statement reprepare | Parsed statements, including user/system variable `SET` assignments combined with `NAMES`, retain direct variable types and refresh them when explicit parameters force reprepare. Referenced table and view definitions also refresh captured types after DDL. Common decimal arithmetic, rounding, and coalescing now propagate result scales and preserve division guard digits. Common expression precision descriptors are derived from operand shapes, and SUM/AVG distinguish untyped NULL and approximate/text inputs from exact numeric inputs; broader prepared query shapes and expression families, and values beyond System.Decimal precision remain incomplete ([evidence](torture/findings/2026-10-06-prepared-parameter-repreparation.md#direct-user-variable-references)) | medium | divergence |
-| Unaliased expression labels | source-shaped expression labels and literal-specific names | parsed source spelling survives spacing, casing, comments, SQL modes, prepared binding, metadata inference, and view rendering; numeric `NAME_CONST` and introduced hexadecimal binary names still differ ([findings](torture/findings/2026-10-07-expression-labels.md), [oracle](torture/scripts/expression-label-oracle.py)) | low | divergence |
+| NAME_CONST argument validation | NULL and nonliteral names are rejected, including negative literal syntax | literal output names agree in audited cases, but NULL returns NULL and negative, arithmetic, function, and COLLATE name arguments are accepted ([findings](torture/findings/2026-10-07-expression-labels.md#remaining-name_const-argument-validation)) | low | divergence |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index and numeric-aggregate conversion conditions, conditional DDL, ignored physical-directory options, unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |

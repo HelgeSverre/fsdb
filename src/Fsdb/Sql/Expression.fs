@@ -2,6 +2,15 @@ module Fsdb.Sql.Expression
 
 open Fsdb.Ast
 
+let (|NamedConstant|_|) = function
+    | FuncCall(name, [ LiteralValue value; _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) ->
+        let text =
+            match value with
+            | Fsdb.Value.VBytes bytes | Fsdb.Value.VBinaryLiteral bytes -> Some(System.Text.Encoding.UTF8.GetString bytes)
+            | _ -> Fsdb.Value.toText value
+        text |> Option.map Projection.literalName
+    | _ -> None
+
 type Traversal<'state> =
     | Descend of 'state
     | Prune of 'state

@@ -1,8 +1,8 @@
 # Unaliased expression source labels
 
-Status: partial. Parsed projections retain source names through execution,
-prepared binding, metadata inference, and view rendering. Numeric `NAME_CONST`
-names and introduced hexadecimal binary names still diverge.
+Status: fixed for the audited naming cases. Parsed projections retain source
+names through execution, prepared binding, metadata inference, and view rendering.
+`NAME_CONST` argument validation remains a separate compatibility gap.
 
 The maintained [expression-label oracle](../scripts/expression-label-oracle.py)
 checks column headers and values against a disposable native MySQL 8.4.11
@@ -32,17 +32,27 @@ The SQL source scanner excludes trailing trivia while retaining interior
 comments. Literal names preserve numeric, boolean, and binary spelling;
 redundant parentheses around positive literals are removed. Adjacent quoted
 strings concatenate as values and retain the first string's name. Leading
-whitespace is removed from string names, independently of the value.
+ASCII whitespace and controls (U+0000–U+0020 and U+007F) are removed from
+string names, independently of the value; nonbreaking spaces remain.
 
 Execution and prepared-metadata regressions cover the table above, SQL-mode
 length changes, grouped window rewrites, derived sources, and explicit aliases.
 The maintained oracle also checks user-variable, window, and full-text names.
 
-Remaining native-verified differences:
-
-| Projection | MySQL name | fsdb name |
-|---|---|---|
-| `NAME_CONST(1,2)` | `1` | `NAME_CONST(1,2)` |
-| `_binary X'41'` | `_binary X'41'` | `A` |
+`NAME_CONST` uses its first literal's value as the name: `001` becomes `1`,
+`1.00` retains its scale, `1e0` becomes `1`, and binary `X'41'` becomes `A`.
+Binary name bytes decode as UTF-8. Introduced binary literals retain the full
+source expression, including parentheses and interior comments; unintroduced
+`0b01` retains its token spelling. Explicit aliases override inferred names.
 
 The `_latin1'é'` control retains the decoded name `Ã©` on both engines.
+
+## Remaining NAME_CONST argument validation
+
+Native MySQL 8.4.11 rejects a NULL name with 1382/HY000 and rejects negative
+names (including `-0`), arithmetic, function calls, and COLLATE expressions
+with 1210/HY000. The maintained oracle checks these errors. fsdb currently
+returns NULL for a NULL name and accepts the other expressions. Its scalar
+implementation only checks arity and NULL; parser folding also erases the
+negative syntax in `-0`. Validation must preserve the relevant argument shape
+rather than infer acceptance solely from its evaluated value.

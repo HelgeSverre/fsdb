@@ -849,11 +849,14 @@ let private bitBytesLit: Parser<Value, unit> =
 
     (quoted <|> unquoted) .>> ws |>> (bytesOfBits >> VBinaryLiteral)
 
+let private introducedBinaryPrefix =
+    let prefix = choice [ pstringCI "X'"; pstringCI "B'"; pstring "0x"; pstring "0b" ]
+    attempt (keyword "_binary" .>> followedBy prefix)
+
 /// An explicit binary introducer removes the numeric origin of bit/hex literals.
 let private introducedBinaryLit: Parser<Value, unit> =
-    let prefix = choice [ pstringCI "X'"; pstringCI "B'"; pstring "0x"; pstring "0b" ]
     let hexadecimalNumber = followedBy (pstring "0x") >>. numberLit
-    attempt (keyword "_binary" .>> followedBy prefix)
+    introducedBinaryPrefix
     >>. choice [ hexBytesLit; bitBytesLit; hexadecimalNumber ]
     |>> Value.materialize
 
@@ -3552,14 +3555,15 @@ let private firstStringSourceName source =
         (attempt (pchar '_' >>. many1Satisfy isIdentChar .>> ws) >>% ())
         <|> (attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>% ())
     match run (literalSourcePrefix >>. optional introducer >>. stringLit) source with
-    | Success(VString text, _, _) -> Some(text.TrimStart())
+    | Success(VString text, _, _) -> Some(Projection.literalName text)
     | _ -> None
 
 let private literalSourceName source =
     let quotedBinary =
         anyOf "xXbB" >>. pchar '\'' >>. skipManyTill anyChar (pchar '\'')
     let token =
-        (numberLiteral numberFormat "number" |>> _.String)
+        withSkippedString (fun text _ -> text) (attempt (pstringCI "0b" >>. many1Chars (anyOf "01")))
+        <|> (numberLiteral numberFormat "number" |>> _.String)
         <|> withSkippedString (fun text _ -> text) quotedBinary
         <|> withSkippedString (fun text _ -> text) (pstringCI "TRUE" <|> pstringCI "FALSE")
     // A folded negative literal still has an expression-shaped name, including parentheses.
@@ -3574,14 +3578,16 @@ let private projectionSourceName state expression first finish =
     | Lit(VString text) ->
         if quotedTokens > 1 then firstStringSourceName (source ())
         else
-            let name = text.TrimStart()
+            let name = Projection.literalName text
             if name = text then None else Some name
     | Lit VNull | Col _ | QualifiedCol _ | Star _ -> None
     | Lit(VBytes _) ->
         let source = source ()
-        literalSourceName source |> Option.orElseWith (fun () -> firstStringSourceName source)
+        match run (literalSourcePrefix >>. introducedBinaryPrefix) source with
+        | Success _ -> Some source
+        | _ -> literalSourceName source |> Option.orElseWith (fun () -> firstStringSourceName source)
     | Lit _ | ApproximateLiteral _ -> literalSourceName (source ())
-    | FuncCall(name, [ Lit(VString _); _ ]) when name.Equals("NAME_CONST", StringComparison.OrdinalIgnoreCase) -> None
+    | Expression.NamedConstant name -> Some name
     | _ -> Some(source ())
 
 let private projection: Parser<Projection, unit> =

@@ -2000,10 +2000,7 @@ let private opSymbol =
     | IntDiv -> "DIV"
     | NullSafeEq -> "<=>"
 
-/// The column name MySQL gives an unaliased projection — exact for columns
-/// and literals, a best-effort reconstruction of the source text for
-/// everything else (real MySQL echoes the original expression text, which
-/// the parser doesn't preserve).
+/// Fallback names for expressions without a parsed projection source name.
 let rec internal exprLabel (expr: Expr) : string =
     match expr with
     | ApproximateLiteral(_, spelling) -> spelling
@@ -2021,7 +2018,7 @@ let rec internal exprLabel (expr: Expr) : string =
     | AssignUserVariable(variable, value) -> variable.Sql + ":=" + expressionLabelFragment value
     | Col name -> name
     | QualifiedCol(_, col) -> col
-    | FuncCall(name, [ Lit(VString label); _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) -> label
+    | Expression.NamedConstant name -> name
     | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToUpperInvariant()) (args |> List.map expressionLabelFragment |> String.concat ", ")
     | Row values -> sprintf "(%s)" (values |> List.map expressionLabelFragment |> String.concat ", ")
     | BinOp(op, a, b) -> sprintf "%s %s %s" (expressionLabelFragment a) (opSymbol op) (expressionLabelFragment b)
