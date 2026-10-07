@@ -26,6 +26,9 @@ def verify(client, _writer):
         ("p0,p1 INTO (PARTITION q0)", (1510, "HY000"), "p0,p1,p2"),
         ("p0 INTO (PARTITION p1)", (1517, "HY000"), "p0,p1,p2"),
         ("p4 INTO (PARTITION q0)", (1507, "HY000"), "p0,p1,p2"),
+        ("p0,p2 INTO (PARTITION a,PARTITION b)", (1519, "HY000"), "p0,p1,p2"),
+        ("p0,p0 INTO (PARTITION a,PARTITION b)", (1507, "HY000"), "p0,p1,p2"),
+        ("p0,p1 INTO (PARTITION a,PARTITION A)", (1517, "HY000"), "p0,p1,p2"),
         ("", None, "p0"),
     ]
     for method in ["HASH(id)", "LINEAR HASH(id)"]:
@@ -68,6 +71,13 @@ def verify(client, _writer):
     expect("case-insensitive partition selection", client.query(
         "SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.h PARTITION(renamed)"
     ), "0,2,4")
+    client.query("ALTER TABLE probe.h ADD PARTITION (PARTITION Third)")
+    expect("explicit-name addition", names(client), "Renamed,Second,Third")
+    client.query("ALTER TABLE probe.h REORGANIZE PARTITION")
+    expect("no-list retains first name", names(client), "Renamed")
+    expect("no-list retains all rows", client.query(
+        "SELECT GROUP_CONCAT(id ORDER BY id) FROM probe.h PARTITION(renamed)"
+    ), "0,1,2,3,4,5")
 
 
 if __name__ == "__main__":

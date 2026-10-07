@@ -750,13 +750,21 @@ type AlterAction =
     | SetAutoIncrement of value: int64
     | AddHashPartitions of count: uint32
     | CoalesceHashPartitions of count: uint32
+    | ReorganizeHashPartitions of replacement: (string list * string list) option
     | DropPartitions of names: string list
     | TruncatePartitions of names: string list option
 
 type HashPartitioning =
     { Expression: Expr
       Count: uint32
+      Names: string list option
       Linear: bool }
+
+    member this.OrderedNames =
+        this.Names |> Option.defaultWith (fun () -> [ for index in 0u .. this.Count - 1u -> sprintf "p%d" index ])
+
+    member this.WithNames names =
+        { this with Count = uint32 (List.length names); Names = Some names }
 
 type TriggerTiming =
     | Before

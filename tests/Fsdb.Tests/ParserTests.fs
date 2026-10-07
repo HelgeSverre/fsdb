@@ -1366,6 +1366,10 @@ let tests =
                     | CreateTable { Partitioning = Some { Count = 4u; Linear = true } } -> ()
                     | other -> failtestf "expected LINEAR HASH metadata, got %A" other
 
+                    match parse "CREATE TABLE p(id INT) PARTITION BY HASH(id) PARTITIONS 3 (PARTITION a,PARTITION b)" with
+                    | Error _ -> ()
+                    | other -> failtestf "expected a partition count/name mismatch to be rejected, got %A" other
+
                     match parseOk "SELECT id FROM p PARTITION (p0,p2) AS chosen" with
                     | Select { From = Some(FromTable { Table = "p"; Alias = Some "chosen"; Partitions = [ "p0"; "p2" ] }) } -> ()
                     | other -> failtestf "expected selected partitions on the table reference, got %A" other

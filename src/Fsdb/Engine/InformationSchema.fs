@@ -2172,9 +2172,9 @@ let private partitionsRows (catalog: Catalog) : Value[] list =
                 | Error _ -> ()
             | _ -> ()
 
-            [ for index in 0u .. partitioning.Count - 1u ->
+            [ for index, name in List.indexed partitioning.OrderedNames ->
                   row
-                      (vs (sprintf "p%d" index))
+                      (vs name)
                       (vi (int index + 1))
                       (vs (if partitioning.Linear then "LINEAR HASH" else "HASH"))
                       (vs (exprToSql partitioning.Expression))
@@ -3871,10 +3871,12 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
         t.Partitioning
         |> Option.map (fun value ->
             sprintf
-                "\nPARTITION BY %sHASH (%s)\nPARTITIONS %d"
+                "\nPARTITION BY %sHASH (%s)\n%s"
                 (if value.Linear then "LINEAR " else "")
                 (exprToSql value.Expression)
-                value.Count)
+                (match value.Names with
+                 | None -> sprintf "PARTITIONS %d" value.Count
+                 | Some names -> names |> List.map (fun name -> "PARTITION " + backtick name) |> String.concat ", " |> sprintf "(%s)"))
         |> Option.defaultValue ""
 
     sprintf

@@ -6300,6 +6300,17 @@ let private validateTableComment (tableName: string) (comment: string) =
     else
         Ok comment
 
+let private validatePartitionNames names =
+    let rec check seen = function
+        | [] -> Ok names
+        | (name: string) :: rest ->
+            let key = name.ToLowerInvariant()
+            if Set.contains key seen then
+                Error(ExpressionError(1517, sprintf "Duplicate partition name %s" name))
+            else
+                check (Set.add key seen) rest
+    check Set.empty names
+
 let createTableSeeded
     (store: Store)
     (dbName: string)
@@ -6347,6 +6358,8 @@ let createTableSeeded
         match partitioning with
         | Some value when value.Count = 0u -> Error(ExpressionError(1504, "Number of partitions = 0 is not an allowed value"))
         | Some value when value.Count > 8192u -> Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
+        | Some value when value.Names |> Option.exists (fun names -> uint32 names.Length <> value.Count) ->
+            Error(ExpressionError(1064, "Wrong number of partitions defined, mismatch with previous setting"))
         | Some { Expression = Col name }
         | Some { Expression = QualifiedCol(_, name) } ->
             resolveColumn columns name
@@ -6364,7 +6377,11 @@ let createTableSeeded
         | _ -> Ok()
 
     let result =
-        match partitioningCheck with
+        match partitioningCheck |> Result.bind (fun () ->
+            partitioning
+            |> Option.bind _.Names
+            |> Option.map (validatePartitionNames >> Result.map ignore)
+            |> Option.defaultValue (Ok())) with
         | Error error -> Error error
         | Ok() ->
             tableComment
@@ -7135,13 +7152,52 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
         | Some partitioning when count > 8192u - partitioning.Count ->
             Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
-        | Some partitioning -> Ok({ table with Partitioning = Some { partitioning with Count = partitioning.Count + count } }, None)
+        | Some partitioning ->
+            let added = [ for index in partitioning.Count .. partitioning.Count + count - 1u -> sprintf "p%d" index ]
+            validatePartitionNames (partitioning.OrderedNames @ added)
+            |> Result.map (fun names ->
+                let resized =
+                    match partitioning.Names with
+                    | None -> { partitioning with Count = partitioning.Count + count }
+                    | Some _ -> partitioning.WithNames names
+                { table with Partitioning = Some resized }, None)
     | CoalesceHashPartitions count ->
         match table.Partitioning with
         | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
         | Some partitioning when count >= partitioning.Count ->
             Error(ExpressionError(1508, "Cannot remove all partitions, use DROP TABLE instead"))
-        | Some partitioning -> Ok({ table with Partitioning = Some { partitioning with Count = partitioning.Count - count } }, None)
+        | Some partitioning ->
+            let resized =
+                match partitioning.Names with
+                | None -> { partitioning with Count = partitioning.Count - count }
+                | Some names -> partitioning.WithNames (List.take (int (partitioning.Count - count)) names)
+            Ok({ table with Partitioning = Some resized }, None)
+    | ReorganizeHashPartitions replacement ->
+        match table.Partitioning with
+        | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
+        | Some partitioning ->
+            let names = partitioning.OrderedNames
+            let reorganized =
+                match replacement with
+                | None -> Ok [ List.head names ]
+                | Some(selected, replacements) ->
+                    let selectedKeys = selected |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList
+                    let positions =
+                        names
+                        |> List.indexed
+                        |> List.choose (fun (index, name) -> if Set.contains (name.ToLowerInvariant()) selectedKeys then Some index else None)
+                    if positions.IsEmpty || positions.Length <> selected.Length then
+                        Error(ExpressionError(1507, "Error in list of partitions to REORGANIZE"))
+                    elif replacements.Length <> selected.Length then
+                        Error(ExpressionError(1510, "REORGANIZE PARTITION can only be used to reorganize partitions not to change their numbers"))
+                    elif (List.last positions - List.head positions + 1) <> positions.Length then
+                        Error(ExpressionError(1519, "When reorganizing a set of partitions they must be in consecutive order"))
+                    else
+                        let first = List.head positions
+                        Ok(List.take first names @ replacements @ List.skip (first + positions.Length) names)
+            reorganized
+            |> Result.bind validatePartitionNames
+            |> Result.map (fun names -> { table with Partitioning = Some(partitioning.WithNames names) }, None)
     | DropPartitions _ ->
         match table.Partitioning with
         | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
@@ -10011,8 +10067,8 @@ let hashPartitionIndex (partitioning: HashPartitioning) (value: Value) : uint32 
         uint32 partition
 
 let hashPartitionNames (partitioning: HashPartitioning) =
-    [ 0u .. partitioning.Count - 1u ]
-    |> List.map (fun index -> sprintf "p%d" index, index)
+    partitioning.OrderedNames
+    |> List.mapi (fun index name -> name.ToLowerInvariant(), uint32 index)
     |> Map.ofList
 
 /// A snapshot read: the table's columns and its rows as they were at the

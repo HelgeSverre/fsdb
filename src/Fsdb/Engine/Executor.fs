@@ -7480,6 +7480,7 @@ and private tryPhysicalTableRef (store: Store) (dbName: string) (tableRef: Table
 
     if
         cteShadows
+        || not tableRef.Partitions.IsEmpty
         || isVirtual
         || System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase)
         || System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase)
@@ -18893,6 +18894,7 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         | SetRowFormat _ -> onlineAlgorithms
         | AddHashPartitions _
         | CoalesceHashPartitions _
+        | ReorganizeHashPartitions _
         | DropPartitions _
         | TruncatePartitions _ -> Set.empty
         | SetAlterAlgorithm _
@@ -18977,7 +18979,7 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
     elif
         hasExecutionOption
         && operations
-           |> List.exists (function AddHashPartitions _ | CoalesceHashPartitions _ | DropPartitions _ | TruncatePartitions _ -> true | _ -> false)
+           |> List.exists (function AddHashPartitions _ | CoalesceHashPartitions _ | ReorganizeHashPartitions _ | DropPartitions _ | TruncatePartitions _ -> true | _ -> false)
     then
         Some(Err(1064, "You have an error in your SQL syntax"))
     elif algorithm = AlgorithmInstant && lockMode <> LockDefault then

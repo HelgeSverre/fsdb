@@ -2741,23 +2741,31 @@ module private ParsedTableOptions =
         | TablePartitioning value -> { options with Partitioning = Some value }
         | IgnoredTableOption -> options
 
+let private hashPartitionNames =
+    between (sym "(") (sym ")") (sepBy1 (keyword "PARTITION" >>. identifier) (sym ","))
+
 let private hashPartitionOption: Parser<TableOption, unit> =
     keyword "PARTITION"
     >>. keyword "BY"
     >>. (opt (keyword "LINEAR") .>> keyword "HASH")
     .>>. between (sym "(") (sym ")") expr
     .>>. opt (keyword "PARTITIONS" >>. (puint64 .>> ws))
-    >>= fun ((linear, expression), count) ->
-        match count |> Option.defaultValue 1UL with
-        | 0UL -> fail "the number of partitions must be positive"
-        | value when value > uint64 UInt32.MaxValue -> fail "the number of partitions is too large"
-        | value ->
-            preturn (
-                TablePartitioning
-                    { Expression = expression
-                      Count = uint32 value
-                      Linear = linear.IsSome }
-            )
+    .>>. opt hashPartitionNames
+    >>= fun (((linear, expression), count), names) ->
+        match count, names with
+        | Some count, Some names when count <> uint64 names.Length -> fail "Wrong number of partitions defined, mismatch with previous setting"
+        | _ ->
+            match count |> Option.defaultWith (fun () -> names |> Option.map (List.length >> uint64) |> Option.defaultValue 1UL) with
+            | 0UL -> fail "the number of partitions must be positive"
+            | value when value > uint64 UInt32.MaxValue -> fail "the number of partitions is too large"
+            | value ->
+                preturn (
+                    TablePartitioning
+                        { Expression = expression
+                          Count = uint32 value
+                          Names = names
+                          Linear = linear.IsSome }
+                )
 
 /// One table-option tail entry. Options fsdb has no behavior for
 /// (ROW_FORMAT, KEY_BLOCK_SIZE, the STATS_* family) are accepted and
@@ -3173,6 +3181,9 @@ let private alterHashPartitions: Parser<AlterAction, unit> =
 
     (attempt (keyword "ADD" >>. keyword "PARTITION" >>. keyword "PARTITIONS") >>. count |>> AddHashPartitions)
     <|> (attempt (keyword "COALESCE" >>. keyword "PARTITION") >>. count |>> CoalesceHashPartitions)
+    <|> (attempt (keyword "REORGANIZE" >>. keyword "PARTITION")
+         >>. opt (sepBy1 identifier (sym ",") .>> keyword "INTO" .>>. hashPartitionNames)
+         |>> ReorganizeHashPartitions)
     <|> (attempt (keyword "DROP" >>. keyword "PARTITION") >>. sepBy1 identifier (sym ",") |>> DropPartitions)
     <|> (attempt (keyword "TRUNCATE" >>. keyword "PARTITION")
          >>. ((attempt (keyword "ALL") >>% None) <|> (sepBy1 identifier (sym ",") |>> Some))

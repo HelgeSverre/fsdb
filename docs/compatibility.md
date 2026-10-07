@@ -454,10 +454,18 @@ duration does not apply.
 ## HASH partitioning
 
 `PARTITION BY HASH` and `PARTITION BY LINEAR HASH` retain their expression and
-partition count. Tables expose MySQL-style `p0`…`pN` names through
-`information_schema.PARTITIONS`, `SHOW CREATE TABLE`, and `PARTITION (...)`
-selection. `ALTER TABLE ... ADD PARTITION PARTITIONS n` and `COALESCE
-PARTITION n` update the logical map and redistribute subsequent selections.
+partition count and optional explicit names. Generated names use `p0`…`pN`;
+explicit names retain their spelling in `information_schema.PARTITIONS` and
+`SHOW CREATE TABLE`, with case-insensitive `PARTITION (...)` selection.
+`ALTER TABLE ... ADD PARTITION PARTITIONS n` and `COALESCE PARTITION n` update
+the logical map while preserving surviving names. Generated-name collisions
+are rejected.
+
+`REORGANIZE PARTITION old_names INTO (PARTITION new_name, ...)` replaces the
+names of a consecutive set without changing its size. The no-list form
+collapses the logical map to one partition, retaining its first name and all
+rows. Names survive WAL replay and snapshots; older count-only files retain
+their generated names.
 
 All rows still share one immutable row store. Partition selection evaluates
 the hash expression while scanning; it does not provide MySQL's physical
@@ -466,8 +474,8 @@ partition pruning or separate storage. `ANALYZE`, `CHECK`, `OPTIMIZE`, and
 rows. `TRUNCATE PARTITION` removes rows from named partitions without firing
 DELETE triggers and preserves the table's AUTO_INCREMENT counter.
 
-`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Partition renaming
-through `REORGANIZE PARTITION` remains unsupported.
+`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Explicit-name
+`ADD PARTITION` and per-partition options such as comments remain unsupported.
 
 ## Check constraints
 

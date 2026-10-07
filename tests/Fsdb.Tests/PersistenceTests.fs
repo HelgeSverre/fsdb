@@ -2642,6 +2642,70 @@ let tests =
                       Expect.equal reloaded.Catalog.[defaultDatabase].[normalizeTableName table].TableComment "" (table + " has no historical table comment")
                   | other -> failtestf "expected legacy table '%s' to load, got %A" table other
 
+          testCase "named HASH partitions survive WAL replay and snapshots"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              for sql in
+                  [ "CREATE TABLE named_hash(id INT PRIMARY KEY) PARTITION BY HASH(id) (PARTITION First,PARTITION Second)"
+                    "INSERT INTO named_hash VALUES(0),(1),(2),(3),(4),(5)"
+                    "ALTER TABLE named_hash ADD PARTITION PARTITIONS 1"
+                    "ALTER TABLE named_hash COALESCE PARTITION 1"
+                    "ALTER TABLE named_hash REORGANIZE PARTITION First INTO (PARTITION Renamed)" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "%s: %d %s" sql code message
+                  | _ -> ()
+              let verify recovered =
+                  let session = Fsdb.Session.create 2 recovered
+                  Expect.equal
+                      (handle session "SELECT id FROM named_hash PARTITION(renamed) ORDER BY id" |> snd)
+                      (ResultSet([ "id" ], [ [ Some "0" ]; [ Some "2" ]; [ Some "4" ] ]))
+                      "renamed partition retains its row mapping"
+                  let table = recovered.Catalog.[defaultDatabase].[normalizeTableName "named_hash"]
+                  Expect.equal (table.Partitioning |> Option.map _.OrderedNames) (Some [ "Renamed"; "Second" ]) "ordered names survive"
+              let recovered = load dir
+              verify recovered
+              snapshotNow dir recovered
+              verify (load dir)
+
+          testCase "count-only HASH partition WAL records remain readable"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let statement =
+                  match Fsdb.Parser.parse "CREATE TABLE old_hash(id INT) PARTITION BY HASH(id) PARTITIONS 3" with
+                  | Ok statement -> statement
+                  | Error error -> failtestf "%A" error
+              let record = encodeWalRecord (SchemaChanged(defaultDatabase, statement))
+              // The V7 CREATE TABLE payload ends at the linear flag, before optional names.
+              let payload = record.[8 .. record.Length - 2]
+              payload.[0] <- 0x15uy
+              let oldRecord = Writer()
+              oldRecord.WriteInt32LE payload.Length
+              oldRecord.WriteUInt32LE(crc32 payload)
+              oldRecord.WriteBytes payload
+              File.WriteAllBytes(walPath dir, oldRecord.ToArray())
+              let recovered = load dir
+              let table = recovered.Catalog.[defaultDatabase].[normalizeTableName "old_hash"]
+              Expect.equal (table.Partitioning |> Option.map _.OrderedNames) (Some [ "p0"; "p1"; "p2" ]) "count-only records synthesize their original names"
+              setCatalog recovered (Map.ofList [ defaultDatabase, Map.ofList [ normalizeTableName "old_hash", table ] ])
+              snapshotNow dir recovered
+              let bytes = File.ReadAllBytes(snapshotPath dir)
+              let payload = bytes.[4 .. bytes.Length - 13]
+              // One empty, non-FULLTEXT table leaves 24 metadata bytes and a 4-byte XA count after the names flag.
+              let namesOffset = payload.Length - 29
+              Expect.equal payload.[namesOffset] 0uy "the fixture uses generated names"
+              let oldPayload = Array.append payload.[.. namesOffset - 1] payload.[namesOffset + 1 ..]
+              let oldSnapshot = Writer()
+              oldSnapshot.WriteBytes (System.Text.Encoding.ASCII.GetBytes "FSNI")
+              oldSnapshot.WriteBytes oldPayload
+              oldSnapshot.WriteInt64LE(int64 oldPayload.Length)
+              oldSnapshot.WriteUInt32LE(crc32 oldPayload)
+              File.WriteAllBytes(snapshotPath dir, oldSnapshot.ToArray())
+              let table = (load dir).Catalog.[defaultDatabase].[normalizeTableName "old_hash"]
+              Expect.equal (table.Partitioning |> Option.map _.OrderedNames) (Some [ "p0"; "p1"; "p2" ]) "count-only snapshots retain generated names"
+
           testCase "FSNC snapshots retain rows without tokenizer metadata"
           <| fun _ ->
               let dir = tempDataDir ()

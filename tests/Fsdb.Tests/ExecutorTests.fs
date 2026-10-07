@@ -90,6 +90,73 @@ let tests =
                     | Err(1564, _) -> ()
                     | other -> failtestf "expected HASH subqueries to be rejected, got %A" other
 
+                testCase "named HASH partitions preserve identities through reorganization"
+                <| fun _ ->
+                    let store = newStore ()
+                    let execute sql =
+                        match runDefault store sql with
+                        | Err(code, message) -> failtestf "%d: %s" code message
+                        | result -> result
+                    let rows sql expected =
+                        match execute sql with
+                        | ResultSet(_, actual) -> Expect.equal actual expected sql
+                        | other -> failtestf "expected rows, got %A" other
+                    execute "CREATE TABLE p (id INT PRIMARY KEY) PARTITION BY HASH(id) (PARTITION First,PARTITION Second)" |> ignore
+                    match runDefault store "CREATE TABLE duplicate_names(id INT) PARTITION BY HASH(id) (PARTITION a,PARTITION A)" with
+                    | Err(1517, _) -> ()
+                    | other -> failtestf "expected case-insensitive name uniqueness, got %A" other
+                    execute "CREATE TABLE collision(id INT) PARTITION BY HASH(id) (PARTITION a,PARTITION p2)" |> ignore
+                    match runDefault store "ALTER TABLE collision ADD PARTITION PARTITIONS 1" with
+                    | Err(1517, _) -> ()
+                    | other -> failtestf "expected generated partition name collision, got %A" other
+                    execute "INSERT INTO p VALUES (0),(1),(2),(3),(4),(5)" |> ignore
+                    execute "ALTER TABLE p ADD PARTITION PARTITIONS 1" |> ignore
+                    execute "ALTER TABLE p COALESCE PARTITION 1" |> ignore
+                    execute "ALTER TABLE p REORGANIZE PARTITION First INTO (PARTITION Renamed)" |> ignore
+                    rows "SELECT id FROM p PARTITION(renamed) ORDER BY id" [ [ Some "0" ]; [ Some "2" ]; [ Some "4" ] ]
+                    rows "SELECT PARTITION_NAME FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='p' ORDER BY PARTITION_ORDINAL_POSITION"
+                        [ [ Some "Renamed" ]; [ Some "Second" ] ]
+                    for action, code in
+                        [ "Renamed INTO (PARTITION a,PARTITION b)", 1510
+                          "Renamed INTO (PARTITION Second)", 1517
+                          "missing INTO (PARTITION a)", 1507 ] do
+                        match runDefault store ("ALTER TABLE p REORGANIZE PARTITION " + action) with
+                        | Err(actual, _) -> Expect.equal actual code action
+                        | other -> failtestf "expected rejected reorganization, got %A" other
+                    rows "SELECT id FROM p ORDER BY id" [ for id in 0..5 -> [ Some(string id) ] ]
+                    match Fsdb.InformationSchema.showCreateTable store.Catalog defaultDatabase "p" with
+                    | Ok(_, [ [ _; Some ddl ] ]) ->
+                        execute (ddl.Replace("CREATE TABLE `p`", "CREATE TABLE `restored`")) |> ignore
+                    | other -> failtestf "expected rendered definition, got %A" other
+                    rows "SELECT COUNT(*) FROM p PARTITION(renamed) WHERE id >= 0" [ [ Some "3" ] ]
+                    rows "SELECT p.id FROM p PARTITION(renamed) JOIN p other ON p.id=other.id ORDER BY p.id"
+                        [ [ Some "0" ]; [ Some "2" ]; [ Some "4" ] ]
+                    execute "ALTER TABLE p TRUNCATE PARTITION renamed" |> ignore
+                    rows "SELECT id FROM p ORDER BY id" [ [ Some "1" ]; [ Some "3" ]; [ Some "5" ] ]
+
+                testCase "HASH reorganization validates contiguous names and preserves rows"
+                <| fun _ ->
+                    for method in [ "HASH"; "LINEAR HASH" ] do
+                        let store = newStore ()
+                        runDefault store (sprintf "CREATE TABLE p (id INT PRIMARY KEY) PARTITION BY %s(id) PARTITIONS 3" method) |> ignore
+                        runDefault store "INSERT INTO p VALUES (0),(1),(2),(3),(4),(5)" |> ignore
+                        for action, code in
+                            [ "p0,p2 INTO (PARTITION a,PARTITION b)", 1519
+                              "p0,p0 INTO (PARTITION a,PARTITION b)", 1507
+                              "p0,p1 INTO (PARTITION a,PARTITION A)", 1517 ] do
+                            match runDefault store ("ALTER TABLE p REORGANIZE PARTITION " + action) with
+                            | Err(actual, _) -> Expect.equal actual code action
+                            | other -> failtestf "expected rejected reorganization, got %A" other
+                        match runDefault store "ALTER TABLE p REORGANIZE PARTITION p1,p0 INTO (PARTITION First,PARTITION Second)" with
+                        | Affected _ -> ()
+                        | other -> failtestf "expected reordered input to preserve slot order, got %A" other
+                        match runDefault store "ALTER TABLE p REORGANIZE PARTITION" with
+                        | Affected _ -> ()
+                        | other -> failtestf "expected no-list reorganization, got %A" other
+                        match runDefault store "SELECT id FROM p PARTITION(first) ORDER BY id" with
+                        | ResultSet(_, rows) -> Expect.equal rows [ for id in 0..5 -> [ Some(string id) ] ] "all rows survive in the first named partition"
+                        | other -> failtestf "expected surviving rows, got %A" other
+
                 testCase "HASH partition truncation removes only selected rows"
                 <| fun _ ->
                     let store = newStore ()
