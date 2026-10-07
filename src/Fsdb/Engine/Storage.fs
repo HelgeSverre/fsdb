@@ -316,6 +316,7 @@ type TransactionLockClaim =
     | ExclusiveKeyLock of database: string * table: string * key: string
 
 type CommitEvent =
+    | WithNgramTokenSize of size: int * event: CommitEvent
     | RowsInserted of db: string * table: string * rows: Value[] list
     /// Retained for WAL records written before stable row identities were persisted.
     | RowsUpdated of db: string * table: string * changes: (Value[] * Value[]) list
@@ -484,6 +485,7 @@ type Store =
       mutable ForeignKeyChecks: bool
       /// Re-derived from session variables before each statement.
       mutable ExecutionSettings: ExecutionSettings
+      mutable NgramTokenSize: int
       /// Session-local names map to the permanent tables they hide, if any.
       TableShadows: Map<string * string, Table option>
       /// Lowercase names overlay real tables in the reserved fsdb schema.
@@ -585,6 +587,7 @@ let internal requiresImmediateAutoIncrementPublication (store: Store) =
     hasCommitConsumer store
 
 let rec private eventRollbackWork = function
+    | WithNgramTokenSize(_, event) -> eventRollbackWork event
     | RowsInserted(_, _, rows)
     | RowsDeleted(_, _, rows) -> int64 rows.Length
     | RowsDeletedById(_, _, rows) -> int64 rows.Length
@@ -632,6 +635,7 @@ let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent li
         observerError |> Option.iter raise
 
 let rec private observerEvent = function
+    | WithNgramTokenSize(_, event) -> observerEvent event
     | RowsUpdatedById(db, table, changes) ->
         RowsUpdated(db, table, changes |> List.map (fun change -> change.Before, change.After))
     | RowsDeletedById(db, table, rows) -> RowsDeleted(db, table, rows |> List.map _.Row)
@@ -641,7 +645,16 @@ let rec private observerEvent = function
     | XaCommitted(xid, events) -> XaCommitted(xid, List.map observerEvent events)
     | event -> event
 
+let private captureNgramTokenSize size event =
+    match event with
+    | RowsInserted _ | RowsUpdated _ | RowsDeleted _
+    | RowsUpdatedById _ | RowsDeletedById _
+    | SchemaChanged _ | SchemaChangedAt _ when size <> FullText.ngramTokenSize ->
+        WithNgramTokenSize(size, event)
+    | _ -> event
+
 let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
+    let events = events |> List.map (captureNgramTokenSize store.NgramTokenSize)
     recordRollbackWork store events
 
     match events, store.PendingEvents with
@@ -678,6 +691,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
 
     { Databases = databases
       ForeignKeyChecks = store.ForeignKeyChecks
+      NgramTokenSize = store.NgramTokenSize
       // QueryHandler derives the transaction's effective mode before use.
       ExecutionSettings =
         { store.ExecutionSettings with
@@ -2594,6 +2608,10 @@ let private fullTextKeyGroups (table: Table) : FullTextKeyGroup list =
             let tokenizer =
                 FullText.tryTokenizer parser
                 |> Option.defaultWith (fun () -> invalidOp "Unsupported stored full-text parser")
+            let tokenizer =
+                match tokenizer, table.FullTextIndexes |> Map.tryFind index.Name |> Option.map FullText.activeTokenizer with
+                | FullText.Ngrams _, Some(FullText.Ngrams size) -> FullText.Ngrams size
+                | _ -> tokenizer
             index.Columns
             |> traverse (resolveColumn table.Columns)
             |> Result.toOption
@@ -2950,6 +2968,18 @@ let internal reindexTableWithFullTextIndexes fullTextIndexes (table: Table) : Ta
 /// Rebuilds all indexes from the current rows and definitions.
 let reindexTable (table: Table) : Table =
     reindexTableWithFullTextIndexes (rebuildFullTextIndexes table) table
+
+let private withTableNgramTokenSize size table =
+    { table with FullTextIndexes = table.FullTextIndexes |> Map.map (fun _ index -> FullText.withNgramTokenSize size index) }
+
+let private reindexTableWithNgramTokenSize size table =
+    let tokenizerFor _ _ = function
+        | FullText.Words -> FullText.Words
+        | FullText.Ngrams _ -> FullText.Ngrams size
+    let indexes =
+        buildFullTextIndexes tokenizerFor table
+        |> Map.map (fun _ index -> FullText.withNgramTokenSize size index)
+    reindexTableWithFullTextIndexes indexes table
 
 let private sameTableSchema (left: Table) (right: Table) =
     left.OriginalName = right.OriginalName
@@ -4416,6 +4446,7 @@ let create () : Store =
     { Databases = databases
       ForeignKeyChecks = true
       ExecutionSettings = ExecutionSettings.defaults
+      NgramTokenSize = FullText.ngramTokenSize
       TableShadows = Map.empty
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
@@ -6230,7 +6261,7 @@ let createTableSeeded
                                               FullTextIndexes = Map.empty
                                               SpatialIndexes = Map.empty }
 
-                                        let database = Map.add key (reindexTable table) db
+                                        let database = Map.add key (reindexTableWithNgramTokenSize store.NgramTokenSize table) db
                                         invalidateAutoIncrementCounter store dbName tableName
                                         Ok(setCatalogDatabase dbName database catalog, (createTime, columns))
 
@@ -6376,7 +6407,7 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
                     )
                 | _ ->
                     let createTime = DateTime.Now
-                    let table = reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
+                    let table = reindexTableWithNgramTokenSize store.NgramTokenSize { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
                     let database = Map.add address.Table table db
                     invalidateAutoIncrementCounter store dbName tableName
                     Ok(setCatalogDatabase address.Database database catalog, createTime)))
@@ -7032,7 +7063,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 // incremental patch — ALTER isn't a hot path.
                 |> Result.map (fun (finalKey, finalTable) ->
                     let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
-                    let database = Map.remove origKey db |> Map.add finalKey (reindexTable finalTable)
+                    let database = Map.remove origKey db |> Map.add finalKey (reindexTableWithNgramTokenSize store.NgramTokenSize finalTable)
                     let updatedCatalog = setCatalogDatabase dbName database catalog
                     invalidateAutoIncrementCounter store dbName origKey
                     invalidateAutoIncrementCounter store dbName finalKey
@@ -9849,7 +9880,7 @@ let private changeTableForReplay
     | true, slot ->
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
-        | Some table -> slot.Value <- slot.Value |> Map.add key (change table)
+        | Some table -> slot.Value <- slot.Value |> Map.add key (withTableNgramTokenSize store.NgramTokenSize table |> change)
 
 let private replayRowIds (table: Table) (targets: Value[] list) : RowId option list =
     let uniqueGroups = uniqueKeyGroups table
@@ -10013,6 +10044,11 @@ let deleteRowsByIdForReplay store dbName tableName (targets: RowRemoval list) on
 
     replayMutations store dbName tableName mutations onMissing
 
+let advanceAutoIncrementForReplay store dbName tableName nextId onMissing =
+    changeTableForReplay store dbName tableName
+        (fun table -> { table with NextAutoId = max table.NextAutoId nextId }) onMissing
+    invalidateAutoIncrementCounter store dbName tableName
+
 /// Restores metadata that is assigned at creation rather than derived from
 /// table contents.
 let setTableCreateTimeForReplay
@@ -10083,3 +10119,10 @@ let appendRowsForReplay (store: Store) (dbName: string) (tableName: string) (row
 let reindexAllForReplay (store: Store) : unit =
     for KeyValue(_, slot) in store.Databases do
         slot.Value <- slot.Value |> Map.map (fun _ table -> reindexTableWithFullTextIndexes table.FullTextIndexes table)
+
+/// Startup-only configuration; existing documents retain their indexing tokenizer.
+let internal configureNgramTokenSize size (store: Store) =
+    if size < 1 || size > 10 then invalidArg "size" "Ngram token size must be between 1 and 10"
+    store.NgramTokenSize <- size
+    for KeyValue(_, slot) in store.Databases do
+        slot.Value <- slot.Value |> Map.map (fun _ table -> withTableNgramTokenSize size table)

@@ -1041,6 +1041,7 @@ let private KindSchemaChangedAtV7 = 0x16uy
 let private KindRowsUpdatedById = 0x17uy
 let private KindRowsDeletedById = 0x18uy
 let private KindXaPreparedWithLocks = 0x19uy
+let private KindWithNgramTokenSize = 0x1Auy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -1108,6 +1109,11 @@ let private decodeRowBin (r: #IReader) : Value[] =
 
 let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
     match event with
+    | WithNgramTokenSize(size, event) ->
+        if size < 1 || size > 10 then invalidArg "size" "Invalid WAL ngram token size"
+        w.WriteByte KindWithNgramTokenSize
+        w.WriteByte(byte size)
+        encodeEvent w event
     | RowsInserted(db, table, rows) ->
         w.WriteByte KindRowsInserted
         w.WriteLenEncString db
@@ -1205,6 +1211,10 @@ let rec private decodeEventAt
     let str () = r.ReadLenEncString() |> Option.defaultValue ""
 
     match r.ReadByte() with
+    | k when k = KindWithNgramTokenSize ->
+        let size = int (r.ReadByte())
+        if size < 1 || size > 10 then failwith "Persistence: invalid WAL ngram token size"
+        WithNgramTokenSize(size, decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
     | k when k = KindRowsInserted ->
         let db = str ()
         let table = str ()
@@ -1402,6 +1412,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         failwith "Persistence: transaction nesting exceeds the apply limit"
 
     match event with
+    | WithNgramTokenSize(size, event) ->
+        applyEventAt (depth + 1) { store with NgramTokenSize = size } event
     | RowsInserted(db, table, rows) ->
         if not rows.IsEmpty then
             appendRowsForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
@@ -1412,7 +1424,7 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
     | RowsDeletedById(db, table, rows) ->
         deleteRowsByIdForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
     | AutoIncrementAdvanced(db, table, nextId) ->
-        warn "AutoIncrementAdvanced" (alterTable store db table [ SetAutoIncrement nextId ])
+        advanceAutoIncrementForReplay store db table nextId (Log.diagnostic "fsdb: WAL replay warning: %s")
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
     | SchemaChangedAt(db, stmt, createTime) ->
         applyDdl store db stmt
@@ -1440,7 +1452,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         store.PreparedXas.TryRemove xid |> ignore
     | XaRolledBack xid -> store.PreparedXas.TryRemove xid |> ignore
 
-let private applyEvent (store: Store) (event: CommitEvent) : unit = applyEventAt 0 store event
+let private applyEvent (store: Store) (event: CommitEvent) : unit =
+    applyEventAt 0 { store with NgramTokenSize = FullText.ngramTokenSize } event
 
 /// Replays every complete record in `walPath` into `store`, returning the
 /// byte offset just past the last successfully applied record. A torn final
@@ -1877,6 +1890,7 @@ let load (dataDir: string) : Store =
             use fs = new FileStream(walPath, FileMode.Open, FileAccess.Write)
             fs.SetLength goodOffset
 
+    configureNgramTokenSize store.NgramTokenSize store
     restorePreparedXaLocks store
     store
 

@@ -37,13 +37,14 @@ fsdb's in-memory full-text documents retain their indexing tokenizer separately
 from the active tokenizer for queries and future writes. Removal and replacement
 use that historical tokenizer when clearing prefix postings. Snapshot format
 FSND retains each indexed row's tokenizer and reconstructs
-postings with that historical context. WAL records still lack the indexing
-context needed for writes made under a different startup setting.
+postings with that historical context. Nondefault-size WAL writes retain their
+indexing context in an event wrapper; legacy records continue to mean size 2.
 Changing only the startup constant would silently retokenize historical data
 and disagree with the observed recovery behavior.
 
-Completing configurable sizing requires indexing context in WAL events and
-startup-option integration. Index rebuilds must deliberately replace that state. The same distinction
+Completing configurable sizing requires startup-option integration and
+validation of prepared XA and metadata-only DDL across size changes. Index
+rebuilds must deliberately replace historical context. The same distinction
 will matter when implementing configurable stopwords. Default-size snapshots
 must remain readable, and reported system variables must agree with the
 active startup configuration.
@@ -60,7 +61,7 @@ the document/query distinction was implemented.
 
 The maintained native oracle also checks quoted historical lookup and prefix
 removal inside a rolled-back transaction. This covers the engine foundation;
-startup options and persistence remain open.
+startup options remain open.
 
 
 ## Snapshot recovery
@@ -79,23 +80,33 @@ snapshot-of-snapshot recovery, and a subsequent WAL-tail insert. It failed
 before tokenizer metadata was retained. A separate regression verifies FSNC
 row recovery without tokenizer metadata.
 
-Startup-option and WAL-context integration remain open. Historical snapshot
+Startup-option integration remains open. Historical snapshot
 and WAL formats predate configurable sizing and must continue to mean size 2,
 even when a future server starts with another configured size.
 
+## WAL recovery
+
+Nondefault-size row and schema events carry their indexing size in WAL tag
+0x1A. Replay applies that size to the affected index for new documents without
+changing historical postings. Unwrapped events retain size-2 semantics. The
+wrapper is removed before observer delivery and traversed when filtering
+session-local temporary-table events. Default-size event encoding is unchanged;
+older binaries cannot read the new wrapper.
+
+The WAL regression covers a committed size-3 transaction following size-2
+writes, rollback with an auto-increment reservation, a newly created size-3
+index, temporary-table filtering, observer delivery, and snapshot recovery of
+the replayed state. Replaying counter advances updates the counter directly,
+so it does not rebuild historical full-text postings through ALTER TABLE.
+
 ## Validation
 
-On 2026-10-07, `just check` passes 2,861 tests with no build warnings or errors.
-An earlier full run hit the unchanged 20 ms primary-key timing limit under
-host load; its focused tests and the full rerun pass without changing the
-threshold. The mixed-tokenizer and FSNC regressions also pass independently.
-
-The native oracle and 45 contract cases pass; all 4,978 differential steps
-match MySQL. Manifest:
-`torture/artifacts/runs/20261007T020019554-45012/contracts/manifest.json`.
+On 2026-10-07, `just check` passes 2,862 tests with no build warnings or errors.
+The mixed-tokenizer WAL regression also passes independently. Native MySQL
+validation passes 45 contract cases and all 4,978 differential steps.
 
 The durability lane with seed 101, four workers, 100 operations per worker,
-eight requested restarts, and checkpoint interval 16 passes. Its 12 total
-crash/restart checks preserve every acknowledged commit, transaction
-boundaries, schema state, WAL tail, snapshots, and torn-tail repair. Artifact:
-`torture/artifacts/runs/20261007T020049923-45294/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+eight requested restarts, and checkpoint interval 16 passes. All 12 total
+crash/restart checks preserve acknowledged commits and transaction boundaries,
+including schema state, WAL tail, snapshots, and torn-tail repair. Artifact:
+`torture/artifacts/runs/20261007T021828277-47159/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

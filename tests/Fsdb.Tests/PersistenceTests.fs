@@ -1854,6 +1854,51 @@ let tests =
               snapshotNow dir recovered
               load dir |> verify
 
+          testCase "WAL retains the ngram tokenizer used by committed writes"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let mutable session = Fsdb.Session.create 1 store
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              execute "CREATE TABLE docs(id INT PRIMARY KEY AUTO_INCREMENT,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              execute "INSERT INTO docs VALUES(1,'生日快乐'),(2,'生日')" |> ignore
+              configureNgramTokenSize 3 store
+              session <- Fsdb.Session.create 2 store
+              let observed = ResizeArray<CommitEvent>()
+              store.OnCommit.Add observed.Add
+              for sql in [ "START TRANSACTION"; "INSERT INTO docs(body) VALUES('生日快乐')"; "COMMIT" ] do
+                  execute sql |> ignore
+              for sql in [ "START TRANSACTION"; "INSERT INTO docs(body) VALUES('uncommitted')"; "ROLLBACK" ] do
+                  execute sql |> ignore
+              execute "CREATE TABLE created_at_three(body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              execute "INSERT INTO created_at_three VALUES('生日快乐')" |> ignore
+              execute "CREATE TEMPORARY TABLE temporary_rows(id INT)" |> ignore
+              execute "INSERT INTO temporary_rows VALUES(1)" |> ignore
+              let rec hasContext = function
+                  | WithNgramTokenSize _ -> true
+                  | TransactionCommitted events -> events |> List.exists hasContext
+                  | _ -> false
+              Expect.isNonEmpty observed "observer receives logical events"
+              Expect.isFalse (observed |> Seq.exists hasContext) "indexing context remains private to durable events"
+              let verify (recovered: Store) =
+                  let table = recovered.Catalog.[defaultDatabase].["docs"]
+                  let index = table.FullTextIndexes.["ft"] |> Fsdb.FullText.withTokenizer (Fsdb.FullText.Ngrams 3)
+                  let actual = Fsdb.FullText.naturalScores index "生日快" |> Map.keys |> Seq.toList
+                  let third = table.RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt 3L) |> fst
+                  Expect.equal actual [ third ] "WAL replay retains each write's tokenizer"
+                  let createdIndex = recovered.Catalog.[defaultDatabase].["created_at_three"].FullTextIndexes.["ft"] |> Fsdb.FullText.withTokenizer (Fsdb.FullText.Ngrams 3)
+                  Expect.equal (Fsdb.FullText.naturalScores createdIndex "生日快" |> Map.count) 1 "DDL and inserts retain indexing context"
+                  Expect.isFalse (recovered.Catalog.[defaultDatabase].ContainsKey "temporary_rows") "temporary-table events remain filtered"
+              verify store
+              let recovered = load dir
+              verify recovered
+              snapshotNow dir recovered
+              load dir |> verify
+
           testCase "snapshots retain mixed ngram document tokenizers"
           <| fun _ ->
               let dir = tempDataDir ()

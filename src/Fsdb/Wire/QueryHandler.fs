@@ -3469,6 +3469,8 @@ let rec private filterTemporaryEvent keys event =
     let isTemporary db table = Set.contains (CatalogOverlay.tableKey db table) keys
 
     match event with
+    | WithNgramTokenSize(size, inner) ->
+        filterTemporaryEvent keys inner |> Option.map (fun retained -> WithNgramTokenSize(size, retained))
     | RowsInserted(db, table, _)
     | RowsUpdated(db, table, _)
     | RowsDeleted(db, table, _)

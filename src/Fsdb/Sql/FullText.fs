@@ -179,6 +179,13 @@ let emptyIndex collation = emptyIndexWith Words collation
 let internal withTokenizer tokenizer (index: Index<'id>) =
     { index with Tokenizer = tokenizer }
 
+let internal activeTokenizer (index: Index<'id>) = index.Tokenizer
+
+let internal withNgramTokenSize size (index: Index<'id>) =
+    match index.Tokenizer with
+    | Words -> index
+    | Ngrams _ -> withTokenizer (Ngrams size) index
+
 let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
     match Map.tryFind id index.Documents with
     | None -> index
