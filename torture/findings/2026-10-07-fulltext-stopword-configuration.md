@@ -58,13 +58,16 @@ commit observers. Legacy schema events retain enabled filtering. Recovery tests
 cover both WAL-only and checkpointed histories, including disabled stopwords
 combined with a non-default ngram size. Older binaries cannot replay this tag.
 
-Snapshot format 14 (`FSNE`) stores one policy byte per full-text index in index
-definition order, including indexes without rows. Recovery combines that policy
-with each document's historical tokenizer. Tests cover mixed word/ngram policies,
-empty and populated indexes, and writes after recovery. A fixture produced by the
-format-13 writer verifies that `FSND` loads with built-in stopwords and retains
-its ngram postings. Earlier formats remain readable; older binaries cannot read
-`FSNE` snapshots.
+Snapshot format 15 (`FSNF`) retains the active policy per full-text index and a
+shared table of historical tokenizer/stopword rules. Each row refers to the rules
+used for its postings, so reconstruction preserves mixed document histories.
+Empty indexes retain their active policy. Invalid policies, tokenizer values,
+rule-table lengths, and document references are rejected.
+
+Format 14 (`FSNE`) supplies its per-index policy to every document; format 13
+(`FSND`) supplies built-in filtering. Fixtures produced by both older writers
+verify those paths. Earlier formats remain readable; older binaries cannot read
+`FSNF` snapshots. The WAL format is unchanged by the snapshot-rule extension.
 
 Regressions verify GLOBAL values seed new sessions without changing existing
 sessions, reject invalid boolean values, and retain policy across reopening.
@@ -96,10 +99,10 @@ checking new and recovered full-text indexes. `--help` and `--version` succeed.
 
 
 The stopword matrix passes on native MySQL 8.4.11 and fsdb. `just check` passes
-all 2,891 tests without build warnings or errors. The natural-phrase oracle and all 47 contracts
+all 2,897 tests without build warnings or errors. The natural-phrase oracle and all 47 contracts
 (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T053856429-80585/contracts`.
+`torture/artifacts/runs/20261007T061108753-84784/contracts`.
 
-The runtime-setting durability validation passed with 12 crash restarts and all 63 acknowledged commits
+The durability validation passes with 12 crash restarts and all 67 acknowledged commits
 recovered, including checkpoint, WAL-tail, and torn-tail checks:
-`torture/artifacts/runs/20261007T052444717-78773/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T061124411-84821/durability-seed101-workers4-ops100-restarts8-checkpoint16`.

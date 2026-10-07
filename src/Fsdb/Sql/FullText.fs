@@ -336,6 +336,15 @@ let internal buildIndexWithStopwords policy tokenizer collation documents =
 let internal documentRules id (index: Index<'id>) =
     index.Documents |> Map.tryFind id |> Option.map _.Rules
 
+let internal rulesInUse (index: Index<'id>) =
+    seq {
+        yield index.Rules
+        for KeyValue(_, document) in index.Documents do
+            yield document.Rules
+    }
+    |> Seq.distinct
+    |> Seq.toArray
+
 let internal documentTokenizer id index =
     documentRules id index |> Option.map _.Tokenizer
 

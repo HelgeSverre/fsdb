@@ -118,8 +118,8 @@ by restart and ordinary inserts cannot be reconstructed from that wrapper alone.
 Query lookup must keep old postings reachable after the write policy changes,
 while phrase handling still observes stopword semantics.
 
-The current binary built-in/disabled policy and its snapshot format are not
-sufficient for these custom histories. Accepting the system variables before
+The policy type still supports only built-in/disabled filtering. Custom lists,
+remembered source names, and reload context remain necessary for these histories. Accepting the system variables before
 those paths are connected would claim behavior the engine does not provide.
 Custom startup options, additional ALTER variants, query expansion, and more
 source charset/collation combinations remain outside this verified matrix.
@@ -134,21 +134,37 @@ Physical rebuilds still apply the selected rules to every document.
 
 The core regressions cover mixed ngram sizes and stopword policies, active-rule
 changes, reconstruction, prefix removal, transaction merging, and metadata rename
-versus physical rebuild. This establishes the in-memory representation; custom
-source resolution, historical-policy persistence, and query lookup across changed
-custom policies remain open. The existing snapshot and WAL formats are unchanged.
+versus physical rebuild. Custom source resolution, custom-list encoding, WAL
+reload context, and query lookup across changed custom policies remain open.
+
+## Snapshot history
+
+Format 15 (`FSNF`) stores a deduplicated rule table for each full-text index,
+followed by a length-encoded rule reference for each document. Rule entries pair
+the tokenizer with the stopword policy. Active policies remain in the index
+metadata, including for empty indexes; startup token-size selection keeps its
+existing behavior independently of historical document tokenizers.
+
+Recovery preserves mixed ngram sizes and built-in/disabled policies within one
+index. Rule counts are bounded by the row count plus one active rule; missing
+or out-of-range document references are rejected. Regressions cover mixed
+histories, subsequent writes, and malformed references with a valid checksum.
+Real format-13 and format-14 fixtures verify backward reading. Older fsdb binaries
+cannot read `FSNF`; the WAL format is unchanged.
 
 ## Verification
 
 The complete native oracle passes, including the same-datadir restart sequence
-and searches in natural and Boolean modes after each transition. The indexing-rule refactor passes `just check` with 2,894 tests and no build
+and searches in natural and Boolean modes after each transition.
+
+The indexing-rule and snapshot changes pass `just check` with 2,897 tests and no build
 warnings or errors. The existing stopword configuration matrix passes on fsdb.
 All 47 MySQL contracts (5,007 steps) pass without differences:
-`torture/artifacts/runs/20261007T055754753-82959/contracts`.
+`torture/artifacts/runs/20261007T061108753-84784/contracts`.
 
-The durability lane passes 12 crash restarts, preserving all 44 acknowledged
+The durability lane passes 12 crash restarts, preserving all 67 acknowledged
 commits and transaction boundaries, with checkpoint, WAL-tail, snapshot, schema,
 and torn-tail checks:
-`torture/artifacts/runs/20261007T055817970-82996/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
+`torture/artifacts/runs/20261007T061124411-84821/durability-seed101-workers4-ops100-restarts8-checkpoint16`.
 
 Custom SQL variables remain unavailable and no known-gap suppression is added.

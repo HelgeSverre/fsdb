@@ -28,7 +28,8 @@ let private taggedIndexSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x41uy |] // "
 let private stableRowIdSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x42uy |] // "FSNB" (format 11)
 let private preparedXaLockSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x43uy |] // "FSNC" (format 12)
 let private fullTextTokenizerSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x44uy |] // "FSND" (format 13)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x45uy |] // "FSNE" (format 14)
+let private fullTextStopwordSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x45uy |] // "FSNE" (format 14)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x46uy |] // "FSNF" (format 15)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -43,7 +44,8 @@ type private SnapshotFormat =
       StableRowIds: bool
       PreparedXaLocks: bool
       FullTextTokenizers: bool
-      FullTextStopwords: bool }
+      FullTextStopwords: bool
+      FullTextDocumentRules: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -58,7 +60,8 @@ let private legacySnapshotFormat =
       StableRowIds = false
       PreparedXaLocks = false
       FullTextTokenizers = false
-      FullTextStopwords = false }
+      FullTextStopwords = false
+      FullTextDocumentRules = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -96,8 +99,11 @@ let private preparedXaLockSnapshotFormat =
 let private fullTextTokenizerSnapshotFormat =
     { preparedXaLockSnapshotFormat with FullTextTokenizers = true }
 
-let private currentSnapshotFormat =
+let private fullTextStopwordSnapshotFormat =
     { fullTextTokenizerSnapshotFormat with FullTextStopwords = true }
+
+let private currentSnapshotFormat =
+    { fullTextStopwordSnapshotFormat with FullTextDocumentRules = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -106,6 +112,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = fullTextStopwordSnapshotMagic then
+        Some fullTextStopwordSnapshotFormat
     elif header = fullTextTokenizerSnapshotMagic then
         Some fullTextTokenizerSnapshotFormat
     elif header = preparedXaLockSnapshotMagic then
@@ -1518,21 +1526,55 @@ let private replayWal (store: Store) (walPath: string) : int64 =
 
 // Snapshots share the WAL row codec and publish through an atomic rename.
 
-let private encodeDocumentTokenizers (w: Writer) rowId indexes =
-    for index in indexes do
-        match FullText.documentTokenizer rowId index with
-        | Some FullText.Words -> w.WriteByte 0uy
-        | Some(FullText.Ngrams size) when size >= 1 && size <= 10 -> w.WriteByte(byte size)
-        | _ -> invalidOp "Persistence: missing or invalid full-text document tokenizer"
+let private encodeStopwordPolicy (w: Writer) = function
+    | FullText.StopwordPolicy.BuiltIn -> w.WriteByte 0uy
+    | FullText.StopwordPolicy.Disabled -> w.WriteByte 1uy
 
-let private decodeDocumentTokenizers names (r: #IReader) =
-    names |> List.map (fun name ->
-        let tokenizer =
-            match r.ReadByte() with
-            | 0uy -> FullText.Words
-            | size when size <= 10uy -> FullText.Ngrams(int size)
-            | _ -> failwith "Persistence: invalid full-text document tokenizer"
-        name, tokenizer)
+let private decodeStopwordPolicy (r: #IReader) =
+    match r.ReadByte() with
+    | 0uy -> FullText.StopwordPolicy.BuiltIn
+    | 1uy -> FullText.StopwordPolicy.Disabled
+    | _ -> failwith "Persistence: invalid full-text stopword policy"
+
+let private encodeTokenizer (w: Writer) = function
+    | FullText.Words -> w.WriteByte 0uy
+    | FullText.Ngrams size when size >= 1 && size <= 10 -> w.WriteByte(byte size)
+    | _ -> invalidOp "Persistence: invalid full-text document tokenizer"
+
+let private decodeTokenizer (r: #IReader) =
+    match r.ReadByte() with
+    | 0uy -> FullText.Words
+    | size when size <= 10uy -> FullText.Ngrams(int size)
+    | _ -> failwith "Persistence: invalid full-text document tokenizer"
+
+let private encodeRuleTables (w: Writer) indexes =
+    indexes |> List.map (fun index ->
+        let rules = FullText.rulesInUse index
+        w.WriteInt32LE rules.Length
+        rules |> Array.iter (fun rules ->
+            encodeTokenizer w rules.Tokenizer
+            encodeStopwordPolicy w rules.Stopwords)
+        rules |> Array.mapi (fun id rules -> rules, uint64 id) |> Map.ofArray)
+
+let private decodeRuleTable rowCount (r: #IReader) =
+    let count = r.ReadInt32LE()
+    if count < 1 || int64 count > int64 rowCount + 1L then
+        failwith "Persistence: invalid full-text rule table length"
+    Array.init count (fun _ ->
+        let tokenizer = decodeTokenizer r
+        let stopwords = decodeStopwordPolicy r
+        ({ Tokenizer = tokenizer; Stopwords = stopwords }: FullText.IndexingRules))
+
+let private encodeDocumentRules (w: Writer) rowId indexes =
+    for index, ruleIds in indexes do
+        match FullText.documentRules rowId index with
+        | Some rules -> w.WriteLenEncInt(Map.find rules ruleIds)
+        | None -> invalidOp "Persistence: missing full-text document rules"
+
+let private decodeDocumentRules (rules: FullText.IndexingRules[]) (r: #IReader) =
+    match r.ReadLenEncInt() with
+    | Some id when id < uint64 rules.Length -> rules.[int id]
+    | _ -> failwith "Persistence: invalid full-text document rule reference"
 
 let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : unit =
     writeStr w t.OriginalName
@@ -1552,9 +1594,7 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
     w.WriteInt32LE t.RowsArray.Length
     if format.FullTextStopwords then
         for index in t.Indexes |> List.filter (fun index -> index.Kind.IsFullText) do
-            match FullText.activeStopwords t.FullTextIndexes.[index.Name] with
-            | FullText.StopwordPolicy.BuiltIn -> w.WriteByte 0uy
-            | FullText.StopwordPolicy.Disabled -> w.WriteByte 1uy
+            encodeStopwordPolicy w (FullText.activeStopwords t.FullTextIndexes.[index.Name])
 
 /// Writes the catalog straight to `s`, flushing the `Writer` every chunk so a
 /// multi-GB snapshot never materializes as one `byte[]`. Rows are the only
@@ -1595,14 +1635,15 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                 let fullTextIndexes =
                     table.Indexes |> List.filter (fun index -> index.Kind.IsFullText)
                     |> List.map (fun index -> table.FullTextIndexes.[index.Name])
+                let ruleTables = encodeRuleTables w fullTextIndexes
+                let indexesWithRules = List.zip fullTextIndexes ruleTables
 
                 for rowId, row in table.RowsArray.Indexed do
                     if currentSnapshotFormat.StableRowIds then
                         w.WriteInt32LE(RowId.value rowId)
 
                     encodeRowBin w row
-                    if currentSnapshotFormat.FullTextTokenizers then
-                        encodeDocumentTokenizers w rowId fullTextIndexes
+                    encodeDocumentRules w rowId indexesWithRules
 
                     if w.Count >= (1 <<< 20) then
                         flush ()))
@@ -1653,21 +1694,28 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
         if format.FullTextStopwords then
             fullTextNames
             |> List.map (fun name ->
-                let policy =
-                    match r.ReadByte() with
-                    | 0uy -> FullText.StopwordPolicy.BuiltIn
-                    | 1uy -> FullText.StopwordPolicy.Disabled
-                    | _ -> failwith "Persistence: invalid full-text stopword policy"
-                name, policy)
+                name, decodeStopwordPolicy r)
             |> Map.ofList
         else Map.empty
-    let mutable tokenizers = Map.empty
+    let ruleTables =
+        if format.FullTextDocumentRules then
+            fullTextNames |> List.map (fun name -> name, decodeRuleTable rowCount r)
+        else []
+    let mutable documents = Map.empty
     let readRow rowId =
         let row = decodeRowBin r
-        if format.FullTextTokenizers then
-            for name, tokenizer in decodeDocumentTokenizers fullTextNames r do
-                tokenizers <- tokenizers |> Map.change name (fun existing ->
-                    existing |> Option.defaultValue Map.empty |> Map.add rowId tokenizer |> Some)
+        let rules =
+            if format.FullTextDocumentRules then
+                ruleTables |> List.map (fun (name, rules) -> name, decodeDocumentRules rules r)
+            elif format.FullTextTokenizers then
+                fullTextNames |> List.map (fun name ->
+                    let tokenizer = decodeTokenizer r
+                    let policy = Map.tryFind name stopwords |> Option.defaultValue FullText.StopwordPolicy.BuiltIn
+                    name, ({ Tokenizer = tokenizer; Stopwords = policy }: FullText.IndexingRules))
+            else []
+        for name, rules in rules do
+            documents <- documents |> Map.change name (fun existing ->
+                existing |> Option.defaultValue Map.empty |> Map.add rowId rules |> Some)
         row
 
     let rows =
@@ -1698,7 +1746,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
           FullTextIndexes = Map.empty
           SpatialIndexes = Map.empty }
 
-    reindexTableWithFullTextIndexes (restoreFullTextIndexesWithStopwords stopwords tokenizers table) table
+    reindexTableWithFullTextIndexes (restoreFullTextIndexesWithRules stopwords documents table) table
 
 /// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or
 /// CRC doesn't match what's actually on disk — the guard `load` needs before

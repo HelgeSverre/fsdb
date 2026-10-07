@@ -2945,10 +2945,9 @@ let private buildFullTextIndexes rulesFor table =
 let private rebuildFullTextIndexes table =
     buildFullTextIndexes (fun _ _ rules -> rules) table
 
-let internal restoreFullTextIndexesWithStopwords stopwords (tokenizers: Map<string, Map<RowId, FullText.Tokenizer>>) table =
-    let rulesFor name rowId (fallback: FullText.IndexingRules) =
-        let tokenizer = tokenizers |> Map.tryFind name |> Option.bind (Map.tryFind rowId) |> Option.defaultValue fallback.Tokenizer
-        { fallback with Tokenizer = tokenizer }
+let internal restoreFullTextIndexesWithRules stopwords (documents: Map<string, Map<RowId, FullText.IndexingRules>>) table =
+    let rulesFor name rowId fallback =
+        documents |> Map.tryFind name |> Option.bind (Map.tryFind rowId) |> Option.defaultValue fallback
     let stopwordsFor name = Map.tryFind name stopwords |> Option.defaultValue FullText.StopwordPolicy.BuiltIn
     buildFullTextIndexesWithStopwords stopwordsFor rulesFor table
 
