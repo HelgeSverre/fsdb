@@ -30,8 +30,8 @@ Fsdb represents a grouped operand directly in `FromItem`. Execution preserves
 its association, qualified source columns, inner ON scope, and NULL-extension
 boundary. Regressions cover direct reads, mutations, lock checks, authorization,
 CTE dependencies, EXPLAIN, full-text scope, stored-view rendering, and recovery.
-Remaining work includes duplicate relation-name diagnostics, broader nested-source
-execution, and prepared-metadata verification.
+Remaining work includes broader nested-source execution and prepared-metadata
+verification.
 
 ## Nested USING column ownership
 
@@ -125,9 +125,29 @@ by a nested WITH clause. Referenced CTEs in later UNION branches retain the
 first branch's WITH namespace. Native acceptance and rejection cases cover
 these boundaries.
 
-Duplicate table aliases and duplicate derived/CTE column names still need
-their relation-level diagnostics. This binding pass does not establish full
-PREPARE semantic parity or execution parity for every accepted nested source.
+This binding pass does not establish full PREPARE semantic parity or execution
+parity for every accepted nested source.
+
+## Relation-name diagnostics
+
+The [relation-name oracle](../scripts/relation-name-oracle.py) checks ordinary
+execution and SQL PREPARE against native MySQL 8.4.11. Duplicate table aliases
+and duplicate local CTE declarations produce 1066 / 42000. Duplicate derived
+or referenced CTE output columns produce 1060 / 42S21, preserving the spelling
+of the repeated name. Grouped sources share their containing query block's
+relation namespace; nested query blocks retain separate namespaces. Physical
+tables from different databases and physical versus derived sources retain
+the namespace distinctions accepted by MySQL.
+
+Explicit CTE and stored-view column names apply before output-name uniqueness
+is checked, so they may replace duplicate projection names. Unused CTE output
+names are not forced. Recursive CTE members see the renamed anchor columns.
+Shared checks cover schema-only preparation and execution; a describable
+derived relation is rejected before application expressions run. Correlated
+bodies whose standalone metadata is unavailable still use execution-time
+validation. Regression tests check codes, SQLSTATEs, spelling, renamed rows,
+and absence of callback side effects; stored-view recovery tests cover
+explicit names over grouped USING projections.
 
 ## CTE body source origins
 

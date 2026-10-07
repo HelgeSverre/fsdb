@@ -10,6 +10,26 @@ open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
+let private relationNameSession () =
+    let mutable session = create 1 (Fsdb.Storage.create ())
+    for sql in
+        [ "CREATE DATABASE probe"
+          "CREATE DATABASE other"
+          "USE probe"
+          "CREATE TABLE a(id INT)"
+          "CREATE TABLE b(id INT)"
+          "CREATE TABLE c(id INT)"
+          "CREATE TABLE other.a(id INT)"
+          "CREATE TABLE other.x(id INT)"
+          "INSERT INTO a VALUES(1)"
+          "INSERT INTO b VALUES(1)" ] do
+        let next, result = handle session sql
+        session <- next
+        match result with
+        | Err(code, message) -> failtestf "%d %s" code message
+        | _ -> ()
+    session
+
 let tests =
     testList
         "PreparedStatements"
@@ -167,6 +187,78 @@ let tests =
                   let prepared, result = handle session ("PREPARE scoped_join FROM '" + sql + "'")
                   Expect.equal result (Affected 0UL) "SQL PREPARE accepts the same scope"
                   Expect.isTrue (Map.containsKey "scoped_join" prepared.TextStatements) "the statement is available for execution"
+
+          testCase "relation name errors agree at preparation and execution"
+          <| fun _ ->
+              let session = relationNameSession ()
+              for sql, (code, state, message) in
+                  [ "WITH d AS (SELECT 1 AS id) SELECT * FROM d x JOIN d x ON 1", (1066, "42000", "Not unique table/alias: 'x'")
+                    "SELECT * FROM a JOIN a ON 1", (1066, "42000", "Not unique table/alias: 'a'")
+                    "SELECT a.id FROM a JOIN (a JOIN c ON a.id=c.id) ON 1", (1066, "42000", "Not unique table/alias: 'a'")
+                    "SELECT * FROM a x JOIN (b x JOIN c y ON 1) ON 1", (1066, "42000", "Not unique table/alias: 'x'")
+                    "SELECT * FROM a x JOIN b X ON 1", (1066, "42000", "Not unique table/alias: 'X'")
+                    "SELECT * FROM (SELECT 1 AS id) d JOIN (SELECT 2 AS id) d ON 1", (1066, "42000", "Not unique table/alias: 'd'")
+                    "SELECT * FROM absent x JOIN absent x ON 1", (1066, "42000", "Not unique table/alias: 'x'")
+                    "SELECT * FROM (SELECT 1 AS id,2 AS id) d", (1060, "42S21", "Duplicate column name 'id'")
+                    "SELECT * FROM (SELECT a.id,b.id FROM a JOIN b ON 1) d", (1060, "42S21", "Duplicate column name 'id'")
+                    "SELECT * FROM (SELECT 1,1) d", (1060, "42S21", "Duplicate column name '1'")
+                    "SELECT * FROM (SELECT a.id,a.id+0 AS id FROM a) d", (1060, "42S21", "Duplicate column name 'id'")
+                    "SELECT * FROM (SELECT 1 AS id,2 AS ID) d", (1060, "42S21", "Duplicate column name 'ID'")
+                    "SELECT * FROM a LEFT JOIN (SELECT 1 AS id,2 AS id) d ON 0", (1060, "42S21", "Duplicate column name 'id'")
+                    "WITH d AS (SELECT a.id,b.id FROM a JOIN b ON 1) SELECT * FROM d", (1060, "42S21", "Duplicate column name 'id'")
+                    "WITH d(x,x) AS (SELECT 1,2) SELECT * FROM d", (1060, "42S21", "Duplicate column name 'x'")
+                    "WITH RECURSIVE d AS (SELECT 1 AS n,2 AS n UNION ALL SELECT n+1,n+2 FROM d WHERE n<2) SELECT * FROM d", (1060, "42S21", "Duplicate column name 'n'")
+                    "WITH d AS (SELECT 1),d AS (SELECT 2) SELECT 1", (1066, "42000", "Not unique table/alias: 'd'")
+                    "UPDATE a x JOIN b x ON 1 SET x.id=2", (1066, "42000", "Not unique table/alias: 'x'")
+                    "DELETE x FROM a x JOIN b x ON 1", (1066, "42000", "Not unique table/alias: 'x'") ] do
+                  match prepareStatementForSession session sql with
+                  | Error error -> Expect.equal error (code, message) "binary PREPARE reports the relation diagnostic"
+                  | other -> failtestf "expected invalid relation rejection for %s: %A" sql other
+                  for command in [ sql; "PREPARE invalid_relation FROM '" + sql + "'" ] do
+                      let _, result = handle session command
+                      match errorInfo result with
+                      | Some error -> Expect.equal (error.Code, error.State, error.Message) (code, state, message) "native code, SQLSTATE, and name"
+                      | None -> failtestf "expected relation-name error for %s: %A" command result
+
+          testCase "relation names retain database query and CTE column namespaces"
+          <| fun _ ->
+              let session = relationNameSession ()
+              for sql in
+                  [ "SELECT * FROM a x JOIN other.a x ON 1"
+                    "SELECT * FROM a a JOIN (SELECT 1 AS id) a ON 1"
+                    "WITH a AS (SELECT 1 AS id) SELECT * FROM a JOIN probe.a ON 1"
+                    "SELECT * FROM probe.a JOIN other.a ON 1"
+                    "SELECT * FROM a x JOIN other.x ON 1"
+                    "SELECT * FROM a JOIN (SELECT 1 AS id) a ON 1"
+                    "SELECT a.id,(SELECT a.id FROM a WHERE a.id=1) FROM a"
+                    "WITH d(x,y) AS (SELECT a.id,b.id FROM a JOIN b ON 1) SELECT * FROM d"
+                    "WITH d(x,x) AS (SELECT 1,2) SELECT 1"
+                    "WITH RECURSIVE d(x,y) AS (SELECT 1 AS n,2 AS n UNION ALL SELECT x+1,y+1 FROM d WHERE x<2) SELECT * FROM d" ] do
+                  match prepareStatementForSession session sql with
+                  | Ok _ -> ()
+                  | Error error -> failtestf "native accepts %s: %A" sql error
+                  match handle session sql |> snd with
+                  | ResultSet _ -> ()
+                  | other -> failtestf "expected valid relation rows for %s: %A" sql other
+              Expect.equal (handle session "WITH d(x,y) AS (SELECT a.id,b.id FROM a JOIN b ON 1) SELECT * FROM d" |> snd)
+                  (ResultSet([ "x"; "y" ], [ [ Some "1"; Some "1" ] ])) "explicit CTE names replace duplicate projection names"
+              Expect.equal (handle session "WITH RECURSIVE d(x,y) AS (SELECT 1 AS n,2 AS n UNION ALL SELECT x+1,y+1 FROM d WHERE x<2) SELECT * FROM d" |> snd)
+                  (ResultSet([ "x"; "y" ], [ [ Some "1"; Some "2" ]; [ Some "2"; Some "3" ] ])) "recursive members use the renamed anchor columns"
+
+          testCase "duplicate derived columns are rejected before application expressions run"
+          <| fun _ ->
+              let session = relationNameSession ()
+              let mutable calls = 0
+              let functions =
+                  session.CustomFunctions
+                  |> Fsdb.Functions.registerScalar "RELATION_TOUCH" (fun _ ->
+                      calls <- calls + 1
+                      VInt 1L)
+              let session = { session with CustomFunctions = functions }
+              match handle session "SELECT * FROM (SELECT RELATION_TOUCH() AS id,1 AS id) d" |> snd with
+              | Err(1060, _) -> ()
+              | other -> failtestf "expected duplicate derived columns: %A" other
+              Expect.equal calls 0 "the invalid relation is rejected from schema metadata"
 
           testCase "join preparation resolves schema without evaluating expressions or writing"
           <| fun _ ->

@@ -400,6 +400,40 @@ let private tryDuplicateIgnoreCase nameOf values =
     let seen = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
     values |> List.tryFind (fun value -> not (seen.Add(nameOf value)))
 
+let private uniqueRelationColumns nameOf columns =
+    match tryDuplicateIgnoreCase nameOf columns with
+    | Some column -> Error(Err(1060, sprintf "Duplicate column name '%s'" (nameOf column)))
+    | None -> Ok columns
+
+let private renameRelationColumns names nameOf rename columns =
+    let renamed =
+        if List.isEmpty names then Ok columns
+        elif sameLength names columns then Ok(List.map2 rename names columns)
+        else Error(Err(1353, "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"))
+    renamed |> Result.bind (uniqueRelationColumns nameOf)
+
+let private validateRelationNames schema (cteNames: Set<string>) (ctes: CommonTableExpr list) (from: FromItem option) (joins: Join list) =
+    let duplicate name = Error(Err(1066, sprintf "Not unique table/alias: '%s'" name))
+    match tryDuplicateIgnoreCase _.CteName ctes with
+    | Some cte -> duplicate cte.CteName
+    | None ->
+        let seen = HashSet<string * string>()
+        (Option.toList from @ (joins |> List.map _.Table))
+        |> List.collect FromItem.leaves
+        |> List.choose (fun source ->
+            FromItem.tryQualifier source |> Option.map (fun qualifier ->
+                let database =
+                    match source with
+                    | FromTable table when not (table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames) ->
+                        table.Database |> Option.defaultValue schema
+                    | _ -> ""
+                database, qualifier))
+        |> List.tryPick (fun (database, qualifier) ->
+            if seen.Add(database.ToLowerInvariant(), qualifier.ToLowerInvariant()) then None else Some qualifier)
+        |> function
+            | Some name -> duplicate name
+            | None -> Ok()
+
 let private equalityMembershipKey domain value =
     match domain, value with
     | SignedIntegerMembership, VInt _
@@ -6311,45 +6345,13 @@ and private resolveTableRef
                             match registryForView store registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
                             | Result.Ok viewRegistry ->
-                                resolveFromSubquery
-                                    store
-                                    viewRegistry
-                                    view.Schema
-                                    (FromSubquery(PlainSelect select, view.Name))
-                                    None
+                                resolveRelationBody store viewRegistry view.Schema view.Columns (PlainSelect select) None
                         | Result.Ok((Union(first, rest, orderBy, limit, offset)) as statement) ->
                             match registryForView store registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
                             | Result.Ok viewRegistry ->
-                                resolveFromSubquery
-                                    store
-                                    viewRegistry
-                                    view.Schema
-                                    (FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), view.Name))
-                                    None
+                                resolveRelationBody store viewRegistry view.Schema view.Columns (UnionSelect(first, rest, orderBy, limit, offset)) None
                         | _ -> Error(Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s)" view.Schema view.Name))
-
-                    let resolved =
-                        resolved
-                        |> Result.bind (fun (columns, rows) ->
-                            let columns =
-                                if view.Columns.IsEmpty then
-                                    Ok columns
-                                elif view.Columns.Length <> columns.Length then
-                                    Error(
-                                        Err(
-                                            1353,
-                                            "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"
-                                        )
-                                    )
-                                else
-                                    Ok(List.map2 (fun column name -> { column with Name = name }) columns view.Columns)
-
-                            columns
-                            |> Result.bind (fun columns ->
-                                match columns |> List.countBy (fun column -> column.Name.ToLowerInvariant()) |> List.tryFind (fun (_, count) -> count > 1) with
-                                | Some(name, _) -> Error(Err(1060, sprintf "Duplicate column name '%s'" name))
-                                | None -> Ok(columns, rows)))
 
                     if not (isNull (box memo)) then memo.[cacheKey] <- resolved
                     resolved
@@ -6469,18 +6471,10 @@ and private describeQueryColumnsChecked
         { Column = column
           NumericParts = literalDecimalParts value |> Option.orElseWith (fun () -> decimalParts column.Type) }
 
-    let renameColumns (names: string list) (columns: ViewColumnDescriptor list) =
-        if names.IsEmpty then
-            Some columns
-        elif sameLength names columns then
-            List.map2
-                (fun (descriptor: ViewColumnDescriptor) name ->
-                    { descriptor with Column = { descriptor.Column with Name = name } })
-                columns
-                names
-            |> Some
-        else
-            None
+    let renameColumns names (columns: ViewColumnDescriptor list) =
+        renameRelationColumns names (fun (descriptor: ViewColumnDescriptor) -> descriptor.Column.Name)
+            (fun name (descriptor: ViewColumnDescriptor) -> { descriptor with Column = { descriptor.Column with Name = name } }) columns
+        |> Result.mapError InvalidDescription
 
     let computedColumn name ty nullable defaultValue collation =
         { Name = name
@@ -6663,10 +6657,10 @@ and private describeQueryColumnsChecked
                         |> Result.bind (fun columns ->
                             let declaredColumns: string list = view.Columns
 
-                            renameColumns declaredColumns columns |> requireDescription)
+                            renameColumns declaredColumns columns)
                 | None -> scan store tableDb tableRef.Table |> Result.mapError (fun _ -> DescriptionUnavailable) |> Result.map (fst >> List.map describeColumn)
-        | FromSubquery(body, _) -> describeBody seen dbName ctes outerScopes body
-        | FromLateral(body, _) -> describeBody seen dbName ctes (preceding :: outerScopes) body
+        | FromSubquery(body, _) -> describeBody seen dbName ctes outerScopes body |> Result.bind (renameColumns [])
+        | FromLateral(body, _) -> describeBody seen dbName ctes (preceding :: outerScopes) body |> Result.bind (renameColumns [])
         | FromJsonTable(_, _, columns, _) -> jsonTableColumnDefs columns |> List.map describeColumn |> Ok
 
     and describeJoinSource seen dbName ctes outerScopes preceding item : Result<DescribedJoinScope, ColumnDescriptionError> =
@@ -6715,7 +6709,7 @@ and private describeQueryColumnsChecked
             match cte.Recursive, cte.Body with
             | true, UnionSelect(anchor, recursiveBranches, _, _, _) ->
                 describeSelect seen dbName ctes outerScopes anchor
-                |> Result.bind (renameColumns cte.CteColumns >> requireDescription)
+                |> Result.bind (renameColumns cte.CteColumns)
                 |> Result.bind (fun anchorColumns ->
                     let scope = Map.add (cte.CteName.ToLowerInvariant()) (lazy (Ok anchorColumns)) ctes
 
@@ -6728,7 +6722,7 @@ and private describeQueryColumnsChecked
                             { descriptor with Column = { descriptor.Column with Nullable = true; Default = None } }))))
             | _ ->
                 describeBody seen dbName ctes outerScopes cte.Body
-                |> Result.bind (renameColumns cte.CteColumns >> requireDescription)
+                |> Result.bind (renameColumns cte.CteColumns)
 
         // Resolve only referenced CTEs, in the namespace at their declaration.
         let cteMap =
@@ -6737,10 +6731,13 @@ and private describeQueryColumnsChecked
                 (fun ctes cte -> Map.add (cte.CteName.ToLowerInvariant()) (lazy (describeCte ctes cte)) ctes)
                 inheritedCtes
 
+        let cteNames = cteMap |> Map.keys |> Set.ofSeq
+        let names = validateRelationNames dbName cteNames select.Ctes select.From select.Joins |> Result.mapError InvalidDescription
         let sources =
-            match select.From with
-            | None -> Ok emptyScope
-            | Some source -> describeJoinChain seen dbName cteMap outerScopes emptyScope source select.Joins
+            names |> Result.bind (fun () ->
+                match select.From with
+                | None -> Ok emptyScope
+                | Some source -> describeJoinChain seen dbName cteMap outerScopes emptyScope source select.Joins)
         sources
         |> Result.bind (fun scope ->
             let sources = scope.Sources
@@ -7378,10 +7375,20 @@ and private resolveFromSubquery
         |> Result.map (fun source -> source.Columns, List.ofSeq source.Rows)
     | FromTable _
     | FromJsonTable _ -> resolveFromItem store registry dbName item
-    | FromSubquery(body, _alias)
-    // The empty-left metadata probe has no outer row, so correlated values
-    // resolve to NULL rather than failing column discovery.
-    | FromLateral(body, _alias) ->
+    | FromSubquery(body, _)
+    | FromLateral(body, _) -> resolveRelationBody store registry dbName [] body outer
+
+and private resolveRelationBody store registry dbName columnNames body outer : Result<ColumnDef list * Value[] list, QueryResult> =
+    let columnNamesAreValid =
+        match describeQueryColumns store registry dbName (QueryBody body) with
+        | Some columns ->
+            renameRelationColumns columnNames (fun (column: ColumnDef) -> column.Name) (fun name column -> { column with Name = name }) columns
+            |> Result.map ignore
+        | None -> Ok()
+
+    match columnNamesAreValid with
+    | Error error -> Error error
+    | Ok() ->
         let result, metadata, typedRows =
             match body with
             | PlainSelect select -> runSelectStmt store registry dbName select outer
@@ -7426,7 +7433,8 @@ and private resolveFromSubquery
                 else
                     derivedColumns
 
-            Ok(columns, typedRows |> List.map (Array.map Value.materialize))
+            renameRelationColumns columnNames (fun (column: ColumnDef) -> column.Name) (fun name column -> { column with Name = name }) columns
+            |> Result.map (fun columns -> columns, typedRows |> List.map (Array.map Value.materialize))
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
         | MultipleResults _ -> Error(nestedResultsError "a derived table")
@@ -7921,14 +7929,18 @@ and private applyLateralJoin
                 match runSelectStmt store registry dbName select bodyOuter with
                 | Err(code, message), _, _ -> Error(Err(code, message))
                 | ResultSet(names, _), metadata, typedRows ->
-                    Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata, typedRows)
+                    deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata
+                    |> uniqueRelationColumns _.Name
+                    |> Result.map (fun columns -> columns, typedRows)
                 | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
                 | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
             | UnionSelect(first, rest, orderBy, limit, offset) ->
                 match runUnionStmtWithOuter store registry dbName first rest orderBy limit offset bodyOuter with
                 | Err(code, message), _, _ -> Error(Err(code, message))
                 | ResultSet(names, _), metadata, typedRows ->
-                    Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata, typedRows)
+                    deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata
+                    |> uniqueRelationColumns _.Name
+                    |> Result.map (fun columns -> columns, typedRows)
                 | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
                 | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
 
@@ -9092,9 +9104,12 @@ and private runMutationJoin
     let qualifier = from.Alias |> Option.defaultValue from.Table
 
     let resolved =
-        match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
-        | Some source -> Ok(source.Columns, source.Rows, source.IdentityOf)
-        | None -> resolveTableRef store registry dbName from |> Result.map (fun (columns, rows) -> columns, rows, Some)
+        let cteNames = currentCteScope () |> Map.keys |> Set.ofSeq
+        validateRelationNames dbName cteNames [] (Some(FromTable from)) joins
+        |> Result.bind (fun () ->
+            match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
+            | Some source -> Ok(source.Columns, source.Rows, source.IdentityOf)
+            | None -> resolveTableRef store registry dbName from |> Result.map (fun (columns, rows) -> columns, rows, Some))
 
     match resolved with
     | Error e -> Error e
@@ -9476,17 +9491,7 @@ and private cteSelfReferenced (cte: CommonTableExpr) =
     cte.Recursive && inBody cte.Body
 
 and private renameCteColumns (cte: CommonTableExpr) (columns: ColumnDef list) : Result<ColumnDef list, QueryResult> =
-    if cte.CteColumns.IsEmpty then
-        Ok columns
-    elif List.length cte.CteColumns <> List.length columns then
-        Error(
-            Err(
-                1353,
-                "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"
-            )
-        )
-    else
-        Ok(List.map2 (fun (column: ColumnDef) name -> { column with Name = name }) columns cte.CteColumns)
+    renameRelationColumns cte.CteColumns _.Name (fun name column -> { column with Name = name }) columns
 
 and private withCteScope
     (store: Store)
@@ -9596,8 +9601,7 @@ and private materializeCte
     (outer: EvalContext option)
     : Result<ColumnDef list * Value[] list, QueryResult> =
     if not (cteSelfReferenced cte) then
-        resolveFromSubquery store registry dbName (FromSubquery(cte.Body, cte.CteName)) outer
-        |> Result.bind (fun (columns, rows) -> renameCteColumns cte columns |> Result.map (fun columns -> columns, rows))
+        resolveRelationBody store registry dbName cte.CteColumns cte.Body outer
     else
 
     match cte.Body with
@@ -9619,7 +9623,7 @@ and private materializeCte
                     expressions
                     columns
 
-        resolveFromSubquery store registry dbName (FromSubquery(PlainSelect anchor, cte.CteName)) outer
+        resolveRelationBody store registry dbName cte.CteColumns (PlainSelect anchor) outer
         |> Result.bind (fun (anchorColumns, anchorRows) ->
             anchorColumns
             |> normalizeLiteralColumns
@@ -10047,25 +10051,31 @@ and private runSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
-    if SelectStmt.hasDestination select then
-        Err(1064, "SELECT INTO is only valid as a top-level statement"), [], []
-    elif not select.Ctes.IsEmpty then
-        let body = { select with Ctes = [] }
-        let ctes = referencedCtes select.Ctes (selectOrUnionTableNames (PlainSelect body))
-        withCteScope store registry dbName ctes outer (fun () -> runSelectStmt store registry dbName body outer)
-    elif outer.IsSome then
-        runUnmergedSelectStmt store registry dbName select outer
-    else
-    match tryMergeDirectView store registry dbName select with
+    let cteNames =
+        Set.union (currentCteScope () |> Map.keys |> Set.ofSeq)
+            (select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList)
+    match validateRelationNames dbName cteNames select.Ctes select.From select.Joins with
     | Error error -> error, [], []
-    | Ok(Some merged) ->
-        let depth = viewMergeDepth.Value
-
-        if depth >= Limits.maxViewMetadataNesting then
-            Err(1436, "Thread stack overrun while expanding stored views"), [], []
+    | Ok() ->
+        if SelectStmt.hasDestination select then
+            Err(1064, "SELECT INTO is only valid as a top-level statement"), [], []
+        elif not select.Ctes.IsEmpty then
+            let body = { select with Ctes = [] }
+            let ctes = referencedCtes select.Ctes (selectOrUnionTableNames (PlainSelect body))
+            withCteScope store registry dbName ctes outer (fun () -> runSelectStmt store registry dbName body outer)
+        elif outer.IsSome then
+            runUnmergedSelectStmt store registry dbName select outer
         else
-            DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmt store registry dbName merged outer)
-    | Ok None -> runUnmergedSelectStmt store registry dbName select outer
+        match tryMergeDirectView store registry dbName select with
+        | Error error -> error, [], []
+        | Ok(Some merged) ->
+            let depth = viewMergeDepth.Value
+
+            if depth >= Limits.maxViewMetadataNesting then
+                Err(1436, "Thread stack overrun while expanding stored views"), [], []
+            else
+                DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmt store registry dbName merged outer)
+        | Ok None -> runUnmergedSelectStmt store registry dbName select outer
 
 and private runUnmergedSelectStmt
     (store: Store)
