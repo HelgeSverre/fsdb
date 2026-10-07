@@ -475,8 +475,12 @@ let private literalDiagnostics =
 
 /// Subqueries bind separately, after resolving their own tables and references.
 let rec tryLiteralDiagnostic expression =
-    literalDiagnostics.GetValue(expression, fun node ->
-        lazy (
-            children node
-            |> List.tryPick tryLiteralDiagnostic
-            |> Option.orElseWith (fun () -> tryLiteralNodeDiagnostic node))).Value
+    // A byref lookup avoids allocating the CLR out-parameter tuple on cache hits.
+    let mutable diagnostic = Unchecked.defaultof<_>
+    if literalDiagnostics.TryGetValue(expression, &diagnostic) then diagnostic.Value
+    else
+        literalDiagnostics.GetValue(expression, fun node ->
+            lazy (
+                children node
+                |> List.tryPick tryLiteralDiagnostic
+                |> Option.orElseWith (fun () -> tryLiteralNodeDiagnostic node))).Value
