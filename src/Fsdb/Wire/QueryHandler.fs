@@ -5133,6 +5133,15 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
 
 let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
     prepareStatementWithOptions (parserOptionsForSession session) sql
+    |> Result.bind (fun (statement, count) ->
+        match statement with
+        | None -> Ok(statement, count)
+        | Some ast ->
+            let store = preparedStore session
+            let schema = session.Database |> Option.defaultValue defaultDatabase
+            checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema ast)
+            |> Result.bind (fun () -> Executor.validatePreparedJoinColumns store (registryFor session) schema ast)
+            |> Result.map (fun () -> statement, count))
 
 let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
     let ast = ast |> Option.map (PreparedVariables.capture session.UserVariables)

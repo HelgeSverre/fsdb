@@ -30,7 +30,7 @@ Fsdb represents a grouped operand directly in `FromItem`. Execution preserves
 its association, qualified source columns, inner ON scope, and NULL-extension
 boundary. Regressions cover direct reads, mutations, lock checks, authorization,
 CTE dependencies, EXPLAIN, full-text scope, stored-view rendering, and recovery.
-Remaining work includes PREPARE-time semantic validation and broader nested-source
+Remaining work includes PREPARE-time ON-name validation and broader nested-source
 and prepared-metadata verification.
 
 ## Nested USING column ownership
@@ -94,9 +94,19 @@ returns explicit missing/ambiguous resolution errors. Metadata inference
 returns no descriptor for these invalid shapes instead of throwing a .NET
 exception, and execution retains the native error codes.
 
-PREPARE-time semantic rejection remains open: fsdb currently defers these
-errors to execution. The native oracle pins both phases so completing prepare
-validation cannot silently preserve that timing difference.
+SQL PREPARE and binary preparation retain these errors through direct queries,
+derived tables, CTEs, scalar subqueries, UNION branches, UPDATE, DELETE, and
+INSERT…SELECT. Schema-only description distinguishes unavailable metadata from
+a known invalid query, and preparation returns the latter without evaluating
+row expressions or invoking application functions. Authorization runs before
+schema validation; grouped mutation privilege errors match native preparation.
+Regressions check both preparation paths, absence of a rejected SQL statement
+handle, and unchanged rows after preparing a mutation.
+
+PREPARE-time ON-name validation remains open. In particular, ambiguous bare ON
+references and references outside a group's ON scope still require a scoped
+name-binding pass. The native oracle retains those expectations alongside the
+covered USING errors.
 
 ## CTE body source origins
 

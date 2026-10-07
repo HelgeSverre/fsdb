@@ -37,6 +37,14 @@ def verify(client, _writer):
         ("SELECT * FROM a LEFT JOIN (b JOIN (SELECT 1 AS other) c USING(id)) ON a.id=b.id", 1054),
         ("SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)", 1052),
         ("SELECT a.id FROM a JOIN (b RIGHT JOIN c USING(id)) ON id=a.id", 1052),
+        ("SELECT * FROM (SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)) d", 1052),
+        ("WITH d AS (SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)) SELECT * FROM d", 1052),
+        ("SELECT (SELECT COUNT(*) FROM a JOIN (b JOIN c ON b.id=c.id) USING(id))", 1052),
+        ("SELECT 1 WHERE EXISTS(SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id))", 1052),
+        ("SELECT id FROM a UNION ALL SELECT id FROM b JOIN c USING(missing)", 1054),
+        ("UPDATE a JOIN (b JOIN c ON b.id=c.id) USING(id) SET a.id=7", 1052),
+        ("DELETE a FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)", 1052),
+        ("INSERT INTO a SELECT a.id FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)", 1052),
     ]:
         for statement in [query, "PREPARE invalid_group FROM '" + query + "'"]:
             rejected = subprocess.run([*client.process.args, "-e", "USE probe;" + statement], capture_output=True, text=True, check=False)
@@ -115,9 +123,10 @@ def verify(client, _writer):
                            (1143, "UPDATE target JOIN b ON target.id=b.id SET b.id=4"),
                            (1143, "UPDATE target JOIN (b JOIN c ON b.id=c.id) ON target.id=b.id SET b.id=4"),
                      (1142, "DELETE b FROM target JOIN (b JOIN c ON b.id=c.id) ON target.id=b.id")]:
-        denied = subprocess.run([*reader_args, "-e", "USE probe;" + mutation], capture_output=True, text=True, check=False)
-        privilege_error = re.search(r"ERROR (\d+) \((\w+)\)", denied.stderr)
-        expect("grouped target requires mutation privilege", (int(privilege_error[1]), privilege_error[2]) if privilege_error else None, (code, "42000"))
+        for statement in [mutation, "PREPARE denied_group FROM '" + mutation + "'"]:
+            denied = subprocess.run([*reader_args, "-e", "USE probe;" + statement], capture_output=True, text=True, check=False)
+            privilege_error = re.search(r"ERROR (\d+) \((\w+)\)", denied.stderr)
+            expect("grouped target requires mutation privilege", (int(privilege_error[1]), privilege_error[2]) if privilege_error else None, (code, "42000"))
     for statement in ["UPDATE target t JOIN (b JOIN c ON b.id=c.id) ON t.id=b.id SET t.n=20",
                       "DELETE t FROM target t JOIN (b JOIN c ON b.id=c.id) ON t.id=b.id"]:
         plan = client.query("USE probe;EXPLAIN " + statement)

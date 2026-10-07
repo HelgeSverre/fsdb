@@ -84,20 +84,57 @@ let tests =
                   Expect.equal (executed.LastResultColumnMetadata |> List.map (fun column -> column.Origin |> Option.map _.OriginalTable)) [ Some "c" ]
                       "execution retains the same physical owner"
 
-          testCase "invalid grouped USING does not fabricate prepared metadata"
+          testCase "PREPARE rejects invalid USING through query boundaries"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
-              for sql in [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)" ] do
+              for sql in [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"; "CREATE TABLE target(id INT)" ] do
                   Expect.equal (handle session sql |> snd) (Affected 0UL) "create sources"
               for sql, code in
                   [ "SELECT * FROM a LEFT JOIN (b JOIN (SELECT 1 AS other) c USING(id)) ON a.id=b.id", 1054
-                    "SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)", 1052 ] do
-                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
-                  let _, columns = preparedMetadata session ast count
-                  Expect.isEmpty columns "unresolved logical columns have no inferred metadata"
+                    "SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)", 1052
+                    "SELECT * FROM (SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)) d", 1052
+                    "WITH d AS (SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)) SELECT * FROM d", 1052
+                    "SELECT (SELECT COUNT(*) FROM a JOIN (b JOIN c ON b.id=c.id) USING(id))", 1052
+                    "SELECT 1 WHERE EXISTS(SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) USING(id))", 1052
+                    "SELECT id FROM a UNION ALL SELECT id FROM b JOIN c USING(missing)", 1054
+                    "UPDATE a JOIN (b JOIN c ON b.id=c.id) USING(id) SET a.id=7", 1052
+                    "DELETE a FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)", 1052
+                    "INSERT INTO target SELECT a.id FROM a JOIN (b JOIN c ON b.id=c.id) USING(id)", 1052 ] do
+                  match prepareStatementForSession session sql with
+                  | Error(actual, _) -> Expect.equal actual code "binary preparation uses the native binding error"
+                  | other -> failtestf "expected PREPARE rejection for %s: %A" sql other
+                  let prepared, result = handle session ("PREPARE invalid_join FROM '" + sql + "'")
+                  match result with
+                  | Err(actual, _) -> Expect.equal actual code "SQL PREPARE uses the same validation"
+                  | other -> failtestf "expected SQL PREPARE rejection for %s: %A" sql other
+                  Expect.isFalse (Map.containsKey "invalid_join" prepared.TextStatements) "a rejected statement has no handle"
+
+          testCase "join preparation resolves schema without evaluating expressions or writing"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE a(id INT)"; "CREATE TABLE b(id INT)"; "CREATE TABLE c(id INT)"
+                           "INSERT INTO a VALUES(1)"; "INSERT INTO b VALUES(1)"; "INSERT INTO c VALUES(1)" ] do
                   match handle session sql |> snd with
-                  | Err(actual, _) -> Expect.equal actual code "native execution error"
-                  | other -> failtestf "expected invalid grouped USING rejection: %A" other
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              let mutable calls = 0
+              let functions =
+                  session.CustomFunctions
+                  |> Fsdb.Functions.registerScalar "PREPARE_TOUCH" (fun _ ->
+                      calls <- calls + 1
+                      VInt 1L)
+              let session = { session with CustomFunctions = functions }
+              for sql in
+                  [ "SELECT PREPARE_TOUCH(a.id),? FROM a JOIN (b JOIN c USING(id)) USING(id) WHERE PREPARE_TOUCH(a.id)"
+                    "SELECT * FROM a JOIN (b JOIN c ON b.id=c.id) ON a.id=b.id WHERE a.id=?"
+                    "UPDATE a JOIN (b JOIN c USING(id)) USING(id) SET a.id=PREPARE_TOUCH(a.id)+?"
+                    "DELETE a FROM a JOIN (b JOIN c USING(id)) USING(id) WHERE PREPARE_TOUCH(a.id)" ] do
+                  match prepareStatementForSession session sql with
+                  | Ok _ -> ()
+                  | Error error -> failtestf "valid join preparation failed: %A" error
+              Expect.equal calls 0 "schema-only validation does not invoke application functions"
+              Expect.equal (handle session "SELECT id FROM a" |> snd) (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                  "preparing mutations leaves stored rows unchanged"
 
           testCase "placeholderPositions counts only ? outside strings, comments, and backtick identifiers"
           <| fun _ ->

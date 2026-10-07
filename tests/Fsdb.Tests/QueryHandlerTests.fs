@@ -338,6 +338,9 @@ let tests =
                   match handle reader sql |> snd with
                   | Err(actual, _) -> Expect.equal actual code "native target privilege error"
                   | other -> failtestf "expected authorization rejection: %A" other
+                  match prepareStatementForSession reader sql with
+                  | Error(actual, _) -> Expect.equal actual code "PREPARE checks the target privilege"
+                  | other -> failtestf "expected PREPARE authorization rejection: %A" other
               Expect.equal (handle root "SELECT id FROM b" |> snd) (ResultSet([ "id" ], [ [ Some "3" ] ]))
                   "rejected mutations leave the grouped target intact"
 

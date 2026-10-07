@@ -6679,7 +6679,17 @@ and private describeQueryColumnsChecked
                         let physicalSources = sources |> List.map (fun (qualifier, columns) -> qualifier, columns |> List.map _.Column)
                         rewriteNaturalSelect select physicalSources
                     else Ok select
-                rewritten |> Result.mapError InvalidDescription |> Result.map (fun select ->
+                let nestedQueries =
+                    selectJoinExpressions select
+                    |> List.collect Expression.collectSubqueries
+                    |> traverse (fun nested ->
+                        match describeSelect seen dbName cteMap nested with
+                        | Error(InvalidDescription error) -> Error(InvalidDescription error)
+                        | _ -> Ok())
+
+                nestedQueries
+                |> Result.bind (fun _ -> rewritten |> Result.mapError InvalidDescription)
+                |> Result.map (fun select ->
                     let descriptors = sources |> List.collect snd
                     let columns = descriptors |> List.map _.Column
                     let qualifiers =
@@ -9176,27 +9186,28 @@ and private referencedCtes (ctes: CommonTableExpr list) (tableNames: Set<string>
         let required = close Set.empty tableNames
         ctes |> List.filter (fun cte -> Set.contains (cte.CteName.ToLowerInvariant()) required)
 
-and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join list) (expressions: Expr list) =
-    let query: SelectStmt =
-        { Projections = expressions |> List.map (fun expression -> expression, None)
-          IntoVariables = []
-          IntoFile = None
-          Distinct = false
-          CalculateFoundRows = false
-          StraightJoin = false
-          From = None
-          Joins = joins
-          Where = None
-          GroupBy = []
-          Rollup = false
-          Windows = []
-          Ctes = []
-          Having = None
-          OrderBy = []
-          Limit = None
-          Offset = None
-          Locking = [] }
+and private mutationSourceQuery from joins ctes expressions : SelectStmt =
+    { Projections = expressions |> List.map (fun expression -> expression, None)
+      IntoVariables = []
+      IntoFile = None
+      Distinct = false
+      CalculateFoundRows = false
+      StraightJoin = false
+      From = from
+      Joins = joins
+      Where = None
+      GroupBy = []
+      Rollup = false
+      Windows = []
+      Ctes = ctes
+      Having = None
+      OrderBy = []
+      Limit = None
+      Offset = None
+      Locking = [] }
 
+and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join list) (expressions: Expr list) =
+    let query = mutationSourceQuery None joins [] expressions
     referencedCtes ctes (selectOrUnionTableNames (PlainSelect query))
 
 and private tryMergeDirectView
@@ -17840,6 +17851,43 @@ let statementColumns (store: Store) (registry: Registry) (schema: string) (state
     | Union(first, rest, orderBy, limit, offset) when not (SelectStmt.hasDestination first) ->
         describeQueryColumns store registry schema (QueryBody(UnionSelect(first, rest, orderBy, limit, offset)))
     | _ -> None
+
+/// Retains known join-binding errors from schema-only description at PREPARE.
+let validatePreparedJoinColumns store registry schema statement =
+    let validateBody body =
+        match describeQueryColumnsChecked store registry schema (QueryBody body) with
+        | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
+        | _ -> Ok()
+
+    let validateExpressions expressions =
+        expressions
+        |> List.collect Expression.collectSubqueries
+        |> traverse (PlainSelect >> validateBody)
+        |> Result.map ignore
+
+    let rec validate = function
+        | Select select -> validateBody (PlainSelect select)
+        | Union(first, rest, orderBy, limit, offset) ->
+            validateBody (UnionSelect(first, rest, orderBy, limit, offset))
+        | Update update ->
+            let expressions = (update.Assignments |> List.map _.Value) @ Option.toList update.Where
+            mutationSourceQuery (Some(FromTable update.From)) update.Joins update.Ctes expressions
+            |> PlainSelect |> validateBody
+        | Delete delete ->
+            mutationSourceQuery (Some(FromTable delete.From)) delete.Joins delete.Ctes (Option.toList delete.Where)
+            |> PlainSelect |> validateBody
+        | InsertSelect(_, _, select, assignments, _) ->
+            validateBody (PlainSelect select)
+            |> Result.bind (fun () -> validateExpressions (assignments |> List.map snd))
+        | ReplaceSelect(_, _, select) -> validateBody (PlainSelect select)
+        | Insert(_, _, rows, assignments, _) -> validateExpressions (List.concat rows @ (assignments |> List.map snd))
+        | Replace(_, _, rows) -> validateExpressions (List.concat rows)
+        | ReplaceSet(_, assignments) -> validateExpressions (assignments |> List.map snd)
+        | Do expressions -> validateExpressions expressions
+        | CreateTableAs(_, query, _, _) | Explain(_, query) -> validate query
+        | _ -> Ok()
+
+    validate statement
 
 let private statementSources store schema (select: SelectStmt) =
     (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
