@@ -698,6 +698,10 @@ type private ViewColumnDescriptor =
     { Column: ColumnDef
       NumericParts: (int * int) option }
 
+type private ColumnDescriptionError =
+    | DescriptionUnavailable
+    | InvalidDescription of QueryResult
+
 type private ColumnDescriptionSource =
     | StoredRelation of string
     | QueryBody of SelectOrUnion
@@ -6410,12 +6414,16 @@ and private resolveTableRef
 
 /// Derives query columns from schema and expression metadata without reading
 /// rows or invoking extension functions.
-and private describeQueryColumns
+and private describeQueryColumnsChecked
     (store: Store)
     (registry: Registry)
     (schema: string)
     (source: ColumnDescriptionSource)
-    : ColumnDef list option =
+    : Result<ColumnDef list, ColumnDescriptionError> =
+    let requireDescription = function
+        | Some value -> Ok value
+        | None -> Error DescriptionUnavailable
+
     let decimalParts =
         function
         | TDecimal(precision, scale, _) -> Some(precision, scale)
@@ -6569,12 +6577,12 @@ and private describeQueryColumns
 
     let unionColumns (branches: ViewColumnDescriptor list list) =
         match branches with
-        | [] -> None
-        | first :: _ when branches |> List.exists (fun columns -> columns.Length <> first.Length) -> None
+        | [] -> Error DescriptionUnavailable
+        | first :: _ when branches |> List.exists (fun columns -> columns.Length <> first.Length) -> Error DescriptionUnavailable
         | first :: rest ->
             rest
             |> List.fold (fun merged branch -> List.map2 (fun left right -> unionColumn [ left; right ]) merged branch) first
-            |> Some
+            |> Ok
 
     let rec describeBody (seen: Set<string * string>) dbName ctes =
         function
@@ -6583,44 +6591,43 @@ and private describeQueryColumns
             let branches = first :: (rest |> List.map snd)
 
             branches
-            |> List.map (describeSelect seen dbName ctes)
-            |> tryAllSome
-            |> Option.bind unionColumns
+            |> traverse (describeSelect seen dbName ctes)
+            |> Result.bind unionColumns
 
     and sourceColumns seen dbName ctes =
         function
         | FromJoinGroup(source, joins) ->
-            (source :: (joins |> List.map _.Table)) |> List.map (sourceColumns seen dbName ctes) |> tryAllSome |> Option.map List.concat
+            (source :: (joins |> List.map _.Table)) |> traverse (sourceColumns seen dbName ctes) |> Result.map List.concat
         | FromTable tableRef ->
             let tableDb = tableRef.Database |> Option.defaultValue dbName
 
             if tableRef.Database.IsNone && Map.containsKey (tableRef.Table.ToLowerInvariant()) ctes then
-                Map.tryFind (tableRef.Table.ToLowerInvariant()) ctes
+                Map.tryFind (tableRef.Table.ToLowerInvariant()) ctes |> requireDescription
             elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-                InformationSchema.scan store.Catalog tableRef.Table None |> Option.map (fst >> List.map describeColumn)
+                InformationSchema.scan store.Catalog tableRef.Table None |> Option.map (fst >> List.map describeColumn) |> requireDescription
             else
                 match tryStoredView store tableDb tableRef.Table with
                 | Some(view: StoredView) ->
                     let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
                     if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
-                        None
+                        Error DescriptionUnavailable
                     else
                         parseStoredViewStatement view.Definition
-                        |> Result.toOption
-                        |> Option.bind (function
+                        |> Result.mapError (fun _ -> DescriptionUnavailable)
+                        |> Result.bind (function
                             | Select select -> describeSelect (Set.add key seen) view.Schema Map.empty select
                             | Union(first, rest, orderBy, limit, offset) ->
                                 describeBody (Set.add key seen) view.Schema Map.empty (UnionSelect(first, rest, orderBy, limit, offset))
-                            | _ -> None)
-                        |> Option.bind (fun columns ->
+                            | _ -> Error DescriptionUnavailable)
+                        |> Result.bind (fun columns ->
                             let declaredColumns: string list = view.Columns
 
-                            renameColumns declaredColumns columns)
-                | None -> scan store tableDb tableRef.Table |> Result.toOption |> Option.map (fst >> List.map describeColumn)
+                            renameColumns declaredColumns columns |> requireDescription)
+                | None -> scan store tableDb tableRef.Table |> Result.mapError (fun _ -> DescriptionUnavailable) |> Result.map (fst >> List.map describeColumn)
         | FromSubquery(body, _)
         | FromLateral(body, _) -> describeBody seen dbName ctes body
-        | FromJsonTable(_, _, columns, _) -> jsonTableColumnDefs columns |> List.map describeColumn |> Some
+        | FromJsonTable(_, _, columns, _) -> jsonTableColumnDefs columns |> List.map describeColumn |> Ok
 
     and describeSelect seen dbName inheritedCtes (select: SelectStmt) =
         let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table) |> List.collect FromItem.leaves
@@ -6629,50 +6636,50 @@ and private describeQueryColumns
             match cte.Recursive, cte.Body with
             | true, UnionSelect(anchor, recursiveBranches, _, _, _) ->
                 describeSelect seen dbName ctes anchor
-                |> Option.bind (renameColumns cte.CteColumns)
-                |> Option.bind (fun anchorColumns ->
+                |> Result.bind (renameColumns cte.CteColumns >> requireDescription)
+                |> Result.bind (fun anchorColumns ->
                     let scope = Map.add (cte.CteName.ToLowerInvariant()) anchorColumns ctes
 
                     recursiveBranches
-                    |> List.map (snd >> describeSelect seen dbName scope)
-                    |> tryAllSome
-                    |> Option.bind (fun branches ->
+                    |> traverse (snd >> describeSelect seen dbName scope)
+                    |> Result.bind (fun branches ->
                         anchorColumns :: branches
                         |> unionColumns
-                        |> Option.map (List.map (fun descriptor ->
+                        |> Result.map (List.map (fun descriptor ->
                             { descriptor with Column = { descriptor.Column with Nullable = true; Default = None } }))))
             | _ ->
                 describeBody seen dbName ctes cte.Body
-                |> Option.bind (renameColumns cte.CteColumns)
+                |> Result.bind (renameColumns cte.CteColumns >> requireDescription)
 
         let ctes =
             select.Ctes
             |> List.fold
                 (fun resolved cte ->
                     resolved
-                    |> Option.bind (fun ctes ->
+                    |> Result.bind (fun ctes ->
                         describeCte ctes cte
-                        |> Option.bind (fun columns ->
-                            Some(Map.add (cte.CteName.ToLowerInvariant()) columns ctes))))
-                (Some inheritedCtes)
+                        |> Result.map (fun columns -> Map.add (cte.CteName.ToLowerInvariant()) columns ctes)))
+                (Ok inheritedCtes)
 
         ctes
-        |> Option.bind (fun cteMap ->
+        |> Result.bind (fun cteMap ->
             sourceItems
             |> List.fold
                 (fun collected item ->
                     collected
-                    |> Option.bind (fun sources ->
+                    |> Result.bind (fun sources ->
                         sourceColumns seen dbName cteMap item
-                        |> Option.bind (fun columns -> FromItem.tryQualifier item |> Option.map (fun qualifier -> sources @ [ qualifier, columns ]))))
-                (Some [])
-            |> Option.bind (fun sources ->
+                        |> Result.bind (fun columns ->
+                            FromItem.tryQualifier item |> requireDescription
+                            |> Result.map (fun qualifier -> sources @ [ qualifier, columns ]))))
+                (Ok [])
+            |> Result.bind (fun sources ->
                 let rewritten =
                     if select.Joins |> List.exists joinCoalescesColumns then
                         let physicalSources = sources |> List.map (fun (qualifier, columns) -> qualifier, columns |> List.map _.Column)
                         rewriteNaturalSelect select physicalSources
                     else Ok select
-                rewritten |> Result.toOption |> Option.map (fun select ->
+                rewritten |> Result.mapError InvalidDescription |> Result.map (fun select ->
                     let descriptors = sources |> List.collect snd
                     let columns = descriptors |> List.map _.Column
                     let qualifiers =
@@ -6810,7 +6817,10 @@ and private describeQueryColumns
     (match source with
      | StoredRelation name -> sourceColumns Set.empty schema Map.empty (FromTable { Database = None; Table = name; Alias = None; Partitions = [] })
      | QueryBody body -> describeBody Set.empty schema Map.empty body)
-    |> Option.map (List.map _.Column)
+    |> Result.map (List.map _.Column)
+
+and private describeQueryColumns store registry schema source =
+    describeQueryColumnsChecked store registry schema source |> Result.toOption
 
 and private describeStoredViewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
     describeQueryColumns store registry schema (StoredRelation name)
