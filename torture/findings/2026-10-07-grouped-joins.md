@@ -237,3 +237,14 @@ dependent. With the fixture above, `SELECT a.id,(SELECT COUNT(*) FROM b JOIN
 returns `(1,0),(2,2)`, and MySQL labels query block 2 `DEPENDENT SUBQUERY`.
 Outer-reference detection traverses grouped conditions through the shared
 join-condition helper. The regression checks both rows and EXPLAIN classification.
+
+## Qualified outer-column fallback
+
+The [correlated-column oracle](../scripts/correlated-column-oracle.py) verifies
+that a local qualifier without the requested column does not hide an outer
+qualified column. For outer `a.id` values `1,2` and `b.id=1`, the subquery
+`SELECT COUNT(*) FROM (SELECT 1 AS other) a JOIN b ON a.id=b.id` returns `1,0`.
+The inner alias `a` has no `id`, so its ON condition resolves the outer column.
+Runtime lookup follows the same rule as schema-only preparation, including
+multiple intervening scopes. A local `a.id` containing NULL wins over outer
+values. Native results and an execution regression cover these cases.

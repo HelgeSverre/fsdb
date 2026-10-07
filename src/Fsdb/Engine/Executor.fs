@@ -2316,11 +2316,15 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
             | None -> Error(unknownColumn (sprintf "%s.%s" table col))
         | None -> Error(unknownColumn (sprintf "%s.%s" table col))
     | _ ->
-        match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
-        | Some(cols, offset) ->
-            match cols |> List.tryFindIndex (fun c -> System.String.Equals(c.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
-            | Some idx -> Ok(readColumnValue ctx.Store cols.[idx] ctx.Row.[offset + idx])
-            | None -> Error(unknownColumn (sprintf "%s.%s" table col))
+        let localColumn =
+            Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers
+            |> Option.bind (fun (columns, offset) ->
+                columns
+                |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, col, System.StringComparison.OrdinalIgnoreCase))
+                |> Option.map (fun index -> columns.[index], offset + index))
+
+        match localColumn with
+        | Some(column, index) -> Ok(readColumnValue ctx.Store column ctx.Row.[index])
         | None ->
             match ctx.Outer with
             | Some parent -> resolveQualifiedCol parent table col

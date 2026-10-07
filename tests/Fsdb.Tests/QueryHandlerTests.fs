@@ -49,7 +49,25 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "grouped joins preserve association and null extension"
+        [ testCase "qualified correlation skips scopes without the requested column"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE a(id INT)"
+                        "CREATE TABLE b(id INT)"
+                        "INSERT INTO a VALUES(1),(2)"
+                        "INSERT INTO b VALUES(1)" ]
+              for expression, expected in
+                  [ "(SELECT COUNT(*) FROM (SELECT 1 AS other) a JOIN b ON a.id=b.id)", [ Some "1"; Some "0" ]
+                    "(SELECT a.id FROM (SELECT 1 AS other) a)", [ Some "1"; Some "2" ]
+                    "(SELECT a.id FROM (SELECT NULL AS id) a)", [ None; None ]
+                    "(SELECT (SELECT a.id FROM (SELECT 1 AS other) a) FROM (SELECT 2 AS other) a)", [ Some "1"; Some "2" ] ] do
+                  let sql = "SELECT a.id," + expression + " AS correlated FROM a ORDER BY a.id"
+                  Expect.equal (run sql)
+                      (ResultSet([ "id"; "correlated" ], List.map2 (fun id value -> [ Some id; value ]) [ "1"; "2" ] expected))
+                      "native MySQL resolves the nearest scope containing the qualified column"
+
+          testCase "grouped joins preserve association and null extension"
           <| fun _ ->
               let run = groupedJoinQuery ()
               for source, rows in
