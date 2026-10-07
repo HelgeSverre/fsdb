@@ -1742,6 +1742,9 @@ let private unknownColumnIn clause name : EvalError =
 
 let private unknownColumn name = unknownColumnIn FieldList name
 
+let private nonUpdatableTarget operation target : EvalError =
+    1288, sprintf "The target table %s of the %s is not updatable" target operation
+
 let private validateReferencesWith resolve expression =
     Expression.collect (function
         | Col name -> Some(None, name)
@@ -9060,6 +9063,11 @@ and private applyPreparedJoin
                 |> Result.mapError Err
                 |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
 
+and private mutationDerivedSource qualifier ((columns, rows): ColumnDef list * Value[] list)
+    : MutationSource list * (Value[] option list * Value[]) list =
+    [ { Qualifier = qualifier; PhysicalTable = None; Columns = columns } ],
+    rows |> List.map (fun row -> [ None ], row)
+
 /// Multi-table mutations retain each source row beside the flattened row.
 /// Derived sources can filter targets but have no writable identity.
 and private applyMutationJoin
@@ -9072,8 +9080,24 @@ and private applyMutationJoin
     (join: Join)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
     match join.Table with
-    | FromLateral _ ->
-        Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+    | FromLateral(_, qualifier) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
+        let sourceColumns = sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)
+        let columns = sourceColumns |> List.collect snd
+        let contextFor = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sourceColumns) None
+        let prepare row =
+            resolveFromSubquery store registry dbName join.Table (Some(contextFor row))
+            |> Result.map (mutationDerivedSource qualifier)
+        let matchRows rows = applyPreparedMutationJoin store registry dbName (sourcesSoFar, rows) leftOperand join
+        let matchRow ((_, flat) as row) = prepare flat |> Result.bind (matchRows [ row ])
+
+        match rowsSoFar with
+        | [] -> prepare (probeRow columns) |> Result.bind (matchRows [])
+        | first :: rest ->
+            matchRow first
+            |> Result.bind (fun (sources, firstRows) ->
+                rest
+                |> traverse matchRow
+                |> Result.map (fun remaining -> sources, firstRows @ (remaining |> List.collect snd)))
     | FromJsonTable(source, path, columns, alias) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
         let sourceColumns = sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)
 
@@ -9126,12 +9150,10 @@ and private applyMutationJoin
                     [ { Qualifier = qualifier; PhysicalTable = Some tableRef; Columns = columns } ],
                     rows |> List.map (fun row -> [ identityOf row ], row))
             | FromSubquery(_, qualifier)
+            | FromLateral(_, qualifier)
             | FromJsonTable(_, _, _, qualifier) ->
                 resolveFromSubquery store registry dbName source None
-                |> Result.map (fun (columns, rows) ->
-                    [ { Qualifier = qualifier; PhysicalTable = None; Columns = columns } ],
-                    rows |> List.map (fun row -> [ None ], row))
-            | FromLateral _ -> failwith "applyMutationJoin: lateral source handled above"
+                |> Result.map (mutationDerivedSource qualifier)
 
         resolved
         |> Result.bind (applyPreparedMutationJoin store registry dbName (sourcesSoFar, rowsSoFar) leftOperand join)
@@ -22058,7 +22080,7 @@ let rec executeAs
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb updateStmt.From.Table with
-        | None -> ids, Err(1288, sprintf "The target table '%s' of the UPDATE is not updatable" updateStmt.From.Table)
+        | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
         | Some view when not view.UpdateJoins.IsEmpty && not updateStmt.OrderBy.IsEmpty ->
             ids, Err(1221, "Incorrect usage of UPDATE and ORDER BY")
         | Some view when not view.UpdateJoins.IsEmpty && updateStmt.Limit.IsSome ->
@@ -22315,7 +22337,7 @@ let rec executeAs
                     let col = List.item colIdx source.Columns
 
                     match source.PhysicalTable with
-                    | None -> Error(1288, sprintf "The target table '%s' of the UPDATE is not updatable" source.Qualifier)
+                    | None -> Error(nonUpdatableTarget "UPDATE" source.Qualifier)
                     | Some tableRef when col.Generated.IsSome -> Error(toMySqlError (GeneratedColumnAssignment(col.Name, tableRef.Table)))
                     | Some _ -> Ok(srcIdx, colIdx, v)
 
@@ -22508,7 +22530,7 @@ let rec executeAs
         let viewDb = deleteStmt.From.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb deleteStmt.From.Table with
-        | None -> ids, Err(1288, sprintf "The target table '%s' of the DELETE is not updatable" deleteStmt.From.Table)
+        | None -> ids, Err(nonUpdatableTarget "DELETE" deleteStmt.From.Table)
         | Some view when not view.UpdateJoins.IsEmpty ->
             ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
         | Some view ->
@@ -22658,7 +22680,7 @@ let rec executeAs
                 |> traverse (fun t ->
                     match Map.tryFind (t.ToLowerInvariant()) sourceIndex with
                     | Some i when sources.[i].PhysicalTable.IsSome -> Ok i
-                    | Some _ -> Error(1288, sprintf "The target table '%s' of the DELETE is not updatable" t)
+                    | Some _ -> Error(nonUpdatableTarget "DELETE" t)
                     | None -> Error(1109, sprintf "Unknown table '%s' in MULTI DELETE" t))
             with
             | Error(code, message) -> ids, Err(code, message)

@@ -343,3 +343,13 @@ empty preceding input does not suppress missing-column errors in reads or
 updates. Preparation and execution share the reference traversal. The native
 fixture repeats argument diagnostics with populated and empty input and checks
 that a valid empty-input argument leaves a user-variable counter unchanged.
+
+## LATERAL mutation sources
+
+The [lateral mutation oracle](../scripts/lateral-mutation-oracle.py) verifies
+independent and correlated UPDATE/DELETE sources, LEFT padding, NATURAL
+matching, independent RIGHT sources, and duplicate lateral matches. Source
+preparation feeds the shared mutation matcher, retaining physical target
+identities and updating each target once. Lateral outputs have no writable
+identity. Read-only source and view diagnostics use MySQL's 1288 wording.
+Nested dependencies across grouped mutation operands remain uncovered.

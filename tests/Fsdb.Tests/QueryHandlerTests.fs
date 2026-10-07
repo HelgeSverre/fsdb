@@ -49,7 +49,28 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "JSON_TABLE validates empty-input references without evaluating arguments"
+        [ testCase "lateral mutation sources preserve target identities"
+          <| fun _ ->
+              let run = queryFixture [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"; "INSERT INTO a VALUES(1,0),(2,0),(3,0)" ]
+              for sql, affected in
+                  [ "UPDATE a JOIN LATERAL (SELECT 1 AS id) d ON a.id=d.id SET a.n=7", 1UL
+                    "UPDATE a JOIN LATERAL (SELECT a.id AS id) d ON a.id=d.id SET a.n=8", 3UL
+                    "UPDATE a LEFT JOIN LATERAL (SELECT a.id AS id WHERE 0) d ON 0 SET a.n=7", 3UL
+                    "UPDATE a NATURAL JOIN LATERAL (SELECT a.id AS id) d SET a.n=a.id*2", 3UL
+                    "UPDATE a RIGHT JOIN LATERAL (SELECT 2 AS id UNION ALL SELECT 4) d ON a.id=d.id SET a.n=9", 1UL
+                    "UPDATE a JOIN LATERAL (SELECT a.id AS id UNION ALL SELECT a.id) d ON 1 SET a.n=a.n+1", 3UL ] do
+                  Expect.equal (run sql) (Affected affected) sql
+              Expect.equal (run "SELECT * FROM a ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "3" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "7" ] ])) "each target is updated once"
+              for sql, operation in
+                  [ "UPDATE a JOIN LATERAL (SELECT a.id AS id) d ON 1 SET d.id=7", "UPDATE"
+                    "DELETE d FROM a JOIN LATERAL (SELECT a.id AS id) d ON 1", "DELETE" ] do
+                  Expect.equal (run sql) (Err(1288, "The target table d of the " + operation + " is not updatable")) "derived source is read-only"
+              Expect.equal (run "DELETE a FROM a JOIN LATERAL (SELECT 3 AS id) d ON a.id=d.id") (Affected 1UL) "independent delete source"
+              Expect.equal (run "DELETE a FROM a JOIN LATERAL (SELECT a.id AS id) d ON a.id=d.id") (Affected 2UL) "correlated delete source"
+              Expect.equal (run "SELECT * FROM a") (ResultSet([ "id"; "n" ], [])) "all targets removed"
+
+          testCase "JSON_TABLE validates empty-input references without evaluating arguments"
           <| fun _ ->
               let run = queryFixture [ "CREATE TABLE a(id INT)"; "SET @touches=0" ]
               for reference in [ "a.missing"; "x.id" ] do

@@ -10925,11 +10925,11 @@ let tests =
                     | other -> failtestf "expected rows after delete, got %A" other
 
                     match runDefault store "UPDATE t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt SET jt.x = 7" with
-                    | Err(1288, "The target table 'jt' of the UPDATE is not updatable") -> ()
+                    | Err(1288, "The target table jt of the UPDATE is not updatable") -> ()
                     | other -> failtestf "expected read-only JSON_TABLE update error, got %A" other
 
                     match runDefault store "DELETE jt FROM t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt" with
-                    | Err(1288, "The target table 'jt' of the DELETE is not updatable") -> ()
+                    | Err(1288, "The target table jt of the DELETE is not updatable") -> ()
                     | other -> failtestf "expected read-only JSON_TABLE delete error, got %A" other ]
 
           // Every expected value below is the answer a live MySQL 8.4.11
