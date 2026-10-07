@@ -124,7 +124,7 @@ cases = [
 ]
 
 
-def verify(client, _writer):
+def verify_cases(client, cases):
     for sql, expected in cases:
         result = subprocess.run(
             [*client.process.args, "--comments", "--column-names", "-e", "USE probe;" + sql],
@@ -137,6 +137,10 @@ def verify(client, _writer):
         else:
             assert result.returncode == 0, (sql, result.stderr)
             oracle["expect"](sql, result.stdout, expected)
+
+
+def verify(client, _writer):
+    verify_cases(client, cases)
 
 
 if __name__ == "__main__":

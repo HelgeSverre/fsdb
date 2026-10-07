@@ -1,0 +1,48 @@
+"""Verify text literal charset identity and lifetime on native MySQL 8.4.11."""
+
+import pathlib
+import runpy
+
+arguments = runpy.run_path(str(pathlib.Path(__file__).with_name("name-const-oracle.py")))
+cases = [
+    ("SELECT CHARSET(_latin1'é'),HEX(_latin1'é'),LENGTH(_latin1'é'),CHAR_LENGTH(_latin1'é')", "CHARSET(_latin1'é')\tHEX(_latin1'é')\tLENGTH(_latin1'é')\tCHAR_LENGTH(_latin1'é')\nlatin1\tC3A9\t2\t2\n"),
+    ("SELECT CHARSET(_latin1 X'C3A9'),HEX(_latin1 X'C3A9'),LENGTH(_latin1 X'C3A9'),CHAR_LENGTH(_latin1 X'C3A9')", "CHARSET(_latin1 X'C3A9')\tHEX(_latin1 X'C3A9')\tLENGTH(_latin1 X'C3A9')\tCHAR_LENGTH(_latin1 X'C3A9')\nlatin1\tC3A9\t2\t2\n"),
+    ("SELECT CHARSET(_utf8mb4 X'C3A9'),HEX(_utf8mb4 X'C3A9'),LENGTH(_utf8mb4 X'C3A9'),CHAR_LENGTH(_utf8mb4 X'C3A9')", "CHARSET(_utf8mb4 X'C3A9')\tHEX(_utf8mb4 X'C3A9')\tLENGTH(_utf8mb4 X'C3A9')\tCHAR_LENGTH(_utf8mb4 X'C3A9')\nutf8mb4\tC3A9\t2\t1\n"),
+    ("SELECT CHARSET('a'),COLLATION('a'),COERCIBILITY('a')", "CHARSET('a')\tCOLLATION('a')\tCOERCIBILITY('a')\nutf8mb4\tutf8mb4_0900_ai_ci\t4\n"),
+    ("SELECT CHARSET(_latin1'a'),COLLATION(_latin1'a'),COERCIBILITY(_latin1'a')", "CHARSET(_latin1'a')\tCOLLATION(_latin1'a')\tCOERCIBILITY(_latin1'a')\nlatin1\tlatin1_swedish_ci\t4\n"),
+    ("SELECT CHARSET(_utf8mb4'a'),COLLATION(_utf8mb4'a'),COERCIBILITY(_utf8mb4'a')", "CHARSET(_utf8mb4'a')\tCOLLATION(_utf8mb4'a')\tCOERCIBILITY(_utf8mb4'a')\nutf8mb4\tutf8mb4_0900_ai_ci\t4\n"),
+    ("SELECT CHARSET(N'a'),COLLATION(N'a'),COERCIBILITY(N'a')", "CHARSET(N'a')\tCOLLATION(N'a')\tCOERCIBILITY(N'a')\nutf8mb3\tutf8mb3_general_ci\t4\n"),
+    ("SELECT CHARSET(_utf8'a'),COLLATION(_utf8'a'),COERCIBILITY(_utf8'a')", "CHARSET(_utf8'a')\tCOLLATION(_utf8'a')\tCOERCIBILITY(_utf8'a')\nutf8mb3\tutf8mb3_general_ci\t4\n"),
+    ("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;SELECT CHARSET('a'),COLLATION('a'),COLLATION(_utf8mb4'a'),COLLATION(N'a')", "CHARSET('a')\tCOLLATION('a')\tCOLLATION(_utf8mb4'a')\tCOLLATION(N'a')\nutf8mb4\tutf8mb4_general_ci\tutf8mb4_0900_ai_ci\tutf8mb3_general_ci\n"),
+    ("SET NAMES latin1 COLLATE latin1_bin;SELECT CHARSET('a'),COLLATION('a'),COLLATION(_latin1'a'),COLLATION(_utf8mb4'a')", "CHARSET('a')\tCOLLATION('a')\tCOLLATION(_latin1'a')\tCOLLATION(_utf8mb4'a')\nlatin1\tlatin1_bin\tlatin1_swedish_ci\tutf8mb4_0900_ai_ci\n"),
+    ("SELECT 'a' COLLATE 'binary'", (1253, '42000')),
+    ("SELECT 'a' COLLATE latin1_bin", (1253, '42000')),
+    ("SELECT _latin1'a' COLLATE utf8mb4_bin", (1253, '42000')),
+    ("SELECT _latin1'a' COLLATE latin1_bin AS v", 'v\na\n'),
+    ("SELECT _utf8mb4'a' COLLATE latin1_bin", (1253, '42000')),
+    ("SELECT N'a' COLLATE utf8mb4_bin", (1253, '42000')),
+    ("SELECT N'a' COLLATE utf8mb3_bin AS v", 'v\na\n'),
+    ("SET NAMES latin1;SELECT 'a' COLLATE latin1_bin AS v", 'v\na\n'),
+    ("SET NAMES latin1;SELECT 'a' COLLATE utf8mb4_bin", (1253, '42000')),
+    ("SET NAMES binary;SELECT CHARSET('a'),COLLATION('a'),COERCIBILITY('a'),HEX('a')", "CHARSET('a')\tCOLLATION('a')\tCOERCIBILITY('a')\tHEX('a')\nbinary\tbinary\t4\t61\n"),
+    ('SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;PREPARE s FROM \'SELECT CHARSET("a"),COLLATION("a")\';SET NAMES latin1;EXECUTE s', 'CHARSET("a")\tCOLLATION("a")\nutf8mb4\tutf8mb4_general_ci\n'),
+    ("SELECT CHARSET(_latin1 X'61'),COLLATION(_latin1 X'61'),HEX(_latin1 X'61')", "CHARSET(_latin1 X'61')\tCOLLATION(_latin1 X'61')\tHEX(_latin1 X'61')\nlatin1\tlatin1_swedish_ci\t61\n"),
+    ("SELECT CHARSET(_utf8mb4 X'61'),COLLATION(_utf8mb4 X'61'),HEX(_utf8mb4 X'61')", "CHARSET(_utf8mb4 X'61')\tCOLLATION(_utf8mb4 X'61')\tHEX(_utf8mb4 X'61')\nutf8mb4\tutf8mb4_0900_ai_ci\t61\n"),
+    ("SELECT CHARSET(_latin1 b'01100001'),COLLATION(_latin1 b'01100001')", "CHARSET(_latin1 b'01100001')\tCOLLATION(_latin1 b'01100001')\nlatin1\tlatin1_swedish_ci\n"),
+    ("SELECT CHARSET(_latin1'a' 'b'),COLLATION(_latin1'a' 'b'),_latin1'a' 'b' AS v", "CHARSET(_latin1'a' 'b')\tCOLLATION(_latin1'a' 'b')\tv\nlatin1\tlatin1_swedish_ci\tab\n"),
+    ("SELECT CHARSET(CONCAT(_latin1'a',_latin1'b')),COLLATION(CONCAT(_latin1'a',_latin1'b'))", "CHARSET(CONCAT(_latin1'a',_latin1'b'))\tCOLLATION(CONCAT(_latin1'a',_latin1'b'))\nlatin1\tlatin1_swedish_ci\n"),
+    ("SELECT CHARSET(NAME_CONST(1,_latin1'a')),COLLATION(NAME_CONST(1,_latin1'a')),COERCIBILITY(NAME_CONST(1,_latin1'a'))", "CHARSET(NAME_CONST(1,_latin1'a'))\tCOLLATION(NAME_CONST(1,_latin1'a'))\tCOERCIBILITY(NAME_CONST(1,_latin1'a'))\nlatin1\tlatin1_swedish_ci\t4\n"),
+    ("SELECT CHARSET(CAST('a' AS CHAR CHARACTER SET latin1)),COLLATION(CAST('a' AS CHAR CHARACTER SET latin1))", "CHARSET(CAST('a' AS CHAR CHARACTER SET latin1))\tCOLLATION(CAST('a' AS CHAR CHARACTER SET latin1))\nlatin1\tlatin1_swedish_ci\n"),
+    ("SET NAMES latin1 COLLATE latin1_bin;CREATE VIEW literal_view AS SELECT 'a' AS v;SET NAMES utf8mb4;SELECT CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM literal_view", 'CHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\nlatin1\tlatin1_bin\t4\n'),
+    ("SET NAMES latin1 COLLATE latin1_bin;CREATE FUNCTION literal_function() RETURNS VARCHAR(64) DETERMINISTIC RETURN COLLATION('a');SET NAMES utf8mb4;SELECT literal_function()", 'literal_function()\nlatin1_bin\n'),
+    ("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;SELECT CHARSET(_utf8mb4'a'),COLLATION(_utf8mb4'a'),COERCIBILITY(_utf8mb4'a')", "CHARSET(_utf8mb4'a')\tCOLLATION(_utf8mb4'a')\tCOERCIBILITY(_utf8mb4'a')\nutf8mb4\tutf8mb4_0900_ai_ci\t4\n"),
+    ("SET NAMES latin1;SELECT CHARSET(_binary'a'),COLLATION(_binary'a'),COERCIBILITY(_binary'a')", "CHARSET(_binary'a')\tCOLLATION(_binary'a')\tCOERCIBILITY(_binary'a')\nbinary\tbinary\t4\n"),
+]
+
+
+def verify(client, _writer):
+    arguments["verify_cases"](client, cases)
+
+
+if __name__ == "__main__":
+    arguments["oracle"]["run"](verify)
