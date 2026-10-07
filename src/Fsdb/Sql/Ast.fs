@@ -370,8 +370,13 @@ and ColumnDef =
 
 and IndexKind =
     | BTree
-    | FullTextIndex
+    | FullTextIndex of parserName: string option
     | SpatialIndex
+
+    member this.IsFullText =
+        match this with
+        | FullTextIndex _ -> true
+        | _ -> false
 
 and MatchMode =
     | NaturalLanguage

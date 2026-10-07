@@ -1948,7 +1948,9 @@ let private userVariableTarget: Parser<UserVariableRef, unit> =
 let private variableAtom: Parser<Expr, unit> =
     let systemVariable =
         pstring "@@"
-        >>. ((attempt (pstringCI "GLOBAL." >>% Some "GLOBAL")) <|> (attempt (pstringCI "SESSION." >>% Some "SESSION")) <|> preturn None)
+        >>. opt (attempt ((pstringCI "GLOBAL" <|> pstringCI "SESSION")
+                          |> withSkippedString (fun spelling _ -> spelling)
+                          .>> pchar '.'))
         .>>. (many1Satisfy isIdentChar .>> ws)
         |>> SystemVariable
 
@@ -2555,7 +2557,7 @@ let private indexedColumn: Parser<IndexColumn, unit> =
 /// doesn't swallow an ordinary column definition.
 let private indexPrefix: Parser<bool * IndexKind, unit> =
     (keyword "UNIQUE" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (true, BTree))
-    <|> (keyword "FULLTEXT" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, FullTextIndex))
+    <|> (keyword "FULLTEXT" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, FullTextIndex None))
     <|> (keyword "SPATIAL" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, SpatialIndex))
     <|> ((keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
 
@@ -2570,20 +2572,31 @@ let private indexAlgorithm: Parser<IndexKind, unit> =
     (keyword "RTREE" >>% SpatialIndex)
     <|> ((keyword "BTREE" <|> keyword "HASH") >>% BTree)
 
+let private indexOptions (kind: IndexKind) =
+    let parser =
+        if kind.IsFullText then
+            opt (keyword "WITH" >>. keyword "PARSER" >>. identifier)
+        else
+            preturn None
+
+    parser .>>. indexVisibility
+    |>> fun (parser, visible) ->
+        (if kind.IsFullText then FullTextIndex parser else kind), visible
+
 let private indexItem: Parser<IndexDef, unit> =
     (indexPrefix .>>. opt identifier
      .>>. opt (keyword "USING" >>. indexAlgorithm)
      .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ","))
-     // `USING BTREE|HASH` — parsed and discarded, every index here is the
-     // same structure either way.
-     .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH"))
-     .>>. indexVisibility)
-    |>> fun (((((unique, kind), name), algorithm), cols), visible) ->
-        { Name = name |> Option.defaultValue (List.head cols).Name
-          KeyColumns = cols
-          Unique = unique
-          Visible = visible
-          Kind = if algorithm = Some SpatialIndex then SpatialIndex else kind }
+     .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH")))
+    >>= fun ((((unique, kind), name), algorithm), cols) ->
+        let kind = if algorithm = Some SpatialIndex then SpatialIndex else kind
+        indexOptions kind
+        |>> fun (kind, visible) ->
+            { Name = name |> Option.defaultValue (List.head cols).Name
+              KeyColumns = cols
+              Unique = unique
+              Visible = visible
+              Kind = kind }
 
 let private namedUniqueConstraint: Parser<IndexDef, unit> =
     (keyword "CONSTRAINT"
@@ -2923,7 +2936,7 @@ let private createTableLike: Parser<Statement, unit> =
 let private createIndexStmt: Parser<Statement, unit> =
     (keyword "CREATE"
      >>. ((keyword "UNIQUE" >>% (true, BTree))
-          <|> (keyword "FULLTEXT" >>% (false, FullTextIndex))
+          <|> (keyword "FULLTEXT" >>% (false, FullTextIndex None))
           <|> (keyword "SPATIAL" >>% (false, SpatialIndex))
           <|> preturn (false, BTree))
      .>> keyword "INDEX"
@@ -2931,11 +2944,11 @@ let private createIndexStmt: Parser<Statement, unit> =
      .>>. opt (keyword "USING" >>. indexAlgorithm)
      .>> keyword "ON"
      .>>. qualifiedTableName
-     .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ","))
-     .>>. indexVisibility)
-    |>> fun ((((((unique, kind), name), algorithm), table), cols), visible) ->
+     .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ",")))
+    >>= fun (((((unique, kind), name), algorithm), table), cols) ->
         let kind = if algorithm = Some SpatialIndex then SpatialIndex else kind
-        CreateIndex(name, table, cols, unique, kind, visible)
+        indexOptions kind
+        |>> fun (kind, visible) -> CreateIndex(name, table, cols, unique, kind, visible)
 
 let private dropIndexStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "INDEX"

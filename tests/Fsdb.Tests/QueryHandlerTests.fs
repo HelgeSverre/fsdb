@@ -6930,6 +6930,25 @@ let tests =
                   | ResultSet(_, [ [ Some "wait_timeout"; Some "123" ] ]) -> ()
                   | other -> failtestf "expected the global override, got %A" other)
 
+          testCase "ngram token size has GLOBAL read-only plugin scope"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for scope in [ "GLOBAL"; "gLoBaL"; "global" ] do
+                  let expression = "@@" + scope + ".ngram_token_size"
+                  Expect.equal
+                      (handle session ("SELECT " + expression) |> snd)
+                      (ResultSet([ expression ], [ [ Some "2" ] ]))
+                      "system variable labels retain their source spelling"
+              Expect.equal
+                  (handle session "SELECT @@SESSION.ngram_token_size" |> snd)
+                  (Err(1238, "Variable 'ngram_token_size' is a GLOBAL variable"))
+                  "session read"
+              for scope in [ "SESSION"; "GLOBAL" ] do
+                  Expect.equal
+                      (handle session (sprintf "SET %s ngram_token_size=3" scope) |> snd)
+                      (Err(1238, "Variable 'ngram_token_size' is a read only variable"))
+                      "read-only plugin setting precedes assignment scope"
+
           testCase "full-text sizing variables expose MySQL defaults and remain read only"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

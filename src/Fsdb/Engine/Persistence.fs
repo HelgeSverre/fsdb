@@ -713,15 +713,24 @@ let private encodeIndexDef (format: SnapshotFormat) (w: Writer) (ix: IndexDef) :
         w.WriteByte(
             match ix.Kind with
             | BTree -> 0uy
-            | FullTextIndex -> 1uy
+            | FullTextIndex None -> 1uy
+            | FullTextIndex(Some _) -> 3uy
             | SpatialIndex -> 2uy
         )
+
+        match ix.Kind with
+        | FullTextIndex(Some parser) -> writeStr w parser
+        | _ -> ()
     else
+        match ix.Kind with
+        | FullTextIndex(Some _) -> invalidArg "format" "Named full-text parsers require tagged index definitions"
+        | _ -> ()
+
         let encodedName = if ix.Kind = SpatialIndex then spatialIndexNamePrefix + ix.Name else ix.Name
         writeStr w (if ix.Visible then encodedName else invisibleIndexNamePrefix + encodedName)
         ix.KeyColumns |> List.map (encodeIndexColumn format) |> writeStrList w
         writeBool w ix.Unique
-        writeBool w (ix.Kind = FullTextIndex)
+        writeBool w (ix.Kind.IsFullText)
 
 let private decodeIndexDef (format: SnapshotFormat) (columnNames: Set<string>) (r: #IReader) : IndexDef =
     if format.TaggedIndexColumns then
@@ -733,8 +742,9 @@ let private decodeIndexDef (format: SnapshotFormat) (columnNames: Set<string>) (
         let kind =
             match r.ReadByte() with
             | 0uy -> BTree
-            | 1uy -> FullTextIndex
+            | 1uy -> FullTextIndex None
             | 2uy -> SpatialIndex
+            | 3uy -> FullTextIndex(Some(readStr r))
             | _ -> failwith "Persistence: invalid index kind"
 
         { Name = name
@@ -758,7 +768,7 @@ let private decodeIndexDef (format: SnapshotFormat) (columnNames: Set<string>) (
           KeyColumns = readStrList r |> List.map (decodeIndexColumn format columnNames)
           Unique = readBool r
           Visible = visible
-          Kind = (if readBool r then FullTextIndex else kind) }
+          Kind = (if readBool r then FullTextIndex None else kind) }
 
 // Qualifiers reuse the legacy table-name field so older snapshots remain readable.
 let private qualifiedForeignKeyPrefix = "\u0000Q:"

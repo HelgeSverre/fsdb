@@ -269,6 +269,7 @@ let private globalScopeOnlyVariables =
           "ft_query_expansion_limit"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
+          "ngram_token_size"
           "mandatory_roles"
           "protocol_compression_algorithms"
           "secure_file_priv" ]
@@ -278,6 +279,7 @@ let private readOnlySystemVariables =
         [ "ft_query_expansion_limit"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
+          "ngram_token_size"
           "secure_file_priv" ]
 
 let private globalOnlyVariables =
@@ -352,6 +354,7 @@ let private numericSystemVariables =
           "innodb_buffer_pool_size"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
+          "ngram_token_size"
           "local_infile"
           "lower_case_table_names"
           "max_allowed_packet"
@@ -1754,7 +1757,8 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
                 sprintf "Variable 'protocol_compression_algorithms' can't be set to the value of '%s'" value
             )
         )
-    | SetVarAction(name, _, true) when readOnlySystemVariables.Contains name ->
+    | SetVarAction(name, _, isGlobal)
+        when readOnlySystemVariables.Contains name && (isGlobal || name = "ngram_token_size") ->
         Error(Err(1238, sprintf "Variable '%s' is a read only variable" name))
     | SetVarAction("session_track_system_variables", Some value, _)
         when Limits.trackedSystemVariablesExceedLimit value ->

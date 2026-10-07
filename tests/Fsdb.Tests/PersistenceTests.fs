@@ -1828,6 +1828,32 @@ let tests =
                   Expect.stringContains ddl "COMMENT 'durable'" "snapshotted event metadata recovered"
               | other -> failtestf "expected snapshotted event metadata, got %A" other
 
+          testCase "ngram parser and postings survive WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              for sql in
+                  [ "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram)"
+                    "INSERT INTO docs VALUES(1,'生日快乐'),(2,'生日')" ] do
+                  match handle session sql |> snd with
+                  | Affected _ -> ()
+                  | other -> failtestf "expected successful %s, got %A" sql other
+              let verify recovered =
+                  let session = Fsdb.Session.create 2 recovered
+                  match handle session "SELECT id FROM docs WHERE MATCH(body) AGAINST('生日快乐' IN BOOLEAN MODE) ORDER BY id" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "recovered phrase postings"
+                  | other -> failtestf "expected recovered matches, got %A" other
+                  match handle session "SHOW CREATE TABLE docs" |> snd with
+                  | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                      Expect.stringContains ddl "WITH PARSER `ngram`" "recovered parser identity"
+                  | other -> failtestf "expected recovered DDL, got %A" other
+              let recovered = load dir
+              verify recovered
+              snapshotNow dir recovered
+              load dir |> verify
+
           testCase "scheduled events execute after WAL recovery"
           <| fun _ ->
               let dir = tempDataDir ()

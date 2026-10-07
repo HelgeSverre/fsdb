@@ -40,7 +40,126 @@ let private ids (result: QueryResult) : string list =
 let tests =
     testList
         "fulltext executor"
-        [ testCase "natural-language WHERE keeps matching rows and orders by relevance implicitly"
+        [ testCase "ngram fulltext indexes distinguish natural unions and boolean phrases"
+          <| fun _ ->
+              let store = create ()
+              Expect.equal
+                  (run store "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram)")
+                  (Affected 0UL)
+                  "ngram index creation"
+              run store "INSERT INTO docs VALUES (1,'生日快乐'),(2,'生日'),(3,'快乐'),(4,'生 日'),(5,'生日 开心'),(6,'abc'),(7,'ab bc'),(8,'a,b'),(9,'dbms'),(10,'mysql'),(11,'日本語'),(12,'日本 語'),(13,'한국어'),(14,'한국 어'),(15,'🙂生日'),(16,'生🙂日'),(17,'生'),(18,''),(19,NULL),(20,'生日生日'),(21,'生日!快乐'),(22,'日快')"
+              |> ignore
+              for term, mode, expected in
+                  [ "生日快乐", "IN NATURAL LANGUAGE MODE", [ "1"; "2"; "3"; "5"; "15"; "20"; "21"; "22" ]
+                    "生日快乐", "IN BOOLEAN MODE", [ "1" ]
+                    "生", "IN NATURAL LANGUAGE MODE", []
+                    "生*", "IN BOOLEAN MODE", [ "1"; "2"; "5"; "15"; "16"; "20"; "21" ]
+                    "生日快乐*", "IN BOOLEAN MODE", [ "1" ]
+                    "\"生日 快乐\"", "IN BOOLEAN MODE", [ "21" ]
+                    "+生日 +快乐", "IN BOOLEAN MODE", [ "1"; "21" ]
+                    "生日 -快乐", "IN BOOLEAN MODE", [ "2"; "5"; "15"; "20" ]
+                    "日本語", "IN NATURAL LANGUAGE MODE", [ "11"; "12" ]
+                    "日本語", "IN BOOLEAN MODE", [ "11" ]
+                    "한국어", "IN NATURAL LANGUAGE MODE", [ "13"; "14" ]
+                    "한국어", "IN BOOLEAN MODE", [ "13" ]
+                    "abc", "IN BOOLEAN MODE", [ "6"; "7" ]
+                    "ab", "IN NATURAL LANGUAGE MODE", []
+                    "🙂生", "IN NATURAL LANGUAGE MODE", [ "15" ]
+                    "🙂生", "IN BOOLEAN MODE", [] ] do
+                  let sql = sprintf "SELECT id FROM docs WHERE MATCH(body) AGAINST('%s' %s) ORDER BY id" term mode
+                  Expect.equal (ids (run store sql)) expected sql
+              match run store "SELECT MATCH(body) AGAINST('生日快乐') FROM docs WHERE id=1" with
+              | ResultSet(_, [ [ Some score ] ]) ->
+                  Expect.isTrue (abs (float score - 2.1516475677490234) < 0.000001) "ngram relevance"
+              | other -> failtestf "expected ngram relevance, got %A" other
+
+          testCase "ngram phrases retain stopped positions and split quoted words"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE ngram_boundaries(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO ngram_boundaries VALUES(1,'cdabef'),(2,'cd ab ef'),(3,'cdef'),(4,'cd xx ef'),(5,'cdaef'),(6,'ab生日'),(7,'生日ab快乐'),(8,'生日xx快乐'),(9,'生日 快乐'),(10,'生日　快乐'),(11,'生日，快乐'),(12,'生😀日'),(13,'𠮷野家'),(14,'b,c'),(15,'b_c'),(16,'b''c'),(17,'b-c'),(18,'b.c'),(19,'bc'),(20,'áb'),(21,'生日a快乐'),(22,'生日abc快乐')" |> ignore
+              for sql, expected in
+                  [
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('cdabef' IN NATURAL LANGUAGE MODE) ORDER BY id", [ "1"; "2"; "3"; "4"; "5"; "20" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('\"cdabef\"' IN NATURAL LANGUAGE MODE) ORDER BY id", [ "1"; "2"; "3"; "4"; "5"; "20" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('cdabef' IN BOOLEAN MODE) ORDER BY id", [ "1" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('\"cdabef\"' IN BOOLEAN MODE) ORDER BY id", [ "1" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('\"cd ef\"' IN BOOLEAN MODE) ORDER BY id", [  ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('cdef' IN BOOLEAN MODE) ORDER BY id", [ "3" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('生日a快乐' IN BOOLEAN MODE) ORDER BY id", [ "21" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('\"生日 快乐\"' IN BOOLEAN MODE) ORDER BY id", [ "9" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('\"生日，快乐\"' IN BOOLEAN MODE) ORDER BY id", [ "9" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('\"生日 快乐\" @2' IN BOOLEAN MODE) ORDER BY id", [ "9" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('\"生日 快乐\" @3' IN BOOLEAN MODE) ORDER BY id", [ "9" ]
+                    "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('+\"生日 快乐\"' IN BOOLEAN MODE) ORDER BY id", [ "9" ]
+                  ] do
+                  Expect.equal (ids (run store sql)) expected sql
+
+          testCase "ngram quoted phrases retain explicit short words"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO docs VALUES(1,'生日 快乐'),(2,'生日 生 快乐'),(3,'生日 x 快乐'),(4,'生日 a 快乐')" |> ignore
+              for term, expected in
+                  [ "\"生日 快乐\"", [ "1"; "2"; "3"; "4" ]
+                    "\"生 生日\"", []
+                    "\"生日 生\"", []
+                    "\"生日 生 快乐\"", []
+                    "\"生日 x 快乐\"", []
+                    "\"a 生日\"", [ "1"; "2"; "3"; "4" ] ] do
+                  let sql = sprintf "SELECT id FROM docs WHERE MATCH(body) AGAINST('%s' IN BOOLEAN MODE) ORDER BY id" term
+                  Expect.equal (ids (run store sql)) expected sql
+
+          testCase "fulltext exact phrases stay within indexed columns"
+          <| fun _ ->
+              for parser, first, second in [ " WITH PARSER ngram", "生日", "快乐"; "", "mysql", "security" ] do
+                  let store = create ()
+                  run store ("CREATE TABLE docs(id INT PRIMARY KEY,a TEXT,b TEXT,FULLTEXT(a,b)" + parser + ")") |> ignore
+                  run store (sprintf "INSERT INTO docs VALUES(1,'%s','%s'),(2,'%s %s',''),(3,'%s%s',NULL),(5,'other','%s %s')" first second first second first second first second) |> ignore
+                  let phrase = sprintf "\"%s %s\"" first second
+                  let query suffix = sprintf "SELECT id FROM docs WHERE MATCH(a,b) AGAINST('%s%s' IN BOOLEAN MODE) ORDER BY id" phrase suffix
+                  Expect.equal (ids (run store (query ""))) [ "2"; "5" ] "exact phrase respects fields"
+                  if parser = "" then
+                      Expect.equal (ids (run store (query " @100"))) [ "1"; "2"; "5" ] "word proximity can cross fields"
+
+          testCase "ngram indexes maintain postings through DDL and rollback"
+          <| fun _ ->
+              for definition in
+                  [ [ "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram)" ]
+                    [ "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT)"
+                      "CREATE FULLTEXT INDEX ft ON docs(body) WITH PARSER ngram" ]
+                    [ "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT)"
+                      "ALTER TABLE docs ADD FULLTEXT KEY ft(body) WITH PARSER ngram" ] ] do
+                  let mutable session = Fsdb.Session.create 1 (create ())
+                  let execute sql =
+                      let next, result = Fsdb.QueryHandler.handle session sql
+                      session <- next
+                      result
+                  for ddl in definition do Expect.equal (execute ddl) (Affected 0UL) ddl
+                  Expect.equal (execute "INSERT INTO docs VALUES(1,'生日快乐'),(2,'生日')") (Affected 2UL) "insert"
+                  Expect.equal (execute "UPDATE docs SET body='中文检索' WHERE id=1") (Affected 1UL) "update"
+                  Expect.equal (execute "DELETE FROM docs WHERE id=2") (Affected 1UL) "delete"
+                  Expect.equal (execute "INSERT INTO docs VALUES(3,'生日')") (Affected 1UL) "insert after removal"
+                  for sql in [ "START TRANSACTION"; "UPDATE docs SET body='中文' WHERE id=3"; "ROLLBACK" ] do
+                      execute sql |> ignore
+                  let query = "SELECT id FROM docs WHERE MATCH(body) AGAINST('生日') ORDER BY id"
+                  Expect.equal (ids (execute query)) [ "3" ] "rollback preserves postings"
+                  Expect.equal (execute "CREATE TABLE copied LIKE docs") (Affected 0UL) "copy definition"
+                  Expect.equal (execute "INSERT INTO copied SELECT * FROM docs") (Affected 2UL) "copy rows"
+                  Expect.equal (ids (execute (query.Replace("docs", "copied")))) [ "3" ] "copied parser"
+                  match execute "SHOW CREATE TABLE docs" with
+                  | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                      Expect.stringContains ddl "/*!50100 WITH PARSER `ngram` */" "parser survives introspection"
+                  | other -> failtestf "expected table DDL, got %A" other
+                  Expect.equal
+                      (execute "CREATE FULLTEXT INDEX missing ON docs(body) WITH PARSER missing_parser")
+                      (Err(1128, "Function 'missing_parser' is not defined"))
+                      "unknown parser"
+                  match execute "CREATE INDEX ordinary ON docs(body(10)) WITH PARSER ngram" with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected non-fulltext syntax rejection, got %A" other
+
+          testCase "natural-language WHERE keeps matching rows and orders by relevance implicitly"
           <| fun _ ->
               let store = setup ()
 

@@ -3709,12 +3709,12 @@ let tests =
 
               match Fsdb.Parser.parse "CREATE TABLE t (a TEXT, FULLTEXT KEY ft (a), KEY plain (a))" with
               | Ok(CreateTable { Indexes = [ ft; plain ] }) ->
-                  Expect.equal ft.Kind FullTextIndex "FULLTEXT KEY kind"
+                  Expect.equal ft.Kind (FullTextIndex None) "FULLTEXT KEY kind"
                   Expect.equal plain.Kind BTree "plain KEY kind"
               | other -> failtestf "unexpected parse: %A" other
 
               match Fsdb.Parser.parse "CREATE FULLTEXT INDEX ft ON t (a)" with
-              | Ok(CreateIndex("ft", "t", [ { Name = "a" } ], false, FullTextIndex, true)) -> ()
+              | Ok(CreateIndex("ft", "t", [ { Name = "a" } ], false, FullTextIndex None, true)) -> ()
               | other -> failtestf "unexpected parse: %A" other
 
               Expect.isError (Fsdb.Parser.parse "SELECT MATCH(body) partial") "MATCH requires AGAINST"

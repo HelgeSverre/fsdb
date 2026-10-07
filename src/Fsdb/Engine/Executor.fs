@@ -1885,7 +1885,7 @@ let rec internal exprLabel (expr: Expr) : string =
         sprintf "match (%s) against (%s)" (cols |> List.map columnLabel |> String.concat ",") (exprLabel q)
     | Placeholder _ -> "?"
     | UserVariable variable -> variable.Sql
-    | SystemVariable(scope, variable) -> "@@" + (scope |> Option.map (fun value -> value.ToLowerInvariant() + ".") |> Option.defaultValue "") + variable
+    | SystemVariable(scope, variable) -> "@@" + (scope |> Option.map (fun value -> value + ".") |> Option.defaultValue "") + variable
     | AssignUserVariable(variable, value) -> variable.Sql + ":=" + exprLabel value
     | Col name -> name
     | QualifiedCol(_, col) -> col
@@ -15120,7 +15120,7 @@ and private fullTextScoresForTable
     =
     let indexColumns =
         table.Indexes
-        |> List.filter (fun index -> index.Kind = FullTextIndex && index.Visible)
+        |> List.filter (fun index -> index.Kind.IsFullText && index.Visible)
         |> List.map (fun index ->
             index,
             (index.Columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList))
@@ -15268,7 +15268,7 @@ and private fullTextIndexMatches (table: Table) (columns: MatchColumn list) =
 
     table.Indexes
     |> List.exists (fun index ->
-        index.Kind = FullTextIndex
+        index.Kind.IsFullText
         && (index.Columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList) = names)
 
 and private fullTextOwnerOf (sources: FullTextPhysicalSource list) node =
@@ -18764,7 +18764,7 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
     let requiresSharedLock =
         hasOperation (function
             | AddColumn({ AutoIncrement = true }, _)
-            | AddIndex { Kind = FullTextIndex } -> true
+            | AddIndex { Kind = FullTextIndex _ } -> true
             | AddForeignKey _ when foreignKeyChecks -> true
             | _ -> false)
 
@@ -18800,7 +18800,7 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
             Err(1846, "LOCK=NONE is not supported. Reason: Cannot change column type INPLACE. Try LOCK=SHARED.")
         elif hasOperation (function AddColumn({ AutoIncrement = true }, _) -> true | _ -> false) then
             Err(1846, "LOCK=NONE is not supported. Reason: Adding an auto-increment column requires a lock. Try LOCK=SHARED.")
-        elif hasOperation (function AddIndex { Kind = FullTextIndex } -> true | _ -> false) then
+        elif hasOperation (function AddIndex { Kind = FullTextIndex _ } -> true | _ -> false) then
             Err(1846, "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED.")
         elif foreignKeyChecks && hasOperation (function AddForeignKey _ -> true | _ -> false) then
             Err(1846, "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED.")

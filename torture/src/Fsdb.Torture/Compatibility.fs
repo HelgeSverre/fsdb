@@ -2659,6 +2659,64 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS aggregate_warning_input" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private ngramFullText =
+        { Name = "ngram-fulltext"
+          Setup =
+            [| "CREATE TABLE ngram_docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram)"
+               "INSERT INTO ngram_docs VALUES (1,'生日快乐'),(2,'生日'),(3,'快乐'),(4,'生 日'),(5,'生日 开心'),(6,'abc'),(7,'ab bc'),(8,'a,b'),(9,'dbms'),(10,'mysql'),(11,'日本語'),(12,'日本 語'),(13,'한국어'),(14,'한국 어'),(15,'🙂生日'),(16,'生🙂日'),(17,'生'),(18,''),(19,NULL),(20,'生日生日'),(21,'生日!快乐'),(22,'日快')"
+               "CREATE TABLE ngram_boundaries(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram)"
+               "INSERT INTO ngram_boundaries VALUES(1,'cdabef'),(2,'cd ab ef'),(3,'cdef'),(4,'cd xx ef'),(5,'cdaef'),(6,'ab生日'),(7,'生日ab快乐'),(8,'生日xx快乐'),(9,'生日 快乐'),(10,'生日　快乐'),(11,'生日，快乐'),(12,'生😀日'),(13,'𠮷野家'),(14,'b,c'),(15,'b_c'),(16,'b''c'),(17,'b-c'),(18,'b.c'),(19,'bc'),(20,'áb'),(21,'生日a快乐'),(22,'生日abc快乐'),(23,'bé'),(24,'生日 生 快乐'),(25,'生日 x 快乐'),(26,'生日 a 快乐')"
+               "CREATE TABLE ngram_columns(id INT PRIMARY KEY,a TEXT,b TEXT,FULLTEXT(a,b) WITH PARSER ngram)"
+               "INSERT INTO ngram_columns VALUES(1,'生日','快乐'),(2,'生日 快乐',''),(3,'生日快乐',NULL),(4,'生','日'),(5,'日','生日 快乐')" |]
+          Steps =
+            [| for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE"; "WITH QUERY EXPANSION" ] |> List.indexed do
+                   let modeIndex, modeSql = mode
+                   for termIndex, term in
+                       [ "生日快乐"; "生日"; "生"; "生*"; "生日*"; "生日快乐*"; "\"生日快乐\""; "\"生日 快乐\""; "+生日 +快乐"; "生日 -快乐"; "日本語"; "한국어"; "abc"; "ab"; "bc"; "a,b"; "dbms"; "🙂生"; "生🙂日" ] |> List.indexed do
+                       let name = sprintf "search-%d-%d" modeIndex termIndex
+                       let sql = sprintf "SELECT id FROM ngram_docs WHERE MATCH(body) AGAINST('%s' %s) ORDER BY id" term modeSql
+                       Contract.query (name + "-text") sql
+                       Contract.preparedQuery (name + "-binary") sql [||]
+               for modeIndex, modeSql in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] |> List.indexed do
+                   for termIndex, term in
+                       [ "cdabef"; "\"cdabef\""; "\"cd ef\""; "cdef"; "生日a快乐"; "生日快乐"; "\"生日 快乐\""; "𠮷野"; "𠮷*"; "áb"; "áb*"; "b,c"; "b_c"; "b'c"; "b-c"; "b.c"; "生日　快乐"; "生日，快乐"; "\"生日，快乐\""; "\"生日 快乐\" @2"; "\"生日 快乐\" @3"; "+\"生日 快乐\""; "+生日 -快乐"; "+(生日 快乐)"; "ab"; "be"; "\"生日 快乐\" @100"; "\"生日 生 快乐\""; "\"生日 x 快乐\""; "\"生 生日\""; "\"生日 生\""; "\"a 生日\"" ] |> List.indexed do
+                       let name = sprintf "boundary-%d-%d" modeIndex termIndex
+                       let sql = sprintf "SELECT id FROM ngram_boundaries WHERE MATCH(body) AGAINST('%s' %s) ORDER BY id" (term.Replace("'", "''")) modeSql
+                       Contract.query (name + "-text") sql
+                       Contract.preparedQuery (name + "-binary") sql [||]
+               for modeIndex, modeSql in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] |> List.indexed do
+                   for termIndex, term in [ "生日快乐"; "\"生日 快乐\""; "生日"; "+生日 +快乐" ] |> List.indexed do
+                       let name = sprintf "columns-%d-%d" modeIndex termIndex
+                       let sql = sprintf "SELECT id FROM ngram_columns WHERE MATCH(a,b) AGAINST('%s' %s) ORDER BY id" term modeSql
+                       Contract.query (name + "-text") sql
+                       Contract.preparedQuery (name + "-binary") sql [||]
+               Contract.preparedQuery "parameter-query" "SELECT id FROM ngram_docs WHERE MATCH(body) AGAINST(? IN BOOLEAN MODE) ORDER BY id" [| box "生日快乐" |]
+               Contract.query "ngram-size" "SELECT @@ngram_token_size,@@GLOBAL.ngram_token_size"
+               Contract.query "session-size" "SELECT @@SESSION.ngram_token_size" |> Contract.fails 1238 "HY000"
+               Contract.execute "session-size-write" "SET SESSION ngram_token_size=3" |> Contract.fails 1238 "HY000"
+               Contract.execute "global-size-write" "SET GLOBAL ngram_token_size=3" |> Contract.fails 1238 "HY000"
+               Contract.execute "unknown-parser" "CREATE FULLTEXT INDEX missing ON ngram_docs(body) WITH PARSER missing_parser" |> Contract.fails 1128 "HY000"
+               Contract.execute "ordinary-parser" "CREATE INDEX ordinary ON ngram_docs(body(10)) WITH PARSER ngram" |> Contract.fails 1064 "42000"
+               Contract.execute "update" "UPDATE ngram_docs SET body='中文检索' WHERE id=1"
+               Contract.execute "delete" "DELETE FROM ngram_docs WHERE id=2"
+               Contract.execute "insert" "INSERT INTO ngram_docs VALUES(23,'生日')"
+               Contract.execute "begin" "START TRANSACTION"
+               Contract.execute "uncommitted-update" "UPDATE ngram_docs SET body='生日' WHERE id=3"
+               Contract.execute "rollback" "ROLLBACK"
+               Contract.query "mutated-postings" "SELECT id FROM ngram_docs WHERE MATCH(body) AGAINST('生日') ORDER BY id"
+               Contract.execute "copy-definition" "CREATE TABLE ngram_copied LIKE ngram_docs"
+               Contract.execute "copy-rows" "INSERT INTO ngram_copied SELECT * FROM ngram_docs"
+               Contract.query "copied-postings" "SELECT id FROM ngram_copied WHERE MATCH(body) AGAINST('生日') ORDER BY id"
+               Contract.execute "create-table" "CREATE TABLE ngram_created(id INT PRIMARY KEY, body TEXT)"
+               Contract.execute "create-index" "CREATE FULLTEXT INDEX ft ON ngram_created(body) WITH PARSER ngram"
+               Contract.execute "alter-table" "CREATE TABLE ngram_altered(id INT PRIMARY KEY, body TEXT)"
+               Contract.execute "alter-index" "ALTER TABLE ngram_altered ADD FULLTEXT KEY ft(body) WITH PARSER ngram"
+               for table in [ "ngram_created"; "ngram_altered" ] do
+                   Contract.execute (table + "-insert") (sprintf "INSERT INTO %s VALUES(1,'生日快乐'),(2,'生日')" table)
+                   Contract.query (table + "-phrase") (sprintf "SELECT id FROM %s WHERE MATCH(body) AGAINST('生日快乐' IN BOOLEAN MODE) ORDER BY id" table) |]
+          Cleanup = [| "DROP TABLE IF EXISTS ngram_docs,ngram_boundaries,ngram_columns,ngram_copied,ngram_created,ngram_altered" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private storedFunctionSet =
         { Name = "stored-function-set"
           Setup =
@@ -2978,6 +3036,7 @@ module ContractCatalog =
            offsetRangeAggregates
            volatileWindowInputs
            storedFunctionSet
+           ngramFullText
            temporalNumericConversion
            roundingPrecisionDescriptors
            integralRoundingDescriptors

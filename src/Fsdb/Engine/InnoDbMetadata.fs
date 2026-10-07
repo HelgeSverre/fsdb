@@ -613,7 +613,7 @@ let private indexFieldCount (index: IndexEntry) =
 let private indexType (index: IndexEntry) =
     if index.GeneratedCluster then 1
     elif index.Primary then 3
-    elif index.Kind = FullTextIndex then 32
+    elif index.Kind.IsFullText then 32
     elif index.Unique then 2
     else 0
 

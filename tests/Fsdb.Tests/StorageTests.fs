@@ -216,7 +216,7 @@ let tests =
 
                     Expect.equal (createTable store defaultDatabase "bounded_key" keyColumns [ boundedKey ] [] None None) (Ok()) "prefixes bound the key size"
 
-                    let fullTextKey = { wideKey with Kind = FullTextIndex }
+                    let fullTextKey = { wideKey with Kind = FullTextIndex None }
 
                     Expect.equal
                         (createTable store defaultDatabase "wide_fulltext_key" keyColumns [ fullTextKey ] [] None None)

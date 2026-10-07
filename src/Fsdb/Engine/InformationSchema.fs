@@ -558,7 +558,7 @@ let private indexVisibilityText (index: IndexDef) =
 
 let private indexTypeText = function
     | BTree -> "BTREE"
-    | FullTextIndex -> "FULLTEXT"
+    | FullTextIndex _ -> "FULLTEXT"
     | SpatialIndex -> "SPATIAL"
 
 /// One row per `(index, column)` pair.
@@ -587,7 +587,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vs ix.Name
                    vi (i + 1)
                    colName
-                   (if ix.Kind = FullTextIndex then VNull else vs (indexDirectionText keyColumn))
+                   (if ix.Kind.IsFullText then VNull else vs (indexDirectionText keyColumn))
                    vi 0
                    (effectivePrefixLength t keyColumn |> Option.map vi |> Option.defaultValue VNull)
                    VNull
@@ -3819,11 +3819,16 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
         |> List.map (fun ix ->
             let prefix =
                 if ix.Unique then "UNIQUE "
-                elif ix.Kind = FullTextIndex then "FULLTEXT "
+                elif ix.Kind.IsFullText then "FULLTEXT "
                 elif ix.Kind = SpatialIndex then "SPATIAL "
                 else ""
 
-            sprintf "%sKEY %s (%s)%s" prefix (backtick ix.Name) (indexColumnsText ix) (if ix.Visible then "" else " /*!80000 INVISIBLE */"))
+            let parser =
+                match ix.Kind with
+                | FullTextIndex(Some name) -> sprintf " /*!50100 WITH PARSER %s */ " (backtick name)
+                | _ -> ""
+
+            sprintf "%sKEY %s (%s)%s%s" prefix (backtick ix.Name) (indexColumnsText ix) parser (if ix.Visible then "" else " /*!80000 INVISIBLE */"))
 
     // The table's own declared defaults (server defaults when unset) —
     // MySQL renders these in the table options even when a column carries
@@ -3979,7 +3984,7 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       Some ix.Name
                       Some(string (i + 1))
                       (if expression.IsSome then None else Some keyColumn.Name)
-                      (if ix.Kind = FullTextIndex then None else Some(indexDirectionText keyColumn))
+                      (if ix.Kind.IsFullText then None else Some(indexDirectionText keyColumn))
                       Some "0"
                       (effectivePrefixLength t keyColumn |> Option.map string)
                       None

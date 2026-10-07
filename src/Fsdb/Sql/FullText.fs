@@ -1,6 +1,7 @@
 /// Full-text scoring for `MATCH (cols) AGAINST (...)` — natural language,
-/// boolean, and query-expansion modes over an immutable inverted index (one
-/// concatenated document per row).
+/// boolean, and query-expansion modes over an immutable inverted index.
+/// Documents combine row-wide term counts but retain column boundaries for
+/// exact phrases.
 ///
 /// Relevance follows InnoDB's documented formula, oracle-verified against
 /// MySQL 8.4.11: `rank = Σ_term TF × IDF²` with `IDF = log10(N / df)`.
@@ -13,9 +14,7 @@ module Fsdb.FullText
 open System
 open Fsdb.Collation
 
-/// `@@innodb_ft_min_token_size`'s default — shorter tokens are never
-/// indexed or searched (fixed, not a knob; same stance as the other
-/// `innodb_ft_*` tunables this module hardcodes).
+/// Minimum indexed word length; ngram indexes use their configured token size.
 let minTokenLength = 3
 
 /// `@@innodb_ft_max_token_size`'s default.
@@ -24,6 +23,17 @@ let maxTokenLength = 84
 /// `@@ft_query_expansion_limit`'s default: how many top-ranked documents
 /// seed the second pass of WITH QUERY EXPANSION.
 let private queryExpansionLimit = 20
+
+let ngramTokenSize = 2
+
+type Tokenizer =
+    | Words
+    | Ngrams of size: int
+
+let tryTokenizer = function
+    | None -> Some Words
+    | Some name when String.Equals(name, "ngram", StringComparison.OrdinalIgnoreCase) -> Some(Ngrams ngramTokenSize)
+    | Some _ -> None
 
 /// InnoDB's default stopword list, verbatim from a live 8.4.11's
 /// `INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD` (where "the" really
@@ -70,6 +80,22 @@ let private rawTokens (text: string) : string[] =
     flush ()
     tokens.ToArray()
 
+let private ngrams size (text: string) =
+    let boundary (rune: Text.Rune) =
+        rune.IsAscii && not (Text.Rune.IsLetterOrDigit rune || rune.Value = int '_')
+
+    text.EnumerateRunes()
+    |> Seq.toArray
+    |> Array.windowed size
+    |> Array.choose (fun runes ->
+        if Array.exists boundary runes then None
+        else runes |> Array.map string |> String.concat "" |> Some)
+
+let private rawTokensWith tokenizer text =
+    match tokenizer with
+    | Words -> rawTokens text
+    | Ngrams size -> ngrams size text
+
 let tokenize (text: string) : string[] = rawTokens text |> Array.map _.ToLowerInvariant()
 
 // ---------------------------------------------------------------------------
@@ -82,32 +108,45 @@ type private Token =
 
 type Index<'id when 'id: comparison> =
     private
-        { Documents: Map<'id, Token[]>
+        { Documents: Map<'id, Token[][]>
           Postings: Map<string, Map<'id, int>>
           PrefixPostings: Map<string, Map<'id, int>>
-          Collation: Collation }
+          Collation: Collation
+          Tokenizer: Tokenizer }
 
 type Corpus =
     private
         { Order: int[]
           Index: Index<int> }
 
-let private tokensWith (collation: Collation) (text: string) =
-    let token text =
-        { Text = text
-          Key = collation.KeyOf text }
+let private tokenWith (collation: Collation) text =
+    { Text = text
+      Key = collation.KeyOf text }
 
-    rawTokens text |> Array.map token
+let private tokensWith tokenizer collation text =
+    rawTokensWith tokenizer text |> Array.map (tokenWith collation)
+
+let private runeLength (text: string) = text.EnumerateRunes() |> Seq.length
+
+let private containsNgramStopword (text: string) =
+    let lower = text.ToLowerInvariant()
+    stopwords |> Set.exists (fun word -> lower.Contains(word, StringComparison.Ordinal))
 
 /// A token that survives the configured length and stopword rules.
-let private isSearchable (token: Token) =
-    token.Text.Length >= minTokenLength
-    && token.Text.Length <= maxTokenLength
-    && not (Set.contains (token.Text.ToLowerInvariant()) stopwords)
+let private isSearchable tokenizer (token: Token) =
+    match tokenizer with
+    | Words ->
+        token.Text.Length >= minTokenLength
+        && token.Text.Length <= maxTokenLength
+        && not (Set.contains (token.Text.ToLowerInvariant()) stopwords)
+    | Ngrams size ->
+        runeLength token.Text = size && not (containsNgramStopword token.Text)
 
 let private prefixKeys (collation: Collation) (token: Token) =
-    [| 1..token.Text.Length |]
-    |> Array.map (fun length -> collation.KeyOf(token.Text.Substring(0, length)))
+    let mutable length = 0
+    [| for rune in token.Text.EnumerateRunes() do
+           length <- length + rune.Utf16SequenceLength
+           collation.KeyOf(token.Text.Substring(0, length)) |]
     |> Array.distinct
 
 let private removePosting id key postings =
@@ -117,20 +156,24 @@ let private removePosting id key postings =
         let remaining = Map.remove id rows
         if remaining.IsEmpty then Map.remove key postings else Map.add key remaining postings
 
-let emptyIndex (collation: Collation) : Index<'id> =
+let private emptyIndexWith tokenizer (collation: Collation) : Index<'id> =
     { Documents = Map.empty
       Postings = Map.empty
       PrefixPostings = Map.empty
-      Collation = collation }
+      Collation = collation
+      Tokenizer = tokenizer }
+
+let emptyIndex collation = emptyIndexWith Words collation
 
 let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
     match Map.tryFind id index.Documents with
     | None -> index
-    | Some tokens ->
+    | Some fields ->
+        let tokens = Array.concat fields
         let frequencies = tokens |> Array.countBy _.Key
         let prefixes =
             tokens
-            |> Array.filter isSearchable
+            |> Array.filter (isSearchable index.Tokenizer)
             |> Array.collect (prefixKeys index.Collation)
             |> Array.countBy (fun key -> key)
 
@@ -147,12 +190,18 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
             Postings = postings
             PrefixPostings = prefixPostings }
 
-let addDocument (id: 'id) (text: string) (index: Index<'id>) : Index<'id> =
+let addDocumentFields (id: 'id) (texts: string list) (index: Index<'id>) : Index<'id> =
     let index = removeDocument id index
-    let tokens = tokensWith index.Collation text
+    // Phrase positions retain tokens omitted from ngram postings.
+    let fields = texts |> List.map (tokensWith index.Tokenizer index.Collation) |> List.toArray
+    let tokens = Array.concat fields
+    let postingTokens =
+        match index.Tokenizer with
+        | Words -> tokens
+        | Ngrams _ -> tokens |> Array.filter (isSearchable index.Tokenizer)
 
     let postings =
-        tokens
+        postingTokens
         |> Array.groupBy _.Key
         |> Array.fold
             (fun postings (key, tokens) ->
@@ -162,7 +211,7 @@ let addDocument (id: 'id) (text: string) (index: Index<'id>) : Index<'id> =
 
     let prefixPostings =
         tokens
-        |> Array.filter isSearchable
+        |> Array.filter (isSearchable index.Tokenizer)
         |> Array.collect (prefixKeys index.Collation)
         |> Array.countBy (fun key -> key)
         |> Array.fold
@@ -172,12 +221,19 @@ let addDocument (id: 'id) (text: string) (index: Index<'id>) : Index<'id> =
             index.PrefixPostings
 
     { index with
-        Documents = Map.add id tokens index.Documents
+        Documents = Map.add id fields index.Documents
         Postings = postings
         PrefixPostings = prefixPostings }
 
-let buildIndexWith (collation: Collation) (documents: ('id * string) seq) : Index<'id> =
-    documents |> Seq.fold (fun index (id, text) -> addDocument id text index) (emptyIndex collation)
+let addDocument id text index = addDocumentFields id [ text ] index
+
+let buildIndexWithFields tokenizer (collation: Collation) (documents: ('id * string list) seq) : Index<'id> =
+    documents |> Seq.fold (fun index (id, fields) -> addDocumentFields id fields index) (emptyIndexWith tokenizer collation)
+
+let buildIndexWithTokenizer tokenizer collation documents =
+    documents |> Seq.map (fun (id, text) -> id, [ text ]) |> buildIndexWithFields tokenizer collation
+
+let buildIndexWith collation documents = buildIndexWithTokenizer Words collation documents
 
 let buildCorpusWith (collation: Collation) (docs: string seq) : Corpus =
     let documents = docs |> Seq.indexed |> Array.ofSeq
@@ -212,15 +268,18 @@ let private termScores index term = termScoresWithin None index term
 // ---------------------------------------------------------------------------
 
 /// Distinct searchable terms of a natural-language query.
-let private queryTokens (index: Index<'id>) (query: string) =
-    rawTokens query
-    |> Array.map (fun text ->
-        { Text = text
-          Key = index.Collation.KeyOf text })
+let private queryTokens (index: Index<'id>) query =
+    tokensWith index.Tokenizer index.Collation query
 
 let private naturalTerms (index: Index<'id>) (query: string) : string[] =
-    queryTokens index query
-    |> Array.filter isSearchable
+    let tokens = queryTokens index query
+    let terms =
+        match index.Tokenizer with
+        | Words -> tokens |> Array.filter (isSearchable index.Tokenizer)
+        // A stopped spelling can still match an indexed collation equivalent.
+        | Ngrams _ -> tokens
+
+    terms
     |> Array.map _.Key
     |> Array.distinct
 
@@ -360,7 +419,7 @@ let private addBooleanContribution operator contribution state =
 let private tryBooleanScore state =
     if state.Matched && not state.Excluded then Some state.Score else None
 
-let private parseBooleanQuery (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
+let private parseBooleanQuery tokenizer (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
     let mutable i = 0
     let len = query.Length
 
@@ -374,8 +433,23 @@ let private parseBooleanQuery (collation: Collation) (query: string) : (BoolOp *
         while i < len && (isWordChar query.[i] || (query.[i] = '\'' && i > start)) do
             i <- i + 1
         let text = query.Substring(start, i - start).Trim('\'')
-        { Text = text
-          Key = collation.KeyOf text }
+        tokenWith collation text
+
+    let phraseWords phrase =
+        let words =
+            match tokenizer with
+            | Words -> tokensWith tokenizer collation phrase
+            | Ngrams size ->
+                rawTokens phrase
+                |> Array.collect (fun word ->
+                    if runeLength word < size then [| tokenWith collation word |]
+                    else tokensWith tokenizer collation word)
+
+        words
+        |> Array.skipWhile (fun word ->
+            match tokenizer with
+            | Words -> not (isSearchable tokenizer word)
+            | Ngrams _ -> containsNgramStopword word.Text)
 
     // Cap parenthesis nesting so a query like "((((...))))" with thousands
     // of groups can't overflow the recursive-descent stack (a
@@ -432,19 +506,30 @@ let private parseBooleanQuery (collation: Collation) (query: string) : (BoolOp *
                         else
                             None
 
-                    let words =
-                        rawTokens phrase
-                        |> Array.map (fun text ->
-                            { Text = text
-                              Key = collation.KeyOf text })
-                        |> Array.skipWhile (isSearchable >> not)
+                    let words = phraseWords phrase
+
+                    // MySQL's ngram phrases ignore the proximity suffix.
+                    let proximity =
+                        match tokenizer with
+                        | Words -> proximity
+                        | Ngrams _ -> None
 
                     acc.Add(op, BPhrase(words, proximity))
                 elif isWordChar query.[i] then
                     let w = readWord ()
                     let prefix = i < len && query.[i] = '*'
                     if prefix then i <- i + 1
-                    if w.Text.Length > 0 then acc.Add(op, BWord(w, prefix))
+                    if w.Text.Length > 0 then
+                        let term =
+                            match tokenizer with
+                            | Words -> BWord(w, prefix)
+                            | Ngrams size when prefix && runeLength w.Text < size -> BWord(w, true)
+                            | Ngrams _ ->
+                                let words = tokensWith tokenizer collation w.Text |> Array.skipWhile (isSearchable tokenizer >> not)
+                                match words with
+                                | [| word |] -> BWord(word, false)
+                                | _ -> BPhrase(words, None)
+                        acc.Add(op, term)
                 else
                     // Punctuation MySQL's parser ignores.
                     i <- i + 1
@@ -527,7 +612,7 @@ let private phraseCandidates (index: Index<'id>) (words: Token[]) =
     words
     // InnoDB omits short terms and stopwords from postings but retains their
     // positions after the first searchable word in a phrase.
-    |> Array.filter isSearchable
+    |> Array.filter (isSearchable index.Tokenizer)
     |> Array.distinctBy _.Key
     |> Array.map (fun word ->
         index.Postings
@@ -571,7 +656,7 @@ let rec private evalTerm
     (term: BoolTerm)
     : Map<'id, float> =
     match term with
-    | BWord(term, false) when not (isSearchable term) ->
+    | BWord(term, false) when not (isSearchable index.Tokenizer term) ->
         // Stopwords and sub-minimum tokens are never in InnoDB's index, so
         // a plain boolean term for one can't match anything — `+was`
         // excludes every row (oracle-verified). Phrases and proximity below
@@ -596,7 +681,7 @@ let rec private evalTerm
 
         let terms =
             words
-            |> Array.filter isSearchable
+            |> Array.filter (isSearchable index.Tokenizer)
             |> Array.distinctBy _.Key
             |> Array.choose (fun word ->
                 index.Postings
@@ -607,11 +692,11 @@ let rec private evalTerm
 
         candidates
         |> Seq.choose (fun id ->
-            let document = index.Documents.[id]
+            let fields = index.Documents.[id]
             let matches =
                 match proximity with
-                | None -> exactPhraseMatches document words
-                | Some distance -> proximityMatches document words distance
+                | None -> fields |> Array.exists (fun tokens -> exactPhraseMatches tokens words)
+                | Some distance -> proximityMatches (Array.concat fields) words distance
 
             if matches then
                 terms
@@ -649,7 +734,7 @@ let private visibleBooleanScore score =
     if score = 0.0 then idfFloor * idfFloor else score
 
 let private booleanScoresWithinOption candidateIds (index: Index<'id>) (query: string) =
-    evalNodes candidateIds index (parseBooleanQuery index.Collation query)
+    evalNodes candidateIds index (parseBooleanQuery index.Tokenizer index.Collation query)
     |> Map.map (fun _ score -> visibleBooleanScore score)
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
@@ -669,12 +754,12 @@ let internal tryFlatBooleanScoresDictionaryWithin
         | (op, BWord(term, prefix)) :: rest -> flatTerms ((op, term, prefix) :: found) rest
         | _ -> None
 
-    parseBooleanQuery index.Collation query
+    parseBooleanQuery index.Tokenizer index.Collation query
     |> flatTerms []
     |> Option.map (fun terms ->
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key index.PrefixPostings
-            elif isSearchable term then Map.tryFind term.Key index.Postings
+            elif isSearchable index.Tokenizer term then Map.tryFind term.Key index.Postings
             else None
 
         let postings =
@@ -810,8 +895,8 @@ let private expansionScoresWithinOption candidateIds (index: Index<'id>) (query:
         |> Map.toArray
         |> Array.sortByDescending snd
         |> Array.truncate queryExpansionLimit
-        |> Array.collect (fun (id, _) -> index.Documents.[id])
-        |> Array.filter isSearchable
+        |> Array.collect (fun (id, _) -> Array.concat index.Documents.[id])
+        |> Array.filter (isSearchable index.Tokenizer)
         |> Array.map _.Key
 
     Array.append (naturalTerms index query) seedTerms

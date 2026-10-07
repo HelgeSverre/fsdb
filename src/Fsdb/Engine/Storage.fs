@@ -62,6 +62,7 @@ type StorageError =
     /// value error other column types raise in strict mode.
     | DataTruncatedForColumn of column: string
     | FullTextColumnNotAllowed of column: string
+    | FullTextParserNotDefined of parser: string
     /// A value doesn't fit the column's numeric range — MySQL's 1264
     /// (SQLSTATE 22003), raised in strict mode when `ALTER ... MODIFY`
     /// narrows an integer type over existing out-of-range rows.
@@ -112,6 +113,7 @@ let toMySqlError (err: StorageError) : int * string =
     | InvalidValueForColumn(column, value) -> 1366, sprintf "Incorrect value: '%s' for column '%s'" value column
     | DataTooLongForColumn(column, row) -> 1406, sprintf "Data too long for column '%s' at row %d" column row
     | DataTruncatedForColumn column -> 1265, sprintf "Data truncated for column '%s' at row 1" column
+    | FullTextParserNotDefined parser -> 1128, sprintf "Function '%s' is not defined" parser
     | FullTextColumnNotAllowed column -> 1283, sprintf "Column '%s' cannot be part of FULLTEXT index" column
     | OutOfRangeForColumn column -> 1264, sprintf "Out of range value for column '%s' at row 1" column
     | ExpressionError(code, message) -> code, message
@@ -2581,14 +2583,17 @@ let private orderedKeyGroups (table: Table) : IndexKeyGroup list =
 type private FullTextKeyGroup =
     { Name: string
       Indices: int list
+      Tokenizer: FullText.Tokenizer
       CollationSpec: Collation.Collation }
 
 let private fullTextKeyGroups (table: Table) : FullTextKeyGroup list =
     table.Indexes
     |> List.choose (fun index ->
-        if index.Kind <> FullTextIndex then
-            None
-        else
+        match index.Kind with
+        | FullTextIndex parser ->
+            let tokenizer =
+                FullText.tryTokenizer parser
+                |> Option.defaultWith (fun () -> invalidOp "Unsupported stored full-text parser")
             index.Columns
             |> traverse (resolveColumn table.Columns)
             |> Result.toOption
@@ -2598,9 +2603,11 @@ let private fullTextKeyGroups (table: Table) : FullTextKeyGroup list =
                     Some
                         { Name = index.Name
                           Indices = indices
+                          Tokenizer = tokenizer
                           CollationSpec =
                             table.Columns.[first].Collation
-                            |> Collation.findOrDefault }))
+                            |> Collation.findOrDefault })
+        | _ -> None)
 
 type private SpatialKeyGroup =
     { Name: string
@@ -2625,10 +2632,9 @@ let private spatialBoundsAt columnIndex (row: Value[]) =
     | VGeometry geometry -> geometryBounds geometry
     | _ -> None
 
-let private fullTextDocument (indices: int list) (row: Value[]) =
+let private fullTextFields (indices: int list) (row: Value[]) =
     indices
     |> List.map (fun index -> Value.toText row.[index] |> Option.defaultValue "")
-    |> String.concat " "
 
 /// Stable equality key for values already coerced into a table column's
 /// declared type. Strings use the same case-insensitive, PAD SPACE semantics
@@ -2893,8 +2899,8 @@ let private rebuildFullTextIndexes (table: Table) : FullTextIndexes =
     |> List.map (fun group ->
         group.Name,
         (table.RowsArray.Indexed
-         |> Seq.map (fun (rowId, row) -> rowId, fullTextDocument group.Indices row)
-         |> FullText.buildIndexWith group.CollationSpec))
+         |> Seq.map (fun (rowId, row) -> rowId, fullTextFields group.Indices row)
+         |> FullText.buildIndexWithFields group.Tokenizer group.CollationSpec))
     |> Map.ofList
 
 let private rebuildSpatialIndexes (table: Table) : SpatialIndexes =
@@ -3079,7 +3085,7 @@ let private publishRows (before: Table) (after: Table) : Table =
                         else
                             index
                             |> fun current -> removed |> Option.fold (fun current _ -> FullText.removeDocument rowId current) current
-                            |> fun current -> added |> Option.fold (fun current row -> FullText.addDocument rowId (fullTextDocument group.Indices row) current) current
+                            |> fun current -> added |> Option.fold (fun current row -> FullText.addDocumentFields rowId (fullTextFields group.Indices row) current) current
 
                     let index = changes |> Array.fold update (Map.find group.Name indexes)
                     Map.add group.Name index indexes)
@@ -5902,7 +5908,7 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
 
                     Ok(prefix * multiplier)
                 | None, Some length -> Ok length
-                | None, None when index.Kind = FullTextIndex || index.Kind = SpatialIndex -> Ok 0
+                | None, None when index.Kind.IsFullText || index.Kind = SpatialIndex -> Ok 0
                 | None, None ->
                     Error(ExpressionError(1170, sprintf "BLOB/TEXT column '%s' used in key specification without a key length" definition.Name))
 
@@ -5917,12 +5923,13 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
                 Ok()))
     |> Result.map ignore
 
-/// FULLTEXT indexes only cover text columns — CHAR/VARCHAR and the TEXT
-/// family — matching MySQL's 1283 for anything else.
+/// Validate the FULLTEXT parser and its text-column compatibility.
 let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Result<unit, StorageError> =
-    if ix.Kind <> FullTextIndex then
-        Ok()
-    else
+    match ix.Kind with
+    | FullTextIndex(Some parser) when FullText.tryTokenizer (Some parser) |> Option.isNone ->
+        Error(FullTextParserNotDefined parser)
+    | kind when not kind.IsFullText -> Ok()
+    | _ ->
         let isTextual (t: ColumnType) =
             match t with
             | TChar _
