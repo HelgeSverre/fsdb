@@ -8,8 +8,10 @@ before preparing full-text source rows. Equality chains can span multiple
 physical sources, with literal bounds in WHERE or ON. The original predicates
 and joins still execute, and relevance uses the complete indexed corpus.
 
-Inference requires qualified columns, identical column types and compatible
-text collations. Numeric columns accept numeric literal bounds; text columns
+Inference requires uniquely resolved columns, identical column types and compatible
+text collations. Each ON clause resolves names against its visible join prefix;
+WHERE resolves against all sources. A later source with the same column name
+does not make an earlier ON reference ambiguous. Numeric columns accept numeric literal bounds; text columns
 accept string literal bounds. Outer joins, USING joins, disjunctions, mixed
 comparison domains, and invalid forward ON references do not supply inferred
 bounds. Existing source-local access remains available.
@@ -28,13 +30,17 @@ python3 torture/scripts/fulltext-join-bounds-oracle.py
 ```
 
 It verifies IDs and rounded relevance for direct, transitive, ON-literal, and
-cross joins, plus text coercion, outer joins, and disjunctions. The matching
+cross joins, plus text coercion, outer joins, and disjunctions. Unqualified
+keys and bounds include a later-source name collision. Ambiguous WHERE/ON
+references return error 1052; forward ON references return error 1054. The matching
 Expecto regressions compare results with the explicit-bound query and count
 virtual-column evaluations to verify candidate preparation. Before inference,
 the 1,000-row fixture prepares 800 rows despite returning ten; the regression
 requires fewer than 30 evaluations after inference.
 
 ## Targeted performance evidence
+
+These timings measure the qualified-bound implementation at `7b4da9ff`.
 
 The embedded Debug, in-memory profile described in the
 [baseline snapshot](../../benchmarks/results/884fece3-fulltext-snapshot.md)
@@ -58,8 +64,7 @@ are diagnostic engine timings, not durable deployment or MySQL comparisons.
 
 ## Validation
 
-`just check` passes 2,935 tests without build warnings or errors. One repeated
-run hit the existing two-second transaction readiness timeout; that test passed
-in isolation, and the next complete gate passed. The native join-bound oracle
-and natural-phrase oracle pass. The contract lane passes 49 cases / 5,117 steps
-without differences at `20261007T100547176-62459/contracts`.
+`just check` passes 2,936 tests without build warnings or errors. The native
+join-bound oracle and natural-phrase oracle pass. The contract lane passes
+49 cases / 5,117 steps without differences at
+`20261007T101140766-63814/contracts`.

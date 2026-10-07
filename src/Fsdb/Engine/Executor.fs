@@ -15302,21 +15302,32 @@ and private fullTextJoinBounds (sources: FullTextPhysicalSource list) (select: S
         |> List.collect (fun source ->
             source.Table.Columns |> List.map (fun column -> (key source.Qualifier, key column.Name), column))
         |> Map.ofList
-    let ownedColumn = function
-        | QualifiedCol(qualifier, name) ->
+    let ownedColumn visible = function
+        | QualifiedCol(qualifier, name) when Set.contains (key qualifier) visible ->
             let identity = key qualifier, key name
             Map.tryFind identity columns |> Option.map (fun column -> identity, column)
+        | Col name ->
+            columns
+            |> Map.toSeq
+            |> Seq.filter (fun ((qualifier, column), _) -> column = key name && Set.contains qualifier visible)
+            |> Seq.tryExactlyOne
         | _ -> None
-    let rec validJoins bound (joins: Join list) =
-        match joins with
-        | [] -> true
-        | join :: rest ->
-            let visible = Set.add (key (fromItemQualifier join.Table)) bound
-            (join.Kind = InnerJoin || join.Kind = CrossJoin)
-            && join.Using.IsEmpty
-            && not (Expression.exists (function Col _ -> true | _ -> false) join.On)
-            && Set.isSubset (qualifiedReferences join.On) visible
-            && validJoins visible rest
+    let validReferences visible expression =
+        not (
+            Expression.exists
+                (function
+                | (Col _ | QualifiedCol _) as column -> ownedColumn visible column |> Option.isNone
+                | _ -> false)
+                expression
+        )
+    let initialScope = select.From |> Option.map (fromItemQualifier >> key) |> Option.toList |> Set.ofList
+    let scopedJoins =
+        select.Joins
+        |> List.mapFold (fun visible join ->
+            let visible = Set.add (key (fromItemQualifier join.Table)) visible
+            (visible, join), visible) initialScope
+        |> fst
+    let completeScope = Set.ofList qualifiers
     let compatibleLiteral (column: ColumnDef) value =
         match column.Type, value with
         | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText), VString _ -> true
@@ -15326,16 +15337,23 @@ and private fullTextJoinBounds (sources: FullTextPhysicalSource list) (select: S
     let eligible =
         not select.Joins.IsEmpty
         && sources.Length = select.Joins.Length + 1
-        && (Set.ofList qualifiers).Count = qualifiers.Length
-        && (select.From |> Option.exists (fun source -> validJoins (Set.singleton (key (fromItemQualifier source))) select.Joins))
+        && completeScope.Count = qualifiers.Length
+        && (select.Where |> Option.forall (validReferences completeScope))
+        && scopedJoins
+           |> List.forall (fun (visible, join) ->
+               (join.Kind = InnerJoin || join.Kind = CrossJoin)
+               && join.Using.IsEmpty
+               && validReferences visible join.On)
     if not eligible then Map.empty
     else
-        let predicates = optionalConjuncts select.Where @ (select.Joins |> List.collect (fun join -> conjuncts join.On))
+        let predicates =
+            (optionalConjuncts select.Where |> List.map (fun predicate -> completeScope, predicate))
+            @ (scopedJoins |> List.collect (fun (visible, join) -> conjuncts join.On |> List.map (fun predicate -> visible, predicate)))
         let edges =
             predicates
             |> List.collect (function
-                | BinOp(Eq, left, right) ->
-                    match ownedColumn left, ownedColumn right with
+                | visible, BinOp(Eq, left, right) ->
+                    match ownedColumn visible left, ownedColumn visible right with
                     | Some(a, leftColumn), Some(b, rightColumn) when compatibleEqualityColumns leftColumn rightColumn ->
                         [ a, b; b, a ]
                     | _ -> []
@@ -15350,8 +15368,8 @@ and private fullTextJoinBounds (sources: FullTextPhysicalSource list) (select: S
                 | next :: pending ->
                     visit (Set.add next seen) ((Map.tryFind next edges |> Option.defaultValue []) @ pending)
             visit Set.empty [ origin ]
-        let seed column literal =
-            match ownedColumn column, literal with
+        let seed visible column literal =
+            match ownedColumn visible column, literal with
             | Some(identity, definition), LiteralValue value when compatibleLiteral definition value ->
                 reachable identity
                 |> Set.remove identity
@@ -15360,7 +15378,7 @@ and private fullTextJoinBounds (sources: FullTextPhysicalSource list) (select: S
             | _ -> []
         predicates
         |> List.collect (function
-            | BinOp(Eq, left, right) -> seed left right @ seed right left
+            | visible, BinOp(Eq, left, right) -> seed visible left right @ seed visible right left
             | _ -> [])
         |> List.distinct
         |> List.groupBy fst

@@ -2,6 +2,8 @@
 
 import pathlib
 import runpy
+import re
+import subprocess
 
 native = runpy.run_path(str(pathlib.Path(__file__).with_name("fulltext-transaction-oracle.py")))
 
@@ -10,6 +12,8 @@ def verify(client, _):
     client.query("USE probe;CREATE TABLE owners(id INT PRIMARY KEY);"
                  "INSERT INTO owners VALUES(42);"
                  "CREATE TABLE bounds(id INT PRIMARY KEY);INSERT INTO bounds VALUES(42);"
+                 "CREATE TABLE limits(chosen_owner INT PRIMARY KEY);INSERT INTO limits VALUES(42);"
+                 "CREATE TABLE shadow(owner_id INT PRIMARY KEY);INSERT INTO shadow VALUES(42);"
                  "CREATE TABLE docs(id INT PRIMARY KEY,owner_id INT,body TEXT,"
                  "KEY(owner_id),FULLTEXT(body))")
     values = [f"({i},{i % 100},'{ 'ordinary' if i % 5 == 0 else 'needle'}')"
@@ -21,12 +25,24 @@ def verify(client, _):
         ("transitive", "JOIN owners o ON o.id=d.owner_id JOIN bounds b ON b.id=o.id", "42=b.id"),
         ("ON literal", "JOIN owners o ON o.id=d.owner_id AND 42=o.id", "TRUE"),
         ("cross join", "CROSS JOIN owners o", "o.id=d.owner_id AND o.id=42"),
+        ("bare join key", "JOIN owners o ON o.id=owner_id", "o.id=42"),
+        ("bare transitive bound", "JOIN owners o ON o.id=owner_id JOIN limits b ON chosen_owner=o.id", "chosen_owner=42"),
+        ("later name collision", "JOIN owners o ON o.id=owner_id JOIN limits b ON chosen_owner=o.id JOIN shadow s ON s.owner_id=o.id", "chosen_owner=42"),
     ]:
         query = ("SELECT d.id,ROUND(MATCH(d.body) AGAINST('needle'),6) FROM docs d "
                  + joins + " WHERE " + bound + " AND MATCH(d.body) AGAINST('needle')")
         actual = client.query(query + " ORDER BY d.id")
         native["expect"](label, actual, expected)
         native["expect"](label + " explicit bound", client.query(query + " AND d.owner_id=42 ORDER BY d.id"), actual)
+
+    for label, query, expected_code in [
+        ("ambiguous WHERE", "SELECT d.id FROM docs d JOIN owners o ON o.id=d.owner_id WHERE id=42 AND MATCH(d.body) AGAINST('needle')", "1052"),
+        ("ambiguous ON", "SELECT d.id FROM docs d JOIN owners o ON id=d.owner_id WHERE o.id=42 AND MATCH(d.body) AGAINST('needle')", "1052"),
+        ("forward ON reference", "SELECT d.id FROM docs d JOIN owners o ON o.id=chosen_owner JOIN limits b ON b.chosen_owner=d.owner_id WHERE b.chosen_owner=42 AND MATCH(d.body) AGAINST('needle')", "1054"),
+    ]:
+        result = subprocess.run([*client.process.args, "-e", "USE probe;" + query], capture_output=True, text=True)
+        error = re.search(r"ERROR (\d+)", result.stderr)
+        native["expect"](label, error.group(1) if error else result.stdout, expected_code)
 
     client.query("CREATE TABLE names(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,body TEXT,KEY(k),FULLTEXT(body));"
                  "CREATE TABLE labels(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci);"
@@ -37,7 +53,6 @@ def verify(client, _):
     native["expect"]("numeric text bound", client.query(prefix + "o.k=1" + suffix), "1\n2")
     native["expect"]("numeric text bound cannot propagate", client.query(prefix + "o.k=1 AND d.k=1" + suffix), "2")
     native["expect"]("string text bound", client.query(prefix + "o.k='1'" + suffix), "1\n2")
-
 
     client.query("INSERT INTO names VALUES(4,'missing','needle')")
     native["expect"]("outer join retains unmatched rows", client.query(

@@ -63,11 +63,18 @@ let tests =
               execute ("INSERT INTO docs(id,owner_id,body) VALUES " + values) |> ignore
               execute "CREATE TABLE bounds(id INT PRIMARY KEY)" |> ignore
               execute "INSERT INTO bounds VALUES(42)" |> ignore
+              execute "CREATE TABLE limits(chosen_owner INT PRIMARY KEY)" |> ignore
+              execute "INSERT INTO limits VALUES(42)" |> ignore
+              execute "CREATE TABLE shadow(owner_id INT PRIMARY KEY)" |> ignore
+              execute "INSERT INTO shadow VALUES(42)" |> ignore
               for joins, bound in
                   [ "JOIN owners o ON o.id=d.owner_id", "o.id=42"
                     "JOIN owners o ON o.id=d.owner_id JOIN bounds b ON b.id=o.id", "42=b.id"
                     "JOIN owners o ON o.id=d.owner_id AND 42=o.id", "TRUE"
-                    "CROSS JOIN owners o", "o.id=d.owner_id AND o.id=42" ] do
+                    "CROSS JOIN owners o", "o.id=d.owner_id AND o.id=42"
+                    "JOIN owners o ON o.id=owner_id", "o.id=42"
+                    "JOIN owners o ON o.id=owner_id JOIN limits b ON chosen_owner=o.id", "chosen_owner=42"
+                    "JOIN owners o ON o.id=owner_id JOIN limits b ON chosen_owner=o.id JOIN shadow s ON s.owner_id=o.id", "chosen_owner=42" ] do
                   let query redundant =
                       "SELECT d.id, ROUND(MATCH(d.body) AGAINST('needle'),6) FROM docs d "
                       + joins + " WHERE " + bound + " AND MATCH(d.body) AGAINST('needle')"
@@ -78,6 +85,23 @@ let tests =
                   Expect.equal (ids actual) ([ 42..100..942 ] |> List.map string) "MySQL 8.4 matching IDs"
                   Expect.equal actual control "the bound preserves scores from the complete corpus"
                   Expect.isLessThan calls 30 "only the ten matching candidates need virtual values"
+
+          testCase "fulltext bound inference preserves ambiguous and forward reference errors"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE docs(id INT PRIMARY KEY,owner_id INT,body TEXT,KEY(owner_id),FULLTEXT(body))" |> ignore
+              run store "INSERT INTO docs VALUES(1,42,'needle'),(2,43,'ordinary')" |> ignore
+              run store "CREATE TABLE owners(id INT PRIMARY KEY)" |> ignore
+              run store "INSERT INTO owners VALUES(42)" |> ignore
+              run store "CREATE TABLE limits(chosen_owner INT PRIMARY KEY)" |> ignore
+              run store "INSERT INTO limits VALUES(42)" |> ignore
+              for joins, predicate, expected in
+                  [ "JOIN owners o ON o.id=d.owner_id", "id=42", 1052
+                    "JOIN owners o ON id=d.owner_id", "o.id=42", 1052
+                    "JOIN owners o ON o.id=chosen_owner JOIN limits b ON b.chosen_owner=d.owner_id", "b.chosen_owner=42", 1054 ] do
+                  match run store ("SELECT d.id FROM docs d " + joins + " WHERE " + predicate + " AND MATCH(d.body) AGAINST('needle')") with
+                  | Err(code, _) -> Expect.equal code expected "MySQL name-resolution error"
+                  | other -> failtestf "expected name-resolution error, got %A" other
 
           testCase "fulltext join bounds preserve text coercion and optional predicates"
           <| fun _ ->
