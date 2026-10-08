@@ -228,3 +228,65 @@ Validation: 3,047 tests pass with no build warnings/errors under a 4 GiB GC
 heap cap. Native wire contracts pass 57 cases / 6,291 steps with zero differences
 at `20261008T024704006-3122/contracts`. The standalone native ordering oracle
 passes direct and SQL-prepared fixtures. No known-gap signatures are added.
+
+## ROLLUP level evaluation and demand
+
+The [ROLLUP oracle](../scripts/rollup-evaluation-oracle.py) uses five source rows
+with `(g,h)` keys `(2,2),(1,1),(2,1),(1,2),(2,1)`. Each query resets `@n=0`.
+It checks direct and SQL-prepared results and final variable state on native
+MySQL 8.4.11 with 64 MiB buffer and redo limits.
+
+For two grouping keys and `SUM(@n:=@n+1)`, MySQL evaluates each sorted input
+at three levels: grand total, g subtotal, and detail. The first input contributes
+1 to the grand total, 2 to its g subtotal, and 3 to its detail. Five inputs leave
+`@n=15`; the grand total is 35 and the g subtotals are 7 and 33. Fsdb at
+`e8ce7bd7` evaluates once per source row, leaves `@n=5`, and reports grand total
+15 and g subtotals 6 and 9.
+
+Multiple aggregate occurrences are evaluated aggregate-first, then level-first
+for each row. With two SUM assignments, the first sorted input contributes
+1/2/3 to the first aggregate's levels, then 4/5/6 to the second's. It does not
+alternate aggregates separately within each level.
+
+| Aggregate shape, two grouping keys | Native final counter | Evaluation observed |
+| --- | ---: | --- |
+| SUM assignment | 15 | Each subtotal level has its own argument value |
+| SUM DISTINCT assignment | 15 | Same level-specific evaluations as SUM |
+| MIN and MAX assignments | 30 | Each occurrence evaluates at all three levels |
+| JSON_ARRAYAGG assignment | 15 | Arrays retain separate values at each level |
+| COUNT DISTINCT assignment | 5 | One argument value per input, shared by levels |
+| GROUP_CONCAT assignment | 5 | One argument value per input, shared by levels |
+| SUM plus COUNT DISTINCT, or SUM plus GROUP_CONCAT | 20 | Three SUM values followed by one shared value per input |
+
+The COUNT DISTINCT and GROUP_CONCAT standalone fixtures already match fsdb.
+A blanket reevaluation of every aggregate at every level would regress them.
+Conversely, treating all DISTINCT aggregates alike would leave SUM DISTINCT
+incorrect.
+
+| SUM query modifier | Native returned result | Native final counter |
+| --- | --- | ---: |
+| LIMIT 1 | First detail `(1,1,3)` | 3 |
+| LIMIT 0 | No rows | 0 |
+| LIMIT 1 OFFSET 2 | First subtotal `(1,NULL,7)` | 6 |
+| HAVING GROUPING(g,h)=0 | Detail rows only | 15 |
+| HAVING GROUPING(g,h)=3 LIMIT 1 | Grand total 35 | 15 |
+| ORDER BY g DESC,h DESC LIMIT 1 | First detail `(2,2,3)` | 15 |
+| ORDER BY s DESC LIMIT 1 | Grand total 35 | 15 |
+| WHERE FALSE | No rows, including no grand total | 0 |
+
+The descending key order also changes input evaluation with ROLLUP. Its detail
+SUM values differ from an ascending-input calculation followed by an output
+sort. Explicit ordering in these fixtures still evaluates all inputs before
+LIMIT, while unordered LIMIT stops after enough groups have been emitted.
+Fsdb currently evaluates every matching input before applying LIMIT and emits
+a NULL grand-total row even for the empty-input fixture.
+
+The native oracle passes all direct and SQL-prepared fixtures. Embedded fsdb
+comparison at `e8ce7bd7`, under a 4 GiB GC heap cap and eight logical processors,
+matches only the standalone COUNT DISTINCT and GROUP_CONCAT fixtures. These
+native-only checks remain outside the passing differential contract lane; no
+known-gap signatures are added.
+
+The implementation needs both per-aggregate level ownership and demand-aware
+group emission. Reusing a single materialized argument list at every subtotal,
+or eagerly evaluating every level before LIMIT, cannot satisfy these contracts.
