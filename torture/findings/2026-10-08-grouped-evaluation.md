@@ -322,3 +322,51 @@ combinations beyond the maintained fixtures.
 Final source validation: 3,048 tests pass with no build warnings/errors under a
 4 GiB GC heap cap. The working tree contains no known-gap enrollment for these
 ROLLUP fixes.
+
+## Projection replay boundaries
+
+The [projection replay oracle](../scripts/projection-replay-oracle.py) uses
+`replay_input(v INT)` containing `2,1,3`, with `@n=0,@m=0` before each query.
+Native MySQL 8.4.11 results distinguish top-level assignments from nested
+assignments, ordinary SELECT from grouping, and output delivery from evaluation.
+
+For top-level projections `(@n:=@n+1) AS a,(@n:=@n+1) AS b,v`, grouped and
+ordered by `IF(a=b,v,-v)`, the produced rows are `(9,10,3),(1,2,2),(5,6,1)`.
+MySQL restores the top-level assignment values of returned rows in projection
+order. Final `@n` is 6 without LIMIT, 10 with LIMIT 1, 2 with LIMIT 1 OFFSET 1,
+and 6 with LIMIT 1 OFFSET 2. LIMIT 1 OFFSET 10 returns no rows and leaves
+`@n=12`: the earlier evaluation side effects remain when no row is returned.
+
+| Projection form, same grouping and ordering | Final state without LIMIT | Final state with LIMIT 1 |
+| --- | --- | --- |
+| Two top-level assignments to n | n=6 | n=10 |
+| `100+(@n:=@n+1)` in each projection | n=12 | n=12 |
+| `(@n:=100+(@m:=@m+1))` in each projection | n=106, m=12 | n=110, m=12 |
+| `(@n:=@n+1)` followed by a read of n | n=5 | n=3 |
+| `(@n:=@n+1)` followed by `(@m:=@n)` | n=5, m=5 | n=3, m=3 |
+
+Only assignments at the projection root are restored. Reexecuting expression
+trees would repeat nested assignments incorrectly; replaying every assignment
+captured during projection would also incorrectly restore m in the nested
+fixture. Ordinary SELECT with the same top-level projections and ORDER BY,
+but no GROUP BY, leaves n=12 and must not use the grouped replay behavior.
+An assignment occurring only in ORDER BY retains its evaluation side effects.
+
+Ordinary LIMIT 0 leaves both variables at zero for every projection form.
+SQL_CALC_FOUND_ROWS with LIMIT 0 still evaluates the grouped query and leaves
+n=12. Suppression must therefore preserve the found-row execution path.
+
+HAVING is a separate phase boundary. With `HAVING v>1`, the group for v=1 is
+rejected, but native projection and nested ordering-alias evaluation still
+occur. The first returned row under the same ordering and LIMIT 1 is
+`(9,10,3)`, with final n=10. Moving the predicate to WHERE instead produces
+`(5,6,3)`, with final n=6. Without ORDER BY, HAVING retains rows `(1,2,2)` and
+`(5,6,3)`, demonstrating projection work for the rejected middle group.
+
+At `7058caa9`, fsdb already returns the same rows for the unfiltered replay
+fixtures, but retains the evaluation counters instead of restoring returned
+root assignments. It also evaluates LIMIT 0 projections and skips rejected
+HAVING-group projections; the latter changes both row values and counters.
+The embedded comparison uses eight logical processors and a 4 GiB GC heap cap.
+These native-only boundaries are not enrolled as passing wire contracts or
+known-gap signatures.
