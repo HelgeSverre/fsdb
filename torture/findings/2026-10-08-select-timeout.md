@@ -38,8 +38,8 @@ own reason and statement scope rather than reuse that error path blindly.
 Existing BENCHMARK work ceilings are separate resource limits and must not
 be presented as MySQL's 3024 timeout.
 
-Before closing this gap, cover hint validation and precedence, native timer
-overflow, and broader scalar and routine timeout boundaries. Preserve the special scalar interruption
+Before closing this gap, cover broader hint contexts and grammar interactions,
+native timer overflow, and broader scalar and routine timeout boundaries. Preserve the special scalar interruption
 results without allowing a table-backed query to return partial success.
 
 ## Settings and lifetime coverage
@@ -57,7 +57,7 @@ SELECT calling a stored function. A positive hint overrides the session value;
 a zero hint falls back to it. A source-free UNION still raises 3024, while a
 constant derived source containing SLEEP returns its interrupted scalar value.
 The audited session-deadline distinctions are covered by the implementation
-and regressions below; hint precedence remains open.
+and regressions below; the audited hint precedence is covered as described below.
 
 UINT64_MAX assignment is accepted, but a repeat native run interrupted its
 readback with 3024. Settings-only readbacks use a 10,000 ms hint to separate
@@ -82,9 +82,9 @@ with zero differences against MySQL 8.4.11, including prepared timeouts and
 transaction preservation:
 `torture/artifacts/runs/20261008T081631631-99012/contracts`.
 
-Remaining: MAX_EXECUTION_TIME hint parsing, validation and precedence; native
-overflow behavior for extreme unsigned durations; broader scalar-only and
-stored-routine combinations. Deadline checks are cooperative, so operations
+Remaining: hint contexts and grammar beyond the audited cases; native overflow
+behavior for extreme unsigned durations; broader scalar-only and stored-routine
+combinations. Deadline checks are cooperative, so operations
 without an internal polling point are observed at the next engine check.
 
 ## Timeout hint diagnostics
@@ -107,4 +107,24 @@ behavior. The scanner regression covers nesting, quoted parentheses, misplaced
 comments, and statement batches. All 3,089 tests pass, and the existing wire
 suite remains at 65 cases / 8,381 steps / zero differences:
 `torture/artifacts/runs/20261008T082458417-8827/contracts`.
-Timeout-hint interpretation and preparation-lifetime diagnostics remain open.
+The scanner checkpoint precedes hint interpretation and diagnostics described below.
+
+## Audited hint execution and preparation
+
+Positive top-level SELECT timeout hints override the session setting; zero falls
+back to the session value. Malformed and duplicate hints produce the native
+warnings pinned above. Nested SELECT and UPDATE hints are ignored with 3125;
+misplaced hint comments remain inert. Accepted hints are reapplied on SQL and
+binary prepared execution, while their diagnostics are emitted at preparation.
+
+The implementation uses the shared comment scanner's source locations and scope
+metadata. No second SQL comment scanner is introduced. The original geometry
+SET_VAR interpretation remains on its existing path.
+
+Validation: 3,090 tests pass. The full wire suite passes 66 cases and 8,428 steps
+with zero differences, including exact malformed/duplicate warning text,
+binary preparation warning lifetime, hinted prepared timeouts, positive
+precedence, and zero fallback:
+`torture/artifacts/runs/20261008T083317596-15973/contracts`.
+Broader hint scope and grammar combinations and extreme-duration behavior remain
+open; this does not establish complete optimizer-hint compatibility.

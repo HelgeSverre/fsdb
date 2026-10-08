@@ -129,6 +129,33 @@ let tests =
               Expect.equal (run "SELECT COUNT(*) AS n FROM timed_log")
                   (ResultSet([ "n" ], [ [ Some "2" ] ])) "both writes complete"
 
+          testCase "SELECT timeout hints override settings and warn only at preparation"
+          <| fun _ ->
+              let run = queryFixture [ "CREATE TABLE hinted(n INT)"; "INSERT INTO hinted VALUES(1),(2)" ]
+              let timeout = Err(3024, "Query execution was interrupted, maximum statement execution time exceeded")
+              Expect.equal (run "SELECT /*+ MAX_EXECUTION_TIME(1) */ n,SLEEP(0.1) FROM hinted") timeout "hint arms a deadline"
+              run "SET max_execution_time=1" |> ignore
+              Expect.equal (run "SELECT /*+ MAX_EXECUTION_TIME(10000) */ n,SLEEP(0.01) AS slept FROM hinted ORDER BY n")
+                  (ResultSet([ "n"; "slept" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) "positive hint overrides session"
+              Expect.equal (run "SELECT /*+ MAX_EXECUTION_TIME(0) */ n,SLEEP(0.1) FROM hinted") timeout "zero falls back to session"
+              run "SET max_execution_time=0" |> ignore
+              let sql = "SELECT /*+ MAX_EXECUTION_TIME(10000) MAX_EXECUTION_TIME(2) */ 1 AS n"
+              run ("PREPARE hinted_query FROM '" + sql + "'") |> ignore
+              Expect.equal (run "SHOW WARNINGS")
+                  (ResultSet([ "Level"; "Code"; "Message" ],
+                      [ [ Some "Warning"; Some "3126"; Some "Hint MAX_EXECUTION_TIME(2) is ignored as conflicting/duplicated" ] ])) "prepare warning"
+              Expect.equal (run "EXECUTE hinted_query") (ResultSet([ "n" ], [ [ Some "1" ] ])) "execute succeeds"
+              Expect.equal (run "SHOW WARNINGS") (ResultSet([ "Level"; "Code"; "Message" ], [])) "execute does not repeat preparation warnings"
+              run "SELECT (SELECT /*+ MAX_EXECUTION_TIME(1) */ 1) AS n" |> ignore
+              Expect.equal (run "SHOW WARNINGS")
+                  (ResultSet([ "Level"; "Code"; "Message" ],
+                      [ [ Some "Warning"; Some "3125"; Some "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only" ] ])) "nested hint ignored"
+              for argument, fragment in [ "-1", "-1"; "1.5", "1.5"; "'1'", "'1'"; "", ""; "1,2", ",2" ] do
+                  run ("SELECT /*+ MAX_EXECUTION_TIME(" + argument + ") */ 1 AS n") |> ignore
+                  let message = "Optimizer hint syntax error near '" + fragment + ") */ 1 AS n' at line 1"
+                  Expect.equal (run "SHOW WARNINGS")
+                      (ResultSet([ "Level"; "Code"; "Message" ], [ [ Some "Warning"; Some "1064"; Some message ] ])) argument
+
           testCase "nested derived sources retain enclosing query correlation"
           <| fun _ ->
               let run = queryFixture

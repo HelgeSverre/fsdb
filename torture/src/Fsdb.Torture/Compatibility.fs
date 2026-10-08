@@ -4592,8 +4592,53 @@ module ContractCatalog =
           Cleanup = [| "SET max_execution_time=0"; "DROP TABLE deadline_rows" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
+    let private selectTimeoutHints =
+        { Name = "select-timeout-hints"
+          Setup = [| "CREATE TABLE hint_t(n INT)"; "INSERT INTO hint_t VALUES(1),(2)" |]
+          Steps =
+            [| for index, sql in
+                   [
+                      "SELECT /*+ MAX_EXECUTION_TIME(0) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(1) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(01) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(-1) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(+1) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(1.5) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME('1') */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(NULL) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME() */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(1,2) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(4294967295) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(4294967296) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(0) MAX_EXECUTION_TIME(2) */ 1 AS n"
+                      "SELECT /*+ MAX_EXECUTION_TIME(1.5) MAX_EXECUTION_TIME(2) */ 1 AS n"
+                      "SELECT (SELECT /*+ MAX_EXECUTION_TIME(1) */ 1) AS n"
+                      "SELECT 1 /*+ MAX_EXECUTION_TIME(1) */ AS n"
+                   ] |> List.indexed do
+                   Contract.query (sprintf "query-%d" index) sql
+                   Contract.query (sprintf "warnings-%d" index) "SHOW WARNINGS"
+               Contract.execute "update-hint" "UPDATE /*+ MAX_EXECUTION_TIME(1) */ hint_t SET n=n"
+               Contract.query "update-warning" "SHOW WARNINGS"
+               Contract.prepare "prepare-hints" "hint-query" Query
+                   "SELECT /*+ MAX_EXECUTION_TIME(10000) MAX_EXECUTION_TIME(2) */ 1 AS n" [||]
+               Contract.query "prepare-warnings" "SHOW WARNINGS"
+               Contract.invoke "execute-hints" "hint-query" OracleSuccess
+               Contract.query "execute-warnings" "SHOW WARNINGS"
+               Contract.close "close-hints" "hint-query"
+               Contract.prepare "prepare-deadline" "hint-deadline" Query
+                   "SELECT /*+ MAX_EXECUTION_TIME(1) */ n,SLEEP(0.1) FROM hint_t" [||]
+               Contract.invoke "hint-deadline" "hint-deadline" (OracleError(3024, "HY000"))
+               Contract.close "close-deadline" "hint-deadline"
+               Contract.execute "session-deadline" "SET max_execution_time=1"
+               Contract.query "override-deadline" "SELECT /*+ MAX_EXECUTION_TIME(10000) */ n,SLEEP(0.01) AS slept FROM hint_t ORDER BY n"
+               Contract.query "fallback-deadline" "SELECT /*+ MAX_EXECUTION_TIME(0) */ n,SLEEP(0.1) FROM hint_t" |> Contract.fails 3024 "HY000" |]
+          Cleanup = [| "SET max_execution_time=0"; "DROP TABLE hint_t" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
+
     let all =
-        [| selectTimeoutExecution
+        [| selectTimeoutHints
+           selectTimeoutExecution
            selectTimeoutSettings
            joinCandidateTraversal
            comments

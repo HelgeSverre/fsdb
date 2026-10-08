@@ -30,6 +30,7 @@ let private storedFunctionSession = System.Threading.AsyncLocal<Session option>(
 let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
 let private creatingTable = System.Threading.AsyncLocal<string option>()
 let private maxPointsInGeometryOverride = System.Threading.AsyncLocal<int option>()
+let private selectTimeoutOverride = System.Threading.AsyncLocal<uint64 option>()
 
 let private insideFunctionOrTrigger (session: Session) =
     session.RoutineStack
@@ -1382,10 +1383,69 @@ let private statementGeometryPointLimit options sql =
 
     pointLimit
 
+let private timeoutHintName = Regex(@"\bMAX_EXECUTION_TIME\b", RegexOptions.IgnoreCase)
+
+let private statementTimeoutHint emitWarnings options (sql: string) =
+    let mutable timeout = None
+    let warn code message =
+        if emitWarnings then Diagnostics.warning code message
+    let near prefix position =
+        let suffix = sql.Substring(position, min 80 (sql.Length - position))
+        let line = 1 + (sql.Substring(0, position) |> Seq.filter ((=) '\n') |> Seq.length)
+        warn 1064 (sprintf "%s near '%s' at line %d" prefix suffix line)
+
+    for hint in Parser.optimizerHintLocationsWithOptions options sql do
+        let mutable validSyntax = true
+        let skipWhitespace offset =
+            let mutable index = offset
+            while index < hint.Body.Length && Char.IsWhiteSpace hint.Body.[index] do
+                index <- index + 1
+            index
+        let syntaxError offset =
+            validSyntax <- false
+            near "Optimizer hint syntax error" (hint.BodyOffset + offset)
+
+        for token in timeoutHintName.Matches hint.Body |> Seq.cast<Match> do
+            if validSyntax && isTopLevelHintToken hint.Body token.Index then
+                let openAt = skipWhitespace (token.Index + token.Length)
+                if openAt >= hint.Body.Length || hint.Body.[openAt] <> '(' then
+                    syntaxError openAt
+                else
+                    let start = skipWhitespace (openAt + 1)
+                    let mutable finish = start
+                    while finish < hint.Body.Length && hint.Body.[finish] >= '0' && hint.Body.[finish] <= '9' do
+                        finish <- finish + 1
+                    let closeAt = skipWhitespace finish
+                    if finish = start then syntaxError start
+                    elif closeAt >= hint.Body.Length || hint.Body.[closeAt] <> ')' then
+                        syntaxError (if closeAt < hint.Body.Length && hint.Body.[closeAt] = '.' then start else closeAt)
+                    else
+                        let digits = hint.Body.Substring(start, finish - start)
+                        match UInt64.TryParse digits with
+                        | false, _ -> near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + closeAt)
+                        | true, value when value > uint64 UInt32.MaxValue ->
+                            near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + closeAt)
+                        | true, value ->
+                            if hint.Keyword <> "SELECT" || hint.ParenthesisDepth <> 0
+                               || (hint.StatementKeyword <> "SELECT" && hint.StatementKeyword <> "WITH") then
+                                warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
+                            elif timeout.IsSome then
+                                warn 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
+                            else timeout <- Some value
+    timeout
+
+let private withStatementHintsCore emitTimeoutWarnings options sql body =
+    let timeout = statementTimeoutHint emitTimeoutWarnings options sql
+    DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
+        match statementGeometryPointLimit options sql with
+        | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
+        | None -> body ())
+
 let private withStatementHints options sql body =
-    match statementGeometryPointLimit options sql with
-    | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
-    | None -> body ()
+    withStatementHintsCore true options sql body
+
+let private withPreparedStatementHints options sql body =
+    withStatementHintsCore false options sql body
 
 let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
     markRoutineVariables connectionVariableNames
@@ -3153,8 +3213,11 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                 session.RoutineStack.IsEmpty
                 && (match stmt with Select _ | Union _ -> true | _ -> false)
             let milliseconds =
-                sessionValue session "max_execution_time"
-                |> Option.bind (fun value -> match UInt64.TryParse value with true, number -> Some number | _ -> None)
+                selectTimeoutOverride.Value
+                |> Option.filter (fun value -> value > 0UL)
+                |> Option.orElseWith (fun () ->
+                    sessionValue session "max_execution_time"
+                    |> Option.bind (fun value -> match UInt64.TryParse value with true, number -> Some number | _ -> None))
                 |> Option.defaultValue 0UL
             if not eligible || milliseconds = 0UL then body ()
             else
@@ -5192,6 +5255,7 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
 let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
     prepareStatementWithOptions (parserOptionsForSession session) sql
     |> Result.bind (fun (statement, count) ->
+        statementTimeoutHint true (parserOptionsForSession session) sql |> ignore
         match statement with
         | None -> Ok(statement, count)
         | Some ast ->
@@ -6855,7 +6919,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
                 match statement.Ast with
                 | Some ast ->
-                    withStatementHints parserOptions statement.Sql (fun () ->
+                    withPreparedStatementHints parserOptions statement.Sql (fun () ->
                         withStoredFunctionRegistry dispatch session (fun current ->
                             match bindPreparedPlaceholders PreparedMetadata.UserVariables current statement ast values with
                             | Ok(updated, bound) ->
@@ -7980,7 +8044,7 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
         let executed, result =
             recordDiagnostics session false (fun () ->
                 try
-                    withStatementHints (parserOptionsForSession session) stmt.Sql (fun () ->
+                    withPreparedStatementHints (parserOptionsForSession session) stmt.Sql (fun () ->
                         match bindPreparedPlaceholders PreparedMetadata.ProtocolValues session stmt ast values with
                         | Error(code, message) -> session, Err(code, message)
                         | Ok(updated, statement) ->
