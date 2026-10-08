@@ -25,7 +25,36 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "Self-referencing writes can use their own candidate as parent"
+        [ testCase "UPDATE IGNORE skips rejected rows and preserves trigger order"
+          <| fun _ ->
+              for statement in
+                  [ "UPDATE IGNORE child SET n=id ORDER BY id"
+                    "UPDATE IGNORE child JOIN parent ON parent.n=child.n SET child.n=child.id" ] do
+                  let mutable session = create 1 (Fsdb.Storage.create ())
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                        "INSERT INTO parent VALUES(1),(3)"
+                        "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                        "CREATE TABLE audit(phase VARCHAR(10),id INT)"
+                        "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)"
+                        "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)" ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  Expect.equal (run statement) (Affected 1UL) "only row three changes"
+                  Expect.equal (session.Diagnostics |> List.map _.Code) [ 1452 ] "orphan becomes a warning"
+                  Expect.equal (run "SELECT * FROM child ORDER BY id")
+                      (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "3" ] ])) "accepted rows survive"
+                  Expect.equal (run "SELECT * FROM audit")
+                      (ResultSet([ "phase"; "id" ],
+                          [ [ Some "before"; Some "1" ]; [ Some "after"; Some "1" ]
+                            [ Some "before"; Some "2" ]; [ Some "before"; Some "3" ]; [ Some "after"; Some "3" ] ]))
+                      "BEFORE survives rejection and AFTER fires only for accepted rows, including no-ops"
+
+          testCase "Self-referencing writes can use their own candidate as parent"
           <| fun _ ->
               for sql, expected in
                   [ "INSERT INTO child VALUES(1,1),(2,1),(3,3)", [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "3" ] ]

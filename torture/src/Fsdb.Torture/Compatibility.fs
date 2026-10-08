@@ -6152,6 +6152,115 @@ module ContractCatalog =
                        | _ -> operation
                    yield step |> Contract.on name |]
 
+    let private updateIgnoreConstraints =
+        let cases =
+            [
+              "mixed", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "CREATE TABLE audit(phase VARCHAR(10),id INT)"
+                    "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)"
+                    "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)"
+                    "UPDATE IGNORE child SET n=id ORDER BY id"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id"
+                    "SELECT * FROM audit" ]
+              "reverse", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "CREATE TABLE audit(phase VARCHAR(10),id INT)"
+                    "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)"
+                    "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)"
+                    "UPDATE IGNORE child SET n=id ORDER BY id DESC"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id"
+                    "SELECT * FROM audit" ]
+              "limit", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "CREATE TABLE audit(phase VARCHAR(10),id INT)"
+                    "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)"
+                    "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)"
+                    "UPDATE IGNORE child SET n=2 ORDER BY id LIMIT 2"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id"
+                    "SELECT * FROM audit" ]
+              "joined", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "CREATE TABLE audit(phase VARCHAR(10),id INT)"
+                    "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)"
+                    "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)"
+                    "UPDATE IGNORE child JOIN parent ON parent.n=child.n SET child.n=child.id"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id"
+                    "SELECT * FROM audit" ]
+              "parent", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "UPDATE IGNORE parent SET n=n+10"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM parent ORDER BY n"
+                    "SELECT * FROM child ORDER BY id" ]
+              "duplicate", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "CREATE TABLE audit(phase VARCHAR(10),id INT)"
+                    "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)"
+                    "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)"
+                    "UPDATE IGNORE child SET id=1"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id"
+                    "SELECT * FROM audit" ]
+              "trigger-error", Some(8, 1452, "23000"),
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1452,MESSAGE_TEXT='trigger failure'"
+                    "UPDATE IGNORE child SET n=3"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id" ]
+            ]
+        { Name = "update-ignore-constraints"
+          Setup = [||]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [| "SET foreign_key_checks=0"; "DROP TABLE IF EXISTS child,parent,audit"; "SET foreign_key_checks=1" |]
+          Coverage = [| "statement:update", [| "text-differential" |]; "statement:create-trigger", [| "text-differential" |] |] }
+
     let private foreignKeyRowValidation =
         let cases =
             [
@@ -7652,6 +7761,7 @@ module ContractCatalog =
            expressionAssignmentWarnings
            quotedTableNames
            foreignKeyRowValidation
+           updateIgnoreConstraints
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings

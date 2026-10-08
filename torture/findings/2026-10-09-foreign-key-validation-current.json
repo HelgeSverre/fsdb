@@ -2,7 +2,7 @@
   "mysql_version": "8.4.11",
   "innodb_buffer_pool_size": "64M",
   "innodb_redo_log_capacity": "64M",
-  "fsdb_base_revision": "85bf01cd",
+  "fsdb_base_revision": "53e1d2e6",
   "fsdb_dirty": true,
   "comparison": "Statement errors, SQLSTATE, diagnostic rows, and selected table contents; affected-row metadata is covered separately by the wire contract.",
   "cases": [
@@ -77,15 +77,10 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
-      "errors": [
-        {
-          "Item1": 1452,
-          "Item2": "23000"
-        }
-      ],
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
-      "matches": false,
+      "matches": true,
       "name": "ignore-update",
       "statements": [
         "USE probe",

@@ -21320,6 +21320,47 @@ let rec executeAs
         | Some(Err(code, message)) -> Error(ExpressionError(code, message))
         | Some _ -> Error(ExpressionError(1105, "Trigger execution failed"))
 
+    let applyUpdateRows ignoreErrors (runStore: Store) db table candidates predicate updater
+        (triggerRows: ResizeArray<Value[] option * Value[] option>) afterTriggers =
+        let write candidates predicate updater =
+            Storage.withPermissiveIndexExpressions ignoreErrors (fun () ->
+                updateRows runStore db table candidates predicate updater)
+        let fireAfter changed =
+            triggerStorageResult (fireTriggers runStore db table After TriggerUpdate afterTriggers (List.ofSeq triggerRows))
+            |> Result.map (fun () -> changed)
+        let updateIgnoredRow rowId row =
+            triggerRows.Clear()
+            // BEFORE effects survive rejected rows; trigger errors cannot be ignored.
+            updater row
+            |> Result.bind (fun candidate ->
+                match write (Some [ rowId, row ]) (fun _ -> Ok true) (fun _ -> Ok candidate) with
+                | Error(ForeignKeyParentMissing _ as error)
+                | Error(ForeignKeyRestrict _ as error)
+                | Error(DuplicateKey _ as error) ->
+                    let code, message = Storage.toMySqlError error
+                    Diagnostics.warning code message
+                    Ok 0
+                | Error error -> Error error
+                | Ok changed -> fireAfter changed)
+        if not ignoreErrors then
+            write candidates predicate updater |> Result.bind fireAfter
+        else
+            let selected =
+                match candidates with
+                | Some rows -> Ok rows
+                | None -> tableSnapshot runStore db table |> Result.map (fun current -> List.ofSeq current.RowsArray.Indexed)
+            selected
+            |> Result.bind (traverse (fun (rowId, _) ->
+                tableSnapshot runStore db table
+                |> Result.bind (fun current ->
+                    match current.RowsArray.TryFind rowId with
+                    | None -> Ok 0
+                    | Some row ->
+                        predicate row
+                        |> Result.bind (fun selected ->
+                            if selected then updateIgnoredRow rowId row else Ok 0))))
+            |> Result.map List.sum
+
     let deleteIgnoredRows (runStore: Store) db table candidates predicate =
         let before = triggersFor runStore db table "BEFORE" "DELETE"
         let after = triggersFor runStore db table "AFTER" "DELETE"
@@ -23600,7 +23641,7 @@ let rec executeAs
                         let targetSet = targetRows |> List.map snd |> referenceSet
                         let beforeTriggers = triggersFor store db table "BEFORE" "UPDATE"
                         let afterTriggers = triggersFor store db table "AFTER" "UPDATE"
-                        let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
+                        let useSnapshot = updateStmt.Ignore || not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
                         let baseCatalog, targetStore =
                             if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
 
@@ -23648,17 +23689,13 @@ let rec executeAs
                             | Error error -> Error error
 
                         match
-                            Storage.withPermissiveIndexExpressions updateStmt.Ignore (fun () ->
-                                updateRows targetStore db table (Some targetRows) predicate updater)
+                            applyUpdateRows updateStmt.Ignore targetStore db table (Some targetRows) predicate updater changedRows afterTriggers
                         with
                         | Ok changed ->
-                            match fireTriggers targetStore db table After TriggerUpdate afterTriggers (List.ofSeq changedRows) with
-                            | Some error -> ids, error
-                            | None ->
-                                if useSnapshot then
-                                    Storage.commitCatalogInto store baseCatalog targetStore
+                            if useSnapshot then
+                                Storage.commitCatalogInto store baseCatalog targetStore
 
-                                ids, Affected(uint64 (if foundRows then targetRows.Length else changed))
+                            ids, Affected(uint64 (if foundRows then targetRows.Length else changed))
                         | Error e -> ids, storageErr e
 
     | Update updateStmt ->
@@ -23878,23 +23915,7 @@ let rec executeAs
                                                         changedRows.Add(Some(Array.copy row), Some candidate)
                                                         Ok candidate)
 
-                                        match
-                                            Storage.withPermissiveIndexExpressions updateStmt.Ignore (fun () ->
-                                                updateRows snapshot tdb tname None predicate updater)
-                                        with
-                                        | Error error -> Error error
-                                        | Ok changed ->
-                                            triggerStorageResult (
-                                                fireTriggers
-                                                    snapshot
-                                                    tdb
-                                                    tname
-                                                    After
-                                                    TriggerUpdate
-                                                    afterTriggers
-                                                    (List.ofSeq changedRows)
-                                            )
-                                            |> Result.map (fun () -> changed))
+                                        applyUpdateRows updateStmt.Ignore snapshot tdb tname None predicate updater changedRows afterTriggers)
                                 |> Array.toList
                                 |> traverse id)
 

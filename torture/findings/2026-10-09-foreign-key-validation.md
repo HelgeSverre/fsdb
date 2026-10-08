@@ -25,7 +25,6 @@ INSERT IGNORE candidates never become parents for later rows.
 
 ## Remaining differences and scope
 
-- UPDATE IGNORE returns error 1452 instead of warning and row skipping.
 - Unnamed constraints use fsdb's generated name rather than MySQL's
   `<table>_ibfk_<sequence>` name.
 - ALTER error messages can name MySQL's temporary `#sql...` table; fsdb retains
@@ -33,7 +32,7 @@ INSERT IGNORE candidates never become parents for later rows.
 - Selection among multiple eligible supporting indexes and functional trailing
   key parts is not covered by this matrix.
 
-The replay matches 33 of 35 scripts. This is bounded evidence, not a claim of
+The replay matches 34 of 35 scripts. [UPDATE IGNORE constraint skipping](2026-10-09-update-ignore.md) is covered separately. This is bounded evidence, not a claim of
 complete foreign-key parity.
 
 ## Validation

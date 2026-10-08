@@ -1,0 +1,177 @@
+{
+  "mysql_version": "8.4.11",
+  "innodb_buffer_pool_size": "64M",
+  "innodb_redo_log_capacity": "64M",
+  "fsdb_base_revision": "53e1d2e6",
+  "fsdb_dirty": true,
+  "comparison": "Errors, SQLSTATE, warning order, retained rows, and trigger effects. Wire contracts also compare affected-row metadata.",
+  "cases": [
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "matches": true,
+      "name": "mixed",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "CREATE TABLE audit(phase VARCHAR(10),id INT)",
+        "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)",
+        "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)",
+        "UPDATE IGNORE child SET n=id ORDER BY id",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id",
+        "SELECT * FROM audit"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t3\nafter\t3\nbefore\t2\nbefore\t1\nafter\t1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t3\nafter\t3\nbefore\t2\nbefore\t1\nafter\t1\n",
+      "matches": true,
+      "name": "reverse",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "CREATE TABLE audit(phase VARCHAR(10),id INT)",
+        "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)",
+        "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)",
+        "UPDATE IGNORE child SET n=id ORDER BY id DESC",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id",
+        "SELECT * FROM audit"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nbefore\t2\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nbefore\t2\n",
+      "matches": true,
+      "name": "limit",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "CREATE TABLE audit(phase VARCHAR(10),id INT)",
+        "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)",
+        "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)",
+        "UPDATE IGNORE child SET n=2 ORDER BY id LIMIT 2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id",
+        "SELECT * FROM audit"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "matches": true,
+      "name": "joined",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "CREATE TABLE audit(phase VARCHAR(10),id INT)",
+        "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)",
+        "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)",
+        "UPDATE IGNORE child JOIN parent ON parent.n=child.n SET child.n=child.id",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id",
+        "SELECT * FROM audit"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nn\n1\n13\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nn\n1\n13\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "matches": true,
+      "name": "parent",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "UPDATE IGNORE parent SET n=n+10",
+        "SHOW WARNINGS",
+        "SELECT * FROM parent ORDER BY n",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\n",
+      "matches": true,
+      "name": "duplicate",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "CREATE TABLE audit(phase VARCHAR(10),id INT)",
+        "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('before',OLD.id)",
+        "CREATE TRIGGER au AFTER UPDATE ON child FOR EACH ROW INSERT INTO audit VALUES('after',NEW.id)",
+        "UPDATE IGNORE child SET id=1",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id",
+        "SELECT * FROM audit"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\ttrigger failure\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\ttrigger failure\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "matches": true,
+      "name": "trigger-error",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "CREATE TRIGGER bu BEFORE UPDATE ON child FOR EACH ROW SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1452,MESSAGE_TEXT='trigger failure'",
+        "UPDATE IGNORE child SET n=3",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    }
+  ]
+}
