@@ -268,8 +268,7 @@ let internal concatInCharset charset (args: Value list) =
                 let converted = Charset.ucs2ToUtf8 bytes
                 match Charset.tryInvalidTextByteOffset charset converted with
                 | Some offset ->
-                    let fragment = Convert.ToHexString(converted, offset, min 3 (converted.Length - offset))
-                    Diagnostics.warning 1300 (sprintf "Invalid %s character string: '%s'" charset fragment)
+                    Diagnostics.warning 1300 (Charset.invalidCharacterMessage charset converted offset)
                 | None -> ()
                 converted
             | VEncodedString(_, bytes) | VBytes bytes | VBinaryLiteral bytes -> bytes

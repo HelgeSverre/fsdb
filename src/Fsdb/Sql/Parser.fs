@@ -871,8 +871,7 @@ let private introducedStringLit: Parser<Expr, unit> =
                 | _ -> Charset.tryInvalidBinaryLiteralByteOffset charset bytes
             match invalidOffset with
             | Some offset ->
-                let fragment = Convert.ToHexString(bytes, offset, min 3 (bytes.Length - offset))
-                raise (SemanticParseError(sprintf "Invalid %s character string: '%s'" charset fragment))
+                raise (SemanticParseError(Charset.invalidCharacterMessage charset bytes offset))
             | None -> preturn (IntroducedLiteral(Value.encodedString charset bytes, charset, CharsetIntroducer spelling))
         | _ -> fail (sprintf "Unknown character set: '%s'" charset)
 

@@ -450,8 +450,7 @@ let literalWarnings statement =
                 |> Option.orElseWith (fun () -> Fsdb.Charset.tryInvalidBinaryLiteralByteOffset charset bytes)
             match invalidOffset with
             | Some offset ->
-                let fragment = System.Convert.ToHexString(bytes, offset, min 3 (bytes.Length - offset))
-                warnings.Add(1300, sprintf "Invalid %s character string: '%s'" charset fragment)
+                warnings.Add(1300, Fsdb.Charset.invalidCharacterMessage charset bytes offset)
             | None -> ()
         | _ -> ())
     List.ofSeq warnings

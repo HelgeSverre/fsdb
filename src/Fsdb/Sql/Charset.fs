@@ -593,6 +593,11 @@ let private bytePreview escapeAscii (bytes: byte[]) offset =
         |> String.concat ""
     if remaining > 6 then preview + "..." else preview
 
+/// Error 1300 previews at most three bytes as uppercase hex, without an ellipsis.
+let invalidCharacterMessage charset (bytes: byte[]) offset =
+    let fragment = Convert.ToHexString(bytes, offset, min 3 (bytes.Length - offset))
+    sprintf "Invalid %s character string: '%s'" charset fragment
+
 let invalidBytePreview bytes offset = bytePreview false bytes offset
 
 let wideBytePreview bytes offset = bytePreview true bytes offset
