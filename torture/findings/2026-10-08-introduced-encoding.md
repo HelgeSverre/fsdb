@@ -251,3 +251,19 @@ The root gate passed 3,079 tests without build warnings or errors. This closes
 the audited Big5/GBK binary-introducer gap. Quoted-string validation, other
 legacy charset families, conversion diagnostics, and charset mappings remain
 separate compatibility boundaries.
+
+### EUC and GB2312 boundaries remain open
+
+`euc-expression-oracle.py` pins a native matrix for UJIS, EUC-KR, and GB2312.
+At `de26bab6`, 229 of its 274 probes differ in acceptance, reversal bytes,
+character count, or the exact rejection message.
+
+The native endpoints distinguish these families. EUC-KR accepts two-byte
+sequences with both bytes in 81–FE. GB2312 accepts leads A1–F7 and trails
+A1–FE. UJIS accepts ordinary A1–FE pairs and three-byte sequences beginning
+8F followed by two A1–FE bytes. Its 8E prefix has an important distinction:
+`8E A0` is accepted in an introduced hex literal but reversed as `A0 8E`
+and counted as two characters, whereas `8E A1` and `8E DF` are single
+characters. Literal acceptance therefore needs a separate rule from character
+boundaries for that UJIS edge; the implementation must not erase the native
+distinction by forcing both operations through an identical predicate.
