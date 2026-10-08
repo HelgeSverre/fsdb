@@ -2,7 +2,9 @@
 
 Status: audited UPDATE, DELETE, INSERT, and REPLACE hint ownership and
 diagnostics implemented. Broader CTE scope combinations, stored programs,
-view expansion, and physical optimizer controls remain open.
+view expansion, and physical optimizer controls remain open. The
+[CTE scope audit](2026-10-08-cte-hints.md) identifies repeated-reference and
+shadowing differences beyond the cases below.
 
 ## Native behavior
 

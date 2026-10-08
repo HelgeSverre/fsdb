@@ -1,0 +1,200 @@
+{
+  "revision": "02ffd278",
+  "oracle": "MySQL 8.4.11",
+  "cases": 32,
+  "differences": 29,
+  "results": [
+    {
+      "Actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\n",
+      "Expected": "n\n1\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT 1 AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n7\n",
+      "Expected": "n\n65536\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1 AS n) SELECT @@max_points_in_geometry AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\nWarning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\n",
+      "Expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ QB_NAME(q) QB_NAME(r) */ 1 AS n) SELECT /*+ QB_NAME(q) QB_NAME(r) */ 1 AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT (SELECT /*+ BKA(y) */ n FROM c) AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `z`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `z`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n), d AS (SELECT /*+ BKA(y) */ n FROM c) SELECT /*+ BKA(z) */ n FROM d;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\n",
+      "Expected": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT a.n,b.n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tlimit_value\n2\t7\n",
+      "Expected": "n\tlimit_value\n2\t65536\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1 AS n) SELECT (WITH c AS (SELECT 2 AS n) SELECT n FROM c) AS n,@@max_points_in_geometry AS limit_value;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#4` for BKA hint\n",
+      "Expected": "n\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT (WITH c AS (SELECT /*+ BKA(y) */ 2 AS n) SELECT n FROM c) AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "id\tlimit_value\n2\t65536\n",
+      "Expected": "id\tlimit_value\n2\t65536\n",
+      "Passed": true,
+      "Sql": "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1 AS n) UPDATE t SET id=(WITH c AS (SELECT 2 AS n) SELECT n FROM c);SHOW WARNINGS;SELECT id,@@max_points_in_geometry AS limit_value FROM t;SHOW WARNINGS"
+    },
+    {
+      "Actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#4` for BKA hint\n",
+      "Expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) UPDATE t SET id=(WITH c AS (SELECT /*+ BKA(y) */ 2 AS n) SELECT n FROM c);SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Expected": "n\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#2` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT (SELECT /*+ BKA(y) */ 2) AS n FROM c;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\n",
+      "Expected": "n\n1\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT 1 AS n UNION ALL SELECT n FROM c;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Expected": "n\n1\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Passed": true,
+      "Sql": "WITH RECURSIVE c AS (SELECT /*+ BKA(x) */ 1 AS n UNION ALL SELECT /*+ BKA(y) */ n+1 FROM c WHERE n<2) SELECT n FROM c;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1064\tOptimizer hint syntax error near 'BOGUS */ 1 AS n) SELECT 1 AS n' at line 1\n",
+      "Expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1064\tOptimizer hint syntax error near 'BOGUS */ 1 AS n) SELECT 1 AS n' at line 1\n",
+      "Passed": true,
+      "Sql": "WITH c AS (SELECT /*+ BOGUS */ 1 AS n) SELECT 1 AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3125\tMAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only\n",
+      "Expected": "n\n1\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ MAX_EXECUTION_TIME(1) */ 1 AS n) SELECT 1 AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name 'unknown' for SET_VAR hint\n",
+      "Expected": "n\n1\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ SET_VAR(unknown=1) */ 1 AS n) SELECT 1 AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`q` for BKA hint\n",
+      "Expected": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `x`@`q` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ QB_NAME(q) BKA(x) */ 1 AS n) SELECT a.n,b.n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n7\n",
+      "Expected": "n\n7\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=7)  is ignored as conflicting/duplicated\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1 AS n) SELECT @@max_points_in_geometry AS n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3125\tMAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only\n",
+      "Expected": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3125\tMAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only\nWarning\t3125\tMAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ MAX_EXECUTION_TIME(1) */ 1 AS n) SELECT a.n,b.n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name 'unknown' for SET_VAR hint\n",
+      "Expected": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name 'unknown' for SET_VAR hint\nWarning\t3128\tUnresolved name 'unknown' for SET_VAR hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ SET_VAR(unknown=1) */ 1 AS n) SELECT a.n,b.n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\n",
+      "Expected": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\nWarning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ QB_NAME(q) QB_NAME(r) */ 1 AS n) SELECT a.n,b.n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\n",
+      "Expected": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT /*+ NO_MERGE(a) NO_MERGE(b) */ a.n,b.n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\n",
+      "Expected": "n\n1\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#4` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT n FROM c UNION ALL SELECT n FROM c;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Expected": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#4` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#5` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n), d AS (SELECT /*+ BKA(y) */ n FROM c) SELECT a.n,b.n FROM d a JOIN d b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n7\n",
+      "Expected": "n\n65536\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1 AS n), d AS (SELECT n FROM c) SELECT @@max_points_in_geometry AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#4` for BKA hint\n",
+      "Expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#4` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT (WITH d AS (SELECT /*+ BKA(y) */ n FROM c) SELECT n FROM d) AS n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\n",
+      "Expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) UPDATE t JOIN c a ON 1 JOIN c b ON 1 SET id=a.n+b.n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\n2\t2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`q` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Expected": "n\tn\n1\t1\n2\t2\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `x`@`q` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#6` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#7` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH RECURSIVE c AS (SELECT /*+ QB_NAME(q) BKA(x) */ 1 AS n UNION ALL SELECT /*+ BKA(y) */ n+1 FROM c WHERE n<2) SELECT a.n,b.n FROM c a JOIN c b ON a.n=b.n ORDER BY a.n;SHOW WARNINGS"
+    },
+    {
+      "Actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nn\tn\n1\t1\n",
+      "Expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\nn\tn\n1\t1\n",
+      "Passed": false,
+      "Sql": "PREPARE s FROM 'WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT a.n,b.n FROM c a JOIN c b ON 1';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`q` for BKA hint\nWarning\t3128\tUnresolved name `a`@`q` for BKA hint\n",
+      "Expected": "n\tn\n1\t1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `x`@`q` for BKA hint\nWarning\t3128\tUnresolved name `a`@`q` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ QB_NAME(q) BKA(x) */ 1 AS n) SELECT /*+ BKA(a@q) */ a.n,b.n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Expected": "n\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#4` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH a AS (SELECT /*+ BKA(x) */ 1 AS n), b AS (SELECT /*+ BKA(y) */ 2 AS n) SELECT (SELECT n FROM b) AS n FROM a;SHOW WARNINGS"
+    },
+    {
+      "Actual": "n\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#4` for BKA hint\n",
+      "Expected": "n\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#4` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#3` for BKA hint\n",
+      "Passed": false,
+      "Sql": "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT (WITH c AS (SELECT /*+ BKA(y) */ 2 AS n) SELECT n FROM c) AS n FROM c;SHOW WARNINGS"
+    }
+  ]
+}
