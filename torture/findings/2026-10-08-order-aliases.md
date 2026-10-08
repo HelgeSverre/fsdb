@@ -217,3 +217,10 @@ scalar and grouped ordering. Per-row binding only supplies projected values.
 The [setup measurement](../../benchmarks/results/bbb713cc-order-scope-setup.md)
 records a repeatable 4.2% allocation reduction for the correlated corpus, with
 variable timing and the remaining general subquery execution cost retained.
+
+
+The remaining aggregate-ordering diagnostic is part of a broader
+[aggregate ownership gap](2026-10-08-order-aggregate-scopes.md): an aggregate
+written in a scalar subquery can belong to its outer query. Native contracts
+now cover the wrong-row result and ordering rejection, so correcting only the
+3029 error number would not close this boundary.
