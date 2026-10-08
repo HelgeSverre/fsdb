@@ -3921,39 +3921,28 @@ type private SqlValueKeyComparer(collations: Collation.Collation list, coerceNum
             | _ -> a |> Array.mapi (fun i v -> (bucketOf i v).GetHashCode()) |> Array.fold (fun h x -> h * 31 + x) 17
 
 /// Traverses lazily and retains only accepted values, so rejected join
-/// candidates do not consume result memory. Stops at the first error, limit,
-/// or cancellation.
-let private traverseSeqWithLimit (limit: (int * 'e) option) (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
+/// candidates do not consume result memory. Stops at the first error or cancellation.
+let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
     let token = queryCancellation.Value
     let acc = ResizeArray()
     let mutable error = None
-    let mutable i = 0
+    let mutable untilCancellationCheck = 0
     use enumerator = xs.GetEnumerator()
 
     while error.IsNone && enumerator.MoveNext() do
-        match limit with
-        | Some(maxItems, tooMany) when i >= maxItems -> error <- Some tooMany
-        | _ -> ()
-
-        if error.IsNone && i % cancellationCheckInterval = 0 then
+        if untilCancellationCheck = 0 then
             token.ThrowIfCancellationRequested()
+            untilCancellationCheck <- cancellationCheckInterval
+        untilCancellationCheck <- untilCancellationCheck - 1
 
-        if error.IsNone then
-            i <- i + 1
-
-            match f enumerator.Current with
-            | Ok(Some y) -> acc.Add y
-            | Ok None -> ()
-            | Error e -> error <- Some e
+        match f enumerator.Current with
+        | Ok(Some y) -> acc.Add y
+        | Ok None -> ()
+        | Error e -> error <- Some e
 
     match error with
     | Some e -> Error e
     | None -> Ok(List.ofSeq acc)
-
-let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
-    traverseSeqWithLimit None f xs
-
-let private maxJoinCandidateRows = 1_000_000
 
 /// Keeps memory proportional to `capacity` without preallocating from a
 /// client-supplied LIMIT. Filesort semantics still evaluate every row.
@@ -9541,11 +9530,7 @@ and private applyPreparedJoin
                         for _, right in rightRowsFor left do
                             yield Array.append left right
                 }
-                |> traverseSeqWithLimit
-                    (Some(
-                        maxJoinCandidateRows,
-                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                    ))
+                |> traverseSeq
                     (fun combined -> candidateHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
                 |> Result.mapError Err
                 |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
@@ -9570,11 +9555,7 @@ and private applyPreparedJoin
                         for rightIndex, (_, right) in rightRowsFor left |> Seq.indexed do
                             yield leftIndex, rightIndex, Array.append left right
                 }
-                |> traverseSeqWithLimit
-                    (Some(
-                        maxJoinCandidateRows,
-                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                    ))
+                |> traverseSeq
                     (fun ((_, _, combined) as candidate) ->
                         candidateHolds combined
                         |> Result.map (fun matches -> if matches then Some candidate else None))
@@ -9596,11 +9577,7 @@ and private applyPreparedJoin
                             | Some rightIndex -> yield leftIndex, rightIndex, Array.append left right
                             | None -> ()
                 }
-                |> traverseSeqWithLimit
-                    (Some(
-                        maxJoinCandidateRows,
-                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                    ))
+                |> traverseSeq
                     (fun ((_, _, combined) as candidate) ->
                         candidateHolds combined
                         |> Result.map (fun matches -> if matches then Some candidate else None))
@@ -9646,11 +9623,7 @@ and private applyPreparedJoin
                         |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
 
                 candidates
-                |> traverseSeqWithLimit
-                    (Some(
-                        maxJoinCandidateRows,
-                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                    ))
+                |> traverseSeq
                     (fun ((_, _, combined) as candidate) ->
                         residualHolds combined
                         |> Result.map (fun matches -> if matches then Some candidate else None))
@@ -9673,11 +9646,7 @@ and private applyPreparedJoin
                 let pairs = seq { for li, l in leftIndexed.Value do for ri, r in rightIndexed -> li, ri, l, r }
 
                 pairs
-                |> traverseSeqWithLimit
-                    (Some(
-                        maxJoinCandidateRows,
-                        (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
-                    ))
+                |> traverseSeq
                     (fun (li, ri, l, r) ->
                         let combined = Array.append l r
 

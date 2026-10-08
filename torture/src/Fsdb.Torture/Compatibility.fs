@@ -4523,8 +4523,31 @@ module ContractCatalog =
           Cleanup = [| "DROP TEMPORARY TABLE IF EXISTS shadow_view"; "DROP VIEW shadow_view"; "DROP TABLE shadow_source" |]
           Coverage = [| "statement:create_table", [| "text-differential"; "prepared-protocol" |] |] }
 
+    let private joinCandidateTraversal =
+        let values = [ 0 .. 1000 ] |> List.map (sprintf "(%d,1)") |> String.concat ","
+        { Name = "join-candidate-traversal"
+          Setup =
+            [| "CREATE TABLE candidate_rows(n INT,k INT)"
+               "INSERT INTO candidate_rows VALUES" + values |]
+          Steps =
+            [| for predicate in [ "a.n+b.n<0"; "a.k=b.k AND a.n+b.n<0" ] do
+                   for kind in [ "JOIN"; "LEFT JOIN"; "RIGHT JOIN" ] do
+                       let sql = "SELECT COUNT(*) AS n FROM candidate_rows a " + kind + " candidate_rows b ON " + predicate
+                       Contract.query (kind + "-" + predicate) sql
+               Contract.execute "add-index" "ALTER TABLE candidate_rows ADD KEY(k)"
+               for kind in [ "JOIN"; "LEFT JOIN"; "RIGHT JOIN" ] do
+                   Contract.query ("indexed-" + kind)
+                       ("SELECT COUNT(*) AS n FROM candidate_rows a " + kind + " candidate_rows b ON a.k=b.k AND a.n+b.n<0")
+               Contract.query "limited-indexed-residual"
+                   "SELECT 1 AS n FROM candidate_rows a JOIN candidate_rows b ON a.k=b.k AND a.n+b.n<0 LIMIT 1"
+               Contract.query "limited-non-equi"
+                   "SELECT 1 AS n FROM candidate_rows a JOIN candidate_rows b ON a.n+b.n>=0 LIMIT 1" |]
+          Cleanup = [| "DROP TABLE candidate_rows" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let all =
-        [| comments
+        [| joinCandidateTraversal
+           comments
            orderAliases
            duplicateOrderAliases
            correlatedOrderAliases

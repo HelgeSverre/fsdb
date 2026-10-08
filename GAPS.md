@@ -194,7 +194,6 @@ or locking retain the general SELECT pipeline.
 | Mixed-type join filters | numeric `IN` conditions can move between collation-equivalent text keys as join order changes | keeps the original comparison domain; the [controlled join-order case](torture/findings/2026-10-07-fulltext-join-bounds.md#mixed-type-in-remains-open) differs when MySQL transfers the filter to the other key, with or without MATCH | medium (result membership) | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/index_merge/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings, index unions and intersections, and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once; common correlated equality/range shapes and compatible functional probes over physical or pass-through projected sources use maintained indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
-| Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 
 ## 3. Built-in functions
 
@@ -783,7 +782,6 @@ records the open shape rather than copying numbers that go stale.
 
 Documented decisions that differ from MySQL intentionally:
 
-- a one-million-row join candidate ceiling;
 - the additive `VECTOR` type and function family forward-ported from MySQL 9;
 - live statistics rather than `ANALYZE`-stale estimates, including full-text
   ranking from the committed corpus rather than rollback-stale InnoDB row

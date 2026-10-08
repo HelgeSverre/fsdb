@@ -26,6 +26,49 @@ let tests =
                   Expect.equal rows [ [ Some "widget"; Some "5" ]; [ Some "gadget"; Some "9" ] ] "each row joined to itself"
               | other -> failtestf "expected a joined resultset, got %A" other
 
+          testCase "joins may inspect over a million rejected candidate pairs"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE cap_a(n INT)" |> ignore
+              runDefault store "CREATE TABLE cap_b(n INT)" |> ignore
+              let values = [ 0 .. 1000 ] |> List.map (sprintf "(%d)") |> String.concat ","
+              runDefault store ("INSERT INTO cap_a VALUES" + values) |> ignore
+              runDefault store "INSERT INTO cap_b SELECT * FROM cap_a" |> ignore
+              for kind, expected in [ "JOIN", "0"; "LEFT JOIN", "1001"; "RIGHT JOIN", "1001" ] do
+                  let sql = "SELECT COUNT(*) AS n FROM cap_a a " + kind + " cap_b b ON a.n+b.n<0"
+                  Expect.equal (runDefault store sql)
+                      (ResultSet([ "n" ], [ [ Some expected ] ])) kind
+              use cancellation = new System.Threading.CancellationTokenSource()
+              let mutable inspected = 0
+              let rejectAndCancel _ =
+                  inspected <- inspected + 1
+                  if inspected = 1_000_001 then cancellation.Cancel()
+                  VInt 0L
+              let registry = builtins |> registerScalar "REJECT_AND_CANCEL" rejectAndCancel
+              Fsdb.Limits.queryCancellation.Value <- cancellation.Token
+              try
+                  Expect.throwsT<System.OperationCanceledException>
+                      (fun () -> run store registry "SELECT COUNT(*) FROM cap_a a JOIN cap_b b ON REJECT_AND_CANCEL(a.n+b.n)=1" |> ignore)
+                      "joins remain cancellable beyond the former candidate ceiling"
+                  Expect.isGreaterThan inspected 1_000_000 "cancellation occurs after the former ceiling"
+              finally
+                  Fsdb.Limits.queryCancellation.Value <- System.Threading.CancellationToken.None
+
+          testCase "equality joins with residuals accept over a million candidates"
+          <| fun _ ->
+              for indexed in [ false; true ] do
+                  let store = newStore ()
+                  let index = if indexed then ",KEY(k)" else ""
+                  runDefault store ("CREATE TABLE cap_keys(n INT,k INT" + index + ")") |> ignore
+                  let values = [ 0 .. 1000 ] |> List.map (sprintf "(%d,1)") |> String.concat ","
+                  runDefault store ("INSERT INTO cap_keys VALUES" + values) |> ignore
+                  for kind, expected in [ "JOIN", "0"; "LEFT JOIN", "1001"; "RIGHT JOIN", "1001" ] do
+                      let sql = "SELECT COUNT(*) AS n FROM cap_keys a " + kind + " cap_keys b ON a.k=b.k AND a.n+b.n<0"
+                      Expect.equal (runDefault store sql)
+                          (ResultSet([ "n" ], [ [ Some expected ] ])) sql
+                  let limited = "SELECT 1 AS n FROM cap_keys a JOIN cap_keys b ON a.k=b.k AND a.n+b.n<0 LIMIT 1"
+                  Expect.equal (runDefault store limited) (ResultSet([ "n" ], [])) limited
+
           testCase "table STRAIGHT_JOIN supports reads, views, and joined mutations"
           <| fun _ ->
               let store = newStore ()
@@ -1035,16 +1078,16 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal (List.length rows) (n - 1) "one match per row except the last"
               | other -> failtestf "expected a resultset, got %A" other
 
-          testCase "a non-equi JOIN rejects more than one million candidate pairs"
+          testCase "a non-equi JOIN beyond one million candidate pairs obeys LIMIT"
           <| fun _ ->
               let store = newStore ()
               runDefault store "CREATE TABLE numbers (n INT)" |> ignore
               let values = [ 1..1_001 ] |> List.map (sprintf "(%d)") |> String.concat ","
               runDefault store ("INSERT INTO numbers VALUES " + values) |> ignore
 
-              match runDefault store "SELECT a.n FROM numbers a JOIN numbers b ON a.n + b.n > 0 LIMIT 1" with
-              | Err(1105, _) -> ()
-              | other -> failtestf "expected 1105 for the oversized join, got %A" other
+              match runDefault store "SELECT 1 AS n FROM numbers a JOIN numbers b ON a.n + b.n > 0 LIMIT 1" with
+              | ResultSet([ "n" ], [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected one limited result, got %A" other
 
           testCase "a chain of Cartesian joins streams into LIMIT"
           <| fun _ ->
