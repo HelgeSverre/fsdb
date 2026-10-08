@@ -3147,6 +3147,16 @@ let tests =
               let r = Reader(w.ToArray())
               Expect.equal (decodeValue r) original "VJson round-trips through encodeValue/decodeValue"
 
+          testCase "the Value binary codec preserves encoded text bytes and charset"
+          <| fun _ ->
+              for original in
+                  [ VEncodedString("ascii", [| 0x80uy |])
+                    VEncodedString("ucs2", [| 0xD8uy; 0uy |])
+                    VEncodedString("utf8mb3", [| 0xF0uy; 0x9Fuy; 0x98uy; 0x80uy |]) ] do
+                  let writer = Writer()
+                  encodeValue writer original
+                  Expect.equal (decodeValue (Reader(writer.ToArray()))) original "encoded text round-trip"
+
           testCase "the Value binary codec round-trips component temporal values"
           <| fun _ ->
               let date = tryZeroDate 2020 0 1 |> Option.get

@@ -857,6 +857,7 @@ let private introducedStringLit: Parser<Expr, unit> =
     introducer
     .>>. choice [ concatenatedStringLit; hexBytesLit; bitBytesLit; hexadecimalNumber ]
     >>= fun (charset, value) ->
+        let spelling = charset
         let bytes =
             match value with
             | VString text -> Text.Encoding.UTF8.GetBytes text
@@ -872,7 +873,7 @@ let private introducedStringLit: Parser<Expr, unit> =
             | Some offset ->
                 let fragment = Convert.ToHexString(bytes, offset, min 3 (bytes.Length - offset))
                 raise (SemanticParseError(sprintf "Invalid %s character string: '%s'" charset fragment))
-            | None -> preturn (IntroducedLiteral(VString(Charset.decodeBytes charset bytes), charset))
+            | None -> preturn (IntroducedLiteral(Value.encodedString charset bytes, charset, CharsetIntroducer spelling))
         | _ -> fail (sprintf "Unknown character set: '%s'" charset)
 
 let private nationalStringLit: Parser<Value, unit> =
@@ -2080,11 +2081,23 @@ let private atom: Parser<Expr, unit> =
           bitBytesLit |>> Lit
           numberExpr
           hexBytesLit |>> Lit
-          nationalStringLit |>> fun value -> IntroducedLiteral(value, "utf8mb3")
+          nationalStringLit |>> fun value ->
+              let value =
+                  match value with
+                  | VString text -> Value.encodedString "utf8mb3" (Text.Encoding.UTF8.GetBytes text)
+                  | value -> value
+              IntroducedLiteral(value, "utf8mb3", NationalIntroducer)
           introducedStringLit
           concatenatedStringLit |>> fun value ->
               match (activeOptions ()).LiteralCollation with
-              | Some collation -> ConnectionLiteral(value, collation)
+              | Some collation ->
+                  let charset = Collation.charsetOfCollation collation |> Charset.canonicalName
+                  let value =
+                      match value with
+                      | VString text when charset = "utf8mb3" ->
+                          Value.encodedString charset (Text.Encoding.UTF8.GetBytes text)
+                      | value -> value
+                  ConnectionLiteral(value, collation)
               | None -> Lit value
           keyword "NULL" >>% Lit VNull
           keyword "TRUE" >>% Lit(VInt 1L)
@@ -2381,7 +2394,7 @@ type private ColMod =
 let private schemaExpression =
     expr |>> Expression.rewrite (function
         | ConnectionLiteral(value, collation) ->
-            Some(IntroducedLiteral(value, Collation.charsetOfCollation collation))
+            Some(IntroducedLiteral(value, Collation.charsetOfCollation collation, ResolvedIntroducer))
         | _ -> None)
 
 /// `CURRENT_TIMESTAMP[(N)]` — the `(N)` is accepted and dropped: MySQL
@@ -3649,7 +3662,7 @@ let private projectionSourceName state expression first finish =
         if quotedTokens > 1 then
             let decode (text: string) =
                 match expression with
-                | IntroducedLiteral(_, charset) -> Text.Encoding.UTF8.GetBytes text |> Charset.decodeBytes charset
+                | IntroducedLiteral(_, charset, _) -> Text.Encoding.UTF8.GetBytes text |> Charset.decodeBytes charset
                 | _ -> text
             firstStringSourceNameWith decode (source ())
         else

@@ -56,13 +56,13 @@ let tests =
 
           testCase "COM_STMT_PREPARE_OK advertises result and parameter counts"
           <| fun _ ->
-              let reader = Reader(stmtPrepareOkPayload 17 2 3)
+              let reader = Reader(stmtPrepareOkPayload 17 2 3 4)
               Expect.equal (reader.ReadByte()) 0uy "status"
               Expect.equal (reader.ReadInt32LE()) 17 "statement id"
               Expect.equal (reader.ReadInt16LE()) 2 "result columns"
               Expect.equal (reader.ReadInt16LE()) 3 "parameters"
               Expect.equal (reader.ReadByte()) 0uy "reserved"
-              Expect.equal (reader.ReadInt16LE()) 0 "warnings"
+              Expect.equal (reader.ReadInt16LE()) 4 "warnings"
 
           testCase "OK payload status flags carry SERVER_STATUS_IN_TRANS while a transaction is open"
           <| fun _ ->

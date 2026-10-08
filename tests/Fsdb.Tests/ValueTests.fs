@@ -155,6 +155,8 @@ let tests =
                           VDouble 1.5
                           VDecimal 12.50M
                           VString "hi | there\nwith \"quotes\""
+                          VEncodedString("ascii", [| 0x80uy |])
+                          VEncodedString("utf8mb3", [| 0xF0uy; 0x9Fuy; 0x98uy; 0x80uy |])
                           VBytes [| 0uy; 255uy; 1uy |]
                           VBinaryLiteral [| 0uy; 255uy; 1uy |]
                           VDate(DateOnly(2024, 3, 5))

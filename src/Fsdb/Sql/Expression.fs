@@ -439,6 +439,20 @@ let iterStatement visit statement =
         None)
     |> ignore
 
+/// Literal validation belongs to submission and preparation, not row evaluation.
+let literalWarnings statement =
+    let warnings = ResizeArray<int * string>()
+    statement |> iterStatement (function
+        | IntroducedLiteral(Fsdb.Value.VEncodedString(charset, bytes), _, _)
+        | ConnectionLiteral(Fsdb.Value.VEncodedString(charset, bytes), _) ->
+            match Fsdb.Charset.tryInvalidTextByteOffset charset bytes with
+            | Some offset ->
+                let fragment = System.Convert.ToHexString(bytes, offset, min 3 (bytes.Length - offset))
+                warnings.Add(1300, sprintf "Invalid %s character string: '%s'" charset fragment)
+            | None -> ()
+        | _ -> ())
+    List.ofSeq warnings
+
 let statementCount predicate statement =
     let mutable count = 0
 
@@ -453,7 +467,7 @@ let statementExists predicate statement =
     statementCount predicate statement > 0
 
 let private knownLiteralCharset = function
-    | IntroducedLiteral(_, charset) -> Some charset
+    | IntroducedLiteral(_, charset, _) -> Some charset
     | ConnectionLiteral(_, collation) -> Some(Fsdb.Collation.charsetOfCollation collation)
     | Lit(Fsdb.Value.VNull | Fsdb.Value.VBytes _ | Fsdb.Value.VBinaryLiteral _ | Fsdb.Value.VBit _)
     | BinaryCast _

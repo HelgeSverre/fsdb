@@ -2065,7 +2065,7 @@ let private opSymbol =
 let rec internal exprLabel (expr: Expr) : string =
     match expr with
     | ApproximateLiteral(_, spelling) -> spelling
-    | Lit v | IntroducedLiteral(v, _) | ConnectionLiteral(v, _) -> v |> toText |> Option.defaultValue "NULL"
+    | Lit v | IntroducedLiteral(v, _, _) | ConnectionLiteral(v, _) -> v |> toText |> Option.defaultValue "NULL"
     | MatchAgainst(cols, q, _) ->
         let columnLabel (column: MatchColumn) =
             column.Qualifier
@@ -3516,7 +3516,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
         | None -> Ok(connection 2)
     | Lit VNull -> named "binary" 6
     | ConnectionLiteral(_, collation) -> named collation 4
-    | IntroducedLiteral(_, charset) -> named (Collation.defaultNameForCharset charset) 4
+    | IntroducedLiteral(_, charset, _) -> named (Collation.defaultNameForCharset charset) 4
     | Lit(VString _) -> Ok(connection 4)
     | Lit(VJson _) -> named "utf8mb4_bin" 4
     | Lit _ | ApproximateLiteral _ -> named "binary" 5
@@ -4788,7 +4788,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         || (Temporal.hasZeroMonthOrDay date && (year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | ApproximateLiteral(value, _) -> Ok(VDouble value)
-    | Lit v | IntroducedLiteral(v, _) | ConnectionLiteral(v, _) -> Ok v
+    | Lit v | IntroducedLiteral(v, _, _) | ConnectionLiteral(v, _) -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
     // MATCH reaches scalar evaluation only when its statement shape has no
     // physical FULLTEXT source for the score pre-pass.
@@ -6014,13 +6014,20 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     | ConnectionLiteral(value, collation) ->
         metadataOfExpr ctx (Lit value)
         |> Option.map (fun metadata -> { metadata with CollationId = metadataCollationId collation })
-    | IntroducedLiteral(VString text, charset) ->
+    | Lit(VEncodedString(charset, bytes))
+    | IntroducedLiteral(VEncodedString(_, bytes), charset, _) ->
+        Some
+            { Value.columnMetadata TypeVarString with
+                ColumnLength = uint32 bytes.Length
+                Flags = NotNullFlag
+                CollationId = metadataCollationId (Collation.defaultNameForCharset charset) }
+    | IntroducedLiteral(VString text, charset, _) ->
         Some
             { Value.columnMetadata TypeVarString with
                 ColumnLength = uint32 (Charset.encode charset text).Length
                 Flags = NotNullFlag
                 CollationId = metadataCollationId (Collation.defaultNameForCharset charset) }
-    | IntroducedLiteral(value, _) -> metadataOfExpr ctx (Lit value)
+    | IntroducedLiteral(value, _, _) -> metadataOfExpr ctx (Lit value)
     | Lit(VString text) ->
         Some
             { Value.columnMetadata TypeVarString with
@@ -6611,6 +6618,7 @@ and private prepareScalarArguments ctx name expressions values =
                 value
 
         match value with
+        | VEncodedString(_, bytes) when Functions.isByteArgument name index ctx.Registry -> VBytes bytes
         | VString text when Functions.isByteArgument name index ctx.Registry ->
             VBytes(Charset.encode (sourceCharset ctx expression) text)
         | _ -> value)
@@ -7457,7 +7465,7 @@ and private describeQueryColumnsInScope
                             | Lit(VDouble _) -> Some(computedColumn name (TDouble false) false (Some(DConst(VInt 0L))) None |> describeColumn)
                             | ConnectionLiteral(VString text, collation) ->
                                 Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some collation) |> describeColumn)
-                            | IntroducedLiteral(VString text, charset) ->
+                            | IntroducedLiteral(VString text, charset, _) ->
                                 Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some(Collation.defaultNameForCharset charset)) |> describeColumn)
                             | Lit(VString text) ->
                                 Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci") |> describeColumn)
@@ -8036,6 +8044,26 @@ and private resolveFromSubquery
             outer |> Option.orElseWith (fun () -> Some(contextFactory store registry dbName Map.empty Map.empty None [||]))
         resolveRelationBody store registry dbName [] body enclosing
 
+and private materializeRelationValue columnName rowNumber value =
+    match value with
+    | VEncodedString(charset, bytes) ->
+        let invalidOffset = Charset.tryInvalidTextByteOffset charset bytes
+        match invalidOffset with
+        | None -> value
+        | Some offset ->
+            let remaining = bytes.Length - offset
+            let preview =
+                bytes.[offset .. offset + min 6 remaining - 1]
+                |> Array.map (fun value ->
+                    if value < 0x80uy then string (char value)
+                    else sprintf "\\x%02X" value)
+                |> String.concat ""
+            let preview = if remaining > 6 then preview + "..." else preview
+            Diagnostics.warning 1366
+                (sprintf "Incorrect string value: '%s' for column '%s' at row %d" preview columnName rowNumber)
+            Value.encodedString charset bytes.[0 .. offset - 1]
+    | _ -> Value.materialize value
+
 and private resolveRelationBody store registry dbName columnNames body outer : Result<ColumnDef list * Value[] list, QueryResult> =
     let describedColumns = describeQueryColumnsInScope store registry dbName (QueryBody body) outer |> Result.toOption
     let columnNamesAreValid =
@@ -8107,7 +8135,13 @@ and private resolveRelationBody store registry dbName columnNames body outer : R
                         { column with ExpressionCollation = description.ExpressionCollation }) columns descriptions
                 | _ -> columns
             renameRelationColumns columnNames (fun (column: ColumnDef) -> column.Name) (fun name column -> { column with Name = name }) columns
-            |> Result.map (fun columns -> columns, typedRows |> List.map (Array.map Value.materialize))
+            |> Result.map (fun columns ->
+                let names = columns |> List.map _.Name |> List.toArray
+                let rows =
+                    typedRows
+                    |> List.mapi (fun rowIndex row ->
+                        row |> Array.mapi (fun index value -> materializeRelationValue names.[index] (rowIndex + 1) value))
+                columns, rows)
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
         | MultipleResults _ -> Error(nestedResultsError "a derived table")

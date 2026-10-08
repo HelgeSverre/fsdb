@@ -135,18 +135,24 @@ let private nestedContext (context: ViewContext) =
 
 let private jsonString (value: string) = "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
 
+/// Malformed Unicode bytes accepted as quoted client text cannot use hex syntax.
+let introducedLiteralWith quote charset value =
+    let bytes =
+        match value with
+        | VString text -> Fsdb.Charset.encode charset text
+        | VEncodedString(_, bytes) -> bytes
+        | _ -> tryRawBytes value |> Option.defaultValue [||]
+    match Fsdb.Charset.tryInvalidUnicodeByteOffset charset bytes with
+    | Some _ -> "_" + charset + quote (System.Text.Encoding.UTF8.GetString bytes)
+    | None -> sprintf "_%s X'%s'" charset (Convert.ToHexString bytes)
+
 let rec private renderViewExpression (options: ViewRenderOptions) (context: ViewContext) (expr: Expr) : string =
     let render = renderViewExpression options context
 
     match expr with
     | ApproximateLiteral(_, spelling) -> spelling
     | Lit value | ConnectionLiteral(value, _) -> literal value
-    | IntroducedLiteral(value, charset) ->
-        let bytes =
-            match value with
-            | VString text -> Fsdb.Charset.encode charset text
-            | _ -> tryRawBytes value |> Option.defaultValue [||]
-        sprintf "_%s X'%s'" charset (Convert.ToHexString bytes)
+    | IntroducedLiteral(value, charset, _) -> introducedLiteralWith (VString >> literal) charset value
     | Placeholder _ -> "?"
     | UserVariable variable -> variable.Sql
     | SystemVariable(scope, name) ->

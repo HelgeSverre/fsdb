@@ -1108,6 +1108,8 @@ type Value =
     | VDouble of float
     | VDecimal of decimal
     | VString of string
+    /// Text bytes that cannot round-trip through the declared character set.
+    | VEncodedString of charset: string * bytes: byte[]
     | VBytes of byte[]
     /// Bare bit/hex bytes retain a numeric interpretation until materialized.
     | VBinaryLiteral of byte[]
@@ -1221,6 +1223,12 @@ let bitValue (bytes: byte[]) : uint64 option =
         |> Array.fold (fun value next -> (value <<< 8) ||| uint64 next) 0UL
         |> Some
 
+let encodedString charset bytes =
+    let charset = Charset.canonicalName charset
+    let text = Charset.decodeBytes charset bytes
+    if Charset.encode charset text = bytes then VString text
+    else VEncodedString(charset, bytes)
+
 /// Numeric literal conversion retains the low 64 bits, including wider literals.
 let binaryLiteralNumber (bytes: byte[]) =
     bytes |> Array.fold (fun value next -> (value <<< 8) ||| uint64 next) 0UL
@@ -1298,6 +1306,7 @@ let toText (v: Value) : string option =
     | VDouble d -> Some(formatDouble d)
     | VDecimal d -> Some(d.ToString(CultureInfo.InvariantCulture))
     | VString s -> Some s
+    | VEncodedString(charset, bytes) -> Some(Charset.decodeBytes charset bytes)
     | VBinaryLiteral b
     | VBytes b -> Some(Text.Encoding.Latin1.GetString b)
     | VDate d -> Some(d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
@@ -1361,6 +1370,7 @@ let toWire (v: Value) : string =
     | VDouble d -> "D" + d.ToString("R", CultureInfo.InvariantCulture)
     | VDecimal d -> "M" + d.ToString(CultureInfo.InvariantCulture)
     | VString s -> "S" + b64 s
+    | VEncodedString(charset, bytes) -> "E" + b64 charset + ":" + Convert.ToBase64String bytes
     | VBinaryLiteral b -> "L" + Convert.ToBase64String b
     | VBytes b -> "B" + Convert.ToBase64String b
     | VDate d -> "T" + d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
@@ -1399,6 +1409,10 @@ let ofWire (s: string) : Value =
                 | None -> failwithf "Value.ofWire: invalid bit payload %s" payload
             | _ -> failwithf "Value.ofWire: invalid bit payload %s" payload
         | 'S' -> VString(unb64 payload)
+        | 'E' ->
+            match payload.Split(':', 2) with
+            | [| charset; bytes |] -> VEncodedString(unb64 charset, Convert.FromBase64String bytes)
+            | _ -> failwith "Value.ofWire: invalid encoded string"
         | 'L' -> VBinaryLiteral(Convert.FromBase64String payload)
         | 'B' -> VBytes(Convert.FromBase64String payload)
         | 'T' -> VDate(DateOnly.Parse(payload, CultureInfo.InvariantCulture))
@@ -1451,6 +1465,10 @@ let encodeValue (w: Writer) (v: Value) : unit =
         let bits = Decimal.GetBits d
         for i in 0..3 do
             w.WriteInt32LE bits.[i]
+    | VEncodedString(charset, bytes) ->
+        w.WriteByte 0x11uy
+        w.WriteLenEncString charset
+        w.WriteLenEncBytes bytes
     | VString s ->
         w.WriteByte 0x04uy
         w.WriteLenEncString s
@@ -1509,6 +1527,10 @@ let decodeValue (r: #IReader) : Value =
     | 0x03uy ->
         let bits = [| for _ in 0..3 -> r.ReadInt32LE() |]
         VDecimal(new decimal (bits))
+    | 0x11uy ->
+        let charset = r.ReadLenEncString() |> Option.defaultValue ""
+        let bytes = r.ReadLenEncInt() |> Option.map (int >> r.ReadBytes) |> Option.defaultValue [||]
+        VEncodedString(charset, bytes)
     | 0x04uy -> VString(r.ReadLenEncString() |> Option.defaultValue "")
     | 0x05uy ->
         r.ReadLenEncInt()
@@ -1575,7 +1597,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VBit(width, _) -> { columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag }
     | VDouble _ -> columnMetadata TypeDouble
     | VDecimal _ -> columnMetadata TypeNewDecimal
-    | VString _ -> columnMetadata TypeVarString
+    | VString _ | VEncodedString _ -> columnMetadata TypeVarString
     | VJson _ -> { columnMetadata TypeJson with Flags = BinaryFlag }
     | VGeometry _ -> { columnMetadata TypeGeometry with Flags = BlobFlag ||| BinaryFlag }
     | VBinaryLiteral _
@@ -1768,6 +1790,7 @@ let private asJsonOperand (v: Value) : int * JsonNode =
     | VDouble d -> 1, JsonValue.Create d
     | VDecimal d -> 1, JsonValue.Create d
     | VString s -> 2, JsonValue.Create s
+    | VEncodedString(charset, bytes) -> 2, JsonValue.Create(Charset.decodeBytes charset bytes)
     | VDate _ -> 6, null
     | VZeroDate _ -> 6, null
     | VTime _ -> 7, null

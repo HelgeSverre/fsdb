@@ -889,6 +889,39 @@ module ContractCatalog =
                 "SELECT HEX(_utf32 X'0041FF') AS h"
                 "SELECT HEX(_utf32 X'') AS h"
             ]
+        let bytePreservation =
+            [
+                "SELECT HEX(_ascii X'80') AS h,LENGTH(_ascii X'80') AS n;SHOW WARNINGS"
+                "SELECT HEX(_ucs2 X'D800') AS h,LENGTH(_ucs2 X'D800') AS n;SHOW WARNINGS"
+                "SELECT HEX(_utf8mb3'😀') AS h,LENGTH(_utf8mb3'😀') AS n;SHOW WARNINGS"
+                "SELECT HEX(N'😀') AS h,LENGTH(N'😀') AS n;SHOW WARNINGS"
+                "SELECT HEX(_ascii'é') AS h,LENGTH(_ascii'é') AS n;SHOW WARNINGS"
+                "SELECT HEX(_utf8mb3'a😀b') AS h;SHOW WARNINGS"
+                "PREPARE p FROM 'SELECT HEX(_ascii X''80'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "PREPARE p FROM 'SELECT HEX(_utf8mb3''😀'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "PREPARE p FROM 'SELECT HEX(N''😀'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "PREPARE p FROM 'SELECT HEX(_ucs2 X''D800'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET @v=_ascii X'80';SHOW WARNINGS;SELECT HEX(@v) AS h;SHOW WARNINGS"
+                "SELECT HEX(v) AS h FROM (SELECT _ascii X'80' AS v) d;SHOW WARNINGS"
+                "SELECT HEX(v) AS h,LENGTH(v) AS n FROM (SELECT _ascii X'80' AS v) d;SHOW WARNINGS"
+                "SELECT HEX(v) AS h,LENGTH(v) AS n FROM (SELECT _ascii X'418042' AS v) d;SHOW WARNINGS"
+                "SELECT HEX(v) AS h,LENGTH(v) AS n FROM (SELECT _ascii'é' AS v) d;SHOW WARNINGS"
+                "SELECT HEX(v) AS h,LENGTH(v) AS n FROM (SELECT _utf8mb3'😀' AS v) d;SHOW WARNINGS"
+                "SELECT HEX(v) AS h,LENGTH(v) AS n FROM (SELECT _utf8mb3'a😀b' AS v) d;SHOW WARNINGS"
+                "SELECT HEX(v) AS h,LENGTH(v) AS n FROM (SELECT _ucs2 X'D800' AS v) d;SHOW WARNINGS"
+                "SET NAMES utf8mb4;PREPARE p FROM 'SELECT HEX(''😀'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb4;SET @src='SELECT HEX(''😀'') AS h';SELECT HEX(@src) AS source_hex;PREPARE p FROM @src;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb4;PREPARE p FROM 'SELECT HEX(_utf8mb3''😀'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb4;SET @src='SELECT HEX(_utf8mb3''😀'') AS h';SELECT HEX(@src) AS source_hex;PREPARE p FROM @src;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb4;PREPARE p FROM 'SELECT HEX(N''😀'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb4;SET @src='SELECT HEX(N''😀'') AS h';SELECT HEX(@src) AS source_hex;PREPARE p FROM @src;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb3;PREPARE p FROM 'SELECT HEX(''😀'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb3;SET @src='SELECT HEX(''😀'') AS h';SELECT HEX(@src) AS source_hex;PREPARE p FROM @src;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb3;PREPARE p FROM 'SELECT HEX(_utf8mb3''😀'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb3;SET @src='SELECT HEX(_utf8mb3''😀'') AS h';SELECT HEX(@src) AS source_hex;PREPARE p FROM @src;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb3;PREPARE p FROM 'SELECT HEX(N''😀'') AS h';SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+                "SET NAMES utf8mb3;SET @src='SELECT HEX(N''😀'') AS h';SELECT HEX(@src) AS source_hex;PREPARE p FROM @src;SHOW WARNINGS;EXECUTE p;SHOW WARNINGS"
+            ]
         { Name = "introduced-literal-encoding"
           Setup = [||]
           Steps =
@@ -901,7 +934,18 @@ module ContractCatalog =
                    yield Contract.preparedQuery (sprintf "valid-binary-%d" index) sql [||]
                    yield Contract.execute (sprintf "valid-prepare-%d" index) ("PREPARE valid_encoding FROM '" + sql.Replace("'", "''") + "'")
                    yield Contract.query (sprintf "valid-execute-%d" index) "EXECUTE valid_encoding"
-                   yield Contract.execute (sprintf "valid-close-%d" index) "DEALLOCATE PREPARE valid_encoding" |]
+                   yield Contract.execute (sprintf "valid-close-%d" index) "DEALLOCATE PREPARE valid_encoding"
+               for index, sql in List.indexed bytePreservation do
+                   yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
+                   for step, fragment in sql.Split(';') |> Array.indexed do
+                       let label = sprintf "bytes-%d-%d" index step
+                       if fragment.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)
+                          || fragment.StartsWith("SHOW", StringComparison.OrdinalIgnoreCase)
+                          || fragment.StartsWith("EXECUTE", StringComparison.OrdinalIgnoreCase) then
+                           yield Contract.query label fragment
+                       else
+                           yield Contract.execute label fragment
+               yield Contract.execute "bytes-reset-charset" "SET NAMES utf8mb4" |]
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential"; "error-contract" |] |] }
 

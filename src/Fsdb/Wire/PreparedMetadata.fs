@@ -161,7 +161,8 @@ let private metadataOfValue =
     | VUInt _ -> ColumnWire.parameterMetadataOfType(TBigInt true)
     | VDouble _ -> ColumnWire.parameterMetadataOfType (TDouble false)
     | VDecimal _ -> ColumnWire.parameterMetadataOfType(TDecimal(65, 30, false))
-    | VString _ -> generic
+    | VString _
+    | VEncodedString _ -> generic
     | VBinaryLiteral _
     | VBytes _ -> ColumnWire.parameterMetadataOfType TLongBlob
     | VDate _

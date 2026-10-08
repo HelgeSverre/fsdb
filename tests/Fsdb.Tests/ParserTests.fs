@@ -72,13 +72,17 @@ let tests =
         "parser"
         [ testCase "introduced literal rendering preserves decoded bytes and charset"
           <| fun _ ->
-              for sql in [ "_latin1'é'"; "N'héllo'"; "_utf8mb4 X'C3A9'"; "_latin1 b'01100001'" ] do
+              for sql in [ "_latin1'é'"; "N'héllo'"; "_utf8mb4 X'C3A9'"; "_latin1 b'01100001'"; "_utf8mb3'😀'"; "N'😀'"; "_ascii X'80'"; "_ucs2 X'D800'" ] do
                   let expression =
                       match Fsdb.Parser.parseExpression sql with
                       | Ok expression -> expression
                       | Error error -> failtestf "%s: %s" sql error
                   Expect.equal (Expression.rewrite (fun _ -> None) expression) expression "rewriting preserves literal identity"
-                  Expect.equal (Fsdb.Parser.parseExpression (SqlText.expression expression)) (Ok expression) sql
+                  let resolved = Expression.rewrite (function
+                      | IntroducedLiteral(value, charset, _) -> Some(IntroducedLiteral(value, charset, ResolvedIntroducer))
+                      | _ -> None)
+                  Expect.equal (Fsdb.Parser.parseExpression (SqlText.expression expression) |> Result.map resolved)
+                      (Ok(resolved expression)) sql
 
           testCase "binary casts remain distinct from explicit binary collations"
           <| fun _ ->
@@ -924,7 +928,7 @@ let tests =
                               Lit(VBinaryLiteral [| 0x01uy; 0xffuy |]), None
                               Lit(VBinaryLiteral [| 0x05uy |]), None
                               Lit(VBinaryLiteral [||]), None
-                              IntroducedLiteral(VString "héllo", "utf8mb3"), None ],
+                              IntroducedLiteral(VString "héllo", "utf8mb3", NationalIntroducer), None ],
                             None,
                             None,
                             [],

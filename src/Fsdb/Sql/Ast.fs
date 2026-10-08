@@ -122,6 +122,12 @@ module UserVariableRef =
         else
             None
 
+/// Source spelling is diagnostic evidence; recovered expressions retain only their charset.
+type LiteralIntroducer =
+    | CharsetIntroducer of spelling: string
+    | NationalIntroducer
+    | ResolvedIntroducer
+
 // `Expr` and `SelectStmt` are mutually recursive: `Exists`/a scalar subquery
 // carries a nested `SelectStmt`, whose projections/`WHERE` are themselves
 // built from `Expr`. Every type in between (`Projection`, `TableRef`, ...)
@@ -129,7 +135,7 @@ module UserVariableRef =
 type Expr =
     | Lit of Value
     /// A charset introducer labels literal bytes independently of the connection.
-    | IntroducedLiteral of value: Value * charset: string
+    | IntroducedLiteral of value: Value * charset: string * syntax: LiteralIntroducer
     /// Ordinary strings retain the connection collation used when parsed.
     | ConnectionLiteral of value: Value * collation: string
     /// Scientific notation retains its spelling for projection names and wire width.
@@ -1294,6 +1300,6 @@ and DeleteStmt =
 
 /// Literal values are independent of the spelling retained for result metadata.
 let (|LiteralValue|_|) = function
-    | Lit value | IntroducedLiteral(value, _) | ConnectionLiteral(value, _) -> Some value
+    | Lit value | IntroducedLiteral(value, _, _) | ConnectionLiteral(value, _) -> Some value
     | ApproximateLiteral(value, _) -> Some(VDouble value)
     | _ -> None

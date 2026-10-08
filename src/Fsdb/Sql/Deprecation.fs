@@ -26,6 +26,22 @@ let private reportCharsetConversions statement =
             | _ -> ()
         | _ -> ())
 
+/// Source spelling survives normalization only for client-submitted literals.
+let reportLiteralSyntax statement =
+    statement |> Expression.iterStatement (function
+        | IntroducedLiteral(_, _, NationalIntroducer) ->
+            Diagnostics.warning 3720
+                "NATIONAL/NCHAR/NVARCHAR implies the character set UTF8MB3, which will be replaced by UTF8MB4 in a future release. Please consider using CHAR(x) CHARACTER SET UTF8MB4 in order to be unambiguous."
+        | IntroducedLiteral(_, _, CharsetIntroducer spelling) ->
+            match spelling.ToLowerInvariant() with
+            | "utf8" -> Diagnostics.deprecatedUtf8Alias ()
+            | "utf8mb3" -> Diagnostics.deprecatedUtf8mb3 ()
+            | "ucs2" ->
+                Diagnostics.warning 1287
+                    "'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
+            | _ -> ()
+        | _ -> ())
+
 let reportQuery statement =
     let reportCalculateFoundRows (select: SelectStmt) =
         if select.CalculateFoundRows then

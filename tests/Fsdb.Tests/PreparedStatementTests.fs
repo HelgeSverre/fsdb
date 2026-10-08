@@ -432,6 +432,112 @@ let tests =
                   ] do
                   Expect.equal (handle session sql |> snd) (ResultSet([ "h" ], [ [ Some expected ] ])) sql
 
+          testCase "introduced literals preserve bytes before output conversion"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for literal, bytes, length in
+                  [ "_ascii X'80'", "80", "1"
+                    "_ucs2 X'D800'", "D800", "2"
+                    "_utf8mb3'😀'", "F09F9880", "4"
+                    "N'😀'", "F09F9880", "4"
+                    "_ascii'é'", "C3A9", "2" ] do
+                  let sql = "SELECT HEX(" + literal + ") AS h,LENGTH(" + literal + ") AS n"
+                  Expect.equal (handle session sql |> snd) (ResultSet([ "h"; "n" ], [ [ Some bytes; Some length ] ])) sql
+
+          testCase "introduced bytes survive user assignment but convert in derived rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @v=_ascii X'80'"
+              Expect.equal (handle session "SELECT HEX(@v) AS h" |> snd)
+                  (ResultSet([ "h" ], [ [ Some "80" ] ])) "user-variable bytes"
+              for literal, expected in
+                  [ "_ascii X'80'", ""
+                    "_ascii X'418042'", "41"
+                    "_ascii'é'", ""
+                    "_utf8mb3'😀'", ""
+                    "_utf8mb3'a😀b'", "61"
+                    "_ucs2 X'D800'", "D800" ] do
+                  let sql = "SELECT HEX(v) AS h FROM (SELECT " + literal + " AS v) d"
+                  Expect.equal (handle session sql |> snd)
+                      (ResultSet([ "h" ], [ [ Some expected ] ])) sql
+
+          testCase "invalid introduced bytes warn on each parse but not prepared execution"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              let warning =
+                  ResultSet([ "Level"; "Code"; "Message" ],
+                      [ [ Some "Warning"; Some "1300"; Some "Invalid ascii character string: '80'" ] ])
+              for _ in 1 .. 4 do
+                  run "SELECT HEX(_ascii X'80') AS h" |> ignore
+                  Expect.equal (run "SHOW WARNINGS") warning "cached direct statements retain their warning"
+              for sql in [ "SET @v=_ascii X'80'"; "SET @v=_ascii X'80', SESSION sql_mode=''" ] do
+                  run sql |> ignore
+                  Expect.equal (run "SHOW WARNINGS") warning sql
+                  Expect.equal (run "SELECT HEX(@v) AS h") (ResultSet([ "h" ], [ [ Some "80" ] ])) "assigned bytes"
+              run "PREPARE p FROM 'SELECT HEX(_ascii X''80'') AS h'" |> ignore
+              Expect.equal (run "SHOW WARNINGS") warning "preparation warning"
+              for _ in 1 .. 2 do
+                  Expect.equal (run "EXECUTE p") (ResultSet([ "h" ], [ [ Some "80" ] ])) "prepared bytes"
+                  Expect.equal (run "SHOW WARNINGS") (ResultSet([ "Level"; "Code"; "Message" ], [])) "execution does not repeat parse warnings"
+
+          testCase "binary preparation captures and replaces its diagnostics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, prepared = prepareStatementWithDiagnostics session "SELECT HEX(_ascii X'80') AS h"
+              Expect.isOk prepared "prepare"
+              Expect.equal (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1300, "Invalid ascii character string: '80'" ] "prepare warnings"
+              let session, prepared = prepareStatementWithDiagnostics session "SELECT 1"
+              Expect.isOk prepared "clean prepare"
+              Expect.isEmpty session.Diagnostics "previous warnings are cleared"
+
+          testCase "quoted and variable preparation sources retain distinct conversion boundaries"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              run "SET NAMES utf8mb4" |> ignore
+              run "PREPARE p FROM 'SELECT HEX(_utf8mb3''😀'') AS h'" |> ignore
+              Expect.equal (run "EXECUTE p") (ResultSet([ "h" ], [ [ Some "3F" ] ])) "quoted source conversion"
+              run "SET @src='SELECT HEX(_utf8mb3''😀'') AS h'" |> ignore
+              run "PREPARE p FROM @src" |> ignore
+              Expect.equal (run "EXECUTE p") (ResultSet([ "h" ], [ [ Some "F09F9880" ] ])) "variable source bytes"
+              run "SET NAMES utf8mb3" |> ignore
+              run "PREPARE p FROM 'SELECT HEX(_utf8mb3''😀'') AS h'" |> ignore
+              Expect.equal (run "EXECUTE p") (ResultSet([ "h" ], [ [ Some "F09F9880" ] ])) "matching source charset retains bytes"
+
+          testCase "literal charset deprecations precede byte warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expected in
+                  [ "SELECT HEX(_utf8mb3'😀'),LENGTH(_utf8mb3'😀')", [ 1287; 1287; 1300; 1300 ]
+                    "SELECT HEX(N'😀')", [ 3720; 1300 ]
+                    "SELECT HEX(_ucs2 X'D800')", [ 1287 ] ] do
+                  let session, _ = handle session sql
+                  Expect.equal (session.Diagnostics |> List.map _.Code) expected sql
+
+          testCase "ordinary UTF8MB3 preparation sources preserve supplementary bytes"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              run "SET NAMES utf8mb3" |> ignore
+              run "SET @src='SELECT HEX(''😀'') AS h'" |> ignore
+              Expect.equal (run "SELECT HEX(@src) AS h")
+                  (ResultSet([ "h" ], [ [ Some "53454C454354204845582827F09F988027292041532068" ] ])) "source bytes"
+              for sql in [ "PREPARE p FROM @src"; "PREPARE p FROM 'SELECT HEX(''😀'') AS h'" ] do
+                  run sql |> ignore
+                  Expect.equal (session.Diagnostics |> List.map _.Code) [ 1300 ] "preparation warning"
+                  Expect.equal (run "EXECUTE p") (ResultSet([ "h" ], [ [ Some "F09F9880" ] ])) "prepared bytes"
+
           testCase "ordinary literal parser caches distinguish connection collations"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

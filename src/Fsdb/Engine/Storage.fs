@@ -2771,6 +2771,7 @@ let private encodeEqualityValues (columns: ColumnDef list) (indices: int list) (
         // collation trims). Same rules as WHERE equality, so the index and
         // the comparison can never disagree.
         | VString value -> "S" + (collationOf index).KeyOf value
+        | VEncodedString(charset, bytes) -> "S" + (collationOf index).KeyOf(Charset.decodeBytes charset bytes)
         | VBinaryLiteral value
         | VBytes value -> "B" + Convert.ToHexString value
         | VDate value -> "T" + string value.DayNumber

@@ -804,14 +804,14 @@ let binaryRowPayload (columns: ColumnMetadata list) (values: string option list)
 
 /// Builds the fixed COM_STMT_PREPARE_OK header. Parameter and result-column
 /// definitions follow as separate packets.
-let stmtPrepareOkPayload (stmtId: int) (numColumns: int) (numParams: int) : byte[] =
+let stmtPrepareOkPayload (stmtId: int) (numColumns: int) (numParams: int) (warningCount: int) : byte[] =
     let w = Writer()
     w.WriteByte 0uy
     w.WriteInt32LE stmtId
     w.WriteInt16LE numColumns
     w.WriteInt16LE numParams
     w.WriteByte 0uy // reserved
-    w.WriteInt16LE 0 // warning count
+    w.WriteInt16LE (min (int System.UInt16.MaxValue) warningCount)
     w.ToArray()
 
 // MySQL binary protocol column type ids, as used in COM_STMT_EXECUTE's

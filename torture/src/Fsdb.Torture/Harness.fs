@@ -302,6 +302,7 @@ module Invariants =
             | VDouble value -> "D" + (if value = 0.0 then 0.0 else value).ToString("R", CultureInfo.InvariantCulture)
             | VDecimal value -> "M" + value.ToString("G29", CultureInfo.InvariantCulture)
             | VString value -> "S" + value.TrimEnd(' ').ToUpperInvariant()
+            | VEncodedString(charset, bytes) -> "S" + (Fsdb.Charset.decodeBytes charset bytes).TrimEnd(' ').ToUpperInvariant()
             | VBinaryLiteral value
             | VBytes value -> "B" + Convert.ToHexString value
             | VDate value -> "T" + string value.DayNumber

@@ -2170,7 +2170,8 @@ let private handleConnection
 
                                 return! loop session
                             | Some(StmtPrepare sql) ->
-                                match QueryHandler.prepareStatementForSession session sql with
+                                let session, prepared = QueryHandler.prepareStatementWithDiagnostics session sql
+                                match prepared with
                                 | Result.Error(code, message) ->
                                     do!
                                         writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities code message }
@@ -2202,7 +2203,7 @@ let private handleConnection
                                             []
 
                                     let payloads =
-                                        stmtPrepareOkPayload stmtId resultColumns.Length paramCount
+                                        stmtPrepareOkPayload stmtId resultColumns.Length paramCount (warningCountFor session)
                                         :: (parameterMetadata
                                             |> List.map (fun metadata -> columnDefPayload { Name = "?"; Metadata = metadata }))
                                         @ paramDefEof

@@ -243,6 +243,8 @@ let private valueToSqlLiteralWithOptions (options: Parser.ParserOptions) (v: Val
     | VDecimal d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
     | VBinaryLiteral bytes -> "X'" + Convert.ToHexString(bytes) + "'"
     | VBytes bytes -> "_binary X'" + Convert.ToHexString(bytes) + "'"
+    | VEncodedString(charset, _) ->
+        SqlText.introducedLiteralWith (fun text -> "'" + escapeSqlString options text + "'") charset v
     | VDate _
     | VDateTime _
     | VTimestamp _
@@ -1115,6 +1117,11 @@ let private parserOptionsForSession (session: Session) =
         |> SqlMode.parserOptionsFor
     { options with LiteralCollation = Some session.Store.ExecutionSettings.ConnectionCollation.Name }
 
+let private emitLiteralWarnings statement =
+    Deprecation.reportLiteralSyntax statement
+    Expression.literalWarnings statement
+    |> List.iter (fun (code, message) -> Diagnostics.warning code message)
+
 /// Evaluates a SET expression against private state so the statement remains
 /// atomic when any assignment fails.
 let private resolveUserSetRhs
@@ -1131,6 +1138,7 @@ let private resolveUserSetRhs
         match Parser.parseExpressionWithOptions options rhs with
         | Error detail -> Error(parserError sql detail)
         | Ok expression ->
+            emitLiteralWarnings (Do [ expression ])
             let variables = expressionVariablesFor session userVariables
 
             evaluateSessionExpression session variables expression
@@ -1975,7 +1983,9 @@ let private handleMixedSet (session: Session) (sql: string) : Session * QueryRes
 
 let private handleSet session sql =
     match tryParseUserVariableSet (parserOptionsForSession session) sql with
-    | Some assignments -> executeUserVariableSet session assignments
+    | Some assignments ->
+        emitLiteralWarnings (Do(assignments |> List.map snd))
+        executeUserVariableSet session assignments
     | None -> handleMixedSet session sql
 
 // Transaction control stays outside the data-statement AST because it changes
@@ -3773,7 +3783,9 @@ let private executeStatement (session: Session) (normalizedSql: string) (parserS
             None, parserSql
 
     match parseStatement parserOptions parsedSql with
-    | Result.Ok stmt -> executeParsedWithTemporaryAction action session stmt
+    | Result.Ok stmt ->
+        emitLiteralWarnings stmt
+        executeParsedWithTemporaryAction action session stmt
     | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError parserSql detail
 
 type private CompletionDirective =
@@ -5148,11 +5160,18 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
         match statement with
         | None -> Ok(statement, count)
         | Some ast ->
+            emitLiteralWarnings ast
             let store = preparedStore session
             let schema = session.Database |> Option.defaultValue defaultDatabase
             checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema ast)
             |> Result.bind (fun () -> Executor.validatePreparedBindings store (registryFor session) schema ast)
             |> Result.map (fun () -> statement, count))
+
+/// Binary preparation starts a new diagnostics area, just as COM_QUERY does.
+let prepareStatementWithDiagnostics (session: Session) sql =
+    let result, captured = Diagnostics.captureStatement (fun () -> prepareStatementForSession session sql)
+    let error = result |> function Ok _ -> None | Error(code, message) -> Some(SqlState.create code message)
+    { session with Diagnostics = Diagnostics.complete error captured }, result
 
 let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
     let ast = ast |> Option.map (PreparedVariables.capture session.UserVariables)
@@ -6756,7 +6775,15 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
             let sql =
                 match source with
-                | PreparedLiteral text -> Some text
+                | PreparedLiteral text ->
+                    let charset =
+                        session.Store.ExecutionSettings.ConnectionCollation.Name
+                        |> Collation.charsetOfCollation
+                        |> Charset.canonicalName
+                    // Quoted preparation sources use the server's UTF8MB3 text;
+                    // matching bytes bypass conversion, as user-variable sources do.
+                    let text = if charset = "utf8mb3" then text else Charset.transcodeText "utf8mb3" text
+                    Some text
                 | PreparedVariable variable ->
                     session.UserVariables |> Map.tryFind variable.Name |> Option.bind toText
 

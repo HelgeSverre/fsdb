@@ -457,6 +457,12 @@ let tryInvalidUnicodeByteOffset (name: string) (bytes: byte[]) =
         invalid
     | _ -> None
 
+/// UCS-2 code units remain accepted even when they are isolated surrogates.
+let tryInvalidTextByteOffset name bytes =
+    match canonicalName name with
+    | "ascii" -> bytes |> Array.tryFindIndex (fun value -> value > 0x7Fuy)
+    | _ -> tryInvalidUnicodeByteOffset name bytes
+
 let decodeLoadData (name: string) (bytes: byte[]) =
     match tryCodec name with
     | None -> Error(sprintf "Unsupported character set '%s'" (canonicalName name))
