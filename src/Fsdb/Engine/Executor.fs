@@ -12609,15 +12609,21 @@ and private resolveOrderAliasValue columnIndex qualifiers projections name outpu
             | Some(_, value) -> Ok(Some(projection.Expression, value))
             | None -> Error(1105, "ORDER BY projection position is outside the output row"))
 
-and private withOrderProjectionAliases (ctx: EvalContext) projections outputColumns =
-    let aliases =
-        correlatedOrderBindings ctx.Registry ctx.ColumnIndex ctx.Qualifiers projections
-        |> Map.map (fun _ binding ->
-            binding |> Result.bind (fun (position, projection) ->
-                match List.tryItem position outputColumns with
-                | Some(_, value) -> Ok(projection.Expression, value)
-                | None -> Error(1105, "ORDER BY projection position is outside the output row")))
-    { ctx with ProjectionAliases = aliases }
+/// Resolve alias identities once; each row contributes only its projected values.
+and private prepareOrderProjectionAliases registry columnIndex qualifiers projections expressions =
+    if expressions |> List.forall (Expression.collectSubqueries >> List.isEmpty) then
+        fun (ctx: EvalContext) _ -> ctx
+    else
+        let bindings = correlatedOrderBindings registry columnIndex qualifiers projections
+        fun (ctx: EvalContext) outputColumns ->
+            let aliases =
+                bindings
+                |> Map.map (fun _ binding ->
+                    binding |> Result.bind (fun (position, projection) ->
+                        match List.tryItem position outputColumns with
+                        | Some(_, value) -> Ok(projection.Expression, value)
+                        | None -> Error(1105, "ORDER BY projection position is outside the output row")))
+            { ctx with ProjectionAliases = aliases }
 
 and private transformUsesStoredSemantics (registry: Registry) expression = function
     | None -> true
@@ -13818,11 +13824,7 @@ and private resolveOrderKey
         | Some(sourceExpr, value) ->
             Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr value)
         | None -> evalOrderKey ctx (Col name))
-    | e ->
-        let context =
-            if (Expression.collectSubqueries e).IsEmpty then ctx
-            else withOrderProjectionAliases ctx projections outputCols
-        evalOrderKey context e
+    | e -> evalOrderKey ctx e
 
 and private groupByIndexTerms (registry: Registry) (table: Table) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let resolved =
@@ -14437,6 +14439,9 @@ and private runGroupedSelect
 
     let orderProjections = expandOrderProjections columns qualifiers select.Projections
     let orderBinding = validateOrderAliases columnIndex qualifiers orderProjections select.OrderBy
+    let bindOrderAliases =
+        select.OrderBy |> List.map fst
+        |> prepareOrderProjectionAliases registry columnIndex qualifiers orderProjections
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
@@ -14483,9 +14488,7 @@ and private runGroupedSelect
                 |> Option.map (fun (expression, value) -> name, (RuntimeExpression expression, value)))
         let cachedContext =
             let context = { ctx with EvaluatedExpressions = aliases |> List.map snd }
-            if select.OrderBy |> List.exists (fst >> Expression.collectSubqueries >> List.isEmpty >> not) then
-                withOrderProjectionAliases context orderProjections outputCols
-            else context
+            bindOrderAliases context outputCols
         let bindCachedAlias =
             bindOrderExpressionWith columnIndex (fun name ->
                 aliases
@@ -16862,13 +16865,19 @@ and private runSelect
         |> traverse (evalProjection (ctxFor row) columns)
         |> Result.map List.concat
 
+    let bindOrderAliases =
+        orderBy |> List.map (fst >> resolveOrderExpr)
+        |> prepareOrderProjectionAliases registry columnIndex qualifiers orderProjections
+
     // `outputCols` (the row's own projection) is computed once by the
     // caller and threaded in here, rather than re-run per `ORDER BY`
     // key — re-running per key would call `projectRow` three times over
     // on the same row for `ORDER BY a, b, c`, for the same result.
     let orderKeysOf (row: Value[]) (outputCols: (string * Value) list) : Result<(Value * Collation.Collation option) list, EvalError> =
         orderBinding
-        |> Result.bind (fun () -> orderBy |> traverse (fun (expr, _) -> resolveOrderKey (ctxFor row) orderProjections outputCols (resolveOrderExpr expr)))
+        |> Result.bind (fun () ->
+            let context = bindOrderAliases (ctxFor row) outputCols
+            orderBy |> traverse (fun (expr, _) -> resolveOrderKey context orderProjections outputCols (resolveOrderExpr expr)))
 
     // The declared fsp per output column, computed once off the probe
     // context — a temporal column renders exactly its fsp digits (see

@@ -210,3 +210,10 @@ Other cases exercise text and binary prepared protocols.
 The [performance sample](../../benchmarks/results/afc79003-correlated-order-aliases.md)
 shows a remaining per-row subquery cost. General scalar-subquery execution is
 correct for these fixtures but substantially more expensive than direct ordering.
+
+
+Correlated alias identities are now prepared once per statement and shared by
+scalar and grouped ordering. Per-row binding only supplies projected values.
+The [setup measurement](../../benchmarks/results/bbb713cc-order-scope-setup.md)
+records a repeatable 4.2% allocation reduction for the correlated corpus, with
+variable timing and the remaining general subquery execution cost retained.
