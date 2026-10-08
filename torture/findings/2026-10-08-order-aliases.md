@@ -154,3 +154,41 @@ contracts pass 51 cases / 5,261 steps with zero differences at
 `torture/artifacts/runs/20261008T003426298-49934/contracts`.
 The [ordering cost measurement](../../benchmarks/results/26716423-order-aliases.md)
 records the current implementation's timing and allocation boundary.
+
+## Correlated ordering scopes
+
+The [correlated ordering oracle](../scripts/correlated-order-alias-oracle.py)
+checks native MySQL 8.4.11 with `ordering_scope(v,w)` rows `(2,10),(1,20)`.
+The SELECT cases also run through SQL PREPARE, including rejection cases.
+
+| Query shape | Native behavior | fsdb at `3034703b` |
+|---|---|---|
+| `SELECT -v AS a ... ORDER BY (SELECT a)` | `-2,-1` | 1054 |
+| Same, nested `SELECT (SELECT a)` or `SELECT a+0` | `-2,-1` | 1054 |
+| `SELECT -v AS v ... ORDER BY (SELECT v)` | source wins: `-1,-2` | matches |
+| Inner derived table declares its own `a` | local field wins | matches |
+| Inner derived table declares only `x` | outer alias remains visible | 1054 |
+| `v AS a,w AS a`, subquery reads `a` | 1052 / 23000, field-list ambiguity | 1054 |
+| `v AS a,-v AS a`, subquery reads `a` | computed projection wins | 1054 |
+| `SUM(-v) AS a`, grouped, subquery reads `a` | 1247 / 42S22, reference to group function | 1054 |
+| `ROW_NUMBER() ... AS a`, subquery reads `a` | 3594 / HY000, window-alias reference forbidden | 1054 |
+| Empty outer input, subquery reads valid alias | succeeds with no rows | 1054 |
+| Subquery WHERE reads outer alias | accepted | 1054 |
+| Qualified `ordering_scope.a` | 1054; aliases are not table fields | matches |
+
+With `@n=0`, an outer projection `(@n:=@n+1) AS a` sorted by either
+`(SELECT a)` or `(SELECT a+0)` returns `1,2` and leaves `@n=2`. Correlated alias
+references reuse the projected value; they do not follow the reevaluation rule
+of an ordinary nested ordering expression. fsdb rejects these before assignment
+and leaves `@n=0`.
+
+These results require a scope-aware alias fallback, preserving source-column
+precedence, projection identity, cached values, and forbidden aggregate/window
+references. Unconditional expression substitution would change side effects and
+capture inner fields. The existing executor comment that a subquery cannot refer
+to this query's projection alias is too broad for ordering scopes.
+
+Native verification uses a disposable server with 64 MiB buffer and redo limits.
+The current-engine comparison uses the embedded Debug assembly, eight logical
+processors, and a 4 GiB GC heap cap. This is an open finding, not implemented
+parity or an accepted differential failure.
