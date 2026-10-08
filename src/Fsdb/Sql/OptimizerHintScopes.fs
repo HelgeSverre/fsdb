@@ -5,13 +5,19 @@ open System
 open Fsdb.Ast
 open Fsdb.Sql
 
+type SourceReference =
+    { Alias: string
+      Body: SelectOrUnion
+      Recursive: bool }
+
 // Source offsets identify definitions; numbers identify distinct CTE references.
 type Block =
     { Number: int
       SourceOffset: int option
       Sources: FromItem list
       Query: SelectStmt option
-      ParentBlock: int option }
+      ParentBlock: int option
+      Source: SourceReference option }
 
 type QuerySource =
     | SourceOffsets of (SelectStmt -> int option)
@@ -38,6 +44,14 @@ let private combine walks =
       Context = walks |> List.collect _.Context
       Resolution = walks |> List.collect _.Resolution }
 
+let private withParent parent blocks =
+    blocks |> List.map (fun block -> { block with ParentBlock = block.ParentBlock |> Option.orElse parent })
+
+let private fromSource reference walk =
+    let attach block =
+        if block.ParentBlock.IsNone then { block with Source = Some reference } else block
+    { walk with Numbered = List.map attach walk.Numbered; Resolution = List.map attach walk.Resolution }
+
 let private sources (select: SelectStmt) = Option.toList select.From @ (select.Joins |> List.map _.Table)
 
 let private extend scope definitions =
@@ -62,7 +76,7 @@ let collect querySource statement =
     let mutable nextNumber = 0
     let allocate offset sources query =
         nextNumber <- nextNumber + 1
-        { Number = nextNumber; SourceOffset = offset; Sources = sources; Query = query; ParentBlock = None }
+        { Number = nextNumber; SourceOffset = offset; Sources = sources; Query = query; ParentBlock = None; Source = None }
     let rec query scope active = function
         | PlainSelect select -> selectBlock scope active select
         | UnionSelect(first, rest, ordering, limit, offset) ->
@@ -85,12 +99,14 @@ let collect querySource statement =
                 else
                     let repeated = binding.Referenced
                     binding.Referenced <- true
-                    let body = query definitionScope (cte :: active) cte.Body
+                    let reference = { Alias = table.Alias |> Option.defaultValue table.Table; Body = cte.Body; Recursive = cte.Recursive }
+                    let body = query definitionScope (cte :: active) cte.Body |> fromSource reference
                     if repeated then { body with Context = Reparse cte :: body.Context } else body
             | None -> empty
         | FromTable _ -> empty
         | FromJoinGroup(first, joins) -> combine [ source scope active first; joinBlocks scope active joins ]
-        | FromSubquery(body, _) | FromLateral(body, _) -> query scope active body
+        | FromSubquery(body, alias) | FromLateral(body, alias) ->
+            query scope active body |> fromSource { Alias = alias; Body = body; Recursive = false }
         | FromJsonTable(value, _, _, _) -> expressions scope active [value]
     and joinBlocks scope active joins =
         joins |> List.collect (fun join -> [source scope active join.Table; expressions scope active [join.On]]) |> combine
@@ -110,9 +126,7 @@ let collect querySource statement =
                 (Option.toList select.Where @ select.GroupBy @ Option.toList select.Having
                  @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
                  @ (select.OrderBy |> List.map fst) @ Option.toList select.Limit @ Option.toList select.Offset)
-        let nested blocks =
-            blocks |> List.map (fun child ->
-                { child with ParentBlock = child.ParentBlock |> Option.orElse (block |> Option.map _.Number) })
+        let nested = withParent (block |> Option.map _.Number)
         { Numbered = Option.toList block @ nested (projections.Numbered @ from.Numbered @ remaining.Numbered)
           Context = projections.Context @ from.Context @ remaining.Context @ (block |> Option.toList |> List.map BlockHints)
           Resolution = Option.toList block @ nested (from.Resolution @ projections.Resolution @ remaining.Resolution) }
@@ -121,9 +135,9 @@ let collect querySource statement =
         let scope = extend scope ctes
         let block = allocate None (from :: (joins |> List.map _.Table)) None
         let children = combine [source scope [] from; joinBlocks scope [] joins; expressions scope [] values]
-        { Numbered = block :: children.Numbered
+        { Numbered = block :: withParent (Some block.Number) children.Numbered
           Context = children.Context @ [BlockHints block]
-          Resolution = block :: children.Resolution }
+          Resolution = block :: withParent (Some block.Number) children.Resolution }
     let insertSelect table select assignments =
         let body = selectBlock scope [] select
         let body =

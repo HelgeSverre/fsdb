@@ -607,10 +607,11 @@ let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVa
 let private triggerSessionExecutor = System.Threading.AsyncLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
 let private foundRowsOutputSlice = System.Threading.AsyncLocal<(int option * int option) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
-let private joinHintDiagnostics = System.Threading.AsyncLocal<(int * (int * string) list) list>()
+let private joinHintDiagnostics = System.Threading.AsyncLocal<OptimizerHintResolution.ExecutionDiagnostics>()
 
-let internal withJoinHintDiagnostics diagnostics body =
-    if List.isEmpty diagnostics && List.isEmpty (DynamicScope.valueOrDefault [] joinHintDiagnostics) then body ()
+let internal withJoinHintDiagnostics (diagnostics: OptimizerHintResolution.ExecutionDiagnostics) body =
+    let inherited = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
+    if diagnostics.Warnings.IsEmpty && inherited.Warnings.IsEmpty then body ()
     else DynamicScope.withValue joinHintDiagnostics diagnostics body
 
 let private metadataProbe = System.Threading.AsyncLocal<bool>()
@@ -17566,7 +17567,12 @@ let rec private boundPlanningExpression = function
     | RuntimeExpression operand -> boundPlanningExpression operand
     | expression -> Expression.mapChildren boundPlanningExpression expression
 
-let private queryEliminatesJoinPlanning store registry schema (select: SelectStmt) =
+type private JoinPlanning =
+    | RetainJoinPlanning
+    | EliminateJoinPlanning
+    | EliminateNestedPlanning
+
+let private queryJoinPlanning store registry schema originalWhere (select: SelectStmt) =
     let sources =
         (Option.toList select.From @ (select.Joins |> List.map _.Table))
         |> List.collect FromItem.leaves
@@ -17622,27 +17628,68 @@ let private queryEliminatesJoinPlanning store registry schema (select: SelectStm
         | _ -> not (Set.contains (Some true) (possibleConditionTruths context expression))
     let conditionEliminates = Option.exists (boundPlanningExpression >> impossible)
     let zeroLimit = not select.CalculateFoundRows && (select.Limit |> Option.exists (fun limit -> rowCount limit = 0))
-    zeroLimit || conditionEliminates select.Where || conditionEliminates select.Having
+    if conditionEliminates select.Where && not (originalWhere |> Option.exists impossible) then
+        // A WHERE condition eliminated only after binding skips materialized source planning too.
+        EliminateNestedPlanning
+    elif zeroLimit || conditionEliminates select.Where || conditionEliminates select.Having then EliminateJoinPlanning
+    else RetainJoinPlanning
+
+let private sourceCanMerge registry (source: OptimizerHintScopes.SourceReference) =
+    match source.Body with
+    | PlainSelect select when not source.Recursive ->
+        let expressions = select.Projections |> List.map _.Expression
+        let preventsMerge expression =
+            containsAggregate registry expression
+            || not (collectWindowFuncs expression).IsEmpty
+            || Expression.exists (function AssignUserVariable _ -> true | _ -> false) expression
+            || (Expression.collectSubqueries expression |> List.exists (scalarSubqueryMaterializes registry))
+        select.From.IsSome && not select.Distinct && select.GroupBy.IsEmpty
+        && select.Having.IsNone && select.Limit.IsNone && select.Windows.IsEmpty
+        && not (expressions |> List.exists preventsMerge)
+    | _ -> false
 
 let private emitJoinHintDiagnostics store registry schema statement =
-    let pending = DynamicScope.valueOrDefault [] joinHintDiagnostics
-    if not pending.IsEmpty then
+    let pending = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
+    if not pending.Warnings.IsEmpty then
         // A statement can enter the executor again for a mutation rewrite or stored body.
-        joinHintDiagnostics.Value <- []
+        joinHintDiagnostics.Value <- OptimizerHintResolution.emptyExecution
         let scopes = OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement
         let eliminated = HashSet<int>()
+        let merged = HashSet<int>()
+        let skipped = HashSet<int>()
         for block in scopes.Numbered do
-            let parentEliminated = block.ParentBlock |> Option.exists eliminated.Contains
-            let queryEliminated () =
-                block.Query |> Option.exists (fun query ->
-                    try Diagnostics.suppress (fun () -> queryEliminatesJoinPlanning store registry schema query)
+            let materialized =
+                block.Source |> Option.exists (fun source ->
+                    let strategy = block.ParentBlock |> Option.bind (fun parent ->
+                        Map.tryFind (parent, Some(source.Alias.ToLowerInvariant())) pending.SourceStrategies
+                        |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.SourceStrategies))
+                    strategy = Some OptimizerHintResolution.MaterializeSource || not (sourceCanMerge registry source))
+            if block.Source.IsSome && not materialized then merged.Add block.Number |> ignore
+            let parentSkipped = block.ParentBlock |> Option.exists skipped.Contains
+            let parentEliminated = not materialized && (block.ParentBlock |> Option.exists eliminated.Contains)
+            let planning =
+                block.Query |> Option.map (fun query ->
+                    let originalWhere = Map.tryFind block.Number pending.ParameterizedWhere |> Option.orElse query.Where
+                    try Diagnostics.suppress (fun () -> queryJoinPlanning store registry schema originalWhere query)
                     with
                     | Value.UnsignedOutOfRange | Value.SignedOutOfRange
-                    | :? System.OverflowException | Functions.SqlError _ -> false)
-            if parentEliminated || queryEliminated () then eliminated.Add block.Number |> ignore
-        for number, warnings in pending do
-            if not (eliminated.Contains number) then
-                for code, message in warnings do Diagnostics.warning code message
+                    | :? System.OverflowException | Functions.SqlError _ -> RetainJoinPlanning)
+                |> Option.defaultValue RetainJoinPlanning
+            if parentSkipped || planning = EliminateNestedPlanning then skipped.Add block.Number |> ignore
+            if parentSkipped || parentEliminated || planning <> RetainJoinPlanning then eliminated.Add block.Number |> ignore
+        let warnings = Map.ofList pending.Warnings
+        let children = scopes.Resolution |> List.groupBy _.ParentBlock |> Map.ofList
+        let rec emit (block: OptimizerHintScopes.Block) =
+            let sources, expressions =
+                Map.tryFind (Some block.Number) children |> Option.defaultValue []
+                |> List.partition (fun child -> child.Source.IsSome)
+            // Materialized sources plan before their owner; scalar subqueries plan afterward.
+            sources |> List.iter emit
+            if not (eliminated.Contains block.Number || merged.Contains block.Number) then
+                for code, message in Map.tryFind block.Number warnings |> Option.defaultValue [] do
+                    Diagnostics.warning code message
+            expressions |> List.iter emit
+        Map.tryFind None children |> Option.defaultValue [] |> List.iter emit
 
 /// Reference identity preserves duplicate-valued rows while matching scan
 /// candidates back to the same immutable table root.

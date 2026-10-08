@@ -5,14 +5,23 @@ open System.Collections.Generic
 open Fsdb.Ast
 open Fsdb.Sql
 
+type SourceStrategy = MergeSource | MaterializeSource
+
+type ExecutionDiagnostics =
+    { Warnings: (int * (int * string) list) list
+      SourceStrategies: Map<int * string option, SourceStrategy>
+      ParameterizedWhere: Map<int, Expr> }
+
+let emptyExecution = { Warnings = []; SourceStrategies = Map.empty; ParameterizedWhere = Map.empty }
+
 /// Contextualization warnings precede variable evaluation and name resolution.
 type Diagnostics =
     { Context: (int * int * string) list
       Hints: OptimizerHints.Hint list option
       Resolution: (int * string) list
-      Execution: (int * (int * string) list) list }
+      Execution: ExecutionDiagnostics }
 
-let empty = { Context = []; Hints = None; Resolution = []; Execution = [] }
+let empty = { Context = []; Hints = None; Resolution = []; Execution = emptyExecution }
 let private sameName left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
 let private quoteIdentifier ansiQuotes (name: string) =
     let delimiter = if ansiQuotes then "\"" else "`"
@@ -32,6 +41,7 @@ type private Block =
     { Number: int
       Sources: FromItem list
       mutable Name: string option
+      mutable SourceStrategies: Map<string option, SourceStrategy>
       Targets: ResizeArray<Target>
       Seen: HashSet<string * ConflictTarget>
       JoinOrders: HashSet<OptimizerHints.JoinOrderKind> }
@@ -159,7 +169,7 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
             | root :: _ ->
                 let blocks = scopes.Numbered |> List.map (fun scope ->
                     scope.Number,
-                    { Number = scope.Number; Sources = scope.Sources; Name = None
+                    { Number = scope.Number; Sources = scope.Sources; Name = None; SourceStrategies = Map.empty
                       Targets = ResizeArray(); Seen = HashSet(); JoinOrders = HashSet() }) |> Map.ofList
                 let context = ResizeArray<int * int * string>()
                 let named = Dictionary<string, Block>(StringComparer.OrdinalIgnoreCase)
@@ -212,7 +222,11 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                             let key = family name, target
                             let inherited = table.IsSome && block.Seen.Contains(family name, WholeBlock)
                             if inherited || not (block.Seen.Add key) then duplicate (OptimizerHints.contextOrder hint) (renderTableHint quote name table printedBlock indexes)
-                            else table |> Option.iter (fun table -> block.Targets.Add(TableTarget(name, table, indexes))))
+                            else
+                                if family name = "MERGE" then
+                                    let strategy = if name = "NO_MERGE" then MaterializeSource else MergeSource
+                                    block.SourceStrategies <- Map.add (table |> Option.map _.ToLowerInvariant()) strategy block.SourceStrategies
+                                table |> Option.iter (fun table -> block.Targets.Add(TableTarget(name, table, indexes))))
                     match hint.Value with
                     | OptimizerHints.QueryBlockName name ->
                         if current.Name.IsSome || named.ContainsKey name then duplicate (OptimizerHints.contextOrder hint) ("QB_NAME(" + quote name + ")")
@@ -256,4 +270,18 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                         | [] -> None
                         | warnings -> Some(scope.Number, warnings))
                 { Context = List.ofSeq context; Hints = Some(contextHints |> List.map snd)
-                  Resolution = resolution; Execution = execution }
+                  Resolution = resolution
+                  Execution =
+                    if execution.IsEmpty then emptyExecution
+                    else
+                        let strategies =
+                            blocks |> Map.toSeq |> Seq.collect (fun (number, block) ->
+                                block.SourceStrategies |> Map.toSeq |> Seq.map (fun (table, strategy) -> (number, table), strategy))
+                            |> Map.ofSeq
+                        let parameterizedWhere =
+                            scopes.Numbered |> List.choose (fun block ->
+                                block.Query |> Option.bind _.Where |> Option.bind (fun condition ->
+                                    if Expression.exists (function Placeholder _ -> true | _ -> false) condition then
+                                        Some(block.Number, condition)
+                                    else None)) |> Map.ofList
+                        { Warnings = execution; SourceStrategies = strategies; ParameterizedWhere = parameterizedWhere } }

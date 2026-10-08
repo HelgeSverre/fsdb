@@ -1,7 +1,6 @@
 # Join-order hint diagnostic lifecycle
 
-Status: audited query-elimination cases implemented; merge/materialization
-interactions remain open. Native MySQL 8.4.11 confirms that join-order target warnings belong
+Status: audited query-elimination and [source warning ownership](2026-10-08-join-hint-merging.md) cases implemented. Native MySQL 8.4.11 confirms that join-order target warnings belong
 to optimization/execution, unlike table/index target warnings emitted during
 preparation. The historical fsdb baseline at `75fa9901` differs in 28 of 36 cases;
 all of those original cases now match.
@@ -48,7 +47,8 @@ Pending warnings retain their query-block numbers until the executor receives
 the bound statement. The shared scope walker supplies each block's SELECT and
 parent. Existing safe constant-condition analysis handles false/NULL predicates;
 integer-column equality conflicts and LIMIT 0 suppress the audited warnings.
-Eliminated parents suppress child-block warnings. An unchosen IF expression
+Eliminated parents suppress ordinary child-block warnings; materialized-source
+ownership follows the separately audited merging rules. An unchosen IF expression
 still plans its subquery. SQL_CALC_FOUND_ROWS keeps planning active for LIMIT 0,
 and a UNION's global LIMIT 0 does not suppress its branches' warnings.
 Floating-point and DECIMAL equality conflicts retain native warning behavior.
@@ -59,8 +59,8 @@ execute user-defined functions or assignments to infer constants. Scalar
 subqueries projecting a column retain its declared result metadata when the
 outer query returns no rows, as required by the full wire comparison.
 
-`just check` passes 3,107 tests. The native fixture passes all 62 cases; fsdb
-matches 59, including every case in the original 36-case baseline. The remaining
+At `008a5628`, `just check` passed 3,107 tests. The native fixture passed all
+62 cases; fsdb matched 59, including every case in the original 36-case baseline. The remaining
 outputs are preserved in `2026-10-08-join-hint-elimination.json`.
 The full wire lane passes 76 cases and 9,486 steps with zero differences:
 `torture/artifacts/runs/20261008T134702569-48507/contracts`.
@@ -72,12 +72,10 @@ records common-path and join-hint allocation costs.
 The native fixture retains these cases without enrolling them in a known-gap
 allowlist:
 
-- A repeated, mergeable CTE whose body contains JOIN_ORDER over a constant
-  derived source emits no native target warning; fsdb emits warnings for its
-  instantiated CTE contexts. Hint ownership after query merging remains open.
-- NO_MERGE on a derived source causes native MySQL to plan that source even
-  when its parent's WHERE is false. fsdb currently suppresses the child warning
-  with the eliminated parent. Materialization-aware planning remains open.
+The repeated mergeable CTE and NO_MERGE child under a statically false parent
+now match; see [source warning ownership](2026-10-08-join-hint-merging.md).
+The current replay matches 61 of 62 cases, retaining this independent gap:
+
 - `SELECT n FROM t WHERE 'x'` emits native warning 1292 for numeric conversion;
   fsdb returns the correct empty result but omits that warning. This is a
   predicate-conversion diagnostic gap independent of join-order hints.

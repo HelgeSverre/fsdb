@@ -625,8 +625,14 @@ syntax warning text, line numbers, and context ordering. Hint identifier
 diagnostics honor ANSI_QUOTES. Join-order target diagnostics appear on execution,
 repeat for prepared statements, and are suppressed for source-free blocks and
 audited false/NULL predicates, integer equality conflicts, and LIMIT 0. Bound
-parameters determine these decisions on each execution. Merge/materialization
-interactions and more general predicate propagation remain incomplete.
+parameters determine these decisions on each execution. Audited merged derived
+and CTE bodies suppress join-order target warnings; materialized bodies retain
+them, with source warnings before their owner and scalar-subquery warnings after
+it. Parameter-dependent false WHERE conditions skip materialized child planning;
+static false predicates and bound HAVING/LIMIT retain the audited child warnings.
+MERGE/NO_MERGE directive precedence participates in diagnostic ownership.
+optimizer_switch configuration, broader materialization interactions, and more
+general predicate propagation remain incomplete.
 Audited table/index target-resolution warnings appear during SQL or binary
 preparation and do not repeat on execution. Recognizing a hint and resolving its
 targets does not imply that its physical optimizer strategy is implemented.
