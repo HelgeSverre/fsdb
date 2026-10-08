@@ -68,6 +68,17 @@ cases = [
     ('SELECT v,COERCIBILITY(v) AS n FROM grouped_literal GROUP BY v WITH ROLLUP', 'v\tn\na\t4\nNULL\t4\n'),
     ('SELECT COERCIBILITY(v) AS n,(SELECT 1) AS s FROM grouped_literal', 'n\ts\n4\t1\n'),
     ('SELECT COERCIBILITY(v) AS n FROM grouped_literal JOIN (SELECT 1 AS x) t ON 1', 'n\n4\n'),
+    ("SET NAMES latin1 COLLATE latin1_bin;CREATE TABLE identity_base(v VARCHAR(8) CHARACTER SET latin1 COLLATE latin1_bin);INSERT INTO identity_base VALUES('a');CREATE VIEW identity_literal AS SELECT 'a' AS v;CREATE VIEW identity_expression AS SELECT CONCAT('a','b') AS v;CREATE VIEW identity_column AS SELECT v FROM identity_base", ''),
+    ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_base', 'v\tcs\tco\tc\na\tlatin1\tlatin1_bin\t2\n'),
+    ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_base GROUP BY v WITH ROLLUP', 'v\tcs\tco\tc\na\tlatin1\tlatin1_bin\t2\nNULL\tlatin1\tlatin1_bin\t2\n'),
+    ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_literal', 'v\tcs\tco\tc\na\tlatin1\tlatin1_bin\t4\n'),
+    ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_literal GROUP BY v WITH ROLLUP', 'v\tcs\tco\tc\na\tlatin1\tlatin1_bin\t4\nNULL\tlatin1\tlatin1_bin\t4\n'),
+    ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_expression', 'v\tcs\tco\tc\nab\tlatin1\tlatin1_bin\t4\n'),
+    ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_expression GROUP BY v WITH ROLLUP', 'v\tcs\tco\tc\nab\tlatin1\tlatin1_bin\t4\nNULL\tlatin1\tlatin1_bin\t4\n'),
+    ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_column', 'v\tcs\tco\tc\na\tlatin1\tlatin1_bin\t2\n'),
+    ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_column GROUP BY v WITH ROLLUP', 'v\tcs\tco\tc\na\tlatin1\tlatin1_bin\t2\nNULL\tlatin1\tlatin1_bin\t2\n'),
+    ("SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM (SELECT _latin1'a' AS v) d", 'v\tcs\tco\tc\na\tlatin1\tlatin1_swedish_ci\t4\n'),
+    ("SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM (SELECT _latin1'a' AS v) d GROUP BY v WITH ROLLUP", 'v\tcs\tco\tc\na\tlatin1\tlatin1_swedish_ci\t4\nNULL\tlatin1\tlatin1_swedish_ci\t4\n'),
 ]
 
 

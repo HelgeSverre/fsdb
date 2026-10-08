@@ -145,3 +145,20 @@ limits. Both a clean committed control and view-export work encountered failures
 when those probes ran alongside other fixtures. The
 [timing-isolation record](../../benchmarks/results/70e0be67-primary-key-timing-isolation.md)
 keeps the controls and their interpretation.
+
+
+### Source expression metadata and ROLLUP
+
+A fresh MySQL 8.4.11 probe broadens the remaining boundary. The maintained
+oracle now checks CHARSET, COLLATION, and COERCIBILITY together on a latin1_bin
+base column, a direct-column view, a literal view, a CONCAT-of-literals view,
+and a derived latin1 literal, both ordinarily and with ROLLUP.
+
+The total row returns NULL as the grouped value but retains the detail row's
+charset, collation, and coercibility. Base columns and direct-column views
+retain coercibility 2; literals, constant-expression views, and derived
+literals retain 4. The derived introducer uses latin1_swedish_ci, while the
+other fixtures retain latin1_bin from their definitions. Thus replacing a
+grouping expression with a bare NULL loses observable static metadata even
+without a view. A fix must preserve source-expression metadata independently
+of materialized row values and subtotal NULLs.
