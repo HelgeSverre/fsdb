@@ -67,6 +67,7 @@ replay include these sequences. No new performance claim is made.
 ## Remaining coverage
 
 These checks establish the listed contexts, not complete conversion parity.
-Nonstrict and IGNORE mutation warning multiplicity, overflow boundaries,
+[Nonstrict and IGNORE mutation warning multiplicity](2026-10-08-mutation-conversion.md)
+is covered by a separate native fixture. Overflow boundaries,
 additional encoded/temporal values, and stored-program combinations need broader
 native coverage. General optimizer controls remain separately incomplete.

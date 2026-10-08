@@ -23332,7 +23332,7 @@ let rec executeAs
                 let metadataRow = probeRow columns
 
                 match
-                    withMetadataProbe (fun () ->
+                    withSourceMetadataProbe (fun () ->
                         whereMatches ctxFor probePredicate metadataRow
                         |> Result.bind (fun _ -> checkAssignments metadataRow))
                 with
@@ -23744,7 +23744,7 @@ let rec executeAs
                 |> Option.map _.ProbePredicate
                 |> Option.orElse deleteStmt.Where
 
-            match withMetadataProbe (fun () -> whereMatches ctxFor probePredicate (probeRow columns)) with
+            match withSourceMetadataProbe (fun () -> whereMatches ctxFor probePredicate (probeRow columns)) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
                 match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with

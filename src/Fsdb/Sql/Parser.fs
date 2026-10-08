@@ -4530,12 +4530,14 @@ let private singleTableDeleteHead: Parser<string list * TableRef * Join list, un
     |>> fun from -> [ from.Alias |> Option.defaultValue from.Table ], from, []
 
 let private deleteStmt: Parser<Statement, unit> =
-    keyword "DELETE" >>. (namedTargetsDelete <|> usingDelete <|> singleTableDeleteHead)
-    >>= fun (targets, from, joins) ->
+    keyword "DELETE" >>. (opt (keyword "IGNORE") |>> Option.isSome)
+    .>>. (namedTargetsDelete <|> usingDelete <|> singleTableDeleteHead)
+    >>= fun (ignoreErrors, (targets, from, joins)) ->
         opt (keyword "WHERE" >>. expr) .>>. singleTableOrderLimit joins
         |>> fun (where, (orderBy, limit)) ->
             Delete
                 { Ctes = []
+                  Ignore = ignoreErrors
                   Targets = targets
                   From = from
                   Joins = joins

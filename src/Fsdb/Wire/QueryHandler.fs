@@ -2812,7 +2812,8 @@ let private ignoresDataChangeErrors =
     | Insert(_, _, _, _, true)
     | InsertSelect(_, _, _, _, true)
     | LoadData { Ignore = true }
-    | Update { Ignore = true } -> true
+    | Update { Ignore = true }
+    | Delete { Ignore = true } -> true
     | _ -> false
 
 let private divisionByZeroPolicy (store: Store) (statement: Statement) =

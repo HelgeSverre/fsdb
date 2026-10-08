@@ -1743,6 +1743,7 @@ let tests =
                         (parseOk "DELETE FROM app.t")
                         (Delete
                             { Ctes = []
+                              Ignore = false
                               Targets = [ "t" ]
                               From = { Database = Some "app"; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
@@ -2093,6 +2094,7 @@ let tests =
                         (parseOk "DELETE FROM t WHERE id = 5")
                         (Delete
                             { Ctes = []
+                              Ignore = false
                               Targets = [ "t" ]
                               From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
@@ -2107,6 +2109,7 @@ let tests =
                         (parseOk "DELETE FROM t")
                         (Delete
                             { Ctes = []
+                              Ignore = false
                               Targets = [ "t" ]
                               From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
@@ -2121,6 +2124,7 @@ let tests =
                         (parseOk "DELETE FROM t WHERE id = 5 LIMIT 100")
                         (Delete
                             { Ctes = []
+                              Ignore = false
                               Targets = [ "t" ]
                               From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []

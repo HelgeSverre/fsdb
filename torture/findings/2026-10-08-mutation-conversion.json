@@ -1,0 +1,151 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "057b1b55",
+  "fsdb_dirty": true,
+  "cases": [
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE 'x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n11\tx\n12\t1x\n13\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n11\tx\n12\t1x\n13\t0x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE '1x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n1\tx\n3\t0x\n12\t1x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n1\tx\n3\t0x\n12\t1x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n3\t0x\n11\tx\n12\t1x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n3\t0x\n11\tx\n12\t1x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE n=1 OR s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE 'x' LIMIT 0;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n2\t1x\n3\t0x\n11\tx\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n2\t1x\n3\t0x\n11\tx\n",
+      "matches": true,
+      "sql": "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE '1x' LIMIT 1;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';DELETE FROM predicate_base WHERE 'x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": true,
+      "sql": "SET sql_mode='';DELETE FROM predicate_base WHERE '1x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n1\tx\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n1\tx\n3\t0x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';DELETE FROM predicate_base WHERE s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n3\t0x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';DELETE FROM predicate_base WHERE n=1 OR s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';DELETE FROM predicate_base WHERE 'x' LIMIT 0;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "SET sql_mode='';DELETE FROM predicate_base WHERE '1x' LIMIT 1;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "UPDATE IGNORE predicate_base SET n=n+10 WHERE 'x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n11\tx\n12\t1x\n13\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n11\tx\n12\t1x\n13\t0x\n",
+      "matches": true,
+      "sql": "UPDATE IGNORE predicate_base SET n=n+10 WHERE '1x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n1\tx\n3\t0x\n12\t1x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n1\tx\n3\t0x\n12\t1x\n",
+      "matches": true,
+      "sql": "UPDATE IGNORE predicate_base SET n=n+10 WHERE s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n3\t0x\n11\tx\n12\t1x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n3\t0x\n11\tx\n12\t1x\n",
+      "matches": true,
+      "sql": "UPDATE IGNORE predicate_base SET n=n+10 WHERE n=1 OR s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "UPDATE IGNORE predicate_base SET n=n+10 WHERE 'x' LIMIT 0;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n2\t1x\n3\t0x\n11\tx\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n2\t1x\n3\t0x\n11\tx\n",
+      "matches": true,
+      "sql": "UPDATE IGNORE predicate_base SET n=n+10 WHERE '1x' LIMIT 1;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "DELETE IGNORE FROM predicate_base WHERE 'x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": true,
+      "sql": "DELETE IGNORE FROM predicate_base WHERE '1x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n1\tx\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n1\tx\n3\t0x\n",
+      "matches": true,
+      "sql": "DELETE IGNORE FROM predicate_base WHERE s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\nn\ts\n3\t0x\n",
+      "matches": true,
+      "sql": "DELETE IGNORE FROM predicate_base WHERE n=1 OR s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nn\ts\n1\tx\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "DELETE IGNORE FROM predicate_base WHERE 'x' LIMIT 0;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n2\t1x\n3\t0x\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nn\ts\n2\t1x\n3\t0x\n",
+      "matches": true,
+      "sql": "DELETE IGNORE FROM predicate_base WHERE '1x' LIMIT 1;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+    }
+  ]
+}

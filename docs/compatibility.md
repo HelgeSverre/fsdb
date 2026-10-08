@@ -544,7 +544,11 @@ reports the same conditions.
 Audited Boolean contexts report numeric-string conversion warnings. Constant
 WHERE, HAVING, and JOIN ON predicates convert once; column predicates retain
 per-evaluated-row warnings and short-circuit behavior. Strict UPDATE/DELETE
-conversion errors preserve table rows. Prepared numeric parameters distinguish
+conversion errors preserve table rows. Audited non-strict mutations and
+UPDATE/DELETE IGNORE retain one warning per constant predicate or evaluated
+column value; metadata validation does not repeat the warnings. This establishes
+conversion policy for DELETE IGNORE, not complete parity for every ignored error.
+Prepared numeric parameters distinguish
 valid numeric strings from malformed prefixes and retain INTEGER or DECIMAL
 conversion diagnostics across repeated executions. Column assignments keep
 their storage conversion rules. See the [native conversion evidence](../torture/findings/2026-10-08-predicate-conversion.md)

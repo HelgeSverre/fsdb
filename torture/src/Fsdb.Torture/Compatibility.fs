@@ -6047,8 +6047,52 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS predicate_base" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
+    let private mutationConversion =
+        let scripts =
+                [ "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE 'x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE '1x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE n=1 OR s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE 'x' LIMIT 0;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';UPDATE predicate_base SET n=n+10 WHERE '1x' LIMIT 1;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';DELETE FROM predicate_base WHERE 'x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';DELETE FROM predicate_base WHERE '1x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';DELETE FROM predicate_base WHERE s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';DELETE FROM predicate_base WHERE n=1 OR s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';DELETE FROM predicate_base WHERE 'x' LIMIT 0;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "SET sql_mode='';DELETE FROM predicate_base WHERE '1x' LIMIT 1;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "UPDATE IGNORE predicate_base SET n=n+10 WHERE 'x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "UPDATE IGNORE predicate_base SET n=n+10 WHERE '1x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "UPDATE IGNORE predicate_base SET n=n+10 WHERE s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "UPDATE IGNORE predicate_base SET n=n+10 WHERE n=1 OR s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "UPDATE IGNORE predicate_base SET n=n+10 WHERE 'x' LIMIT 0;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "UPDATE IGNORE predicate_base SET n=n+10 WHERE '1x' LIMIT 1;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "DELETE IGNORE FROM predicate_base WHERE 'x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "DELETE IGNORE FROM predicate_base WHERE '1x';SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "DELETE IGNORE FROM predicate_base WHERE s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "DELETE IGNORE FROM predicate_base WHERE n=1 OR s;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "DELETE IGNORE FROM predicate_base WHERE 'x' LIMIT 0;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n"
+                  "DELETE IGNORE FROM predicate_base WHERE '1x' LIMIT 1;SHOW WARNINGS;SELECT n,s FROM predicate_base ORDER BY n" ]
+        { Name = "mutation-conversion"
+          Setup = [| "CREATE TABLE predicate_base(n INT,s VARCHAR(20))" |]
+          Steps =
+            [| for index, sql in List.indexed scripts do
+                   yield Contract.execute (sprintf "mode-%d" index) "SET sql_mode=DEFAULT"
+                   yield Contract.execute (sprintf "reset-%d" index) "DELETE FROM predicate_base"
+                   yield Contract.execute (sprintf "seed-%d" index) "INSERT INTO predicate_base VALUES(1,'x'),(2,'1x'),(3,'0x')"
+                   for part, statement in sql.Split(';', StringSplitOptions.RemoveEmptyEntries) |> Array.indexed do
+                       let name = sprintf "case-%d-%d" index part
+                       yield
+                           if statement.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)
+                              || statement.StartsWith("SHOW", StringComparison.OrdinalIgnoreCase) then
+                               Contract.query name statement
+                           else Contract.execute name statement |]
+          Cleanup = [| "DROP TABLE IF EXISTS predicate_base"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:update", [| "text-differential" |]; "statement:delete", [| "text-differential" |] |] }
+
     let all =
-        [| predicateConversion
+        [| mutationConversion
+           predicateConversion
            joinHintMerging
            joinHintLifecycle
            cteHintSyntax

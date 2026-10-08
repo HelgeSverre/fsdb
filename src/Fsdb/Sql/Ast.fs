@@ -1302,6 +1302,7 @@ and UpdateStmt =
 /// (single-table) the same way `UpdateStmt`'s are.
 and DeleteStmt =
     { Ctes: CommonTableExpr list
+      Ignore: bool
       Targets: string list
       From: TableRef
       Joins: Join list
