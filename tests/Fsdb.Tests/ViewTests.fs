@@ -698,10 +698,11 @@ let tests =
               let store = Fsdb.Storage.create ()
               expectOk (run store "CREATE TABLE vault (id INT PRIMARY KEY, public_value INT, secret INT)") "create vault"
               expectOk (run store "INSERT INTO vault VALUES (1, 10, 99)") "seed vault"
-              expectOk (run store "CREATE VIEW public_vault AS SELECT id, public_value FROM vault") "create inner view"
+              expectOk (run store "CREATE VIEW public_vault AS SELECT id, public_value, secret FROM vault") "create inner view"
               expectOk
                   (run store "CREATE VIEW malformed_vault AS SELECT id, public_value, secret AS leaked FROM public_vault")
-                  "store the invalidated outer definition"
+                  "create outer view"
+              expectOk (run store "ALTER VIEW public_vault AS SELECT id, public_value FROM vault") "hide the inner column"
 
               match run store "UPDATE malformed_vault SET public_value = leaked WHERE id = 1" with
               | Err(1054, _) -> ()
@@ -947,7 +948,10 @@ let tests =
           testCase "recursive view references fail cleanly"
           <| fun _ ->
               let store = setup ()
-              expectOk (run store "CREATE VIEW looped AS SELECT * FROM looped") "create recursive definition"
+              expectOk (run store "CREATE VIEW looped AS SELECT 1 AS n") "create view"
+              expectOk
+                  (run store "UPDATE mysql.views SET view_definition='SELECT * FROM looped' WHERE view_name='looped'")
+                  "seed a recursive stored definition"
 
               match run store "SELECT * FROM looped" with
               | Err(1462, message) -> Expect.stringContains message "recursive reference" "clear recursion error"

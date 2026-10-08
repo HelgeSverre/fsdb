@@ -1,6 +1,6 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "651e38ab",
+  "fsdb_base_revision": "56b55ac1",
   "fsdb_dirty": true,
   "comparison": "rendered result rows; SQLSTATEs are separately asserted by unit and wire contracts",
   "cases": [
@@ -204,7 +204,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'absent' doesn't exist\nid\n1\n2\n3\nseen\nNULL\n",
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\nid\n1\n2\n3\nseen\nNULL\n",
       "errors": [
         {
           "Item1": 1146,
@@ -212,7 +212,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\nid\n1\n2\n3\nseen\nNULL\n",
-      "matches": false,
+      "matches": true,
       "name": "warning-then-missing-table",
       "statements": [
         "USE probe",

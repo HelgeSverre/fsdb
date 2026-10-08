@@ -6090,6 +6090,55 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS predicate_base"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:update", [| "text-differential" |]; "statement:delete", [| "text-differential" |] |] }
 
+    let private missingTableDiagnostics =
+        let cases =
+            [
+              "select", "SELECT * FROM absent", Some(1146, "42S02")
+              "mixed-case", "SELECT * FROM AbSeNt", Some(1146, "42S02")
+              "insert", "INSERT INTO absent VALUES(1)", Some(1146, "42S02")
+              "replace", "REPLACE INTO absent VALUES(1)", Some(1146, "42S02")
+              "update", "UPDATE absent SET n=1", Some(1146, "42S02")
+              "delete", "DELETE FROM absent", Some(1146, "42S02")
+              "truncate", "TRUNCATE TABLE absent", Some(1146, "42S02")
+              "alter", "ALTER TABLE absent ADD n INT", Some(1146, "42S02")
+              "show-create", "SHOW CREATE TABLE absent", Some(1146, "42S02")
+              "describe", "DESCRIBE absent", Some(1146, "42S02")
+              "show-columns", "SHOW COLUMNS FROM absent", Some(1146, "42S02")
+              "show-index", "SHOW INDEX FROM absent", Some(1146, "42S02")
+              "explain", "EXPLAIN SELECT * FROM absent", Some(1146, "42S02")
+              "create-like", "CREATE TABLE copied LIKE absent", Some(1146, "42S02")
+              "create-view", "CREATE VIEW absent_view AS SELECT * FROM absent", Some(1146, "42S02")
+              "rename", "RENAME TABLE absent TO renamed", Some(1146, "42S02")
+              "drop", "DROP TABLE absent", Some(1051, "42S02")
+              "drop-ignore", "DROP TABLE IF EXISTS absent", None
+              "prepare", "PREPARE missing_statement FROM 'SELECT * FROM absent'", Some(1146, "42S02")
+              "lock", "LOCK TABLES absent READ", Some(1146, "42S02")
+              "missing-db-select", "SELECT * FROM nowhere.absent", Some(1049, "42000")
+              "missing-db-insert", "INSERT INTO nowhere.absent VALUES(1)", Some(1049, "42000")
+              "missing-db-update", "UPDATE nowhere.absent SET n=1", Some(1049, "42000")
+              "missing-db-delete", "DELETE FROM nowhere.absent", Some(1049, "42000")
+              "missing-db-truncate", "TRUNCATE TABLE nowhere.absent", Some(1146, "42S02")
+              "missing-db-alter", "ALTER TABLE nowhere.absent ADD n INT", Some(1049, "42000")
+              "missing-db-show-create", "SHOW CREATE TABLE nowhere.absent", Some(1049, "42000")
+              "missing-db-create", "CREATE TABLE nowhere.absent(n INT)", Some(1049, "42000")
+              "missing-db-drop", "DROP TABLE nowhere.absent", Some(1051, "42S02")
+            ]
+        { Name = "missing-table-diagnostics"
+          Setup = [||]
+          Steps =
+            [| for name, sql, error in cases do
+                   let operation =
+                       if [ "SELECT"; "SHOW"; "DESCRIBE"; "EXPLAIN" ] |> List.exists (fun prefix -> sql.StartsWith(prefix, StringComparison.Ordinal)) then
+                           Contract.query name sql
+                       else Contract.execute name sql
+                   yield
+                       match error with
+                       | Some(code, state) -> operation |> Contract.fails code state
+                       | None -> operation
+                   yield Contract.query (name + "-warnings") "SHOW WARNINGS" |]
+          Cleanup = [| "DROP VIEW IF EXISTS absent_view"; "DROP TABLE IF EXISTS copied" |]
+          Coverage = [| "statement:select", [| "text-differential" |]; "statement:drop-table", [| "text-differential" |]; "statement:create-view", [| "text-differential" |] |] }
+
     let private qualifiedDuplicateKeys =
         let keyed =
             [ "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))"
@@ -6271,6 +6320,9 @@ module ContractCatalog =
                     "INSERT INTO audit VALUES(1),(2)"
                     "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW UPDATE audit SET n=IF('1x',0,0)"
                     "DELETE FROM parent WHERE id=1" ]
+              "warning-then-missing-table", Some(1146, "42S02"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; INSERT INTO absent VALUES(1); END"
+                    "DELETE FROM parent WHERE id=1" ]
               "before-warning", None,
                   [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
                     "DELETE FROM parent WHERE id=1" ]
@@ -6440,7 +6492,8 @@ module ContractCatalog =
           Coverage = [| "statement:delete", [| "text-differential" |] |] }
 
     let all =
-        [| qualifiedDuplicateKeys
+        [| missingTableDiagnostics
+           qualifiedDuplicateKeys
            integerCastConditions
            triggerWarningLifetimes
            deleteIgnoreForeignKeys

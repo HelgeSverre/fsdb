@@ -3603,7 +3603,9 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
     let combined =
         targets
         |> Set.fold (fun catalog (db, table) ->
-            if Set.contains (db, table) beforeKeys then catalog else CatalogOverlay.setTable catalog db table None) combined
+            if Set.contains (db, table) beforeKeys then catalog
+            // Hiding a permanent table must retain its database, even when empty.
+            else catalog |> Map.change db (Option.map (Map.remove table))) combined
 
     let working =
         { Storage.beginTransactionSnapshotFromCatalog baseStore combined with
@@ -3640,7 +3642,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             else
                 overlayKeys
                 |> Set.fold (fun catalog (db, table) ->
-                    CatalogOverlay.setTable catalog db table (CatalogOverlay.tryTable baseCatalog (db, table))) working.Catalog
+                    CatalogOverlay.restoreTable baseCatalog catalog db table) working.Catalog
 
         working.Catalog <- permanentCatalog
 

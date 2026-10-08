@@ -1,0 +1,482 @@
+{
+  "mysql_version": "8.4.11",
+  "buffer_pool_mib": 64,
+  "redo_mib": 64,
+  "cases": [
+    {
+      "name": "select",
+      "statements": [
+        "USE probe",
+        "SELECT * FROM absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "mixed-case",
+      "statements": [
+        "USE probe",
+        "SELECT * FROM AbSeNt",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "qualified",
+      "statements": [
+        "USE probe",
+        "SELECT * FROM probe.absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "insert",
+      "statements": [
+        "USE probe",
+        "INSERT INTO absent VALUES(1)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "replace",
+      "statements": [
+        "USE probe",
+        "REPLACE INTO absent VALUES(1)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "update",
+      "statements": [
+        "USE probe",
+        "UPDATE absent SET n=1",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "delete",
+      "statements": [
+        "USE probe",
+        "DELETE FROM absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "truncate",
+      "statements": [
+        "USE probe",
+        "TRUNCATE TABLE absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "alter",
+      "statements": [
+        "USE probe",
+        "ALTER TABLE absent ADD n INT",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "show-create",
+      "statements": [
+        "USE probe",
+        "SHOW CREATE TABLE absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "describe",
+      "statements": [
+        "USE probe",
+        "DESCRIBE absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "show-columns",
+      "statements": [
+        "USE probe",
+        "SHOW COLUMNS FROM absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "show-index",
+      "statements": [
+        "USE probe",
+        "SHOW INDEX FROM absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "explain",
+      "statements": [
+        "USE probe",
+        "EXPLAIN SELECT * FROM absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "create-like",
+      "statements": [
+        "USE probe",
+        "CREATE TABLE copied LIKE absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "create-view",
+      "statements": [
+        "USE probe",
+        "CREATE VIEW absent_view AS SELECT * FROM absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "rename",
+      "statements": [
+        "USE probe",
+        "RENAME TABLE absent TO renamed",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "drop",
+      "statements": [
+        "USE probe",
+        "DROP TABLE absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1051\tUnknown table 'probe.absent'\n",
+      "stderr": "ERROR 1051 (42S02) at line 1: Unknown table 'probe.absent'\n",
+      "errors": [
+        [
+          1051,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "drop-ignore",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nNote\t1051\tUnknown table 'probe.absent'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "prepare",
+      "statements": [
+        "USE probe",
+        "PREPARE missing_statement FROM 'SELECT * FROM absent'",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "lock",
+      "statements": [
+        "USE probe",
+        "LOCK TABLES absent READ",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-select",
+      "statements": [
+        "USE probe",
+        "SELECT * FROM nowhere.absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "stderr": "ERROR 1049 (42000) at line 1: Unknown database 'nowhere'\n",
+      "errors": [
+        [
+          1049,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-insert",
+      "statements": [
+        "USE probe",
+        "INSERT INTO nowhere.absent VALUES(1)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "stderr": "ERROR 1049 (42000) at line 1: Unknown database 'nowhere'\n",
+      "errors": [
+        [
+          1049,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-update",
+      "statements": [
+        "USE probe",
+        "UPDATE nowhere.absent SET n=1",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "stderr": "ERROR 1049 (42000) at line 1: Unknown database 'nowhere'\n",
+      "errors": [
+        [
+          1049,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-delete",
+      "statements": [
+        "USE probe",
+        "DELETE FROM nowhere.absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "stderr": "ERROR 1049 (42000) at line 1: Unknown database 'nowhere'\n",
+      "errors": [
+        [
+          1049,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-truncate",
+      "statements": [
+        "USE probe",
+        "TRUNCATE TABLE nowhere.absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'nowhere.absent' doesn't exist\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'nowhere.absent' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-alter",
+      "statements": [
+        "USE probe",
+        "ALTER TABLE nowhere.absent ADD n INT",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "stderr": "ERROR 1049 (42000) at line 1: Unknown database 'nowhere'\n",
+      "errors": [
+        [
+          1049,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-show-create",
+      "statements": [
+        "USE probe",
+        "SHOW CREATE TABLE nowhere.absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "stderr": "ERROR 1049 (42000) at line 1: Unknown database 'nowhere'\n",
+      "errors": [
+        [
+          1049,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-create",
+      "statements": [
+        "USE probe",
+        "CREATE TABLE nowhere.absent(n INT)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "stderr": "ERROR 1049 (42000) at line 1: Unknown database 'nowhere'\n",
+      "errors": [
+        [
+          1049,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-db-drop",
+      "statements": [
+        "USE probe",
+        "DROP TABLE nowhere.absent",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1051\tUnknown table 'nowhere.absent'\n",
+      "stderr": "ERROR 1051 (42S02) at line 1: Unknown table 'nowhere.absent'\n",
+      "errors": [
+        [
+          1051,
+          "42S02"
+        ]
+      ]
+    }
+  ]
+}

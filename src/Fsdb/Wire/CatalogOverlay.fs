@@ -41,3 +41,16 @@ module internal CatalogOverlay =
 
                 if Map.isEmpty updated then None else Some updated)
             catalog
+
+    /// Restoring a shadowed table retains an original database even when empty.
+    let restoreTable (original: Catalog) (catalog: Catalog) database table =
+        let database, table = tableKey database table
+        match Map.tryFind database original with
+        | None -> setTable catalog database table None
+        | Some originalTables ->
+            catalog
+            |> Map.change database (fun current ->
+                current
+                |> Option.defaultValue Map.empty
+                |> Map.change table (fun _ -> Map.tryFind table originalTables)
+                |> Some)

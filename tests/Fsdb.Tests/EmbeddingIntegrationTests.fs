@@ -92,6 +92,7 @@ let tests =
               | ResultSet(_, [ [ Some "large" ] ]) -> ()
               | other -> failtestf "expected WHERE to post-filter the virtual rows, got %A" other
 
+              Expect.equal (conn.Query "CREATE DATABASE test") (Affected 0UL) "create the physical schema"
               conn.Query "CREATE TABLE test.prefs (model VARCHAR(50), fave INT)" |> ignore
               conn.Query "INSERT INTO test.prefs VALUES ('small', 1), ('large', 0)" |> ignore
 

@@ -26,14 +26,14 @@ matching this error now receive a three-field case instead of two fields.
 
 Four trigger counterexamples now match, including the INTEGER/DOUBLE warnings
 before duplicate-key failures in INSERT and UPDATE. They are included in the
-passing trigger wire contract. Its replay matches 33 of 34 scripts; the remaining
-1146 error still omits the database qualification.
+passing trigger wire contract. Its replay now matches all 34 scripts, including
+[qualified missing-table errors](2026-10-08-missing-table.md).
 
 ## Remaining counterexamples
 
 - `odd-name`: MySQL preserves a dot inside the quoted table name `Odd.Table`,
   reporting `odd.table.Odd.Key`. fsdb interprets that dot as qualification and
-  reports `table.Odd.Key`. This requires preserving identifier structure beyond
+  rejects the absent database `Odd` with error 1049. This requires preserving identifier structure beyond
   diagnostic formatting; the discrepancy is not corrected by adding a string
   prefix at the error boundary.
 - `narrow-column`: non-strict ALTER narrows two distinct VARCHAR values to the
@@ -46,9 +46,9 @@ in the known-gap allowlist.
 
 ## Validation
 
-- `just check`: 3,129 tests pass, no build warnings or errors.
-- Full native wire suite: 84 contracts / 11,577 steps / zero differences.
+- `just check`: 3,131 tests pass, no build warnings or errors.
+- Full native wire suite: 85 contracts / 11,652 steps / zero differences.
 - Native key-diagnostic fixture: all 16 scripts reproduced.
-- Key replay: 14 of 16 exact matches; trigger replay: 33 of 34 exact matches.
+- Key replay: 14 of 16 exact matches; trigger replay: all 34 exact matches.
 
-Wire artifact: `torture/artifacts/runs/20261008T202819420-72996/contracts`.
+Wire artifact: `torture/artifacts/runs/20261008T204626214-74341/contracts`.

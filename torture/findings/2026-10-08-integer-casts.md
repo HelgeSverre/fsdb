@@ -44,9 +44,9 @@ also verifies the trigger fixture without duplicating its process/error handling
 native wire suite passes 83 contracts / 11,408 steps with zero differences:
 `torture/artifacts/runs/20261008T201853608-72130/contracts`.
 Both maintained native fixtures pass (107 CAST scripts and 34 trigger scripts).
-The trigger replay now retains only the missing-table qualification difference;
-INTEGER warnings and qualified duplicate-key messages match in failing
-INSERT/UPDATE cases ([evidence](2026-10-08-key-diagnostics.md)).
+The trigger replay now matches all 34 cases, including INTEGER warnings and
+qualified error messages ([key evidence](2026-10-08-key-diagnostics.md),
+[missing-table evidence](2026-10-08-missing-table.md)).
 
 This establishes the audited integer-cast contexts, not complete conversion
 warning coverage. Other cast targets and broader diagnostic producers remain

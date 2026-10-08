@@ -1617,8 +1617,12 @@ let private storageErr (e: StorageError) : QueryResult =
 let private noteTableExists name =
     Diagnostics.note 1050 (sprintf "Table '%s' already exists" name)
 
+let private unknownTableError (database: string) (table: string) : EvalError =
+    1051, sprintf "Unknown table '%s.%s'" (database.ToLowerInvariant()) (table.ToLowerInvariant())
+
 let private noteUnknownTable database table =
-    Diagnostics.note 1051 (sprintf "Unknown table '%s.%s'" database table)
+    let code, message = unknownTableError database table
+    Diagnostics.note code message
 
 let private noteAuthorizationExists name host =
     Diagnostics.note 3163 (sprintf "Authorization ID '%s'@'%s' already exists." name host)
@@ -6937,7 +6941,7 @@ and private resolveTableRef
         else
             match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
             | Some(columns, rows) -> Ok(columns, if planningProbe.Value then [] else rows)
-            | None -> Error(storageErr (NoSuchTable tableRef.Table))
+            | None -> Error(storageErr (NoSuchTable(tableDb, tableRef.Table)))
     elif
         System.String.Equals(tableDb, "fsdb", System.StringComparison.OrdinalIgnoreCase)
         && store.VirtualTables.ContainsKey(tableRef.Table.ToLowerInvariant())
@@ -7318,7 +7322,13 @@ and private describeQueryColumnsInScope
                             let declaredColumns: string list = view.Columns
 
                             renameColumns declaredColumns columns)
-                | None -> scan store tableDb tableRef.Table |> Result.mapError (fun _ -> DescriptionUnavailable) |> Result.map (fst >> List.map describeColumn)
+                | None when tableRef.Database.IsNone && equalsIgnoreCase tableRef.Table "dual" -> Ok []
+                | None when equalsIgnoreCase tableDb defaultDatabase && store.VirtualTables.ContainsKey(normalizeTableName tableRef.Table) ->
+                    store.VirtualTables.[normalizeTableName tableRef.Table].Columns |> List.map describeColumn |> Ok
+                | None ->
+                    scan store tableDb tableRef.Table
+                    |> Result.mapError (storageErr >> InvalidDescription)
+                    |> Result.map (fst >> List.map describeColumn)
         | FromSubquery(body, _) -> describeBody seen dbName ctes outerScopes body |> Result.bind (renameColumns [])
         | FromLateral(body, _) -> describeBody seen dbName ctes (preceding :: outerScopes) body |> Result.bind (renameColumns [])
         | FromJsonTable(argument, _, columns, _) ->
@@ -21917,7 +21927,7 @@ let rec executeAs
                 |> Option.bind (Map.tryFind (normalizeTableName sourceName))
 
             match sourceTable with
-            | None -> ids, storageErr (NoSuchTable sourceName)
+            | None -> ids, storageErr (NoSuchTable(sourceDb, sourceName))
             | Some table ->
                 let decodeCheck (check: StoredCheck) =
                     match Parser.parse ("SELECT " + check.Clause) with
@@ -21959,9 +21969,10 @@ let rec executeAs
     | CreateTable table ->
         let db, name = splitQualified dbName table.Name
 
-        match validateCreateEngine store name table.Partitioning table.RequestedEngine with
-        | Some error -> ids, error
-        | None ->
+        match Map.containsKey (db.ToLowerInvariant()) store.Catalog, validateCreateEngine store name table.Partitioning table.RequestedEngine with
+        | false, _ -> ids, storageErr (NoSuchDatabase db)
+        | true, Some error -> ids, error
+        | true, None ->
             let table, partitionEngineError =
                 match resolvePartitioningEngineRequests store table.Partitioning with
                 | Ok partitioning -> { table with Partitioning = partitioning }, None
@@ -22043,6 +22054,12 @@ let rec executeAs
             |> Result.bind (fun _ -> removeStoredChecks snapshot db name |> Result.map ignore)
 
         match dropTables snapshot ifExists targets with
+        | Error(NoSuchTable(database, table)) -> ids, Err(unknownTableError database table)
+        | Error(NoSuchDatabase database as error) ->
+            let missing = targets |> List.tryFind (fun (name, _) -> equalsIgnoreCase name database)
+            match missing with
+            | Some(database, table) -> ids, Err(unknownTableError database table)
+            | None -> ids, storageErr error
         | Error error -> ids, storageErr error
         | Ok dropped ->
             match dropped |> traverse removeStoredObjects with
@@ -22445,6 +22462,7 @@ let rec executeAs
 
         match truncate store db table with
         | Ok() -> ids, Affected 0UL
+        | Error(NoSuchDatabase _) -> ids, storageErr (NoSuchTable(db, table))
         | Error e -> ids, storageErr e
 
     | CreateView viewSpec ->
@@ -22591,13 +22609,15 @@ let rec executeAs
                 else
                     algorithm
 
-            if viewContainsDestination view then
+            match validatePreparedBindings store registry db view with
+            | _ when viewContainsDestination view ->
                 ids, Err(1350, "View's SELECT contains a 'INTO' clause")
-            elif viewContainsSessionVariable view then
+            | _ when viewContainsSessionVariable view ->
                 ids, Err(1351, "View's SELECT contains a variable or parameter")
-            elif checkOption <> "NONE" && not (supportsCheckOption definer view) then
+            | Error error -> ids, Err error
+            | Ok() when checkOption <> "NONE" && not (supportsCheckOption definer view) ->
                 ids, Err(1368, sprintf "CHECK OPTION on non-updatable view '%s.%s'" db viewName)
-            else
+            | Ok() ->
                 missingDefiner
                 |> Option.iter (fun account ->
                     Diagnostics.note 1449 (sprintf "The user specified as a definer ('%s'@'%s') does not exist" account.Name account.Host))
@@ -22671,7 +22691,7 @@ let rec executeAs
                     ))
             |> Result.bind (fun removed ->
                 if removed = 0 && not ifExists then
-                    Error(NoSuchTable viewName)
+                    Error(NoSuchTable(db, viewName))
                 else
                     Ok(db, viewName, removed))
 

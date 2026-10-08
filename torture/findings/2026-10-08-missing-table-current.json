@@ -1,0 +1,513 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "56b55ac1",
+  "fsdb_dirty": true,
+  "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
+  "cases": [
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "select",
+      "statements": [
+        "USE probe",
+        "SELECT * FROM absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "mixed-case",
+      "statements": [
+        "USE probe",
+        "SELECT * FROM AbSeNt",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "qualified",
+      "statements": [
+        "USE probe",
+        "SELECT * FROM probe.absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "insert",
+      "statements": [
+        "USE probe",
+        "INSERT INTO absent VALUES(1)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "replace",
+      "statements": [
+        "USE probe",
+        "REPLACE INTO absent VALUES(1)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "update",
+      "statements": [
+        "USE probe",
+        "UPDATE absent SET n=1",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "delete",
+      "statements": [
+        "USE probe",
+        "DELETE FROM absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "truncate",
+      "statements": [
+        "USE probe",
+        "TRUNCATE TABLE absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "alter",
+      "statements": [
+        "USE probe",
+        "ALTER TABLE absent ADD n INT",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "show-create",
+      "statements": [
+        "USE probe",
+        "SHOW CREATE TABLE absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "describe",
+      "statements": [
+        "USE probe",
+        "DESCRIBE absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "show-columns",
+      "statements": [
+        "USE probe",
+        "SHOW COLUMNS FROM absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "show-index",
+      "statements": [
+        "USE probe",
+        "SHOW INDEX FROM absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "explain",
+      "statements": [
+        "USE probe",
+        "EXPLAIN SELECT * FROM absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "create-like",
+      "statements": [
+        "USE probe",
+        "CREATE TABLE copied LIKE absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "create-view",
+      "statements": [
+        "USE probe",
+        "CREATE VIEW absent_view AS SELECT * FROM absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "rename",
+      "statements": [
+        "USE probe",
+        "RENAME TABLE absent TO renamed",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1051\tUnknown table 'probe.absent'\n",
+      "errors": [
+        {
+          "Item1": 1051,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1051\tUnknown table 'probe.absent'\n",
+      "matches": true,
+      "name": "drop",
+      "statements": [
+        "USE probe",
+        "DROP TABLE absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nNote\t1051\tUnknown table 'probe.absent'\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nNote\t1051\tUnknown table 'probe.absent'\n",
+      "matches": true,
+      "name": "drop-ignore",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "prepare",
+      "statements": [
+        "USE probe",
+        "PREPARE missing_statement FROM 'SELECT * FROM absent'",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\n",
+      "matches": true,
+      "name": "lock",
+      "statements": [
+        "USE probe",
+        "LOCK TABLES absent READ",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "errors": [
+        {
+          "Item1": 1049,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "matches": true,
+      "name": "missing-db-select",
+      "statements": [
+        "USE probe",
+        "SELECT * FROM nowhere.absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "errors": [
+        {
+          "Item1": 1049,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "matches": true,
+      "name": "missing-db-insert",
+      "statements": [
+        "USE probe",
+        "INSERT INTO nowhere.absent VALUES(1)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "errors": [
+        {
+          "Item1": 1049,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "matches": true,
+      "name": "missing-db-update",
+      "statements": [
+        "USE probe",
+        "UPDATE nowhere.absent SET n=1",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "errors": [
+        {
+          "Item1": 1049,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "matches": true,
+      "name": "missing-db-delete",
+      "statements": [
+        "USE probe",
+        "DELETE FROM nowhere.absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'nowhere.absent' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'nowhere.absent' doesn't exist\n",
+      "matches": true,
+      "name": "missing-db-truncate",
+      "statements": [
+        "USE probe",
+        "TRUNCATE TABLE nowhere.absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "errors": [
+        {
+          "Item1": 1049,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "matches": true,
+      "name": "missing-db-alter",
+      "statements": [
+        "USE probe",
+        "ALTER TABLE nowhere.absent ADD n INT",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "errors": [
+        {
+          "Item1": 1049,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "matches": true,
+      "name": "missing-db-show-create",
+      "statements": [
+        "USE probe",
+        "SHOW CREATE TABLE nowhere.absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "errors": [
+        {
+          "Item1": 1049,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1049\tUnknown database 'nowhere'\n",
+      "matches": true,
+      "name": "missing-db-create",
+      "statements": [
+        "USE probe",
+        "CREATE TABLE nowhere.absent(n INT)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1051\tUnknown table 'nowhere.absent'\n",
+      "errors": [
+        {
+          "Item1": 1051,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1051\tUnknown table 'nowhere.absent'\n",
+      "matches": true,
+      "name": "missing-db-drop",
+      "statements": [
+        "USE probe",
+        "DROP TABLE nowhere.absent",
+        "SHOW WARNINGS"
+      ]
+    }
+  ]
+}

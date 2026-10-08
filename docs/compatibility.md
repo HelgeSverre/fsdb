@@ -537,6 +537,12 @@ expression validator rejects subqueries, aggregates, window functions,
 nondeterministic functions, cross-table references, auto-increment references,
 and DirectOnly or nondeterministic host extensions.
 
+Audited missing-table errors retain normalized database/table names. DROP,
+TRUNCATE, and ordinary references preserve their distinct error codes and
+SQLSTATEs. PREPARE and CREATE VIEW reject missing sources; SQL CREATE TABLE
+rejects an absent destination database. See the
+[missing-object evidence](../torture/findings/2026-10-08-missing-table.md).
+
 Duplicate-key errors and IGNORE warnings identify the base table and index,
 including through aliases and views, after table renames, and during unique-index
 creation. The [native diagnostic evidence](../torture/findings/2026-10-08-key-diagnostics.md)

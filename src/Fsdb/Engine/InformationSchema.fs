@@ -3511,7 +3511,7 @@ let findTable (catalog: Catalog) (dbName: string) (tableName: string) : Result<T
     | Some db ->
         match Map.tryFind (tableName.ToLowerInvariant()) db with
         | Some t -> Ok t
-        | None -> Error(1146, sprintf "Table '%s' doesn't exist" tableName)
+        | None -> Error(toMySqlError (NoSuchTable(dbName, tableName)))
 
 /// `SHOW [FULL] TABLES [FROM db] [LIKE 'pattern']`.
 /// `fsdbTables` is the host-extension overlay's table names (empty when

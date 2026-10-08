@@ -51,7 +51,7 @@ type StorageError =
     /// the storage layer so every caller (executor, WAL replay) is covered.
     | SystemSchemaAccess of schema: string
     | TableExists of name: string
-    | NoSuchTable of name: string
+    | NoSuchTable of database: string * table: string
     | UnknownColumn of name: string
     | ColumnCountMismatch of expected: int * actual: int
     | NotNullViolation of column: string
@@ -105,7 +105,8 @@ let toMySqlError (err: StorageError) : int * string =
     | SystemSchemaAccess schema -> 3552, sprintf "Access to system schema '%s' is rejected." schema
     | DatabaseExists name -> 1007, sprintf "Can't create database '%s'; database exists" name
     | TableExists name -> 1050, sprintf "Table '%s' already exists" name
-    | NoSuchTable name -> 1146, sprintf "Table '%s' doesn't exist" name
+    | NoSuchTable(database, table) ->
+        1146, sprintf "Table '%s.%s' doesn't exist" (database.ToLowerInvariant()) (table.ToLowerInvariant())
     | UnknownColumn name -> 1054, sprintf "Unknown column '%s' in field list" name
     | ColumnCountMismatch(expected, actual) ->
         1136, sprintf "Column count doesn't match value count at row 1 (expected %d, got %d)" expected actual
@@ -1460,17 +1461,17 @@ let bumpAutoIncrements (current: Catalog) (target: Catalog) : Catalog =
                 Map.add dbName mergedDb acc)
         target
 
-let private tryGetTable (db: Database) (tableName: string) : Result<Table, StorageError> =
+let private tryGetTable dbName (db: Database) (tableName: string) : Result<Table, StorageError> =
     match Map.tryFind (normalizeTableName tableName) db with
     | Some t -> Ok t
-    | None -> Error(NoSuchTable tableName)
+    | None -> Error(NoSuchTable(dbName, tableName))
 
 /// A lock-free physical-table snapshot for access paths that must keep their
 /// scan fallback and index candidates on the same catalog root.
 let tableSnapshot (store: Store) (dbName: string) (tableName: string) : Result<Table, StorageError> =
     match store.Databases.TryGetValue dbName with
     | false, _ -> Error(NoSuchDatabase dbName)
-    | true, slot -> tryGetTable slot.Value tableName
+    | true, slot -> tryGetTable dbName slot.Value tableName
 
 /// Auto-creates a database the first time a real table is written into it
 /// (`withDatabase`), and for the database a client names at connect time
@@ -2989,7 +2990,7 @@ let tryInsertLockTargets
                       Keys = encodedKeys |> List.map (fun (_, _, lockKey) -> lockKey) }))
 
     match store.Databases.TryGetValue dbName with
-    | true, slot -> tryGetTable slot.Value tableName |> Result.toOption |> Option.bind findInTable
+    | true, slot -> tryGetTable dbName slot.Value tableName |> Result.toOption |> Option.bind findInTable
     | false, _ -> None
 
 let private constraintLookup columns indices rows =
@@ -5961,7 +5962,7 @@ let private withTable
     (f: Table -> Result<Table * 'a, StorageError>)
     : Result<'a, StorageError> =
     withDatabase store dbName (fun db ->
-        tryGetTable db tableName
+        tryGetTable dbName db tableName
         |> Result.bind (fun table -> f table |> Result.map (fun (table', result) -> Map.add (normalizeTableName tableName) table' db, result)))
 
 /// Validates type parameters at DDL time, where the real column name is in
@@ -6614,7 +6615,7 @@ let dropTables
                         match tryCatalogTable address catalog with
                         | Some _ -> Ok(database, table, address)
                         | None when ifExists -> Ok(database, table, address)
-                        | None -> Error(NoSuchTable table)))
+                        | None -> Error(NoSuchTable(database, table))))
                 |> Result.bind (fun resolved ->
                     let existing =
                         resolved
@@ -6669,7 +6670,7 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
             let address = tableAddress dbName tableName
 
             virtualWriteGuard store dbName tableName
-            |> Result.bind (fun () -> tryGetTable db tableName)
+            |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
                 match referencingForeignKeys catalog address |> List.tryFind (fst >> (<>) address) with
                 | Some(childAddress, foreignKey) when store.ForeignKeyChecks ->
@@ -7443,7 +7444,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
         (fun () -> [ SchemaChanged(dbName, AlterTable(tableName, actions)) ])
         (fun catalog db ->
             virtualWriteGuard store dbName tableName
-            |> Result.bind (fun () -> tryGetTable db tableName)
+            |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
                 let origKey = normalizeTableName tableName
 
@@ -7553,7 +7554,7 @@ let private moveTableInCatalog
 
         virtualWriteGuard store sourceDatabaseName sourceTableName
         |> Result.bind (fun () -> virtualWriteGuard store targetDatabaseName targetTableName)
-        |> Result.bind (fun () -> tryGetTable sourceDatabase sourceTableName)
+        |> Result.bind (fun () -> tryGetTable sourceDatabaseName sourceDatabase sourceTableName)
         |> Result.bind (fun table ->
             if Map.containsKey targetKey targetDatabase || storedViewExists catalog targetDatabaseName targetTableName then
                 Error(TableExists targetTableName)
@@ -7828,7 +7829,7 @@ let private prepareInsertCandidateCore
     (finish: Value[] -> Result<Value[], StorageError>)
     : Result<PreparedInsertCandidate, StorageError> =
     match tableAt store dbName tableName with
-    | None -> Error(NoSuchTable tableName)
+    | None -> Error(NoSuchTable(dbName, tableName))
     | Some table ->
         resolveInsertColumns table columns
         |> Result.bind (fun indices ->
@@ -7887,7 +7888,7 @@ let internal replaceConflictRows
     (candidate: Value[])
     : Result<(RowId * Value[]) list, StorageError> =
     match tableAt store dbName tableName with
-    | None -> Error(NoSuchTable tableName)
+    | None -> Error(NoSuchTable(dbName, tableName))
     | Some table ->
         uniqueKeyGroups table
         |> List.choose (fun group ->
@@ -8166,7 +8167,7 @@ let private insertRowsPreparedCore
                     [ RowsInserted(dbName, tableName, outcome.InsertedRows) ])
             (fun catalog db ->
                 virtualWriteGuard store dbName tableName
-                |> Result.bind (fun () -> tryGetTable db tableName)
+                |> Result.bind (fun () -> tryGetTable dbName db tableName)
                 |> Result.bind (fun table ->
                     resolveInsertColumns table columns
                     |> Result.bind (fun indices ->
@@ -8245,7 +8246,7 @@ let internal insertPreparedCandidate
         (fun candidate -> [ RowsInserted(dbName, tableName, [ candidate ]) ])
         (fun catalog db ->
             virtualWriteGuard store dbName tableName
-            |> Result.bind (fun () -> tryGetTable db tableName)
+            |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
                 let collision =
                     uniqueKeyGroups table
@@ -8685,7 +8686,7 @@ and upsertRowsWithOrdinal
         let publish () =
             withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
                 virtualWriteGuard store dbName tableName
-                |> Result.bind (fun () -> tryGetTable db tableName)
+                |> Result.bind (fun () -> tryGetTable dbName db tableName)
                 |> Result.bind (fun table -> upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate foundRows)
                 |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
 
@@ -9113,7 +9114,7 @@ let private replaceRowsCore
     let result =
         withReferentialCatalogPublishing store dbName SharedAccess snd (fun initialCatalog initialDb ->
             virtualWriteGuard store dbName tableName
-            |> Result.bind (fun () -> tryGetTable initialDb tableName)
+            |> Result.bind (fun () -> tryGetTable dbName initialDb tableName)
             |> Result.bind (fun initialTable ->
                 resolveInsertColumns initialTable columns
                 |> Result.bind (fun idxs ->
@@ -9365,7 +9366,7 @@ let private deleteRowsCore
             let address = tableAddress dbName key
 
             virtualWriteGuard store dbName tableName
-            |> Result.bind (fun () -> tryGetTable db tableName)
+            |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
                 let rows =
                     candidates
@@ -10006,7 +10007,7 @@ let updateRows
         let address = tableAddress dbName key
 
         virtualWriteGuard store dbName tableName
-        |> Result.bind (fun () -> tryGetTable db tableName)
+        |> Result.bind (fun () -> tryGetTable dbName db tableName)
         |> Result.bind (fun table ->
             let uniqueGroups = uniqueKeyGroups table
             let secondaryGroups = secondaryKeyGroups table
@@ -10203,7 +10204,7 @@ let scan (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef 
     match store.Databases.TryGetValue dbName with
     | false, _ -> Error(NoSuchDatabase dbName)
     | true, slot ->
-        match tryGetTable slot.Value tableName with
+        match tryGetTable dbName slot.Value tableName with
         | Error e -> Error e
         | Ok table -> Ok(table.Columns, table.RowsArray :> Value[] seq)
 
@@ -10215,7 +10216,7 @@ let scanList (store: Store) (dbName: string) (tableName: string) : Result<Column
     match store.Databases.TryGetValue dbName with
     | false, _ -> Error(NoSuchDatabase dbName)
     | true, slot ->
-        match tryGetTable slot.Value tableName with
+        match tryGetTable dbName slot.Value tableName with
         | Error e -> Error e
         | Ok table -> Ok(table.Columns, rowsList table)
 

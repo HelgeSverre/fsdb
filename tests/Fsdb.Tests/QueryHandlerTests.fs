@@ -465,6 +465,30 @@ let tests =
                   [ "CREATE TABLE predicate_base(n INT,s VARCHAR(20))"
                     "INSERT INTO predicate_base VALUES(1,'x'),(2,'1x'),(3,'0x')" ]
 
+          testCase "Missing-table diagnostics retain database and normalized table names" <| fun _ ->
+              let run = queryFixture [ "CREATE DATABASE probe"; "USE probe" ]
+              for statement in
+                  [ "SELECT * FROM absent"; "SELECT * FROM AbSeNt"
+                    "INSERT INTO absent VALUES(1)"; "UPDATE absent SET n=1"
+                    "DELETE FROM absent"; "ALTER TABLE absent ADD n INT"
+                    "SHOW CREATE TABLE absent"; "TRUNCATE TABLE absent" ] do
+                  Expect.equal (run statement) (Err(1146, "Table 'probe.absent' doesn't exist")) statement
+                  Expect.equal (run "SHOW WARNINGS")
+                      (ResultSet([ "Level"; "Code"; "Message" ],
+                          [ [ Some "Error"; Some "1146"; Some "Table 'probe.absent' doesn't exist" ] ])) "retained error identity"
+              Expect.equal (run "DROP TABLE absent") (ErrState(1051, "42S02", "Unknown table 'probe.absent'")) "DROP has its own error"
+              Expect.equal (run "SELECT * FROM nowhere.absent") (Err(1049, "Unknown database 'nowhere'")) "SELECT distinguishes a missing database"
+              Expect.equal (run "TRUNCATE TABLE nowhere.absent") (Err(1146, "Table 'nowhere.absent' doesn't exist")) "TRUNCATE reports a missing table"
+              Expect.equal (run "DROP TABLE nowhere.absent") (ErrState(1051, "42S02", "Unknown table 'nowhere.absent'")) "DROP retains the requested identity"
+
+          testCase "Missing objects are rejected before storing prepared statements or definitions" <| fun _ ->
+              for statement, expected in
+                  [ "PREPARE missing_statement FROM 'SELECT * FROM absent'", Err(1146, "Table 'fsdb.absent' doesn't exist")
+                    "CREATE VIEW absent_view AS SELECT * FROM absent", Err(1146, "Table 'fsdb.absent' doesn't exist")
+                    "CREATE TABLE nowhere.absent(n INT)", Err(1049, "Unknown database 'nowhere'") ] do
+                  let run = queryFixture []
+                  Expect.equal (run statement) expected statement
+
           testCase "Duplicate-key diagnostics identify the base table and index" <| fun _ ->
               for statement, value, key in
                   [ "INSERT INTO target VALUES(1,30)", "1", "PRIMARY"

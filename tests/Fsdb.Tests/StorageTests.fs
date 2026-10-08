@@ -246,7 +246,7 @@ let tests =
                     let store = create ()
 
                     match scan store defaultDatabase "ghosts" with
-                    | Error(NoSuchTable "ghosts") -> ()
+                    | Error(NoSuchTable(_, "ghosts")) -> ()
                     | other -> failtestf "expected NoSuchTable, got %A" other
 
                 testCase "scan on an unknown database returns NoSuchDatabase"
@@ -271,7 +271,7 @@ let tests =
                     let store = create ()
 
                     match dropTable store defaultDatabase "ghosts" with
-                    | Error(NoSuchTable "ghosts") -> ()
+                    | Error(NoSuchTable(_, "ghosts")) -> ()
                     | other -> failtestf "expected NoSuchTable, got %A" other
 
                 testCase "truncate clears rows and resets the AUTO_INCREMENT counter"
@@ -296,7 +296,7 @@ let tests =
                     let store = create ()
 
                     match truncate store defaultDatabase "ghosts" with
-                    | Error(NoSuchTable "ghosts") -> ()
+                    | Error(NoSuchTable(_, "ghosts")) -> ()
                     | other -> failtestf "expected NoSuchTable, got %A" other
 
                 testCase "truncate resets the PRIMARY KEY index too, not just NextAutoId — re-inserting the same id after a truncate isn't a stale duplicate"
