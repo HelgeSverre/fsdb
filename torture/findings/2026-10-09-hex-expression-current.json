@@ -1,6 +1,6 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "abb4d0b4",
+  "fsdb_base_revision": "79521d35",
   "fsdb_dirty": true,
   "comparison": "rendered results and conditions, numeric error codes, and SQLSTATEs",
   "cases": [
@@ -684,10 +684,10 @@
       ]
     },
     {
-      "actual": "value\n7FFFFFFFFFFFFFFF\ncalls\n1\n",
+      "actual": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\ncalls\n1\n",
       "errors": [],
       "expected": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\ncalls\n1\n",
-      "matches": false,
+      "matches": true,
       "name": "if-once",
       "statements": [
         "SET @calls=0",
@@ -697,10 +697,10 @@
       ]
     },
     {
-      "actual": "value\n7FFFFFFFFFFFFFFF\ncalls\n1\n",
+      "actual": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\ncalls\n1\n",
       "errors": [],
       "expected": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\ncalls\n1\n",
-      "matches": false,
+      "matches": true,
       "name": "case-once",
       "statements": [
         "SET @calls=0",

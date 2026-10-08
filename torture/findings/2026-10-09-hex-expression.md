@@ -1,7 +1,7 @@
 # HEX integer conversion by expression kind
 
-Status: audited DOUBLE conversion behavior implemented; expression-assignment
-deprecation warnings remain open.
+Status: audited DOUBLE conversion behavior and expression-assignment
+deprecation warnings implemented.
 
 ## Native evidence
 
@@ -12,10 +12,9 @@ on disposable MySQL 8.4.11 with a 64 MiB buffer pool and redo capacity. Reproduc
 python3 torture/scripts/condition-oracle.py torture/findings/2026-10-09-hex-expression-native.json
 ```
 
-The [fsdb replay](2026-10-09-hex-expression-current.json) matches 49 scripts
-exactly. The two mismatches have matching results and assignment counts but
-lack native warning 1287 for user-variable assignments within expressions.
-The `hex-expression-conversion` wire contract covers all 49 exact matches.
+The [fsdb replay](2026-10-09-hex-expression-current.json) matches all 51 scripts
+exactly. The `hex-expression-conversion` wire contract covers these scripts,
+including user-variable assignment warnings and single evaluation of conditions.
 No mismatch is enrolled in the known-gap allowlist.
 
 ## Established behavior
@@ -45,20 +44,18 @@ This matrix does not establish every integer-conversion context, mixed-result
 type, or materialized/filtered scalar-subquery shape. Those need further native
 probes before broader compatibility claims.
 
-## Remaining counterexample
+## Assignment warning coverage
 
 The `if-once` and `case-once` scripts assign to `@calls` inside their condition.
-Both engines return the same HEX value and a final count of one. MySQL also
-emits warning 1287: setting user variables within expressions is deprecated.
-fsdb omits that deprecation warning. The native/current fixtures preserve the
-full message and condition order.
+Both engines return the same HEX value, a final count of one, and warning 1287.
+See the [assignment warning audit](2026-10-09-assignment-deprecation.md) for
+preparation timing, warning order, and remaining unrelated diagnostics.
 
 ## Validation
 
 - The focused overflow regression fails before the implementation.
-- `just check`: 3,152 tests pass, no build warnings or errors.
-- Original numeric HEX replay: all 32 scripts match.
-- Expanded expression replay: 49 of 51 scripts match; the two warning gaps remain.
-- Full native wire suite: 92 contracts, 13,931 steps, zero differences.
+- `just check`: 3,155 tests pass, no build warnings or errors.
+- Expanded expression replay: all 51 scripts match.
+- Full native wire suite: 93 contracts, 13,996 steps, zero differences.
 
-Wire artifact: `torture/artifacts/runs/20261008T222906031-82197/contracts`.
+Wire artifact: `torture/artifacts/runs/20261008T224244964-83002/contracts`.

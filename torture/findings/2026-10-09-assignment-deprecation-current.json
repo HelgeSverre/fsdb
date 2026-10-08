@@ -1,0 +1,280 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "79521d35",
+  "fsdb_dirty": true,
+  "comparison": "rendered results and conditions, numeric error codes, and SQLSTATEs",
+  "cases": [
+    {
+      "actual": "value\n1\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "value\n1\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "one",
+      "statements": [
+        "SELECT @a:=1 AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "a\tb\n1\t2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "a\tb\n1\t2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "two",
+      "statements": [
+        "SELECT @a:=1 AS a,@b:=2 AS b",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "value\n2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "nested",
+      "statements": [
+        "SELECT @a:=(@b:=2) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "a\tb\n1\t2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "a\tb\n1\t2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "same",
+      "statements": [
+        "SELECT @a:=1 AS a,@a:=2 AS b",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "value\n2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "unchosen",
+      "statements": [
+        "SELECT IF(0,@a:=1,2) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "no-rows",
+      "statements": [
+        "SELECT @a:=1 AS value WHERE 0",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n1\n2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "value\n1\n2\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "rows",
+      "statements": [
+        "SELECT @a:=n AS value FROM (SELECT 1 AS n UNION ALL SELECT 2) t",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "",
+      "errors": [],
+      "expected": "",
+      "matches": true,
+      "name": "set-equal",
+      "statements": [
+        "SET @a=1",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "",
+      "errors": [],
+      "expected": "",
+      "matches": true,
+      "name": "set-colon",
+      "statements": [
+        "SET @a:=1",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "set-nested",
+      "statements": [
+        "SET @a=(@b:=1)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "do",
+      "statements": [
+        "DO @a:=1",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nError\t1054\tUnknown column 'absent' in 'field list'\n",
+      "errors": [
+        {
+          "Item1": 1054,
+          "Item2": "42S22"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nError\t1054\tUnknown column 'absent' in 'field list'\n",
+      "matches": true,
+      "name": "missing-column",
+      "statements": [
+        "SELECT @a:=absent",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nError\t1305\tFUNCTION no_such_function does not exist\n",
+      "errors": [
+        {
+          "Item1": 1305,
+          "Item2": "HY000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nError\t1046\tNo database selected\nError\t1046\tNo database selected\n",
+      "matches": false,
+      "name": "missing-function",
+      "statements": [
+        "SELECT @a:=no_such_function()",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "",
+      "errors": [],
+      "expected": "",
+      "matches": true,
+      "name": "into",
+      "statements": [
+        "SELECT 1 INTO @a",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nn\n1\n1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nn\n1\n1\n",
+      "matches": true,
+      "name": "insert",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "INSERT INTO target VALUES(1)",
+        "INSERT INTO target VALUES(@a:=1)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nn\n2\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nn\n2\n",
+      "matches": true,
+      "name": "update",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "INSERT INTO target VALUES(1)",
+        "UPDATE target SET n=(@a:=2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "delete",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "INSERT INTO target VALUES(1)",
+        "DELETE FROM target WHERE (@a:=n)=1",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nvalue\n1\nvalue\n1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nvalue\n1\nvalue\n1\n",
+      "matches": true,
+      "name": "prepared",
+      "statements": [
+        "PREPARE p FROM 'SELECT @a:=1 AS value'",
+        "SHOW WARNINGS",
+        "EXECUTE p",
+        "SHOW WARNINGS",
+        "EXECUTE p",
+        "SHOW WARNINGS",
+        "DEALLOCATE PREPARE p"
+      ]
+    },
+    {
+      "actual": "value\nx\nLevel\tCode\tMessage\nWarning\t3719\t'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "value\nx\nLevel\tCode\tMessage\nWarning\t3719\t'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "charset",
+      "statements": [
+        "SELECT @a:=_utf8'x' AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\nx\nLevel\tCode\tMessage\nWarning\t3720\tNATIONAL/NCHAR/NVARCHAR implies the character set UTF8MB3, which will be replaced by UTF8MB4 in a future release. Please consider using CHAR(x) CHARACTER SET UTF8MB4 in order to be unambiguous.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "value\nx\nLevel\tCode\tMessage\nWarning\t3720\tNATIONAL/NCHAR/NVARCHAR implies the character set UTF8MB3, which will be replaced by UTF8MB4 in a future release. Please consider using CHAR(x) CHARACTER SET UTF8MB4 in order to be unambiguous.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "national",
+      "statements": [
+        "SELECT @a:=N'x' AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\n",
+      "matches": true,
+      "name": "nested-set",
+      "statements": [
+        "SET @a=(@b:=1),@c=(@d:=2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n0\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tFOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead.\n",
+      "errors": [],
+      "expected": "value\n1\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1287\tFOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead.\n",
+      "matches": false,
+      "name": "order",
+      "statements": [
+        "SELECT @a:=FOUND_ROWS() AS value",
+        "SHOW WARNINGS"
+      ]
+    }
+  ]
+}

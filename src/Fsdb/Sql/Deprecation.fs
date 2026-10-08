@@ -26,9 +26,9 @@ let private reportCharsetConversions statement =
             | _ -> ()
         | _ -> ())
 
-/// Source spelling survives normalization only for client-submitted literals.
-let reportLiteralSyntax statement =
-    statement |> Expression.iterStatement (function
+/// Syntax warnings belong to submission or preparation, not row evaluation.
+let reportParsedSyntax statement =
+    let reportIntroducer = function
         | IntroducedLiteral(_, _, NationalIntroducer) ->
             Diagnostics.warning 3720
                 "NATIONAL/NCHAR/NVARCHAR implies the character set UTF8MB3, which will be replaced by UTF8MB4 in a future release. Please consider using CHAR(x) CHARACTER SET UTF8MB4 in order to be unambiguous."
@@ -40,7 +40,21 @@ let reportLiteralSyntax statement =
                 Diagnostics.warning 1287
                     "'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
             | _ -> ()
-        | _ -> ())
+        | _ -> ()
+
+    let rec report expression =
+        match expression with
+        | AssignUserVariable(_, value) ->
+            // The assigned expression's syntax conditions precede the assignment's.
+            Expression.rewriteTree report value |> ignore
+            Diagnostics.warning 1287
+                "Setting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'."
+            Some expression
+        | _ ->
+            reportIntroducer expression
+            None
+
+    Expression.rewriteStatement report statement |> ignore
 
 let private reportFoundRows statement =
     repeatWarning

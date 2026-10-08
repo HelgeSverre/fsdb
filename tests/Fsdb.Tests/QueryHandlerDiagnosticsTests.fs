@@ -25,7 +25,42 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "HEX rejects overflowing computed DOUBLE arguments"
+        [ testCase "Expression assignments warn per syntax occurrence"
+          <| fun _ ->
+              for sql, expected in
+                  [ "SELECT @a:=1 AS value", 1
+                    "SELECT @a:=(@b:=2) AS value", 2
+                    "SELECT IF(0,@a:=1,2) AS value", 1
+                    "SELECT @a:=1 AS value WHERE 0", 1
+                    "SELECT @a:=n FROM (SELECT 1 AS n UNION ALL SELECT 2) t", 1
+                    "SET @a:=1", 0
+                    "SET @a=(@b:=1)", 1 ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, result = handle session sql
+                  Expect.isNone (errorInfo result) sql
+                  Expect.equal (session.Diagnostics |> List.map _.Code) (List.replicate expected 1287) sql
+
+          testCase "Expression assignment deprecation follows literal introducers and precedes binding failure"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SELECT @a:=_utf8'x' AS value"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 3719; 1287 ] "literal warning precedes its enclosing assignment"
+              let session, _ = handle session "SELECT @a:=absent"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1287; 1054 ] "assignment warning survives binding error"
+
+          testCase "Prepared expression assignments warn during preparation only"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, prepared = handle session "PREPARE p FROM 'SELECT @a:=1 AS value'"
+              Expect.isNone (errorInfo prepared) "prepared"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1287 ] "prepare warning"
+              let session, first = handle session "EXECUTE p"
+              Expect.equal first (ResultSet([ "value" ], [ [ Some "1" ] ])) "first execution"
+              Expect.isEmpty session.Diagnostics "execution does not repeat syntax warning"
+              let session, _ = handle session "EXECUTE p"
+              Expect.isEmpty session.Diagnostics "repeated execution has no syntax warning"
+
+          testCase "HEX rejects overflowing computed DOUBLE arguments"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               for expression, rendered in

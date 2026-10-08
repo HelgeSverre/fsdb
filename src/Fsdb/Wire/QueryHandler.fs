@@ -1126,8 +1126,8 @@ let private parserOptionsForSession (session: Session) =
         |> SqlMode.parserOptionsFor
     { options with LiteralCollation = Some session.Store.ExecutionSettings.ConnectionCollation.Name }
 
-let private emitLiteralWarnings statement =
-    Deprecation.reportLiteralSyntax statement
+let private emitParseWarnings statement =
+    Deprecation.reportParsedSyntax statement
     Expression.literalWarnings statement
     |> List.iter (fun (code, message) -> Diagnostics.warning code message)
 
@@ -1147,7 +1147,7 @@ let private resolveUserSetRhs
         match Parser.parseExpressionWithOptions options rhs with
         | Error detail -> Error(parserError sql detail)
         | Ok expression ->
-            emitLiteralWarnings (Do [ expression ])
+            emitParseWarnings (Do [ expression ])
             let variables = expressionVariablesFor session userVariables
 
             evaluateSessionExpression session variables expression
@@ -1990,7 +1990,7 @@ let private handleMixedSet (session: Session) (sql: string) : Session * QueryRes
 let private handleSet session sql =
     match tryParseUserVariableSet (parserOptionsForSession session) sql with
     | Some assignments ->
-        emitLiteralWarnings (Do(assignments |> List.map snd))
+        emitParseWarnings (Do(assignments |> List.map snd))
         executeUserVariableSet session assignments
     | None -> handleMixedSet session sql
 
@@ -3838,7 +3838,7 @@ let private executeStatement (session: Session) (normalizedSql: string) (parserS
 
     match parseStatement parserOptions parsedSql with
     | Result.Ok stmt ->
-        emitLiteralWarnings stmt
+        emitParseWarnings stmt
         executeParsedWithTemporaryAction action session stmt
     | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError parserSql detail
 
@@ -5244,7 +5244,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
         match statement with
         | None -> Ok(statement, count)
         | Some ast ->
-            emitLiteralWarnings ast
+            emitParseWarnings ast
             let store = preparedStore session
             let schema = session.Database |> Option.defaultValue defaultDatabase
             checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema ast)

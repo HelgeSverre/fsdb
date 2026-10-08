@@ -6614,6 +6614,56 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS target"; "DROP TABLE IF EXISTS renamed"; "DROP TABLE IF EXISTS parent"; "SET foreign_key_checks=1" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
+    let private expressionAssignmentWarnings =
+        let cases =
+            [
+              "one", None,
+                  [ "SELECT @a:=1 AS value"; "SHOW WARNINGS" ]
+              "two", None,
+                  [ "SELECT @a:=1 AS a,@b:=2 AS b"; "SHOW WARNINGS" ]
+              "nested", None,
+                  [ "SELECT @a:=(@b:=2) AS value"; "SHOW WARNINGS" ]
+              "same", None,
+                  [ "SELECT @a:=1 AS a,@a:=2 AS b"; "SHOW WARNINGS" ]
+              "unchosen", None,
+                  [ "SELECT IF(0,@a:=1,2) AS value"; "SHOW WARNINGS" ]
+              "no-rows", None,
+                  [ "SELECT @a:=1 AS value WHERE 0"; "SHOW WARNINGS" ]
+              "rows", None,
+                  [ "SELECT @a:=n AS value FROM (SELECT 1 AS n UNION ALL SELECT 2) t"; "SHOW WARNINGS" ]
+              "set-equal", None,
+                  [ "SET @a=1"; "SHOW WARNINGS" ]
+              "set-colon", None,
+                  [ "SET @a:=1"; "SHOW WARNINGS" ]
+              "set-nested", None,
+                  [ "SET @a=(@b:=1)"; "SHOW WARNINGS" ]
+              "do", None,
+                  [ "DO @a:=1"; "SHOW WARNINGS" ]
+              "missing-column", Some(0, 1054, "42S22"),
+                  [ "SELECT @a:=absent"; "SHOW WARNINGS" ]
+              "into", None,
+                  [ "SELECT 1 INTO @a"; "SHOW WARNINGS" ]
+              "insert", None,
+                  [ "DROP TABLE IF EXISTS target"; "CREATE TABLE target(n INT)"; "INSERT INTO target VALUES(1)"; "INSERT INTO target VALUES(@a:=1)"; "SHOW WARNINGS"; "SELECT * FROM target" ]
+              "update", None,
+                  [ "DROP TABLE IF EXISTS target"; "CREATE TABLE target(n INT)"; "INSERT INTO target VALUES(1)"; "UPDATE target SET n=(@a:=2)"; "SHOW WARNINGS"; "SELECT * FROM target" ]
+              "delete", None,
+                  [ "DROP TABLE IF EXISTS target"; "CREATE TABLE target(n INT)"; "INSERT INTO target VALUES(1)"; "DELETE FROM target WHERE (@a:=n)=1"; "SHOW WARNINGS"; "SELECT * FROM target" ]
+              "prepared", None,
+                  [ "PREPARE p FROM 'SELECT @a:=1 AS value'"; "SHOW WARNINGS"; "EXECUTE p"; "SHOW WARNINGS"; "EXECUTE p"; "SHOW WARNINGS"; "DEALLOCATE PREPARE p" ]
+              "charset", None,
+                  [ "SELECT @a:=_utf8'x' AS value"; "SHOW WARNINGS" ]
+              "national", None,
+                  [ "SELECT @a:=N'x' AS value"; "SHOW WARNINGS" ]
+              "nested-set", None,
+                  [ "SET @a=(@b:=1),@c=(@d:=2)"; "SHOW WARNINGS" ]
+            ]
+        { Name = "expression-assignment-warnings"
+          Setup = [||]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [| "DROP TABLE IF EXISTS target" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private hexExpressionConversion =
         let expressions =
             [
@@ -6672,7 +6722,12 @@ module ContractCatalog =
               yield "variable", None, [ "SET @n=1e30"; "SELECT HEX(@n) AS value"; "SHOW WARNINGS" ]
               yield "column", None,
                   [ "CREATE TABLE target(n DOUBLE)"; "INSERT INTO target VALUES(1e30)"
-                    "SELECT HEX(n) AS value FROM target"; "SHOW WARNINGS" ] ]
+                    "SELECT HEX(n) AS value FROM target"; "SHOW WARNINGS" ]
+              yield "if-once", None,
+                  [ "SET @calls=0"; "SELECT HEX(IF((@calls:=@calls+1),1e30,CAST('1e30' AS DOUBLE))) AS value"; "SHOW WARNINGS"; "SELECT @calls AS calls" ]
+              yield "case-once", None,
+                  [ "SET @calls=0"; "SELECT HEX(CASE (@calls:=@calls+1) WHEN 1 THEN 1e30 ELSE CAST('1e30' AS DOUBLE) END) AS value"; "SHOW WARNINGS"; "SELECT @calls AS calls" ]
+            ]
         { Name = "hex-expression-conversion"
           Setup = [||]
           Steps = isolatedScriptSteps cases
@@ -7336,6 +7391,7 @@ module ContractCatalog =
            alterRowOrder
            hexNumericConversion
            hexExpressionConversion
+           expressionAssignmentWarnings
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings
