@@ -21519,6 +21519,32 @@ let rec executeAs
         | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
+    | AlterRoutine alteration ->
+        let database, name = splitQualified dbName alteration.Name
+        let kind, table, matches =
+            match alteration.RoutineKind with
+            | RoutineKind.Procedure -> "PROCEDURE", "routines", SystemCatalog.Routine.rowMatches database name
+            | RoutineKind.Function -> "FUNCTION", "functions", SystemCatalog.StoredFunction.rowMatches database name
+        match Storage.tableSnapshot store "mysql" table with
+        | Error error -> ids, storageErr error
+        | Ok snapshot when not (snapshot.RowsArray |> Seq.exists matches) ->
+            ids, ErrState(1305, "42000", sprintf "%s %s.%s does not exist" kind database name)
+        | Ok snapshot ->
+            let changes =
+                [ yield "last_altered", VDateTime System.DateTime.Now
+                  for value in Option.toList alteration.Comment do yield "routine_comment", VString value
+                  for value in Option.toList alteration.SecurityType do yield "security_type", VString value
+                  for value in Option.toList alteration.SqlDataAccess do yield "sql_data_access", VString value ]
+                |> Map.ofList
+            let columns = snapshot.Columns |> List.toArray
+            let update (row: Value[]) =
+                columns
+                |> Array.mapi (fun index column -> Map.tryFind column.Name changes |> Option.defaultValue row.[index])
+                |> Ok
+            match Storage.updateRows store "mysql" table None (matches >> Ok) update with
+            | Ok _ -> ids, Affected 0UL
+            | Error error -> ids, storageErr error
+
     | AlterDatabase(requestedName, _) ->
         // Database charset and collation are server-wide in the current
         // catalog model, so ALTER DATABASE only validates the target.

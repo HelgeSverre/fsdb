@@ -3180,6 +3180,28 @@ let private dropDatabaseStmt: Parser<Statement, unit> =
      .>>. identifier)
     |>> fun (ifExists, name) -> DropDatabase(name, ifExists)
 
+let private alterRoutineStmt: Parser<Statement, unit> =
+    let characteristic: Parser<RoutineAlteration -> RoutineAlteration, unit> =
+        choice
+            [ keyword "COMMENT" >>. stringLit
+              |>> fun value alteration -> { alteration with Comment = Some(Value.toText value |> Option.defaultValue "") }
+              keyword "LANGUAGE" >>. keyword "SQL" >>% id
+              keyword "SQL" >>. keyword "SECURITY" >>. ((keyword "DEFINER" >>% "DEFINER") <|> (keyword "INVOKER" >>% "INVOKER"))
+              |>> fun value alteration -> { alteration with SecurityType = Some value }
+              choice
+                  [ keyword "NO" >>. keyword "SQL" >>% "NO SQL"
+                    keyword "CONTAINS" >>. keyword "SQL" >>% "CONTAINS SQL"
+                    keyword "READS" >>. keyword "SQL" >>. keyword "DATA" >>% "READS SQL DATA"
+                    keyword "MODIFIES" >>. keyword "SQL" >>. keyword "DATA" >>% "MODIFIES SQL DATA" ]
+              |>> fun value alteration -> { alteration with SqlDataAccess = Some value } ]
+    pipe3
+        (keyword "ALTER" >>. ((keyword "PROCEDURE" >>% RoutineKind.Procedure) <|> (keyword "FUNCTION" >>% RoutineKind.Function)))
+        qualifiedTableName
+        (many characteristic)
+        (fun kind name changes ->
+            let initial = { RoutineKind = kind; Name = name; Comment = None; SecurityType = None; SqlDataAccess = None }
+            changes |> List.fold (fun alteration change -> change alteration) initial |> AlterRoutine)
+
 let private alterDatabaseStmt: Parser<Statement, unit> =
     let optionStart =
         choice
@@ -5112,6 +5134,7 @@ statementRef.Value <-
           updateStmt
           deleteStmt
           attempt alterUserStmt
+          attempt alterRoutineStmt
           attempt alterTableStmt
           alterDatabaseStmt
           renameTableStmt

@@ -145,9 +145,8 @@ cases: 66 cases / 8,436 steps / zero differences, at
 The EXPLAIN regression checks removal of the incorrect 3125 warning; it does not
 claim parity for MySQL's rewritten-query note 1003.
 
-The context fixture also preserves remaining differences: procedure declarations
-and first executions warn with 3125;
-an unknown hint before MAX_EXECUTION_TIME stops hint parsing, whereas a valid
+The context fixture also pins routine declaration/loading warnings, now implemented
+below. An unknown hint before MAX_EXECUTION_TIME stops hint parsing, whereas a valid
 timeout before that unknown token still applies. These grammar/lifetime cases
 remain open along with extreme-duration behavior.
 
@@ -168,7 +167,7 @@ and mixed-hint grammar remain open.
 
 ## Stored-routine diagnostic lifetime
 
-Status: reproduced; runtime parity remains open.
+Status: audited routine-loading lifetime implemented; see final validation below.
 
 `select-timeout-routine-hints-oracle.py` pins seven scripts on native MySQL
 8.4.11 with a disposable 64 MiB buffer pool and redo capacity. Scripts use
@@ -200,3 +199,86 @@ diagnostics.
 
 Validation: the maintained native fixture passes in full. No runtime code or
 known-gap allowlist changes accompany this evidence.
+
+## Routine lifetime implementation in progress
+
+The connection-local implementation passes the first-load regression and all
+3,093 root tests. It tracks immutable procedure/function catalog row roots,
+invalidates loaded identities on catalog publication, and distinguishes stored
+routine hint scope from standalone/prepared execution. Unreachable branches,
+repeat calls, new connections, and CREATE/DROP invalidation pass wire comparison.
+
+The expanded wire contract remains failing and is not allowlisted:
+`torture/artifacts/runs/20261008T092239668-44055/contracts` reports 67 cases,
+8,479 steps, and five differences:
+
+- ALTER PROCEDURE is rejected with 1064, so the following CALL also lacks the
+  renewed loading warning.
+- The first dynamic-procedure call returns an empty inner SHOW WARNINGS result
+  instead of the PREPARE warning. The second call happens to see the warning
+  retained from the previous CALL.
+- After both dynamic calls, fsdb exposes the preparation warning to the caller,
+  whereas native MySQL clears it after the subsequent EXECUTE.
+
+These results require ALTER routine support and correction of stored-program
+current-diagnostic visibility/lifetime. The runtime patch remains uncommitted
+until the expanded contract passes; the native fixture remains authoritative.
+
+## Current diagnostic area inside procedures
+
+`routine-diagnostics-oracle.py` pins native clearing and preservation behavior.
+A later SELECT, user-variable SET, or local-variable SET clears previous routine
+warnings. SHOW WARNINGS preserves them and reads the current routine diagnostic
+area. A warning from the final statement remains visible after CALL. These
+cases invalidate the former call-wide accumulation of every generated warning.
+
+The implementation now publishes the final current diagnostic area, and inner
+SHOW WARNINGS receives that area rather than stale connection diagnostics. The
+same diagnostic-preservation predicate is shared with top-level execution. An
+older regression expecting SIGNAL's warning to survive a subsequent local SET
+is corrected from the native result.
+
+All 3,094 tests pass. The expanded wire suite now reports only the unsupported
+ALTER PROCEDURE and its missing invalidation warning: 67 cases / 8,479 steps /
+two differences, at
+`torture/artifacts/runs/20261008T093332098-46339/contracts`.
+Both dynamic PREPARE calls and their inner/outer diagnostics match MySQL.
+The runtime patch remains uncommitted pending ALTER support.
+
+`alter-routine-oracle.py` pins the next implementation requirements: procedure
+and function comments, security and data-access characteristics, SHOW CREATE
+rendering, last duplicate COMMENT winning, rejection of determinism changes,
+1305/42000 for missing procedures, acceptance of an empty ALTER, and retention
+of the original SQL mode. Both new maintained native fixtures pass on 8.4.11.
+
+## Audited routine lifecycle and ALTER support
+
+The routine-loading and current-diagnostic cases above now pass. Connections
+remember loaded hinted routines until procedure/function catalog rows change.
+This covers first invocation, repeat invocation, new connections, and CREATE,
+DROP, and ALTER invalidation. Dynamic PREPARE uses standalone hint scope and
+its own diagnostics; subsequent execution clears those warnings.
+
+ALTER PROCEDURE and ALTER FUNCTION use one parsed characteristic record and
+one catalog update path. Comments, SQL SECURITY, data-access characteristics,
+and alteration timestamps persist; routine bodies, determinism, and creation
+SQL mode remain unchanged. Empty alterations are accepted, duplicate comments
+use the last value, and unsupported determinism changes are rejected. ALTER
+ROUTINE privileges and ordinary DDL implicit-commit handling apply.
+
+SHOW CREATE renders characteristic lines in native order. Routine status and
+information_schema expose altered metadata. Native ENUM descriptors for
+SQL_DATA_ACCESS/SECURITY_TYPE and the SQL_MODE SET descriptor are retained,
+including MySQL's obsolete SET positions. Wire rendering checks use an explicit
+identical definer because the two test servers bootstrap different root hosts.
+
+Validation: all 3,095 root tests pass, including WAL and snapshot recovery of
+altered characteristics. The full native wire suite passes 68 cases / 8,496
+steps with zero differences:
+`torture/artifacts/runs/20261008T095356620-47527/contracts`.
+The maintained ALTER and current-diagnostic native fixtures also pass.
+
+Remaining timeout work includes mixed/unknown-hint grammar, extreme unsigned
+durations, and broader scalar/routine execution combinations. The historical
+failing checkpoints above are resolved for their enrolled cases, not evidence
+that all optimizer-hint behavior is implemented.

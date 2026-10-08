@@ -4343,7 +4343,10 @@ let mysqlRoutinesColumns: ColumnDef list =
       sysCol "sql_mode" TText false (Some(VString SystemCatalog.Trigger.legacySqlMode))
       sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCharacterSetClient))
       sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCollationConnection))
-      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyDatabaseCollation)) ]
+      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyDatabaseCollation))
+      sysCol "routine_comment" TText false (Some(VString ""))
+      sysCol "last_altered" (TDateTime 2) true None
+      sysCol "sql_data_access" (TChar 17) false (Some(VString "CONTAINS SQL")) ]
 
 let mysqlStoredFunctionsColumns: ColumnDef list =
     [ keyCol "function_schema" 64
@@ -4359,7 +4362,9 @@ let mysqlStoredFunctionsColumns: ColumnDef list =
       sysCol "sql_mode" TText false (Some(VString SystemCatalog.StoredExecutionContext.legacySqlMode))
       sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCharacterSetClient))
       sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCollationConnection))
-      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyDatabaseCollation)) ]
+      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyDatabaseCollation))
+      sysCol "routine_comment" TText false (Some(VString ""))
+      sysCol "last_altered" (TDateTime 2) true None ]
 
 let mysqlEventsColumns: ColumnDef list =
     [ keyCol "event_schema" 64

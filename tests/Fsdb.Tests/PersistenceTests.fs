@@ -1806,6 +1806,18 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected event creation, got %A" other
 
+              for sql in
+                  [ "ALTER PROCEDURE topics COMMENT 'persisted procedure' READS SQL DATA"
+                    "ALTER FUNCTION doubled COMMENT 'persisted function' NO SQL" ] do
+                  Expect.equal (handle session sql |> snd) (Affected 0UL) "routine alteration persisted"
+
+              let expectCharacteristics session context =
+                  let result = handle session "SELECT ROUTINE_NAME,ROUTINE_COMMENT,SQL_DATA_ACCESS FROM information_schema.routines WHERE ROUTINE_SCHEMA='fsdb' ORDER BY ROUTINE_NAME" |> snd
+                  Expect.equal result
+                      (ResultSet(["ROUTINE_NAME"; "ROUTINE_COMMENT"; "SQL_DATA_ACCESS"],
+                          [[Some "doubled"; Some "persisted function"; Some "NO SQL"]
+                           [Some "topics"; Some "persisted procedure"; Some "READS SQL DATA"]])) context
+
               let reloaded = load dir
               let recovered = Fsdb.Session.create 2 reloaded
 
@@ -1827,10 +1839,11 @@ let tests =
 
               match handle recovered "SHOW CREATE PROCEDURE topics" |> snd with
               | ResultSet(_, [ [ Some "topics"; Some ""; Some ddl; Some "latin1"; Some "latin1_bin"; Some "utf8mb4_0900_ai_ci" ] ]) ->
-                  Expect.stringContains ddl "PROCEDURE `topics`(IN num INT) SQL SECURITY INVOKER" "signature recovered"
+                  Expect.stringContains ddl "PROCEDURE `topics`(IN num INT)\n    READS SQL DATA\n    SQL SECURITY INVOKER" "signature recovered"
               | other -> failtestf "expected recovered procedure metadata, got %A" other
 
               expectParameters recovered "WAL retains routine parameters"
+              expectCharacteristics recovered "WAL retains altered characteristics"
 
               match handle recovered "CALL topics(6)" |> snd with
               | MultipleResults [ (ResultSet([ "doubled" ], [ [ Some "12" ] ]), _); (Affected 0UL, []) ] -> ()
@@ -1851,6 +1864,7 @@ let tests =
               let recovered = Fsdb.Session.create 3 snapshotted
 
               expectParameters recovered "snapshot retains routine parameters"
+              expectCharacteristics recovered "snapshot retains altered characteristics"
 
               match handle recovered "SELECT doubled(9)" |> snd with
               | ResultSet(_, [ [ Some "18" ] ]) -> ()

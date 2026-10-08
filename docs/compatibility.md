@@ -430,6 +430,12 @@ assignments, and CONTINUE handlers resume at the next assignment. User-variable
 changes remain visible after return or an error. MySQL's recursion refusal and
 creation-time SQL mode, charset, and collation behavior are retained.
 
+`ALTER PROCEDURE` and `ALTER FUNCTION` update comments, SQL SECURITY, and
+SQL data-access characteristics while preserving routine bodies and creation
+SQL mode. Changes appear in metadata and SHOW CREATE and survive WAL and
+snapshot recovery. Routine diagnostics expose the current statement's warnings;
+later statements clear them, while SHOW WARNINGS preserves them.
+
 Data-changing routine bodies share the invoking statement's transaction.
 Failed data-changing statements discard row changes, and error 1442 protects
 tables read or written by the invoking statement. Metadata probes do not invoke function

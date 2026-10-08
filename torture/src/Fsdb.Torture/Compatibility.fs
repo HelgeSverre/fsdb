@@ -4592,6 +4592,82 @@ module ContractCatalog =
           Cleanup = [| "SET max_execution_time=0"; "DROP TABLE deadline_rows" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
+    let private routineAlterations =
+        { Name = "routine-alterations"
+          Setup =
+            [| "CREATE USER 'routine_owner'@'%'"
+               "CREATE DEFINER='routine_owner'@'%' PROCEDURE alter_p() SELECT 1"
+               "CREATE DEFINER='routine_owner'@'%' FUNCTION alter_f() RETURNS INT DETERMINISTIC RETURN 1" |]
+          Steps =
+            [| Contract.execute "procedure-comment" "ALTER PROCEDURE alter_p COMMENT 'changed'"
+               Contract.query "procedure-metadata"
+                   "SELECT ROUTINE_COMMENT,SQL_DATA_ACCESS,SECURITY_TYPE FROM information_schema.routines WHERE ROUTINE_NAME='alter_p'"
+               Contract.execute "procedure-characteristics"
+                   "ALTER PROCEDURE alter_p SQL SECURITY INVOKER READS SQL DATA LANGUAGE SQL COMMENT 'it''s changed'"
+               Contract.query "procedure-definition" "SHOW CREATE PROCEDURE alter_p"
+               Contract.execute "function-characteristics" "ALTER FUNCTION alter_f SQL SECURITY INVOKER NO SQL COMMENT 'fn'"
+               Contract.query "function-metadata"
+                   "SELECT ROUTINE_COMMENT,SQL_DATA_ACCESS,SECURITY_TYPE,IS_DETERMINISTIC FROM information_schema.routines WHERE ROUTINE_NAME='alter_f'"
+               Contract.query "function-definition" "SHOW CREATE FUNCTION alter_f"
+               Contract.execute "duplicate-comment" "ALTER PROCEDURE alter_p COMMENT 'first' COMMENT 'second'"
+               Contract.query "last-comment"
+                   "SELECT ROUTINE_COMMENT FROM information_schema.routines WHERE ROUTINE_NAME='alter_p'"
+               Contract.execute "reject-procedure-determinism" "ALTER PROCEDURE alter_p DETERMINISTIC" |> Contract.fails 1064 "42000"
+               Contract.execute "reject-function-determinism" "ALTER FUNCTION alter_f NOT DETERMINISTIC" |> Contract.fails 1064 "42000"
+               Contract.execute "missing" "ALTER PROCEDURE missing_p COMMENT 'x'" |> Contract.fails 1305 "42000"
+               Contract.execute "empty" "ALTER PROCEDURE alter_p"
+               Contract.execute "change-mode" "SET sql_mode='ANSI_QUOTES'"
+               Contract.execute "preserve-mode" "ALTER PROCEDURE alter_p COMMENT 'mode'"
+               Contract.query "creation-mode"
+                   "SELECT SQL_MODE FROM information_schema.routines WHERE ROUTINE_NAME='alter_p'"
+               Contract.query "alter-time"
+                   "SELECT LAST_ALTERED>=CREATED AS valid_time FROM information_schema.routines WHERE ROUTINE_NAME='alter_p'" |]
+          Cleanup = [| "SET sql_mode=DEFAULT"; "DROP PROCEDURE alter_p"; "DROP FUNCTION alter_f"; "DROP USER 'routine_owner'@'%'" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
+    let private routineTimeoutHints =
+        { Name = "routine-timeout-hints"
+          Setup = [||]
+          Steps =
+            [| Contract.execute "create-procedure"
+                   "CREATE PROCEDURE lifetime_p() BEGIN IF 0 THEN SELECT /*+ MAX_EXECUTION_TIME(1) */ 2; END IF; SELECT 1 AS n; END"
+               Contract.query "declaration-warning" "SHOW WARNINGS"
+               for label in [ "first"; "second" ] do
+                   Contract.query (label + "-call") "CALL lifetime_p()"
+                   Contract.query (label + "-warnings") "SHOW WARNINGS"
+               Contract.execute "unrelated-table" "CREATE TABLE lifetime_unrelated(n INT)"
+               Contract.query "after-table" "CALL lifetime_p()"
+               Contract.query "after-table-warnings" "SHOW WARNINGS"
+               Contract.execute "create-other-routine" "CREATE PROCEDURE lifetime_other() SELECT 7"
+               Contract.query "after-create" "CALL lifetime_p()"
+               Contract.query "after-create-warnings" "SHOW WARNINGS"
+               Contract.execute "drop-other-routine" "DROP PROCEDURE lifetime_other"
+               Contract.query "after-drop" "CALL lifetime_p()"
+               Contract.query "after-drop-warnings" "SHOW WARNINGS"
+               Contract.execute "alter" "ALTER PROCEDURE lifetime_p COMMENT 'changed'"
+               Contract.query "after-alter" "CALL lifetime_p()"
+               Contract.query "after-alter-warnings" "SHOW WARNINGS"
+               Contract.query "observer-call" "CALL lifetime_p()" |> Contract.on "routine-observer"
+               Contract.query "observer-warnings" "SHOW WARNINGS" |> Contract.on "routine-observer"
+               Contract.query "observer-repeat" "CALL lifetime_p()" |> Contract.on "routine-observer"
+               Contract.query "observer-repeat-warnings" "SHOW WARNINGS" |> Contract.on "routine-observer"
+               Contract.execute "create-function"
+                   "CREATE FUNCTION lifetime_f() RETURNS INT DETERMINISTIC RETURN (SELECT /*+ MAX_EXECUTION_TIME(1) */ 1)"
+               Contract.query "function-declaration-warnings" "SHOW WARNINGS"
+               for label in [ "first"; "second" ] do
+                   Contract.query (label + "-function") "SELECT lifetime_f() AS n"
+                   Contract.query (label + "-function-warnings") "SHOW WARNINGS"
+               Contract.execute "create-dynamic"
+                   "CREATE PROCEDURE lifetime_dynamic() BEGIN PREPARE s FROM 'SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ 1 AS n'; SHOW WARNINGS; EXECUTE s; END"
+               Contract.query "dynamic-declaration-warnings" "SHOW WARNINGS"
+               for label in [ "first"; "second" ] do
+                   Contract.query (label + "-dynamic") "CALL lifetime_dynamic()"
+                   Contract.query (label + "-dynamic-warnings") "SHOW WARNINGS" |]
+          Cleanup =
+            [| "DROP PROCEDURE lifetime_p"; "DROP PROCEDURE lifetime_dynamic"
+               "DROP FUNCTION lifetime_f"; "DROP TABLE lifetime_unrelated" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private selectTimeoutHints =
         { Name = "select-timeout-hints"
           Setup = [| "CREATE TABLE hint_t(n INT)"; "INSERT INTO hint_t VALUES(1),(2)" |]
@@ -4649,7 +4725,9 @@ module ContractCatalog =
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
     let all =
-        [| selectTimeoutHints
+        [| routineAlterations
+           routineTimeoutHints
+           selectTimeoutHints
            selectTimeoutExecution
            selectTimeoutSettings
            joinCandidateTraversal

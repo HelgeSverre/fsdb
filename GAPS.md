@@ -478,6 +478,10 @@ The implemented routine and event boundary is summarized in the
 In stored programs, user-variable SET supports local expressions, sequential
 assignments, and CONTINUE handler resumption; assignments remain visible to callers after
 nested calls and errors ([oracle](torture/findings/2026-10-07-stored-function-set.md)).
+ALTER PROCEDURE/FUNCTION retain comments, security and data-access characteristics,
+alteration metadata, and persisted definitions. Current routine diagnostics and
+connection-local timeout-hint loading warnings follow the audited native lifecycle
+([oracle](torture/findings/2026-10-08-select-timeout.md#audited-routine-lifecycle-and-alter-support)).
 
 ## 11. Full-text search
 
@@ -588,7 +592,7 @@ NULL marker's original expression context.
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index and numeric-aggregate conversion conditions, conditional DDL, ignored physical-directory options, unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |
-| System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset, `SYSTEM`, and catalog-backed named time-zone variables are live; most others are inert or absent, `div_precision_increment` controls division and AVG and is retained by prepared statements ([oracle](torture/findings/2026-10-06-prepared-parameter-repreparation.md#division-precision-increment)), `max_execution_time` settings, audited SELECT deadlines, scalar interruption, and transaction preservation work; audited timeout-hint precedence and preparation diagnostics work, while broader hint contexts and extreme-duration parity remain open ([native timeout contract](torture/findings/2026-10-08-select-timeout.md)), and `system_time_zone` retains its static bootstrap label | medium | divergence |
+| System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset, `SYSTEM`, and catalog-backed named time-zone variables are live; most others are inert or absent, `div_precision_increment` controls division and AVG and is retained by prepared statements ([oracle](torture/findings/2026-10-06-prepared-parameter-repreparation.md#division-precision-increment)), `max_execution_time` settings, audited SELECT deadlines, scalar interruption, and transaction preservation work; audited timeout-hint precedence, preparation diagnostics, and routine-loading warning lifetimes work, while broader hint contexts and extreme-duration parity remain open ([native timeout contract](torture/findings/2026-10-08-select-timeout.md)), and `system_time_zone` retains its static bootstrap label | medium | divergence |
 
 ## 13. Authentication and privileges
 

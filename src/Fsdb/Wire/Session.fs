@@ -308,6 +308,30 @@ type Transaction =
       NextSavepointSeq: int
       Xa: (Xa.Xid * XaAssociationState) option }
 
+/// Routine DDL invalidates connection-local loading diagnostics.
+type RoutineDiagnosticCache() =
+    let loaded = System.Collections.Generic.HashSet<string * string * string>()
+    let mutable procedureRows = None
+    let mutable functionRows = None
+
+    let sameRows previous current =
+        match previous, current with
+        | Some previous, Some current -> Object.ReferenceEquals(previous, current)
+        | None, None -> true
+        | _ -> false
+
+    member _.FirstLoad(store, kind, schema: string, name: string) =
+        let rows table =
+            Storage.tableSnapshot store "mysql" table
+            |> Result.toOption
+            |> Option.map _.RowsArray
+        let procedures, functions = rows "routines", rows "functions"
+        if not (sameRows procedureRows procedures && sameRows functionRows functions) then
+            loaded.Clear()
+            procedureRows <- procedures
+            functionRows <- functions
+        loaded.Add(kind, schema.ToLowerInvariant(), name.ToLowerInvariant())
+
 type Session =
     { ConnectionId: int
       /// The selected account's name. `"root"` for a session built directly.
@@ -365,6 +389,7 @@ type Session =
       TextStatements: Map<string, PreparedStmt>
       /// Active stored-procedure identities, innermost first.
       RoutineStack: (string * string * string) list
+      RoutineDiagnostics: RoutineDiagnosticCache
       /// The next id COM_STMT_PREPARE will assign.
       NextStmtId: int
       /// Paged COM_STMT_SEND_LONG_DATA buffers keyed by statement and param.
@@ -430,6 +455,7 @@ let create (connectionId: int) (store: Store) : Session =
       TableHandlers = Map.empty
       TextStatements = Map.empty
       RoutineStack = []
+      RoutineDiagnostics = RoutineDiagnosticCache()
       NextStmtId = 1
       LongData = Map.empty
       LongDataBytes = 0L

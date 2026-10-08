@@ -1416,7 +1416,9 @@ let private parseTimeoutHintArgument (body: string) afterName =
             | true, value when value <= uint64 UInt32.MaxValue -> Ok value
             | _ -> Error(UnsupportedTimeout closeAt)
 
-let private statementTimeoutHint emitWarnings options (sql: string) (hints: Parser.OptimizerHintLocation list) =
+type private TimeoutHintScope = StandaloneStatement | StoredRoutine
+
+let private statementTimeoutHint scope emitWarnings options (sql: string) (hints: Parser.OptimizerHintLocation list) =
     let mutable timeout = None
     let warn code message =
         if emitWarnings then Diagnostics.warning code message
@@ -1437,6 +1439,8 @@ let private statementTimeoutHint emitWarnings options (sql: string) (hints: Pars
                     near "Optimizer hint syntax error" (hint.BodyOffset + offset)
                 | Error(UnsupportedTimeout offset) ->
                     near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + offset)
+                | Ok _ when scope = StoredRoutine ->
+                    warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
                 | Ok value ->
                     match hint.StatementKeyword with
                     | "CREATE" | "ALTER" when viewDefinition.Value -> ()
@@ -1447,19 +1451,22 @@ let private statementTimeoutHint emitWarnings options (sql: string) (hints: Pars
                     | _ -> warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
     timeout
 
-let private withStatementHintsCore emitTimeoutWarnings options sql body =
+let private withStatementHintsCore scope emitTimeoutWarnings options sql body =
     let hints = Parser.optimizerHintLocationsWithOptions options sql
-    let timeout = statementTimeoutHint emitTimeoutWarnings options sql hints
+    let timeout = statementTimeoutHint scope emitTimeoutWarnings options sql hints
     DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
         match statementGeometryPointLimit hints with
         | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
         | None -> body ())
 
-let private withStatementHints options sql body =
-    withStatementHintsCore true options sql body
-
 let private withPreparedStatementHints options sql body =
-    withStatementHintsCore false options sql body
+    withStatementHintsCore StandaloneStatement false options sql body
+
+let private emitRoutineHintDiagnostics (session: Session) kind schema name options (definition: string) =
+    if definition.Contains("/*+", StringComparison.Ordinal) && session.RoutineDiagnostics.FirstLoad(session.Store, kind, schema, name) then
+        Parser.optimizerHintLocationsWithOptions options definition
+        |> statementTimeoutHint StoredRoutine true options definition
+        |> ignore
 
 let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
     markRoutineVariables connectionVariableNames
@@ -2972,6 +2979,10 @@ let rec private statementStatusCommand = function
     | CreateDatabase _ -> Some InformationSchema.StatusCommand.createDatabase
     | DropDatabase _ -> Some InformationSchema.StatusCommand.dropDatabase
     | AlterDatabase _ -> Some InformationSchema.StatusCommand.alterDatabase
+    | AlterRoutine alteration ->
+        match alteration.RoutineKind with
+        | RoutineKind.Procedure -> Some InformationSchema.StatusCommand.alterProcedure
+        | RoutineKind.Function -> Some InformationSchema.StatusCommand.alterFunction
     | CreateServer _ -> Some InformationSchema.StatusCommand.createServer
     | AlterServer _ -> Some InformationSchema.StatusCommand.alterServer
     | DropServer _ -> Some InformationSchema.StatusCommand.dropServer
@@ -3450,6 +3461,7 @@ let private causesImplicitCommit = function
     | CreateDatabase _
     | DropDatabase _
     | AlterDatabase _
+    | AlterRoutine _
     | CreateTable _
     | CreateTableLike _
     | CreateTableAs _
@@ -4331,6 +4343,21 @@ let private applyTransactionCompletion completion characteristics readOnly sessi
     { session with
         CloseAfterReply = resolveCompletionDirective defaultRelease completion.Release }
 
+let private storedCommentLiteral sqlMode (text: string) =
+    let options = SqlMode.parserOptionsFor sqlMode
+    let escaped =
+        if options.NoBackslashEscapes then text.Replace("'", "''")
+        else text.Replace("\\", "\\\\").Replace("'", "''").Replace("\r", "\\r").Replace("\n", "\\n")
+    "'" + escaped + "'"
+
+let private routineCharacteristics sqlMode dataAccess deterministic security comment =
+    [ if dataAccess <> "CONTAINS SQL" then dataAccess
+      if deterministic then "DETERMINISTIC"
+      if security <> "DEFINER" then "SQL SECURITY " + security
+      if comment <> "" then "COMMENT " + storedCommentLiteral sqlMode comment ]
+    |> List.map (fun clause -> "\n    " + clause)
+    |> String.concat ""
+
 let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
     probe
     |> probeStatusCommand
@@ -4933,18 +4960,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                         if event.Comment = "" then
                             ""
                         else
-                            let options = SqlMode.parserOptionsFor event.SqlMode
-                            let escaped =
-                                if options.NoBackslashEscapes then
-                                    event.Comment.Replace("'", "''")
-                                else
-                                    event.Comment
-                                        .Replace("\\", "\\\\")
-                                        .Replace("'", "''")
-                                        .Replace("\r", "\\r")
-                                        .Replace("\n", "\\n")
-
-                            " COMMENT '" + escaped + "'"
+                            " COMMENT " + storedCommentLiteral event.SqlMode event.Comment
 
                     let ddl =
                         sprintf
@@ -4983,12 +4999,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                     if canInspectRoutine session routine.Schema routine.Definer then
                         Some(
                             sprintf
-                                "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`(%s) SQL SECURITY %s %s"
+                                "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`(%s)%s\n%s"
                                 definer.Name
                                 definer.Host
                                 name
                                 routine.Parameters
-                                routine.SecurityType
+                                (routineCharacteristics routine.SqlMode routine.SqlDataAccess false routine.SecurityType routine.Comment)
                                 routine.Definition
                         )
                     else
@@ -5015,21 +5031,18 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                 session, Err(1305, sprintf "%s %s does not exist" kind name)
             | Some routine ->
                 let definer = accountRefOf routine.Definer
-                let deterministic = if routine.Deterministic then " DETERMINISTIC" else ""
 
                 let ddl =
                     if canInspectRoutine session routine.Schema routine.Definer then
                         Some(
                             sprintf
-                                "CREATE DEFINER=`%s`@`%s` FUNCTION `%s`(%s) RETURNS %s%s %s SQL SECURITY %s %s"
+                                "CREATE DEFINER=`%s`@`%s` FUNCTION `%s`(%s) RETURNS %s%s\n%s"
                                 definer.Name
                                 definer.Host
                                 name
                                 routine.Parameters
                                 routine.ReturnType
-                                deterministic
-                                routine.SqlDataAccess
-                                routine.SecurityType
+                                (routineCharacteristics routine.SqlMode routine.SqlDataAccess routine.Deterministic routine.SecurityType routine.Comment)
                                 routine.Definition
                         )
                     else
@@ -5271,7 +5284,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
     |> Result.bind (fun (statement, count) ->
         let options = parserOptionsForSession session
         Parser.optimizerHintLocationsWithOptions options sql
-        |> statementTimeoutHint true options sql
+        |> statementTimeoutHint StandaloneStatement true options sql
         |> ignore
         match statement with
         | None -> Ok(statement, count)
@@ -5869,6 +5882,22 @@ let private executionErrorResult =
     | Functions.SqlError(code, message) -> Some(Err(code, message))
     | _ -> None
 
+let private preservesDiagnostics parserOptions (sql: string) =
+    match StoredProgram.parseDiagnostics parserOptions sql with
+    | Ok(Some _) -> true
+    | _ when
+        showWarningsRe.IsMatch sql
+        || showErrorsRe.IsMatch sql
+        || showCountWarningsRe.IsMatch sql
+        || showCountErrorsRe.IsMatch sql
+        -> true
+    | _ ->
+        Regex.IsMatch(
+            sql,
+            @"^\s*SELECT\s+@@(?:SESSION\.)?(?:WARNING_COUNT|ERROR_COUNT)(?:\s+AS\s+\w+)?\s*$",
+            RegexOptions.IgnoreCase
+        )
+
 let private runRoutineStatements
     (store: Store)
     (executeSql: Session -> Ast.Statement -> Session * QueryResult)
@@ -5884,7 +5913,6 @@ let private runRoutineStatements
         ref
             { Conditions = []
               RowCount = 0L }
-    let propagatedConditions = ResizeArray<Diagnostics.Condition>()
     let cursors = ref Map.empty<string, StoredProgram.Cursor>
 
     let updateDiagnostics generated result =
@@ -5901,7 +5929,7 @@ let private runRoutineStatements
             { Conditions = conditions
               RowCount = rowCount }
 
-    let executeWithDiagnostics current execute =
+    let executeWithDiagnostics preserve current execute =
         let execute () =
             try
                 execute ()
@@ -5911,8 +5939,8 @@ let private runRoutineStatements
                 | None -> reraise ()
 
         let (next, result), generated = Diagnostics.captureStatement execute
-        updateDiagnostics generated result
-        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
+        if not preserve || Executor.errorInfo result |> Option.isSome then
+            updateDiagnostics generated result
         next, result
 
     let valuesOfResultRow (session: Session) (row: string option list) =
@@ -5984,12 +6012,12 @@ let private runRoutineStatements
         | Some(statement, rest) ->
             match statement with
             | StoredProgram.Sql sql ->
-                executeWithDiagnostics current (fun () ->
+                executeWithDiagnostics false current (fun () ->
                     Executor.withRoutineVariables locals (fun () -> executeSql current sql))
                 ||> continueAfterSql scope locals results affectedRows rest
             | StoredProgram.SelectInto(sql, targets) ->
                 let next, selected =
-                    executeWithDiagnostics current (fun () ->
+                    executeWithDiagnostics false current (fun () ->
                         Executor.withRoutineVariables locals (fun () -> executeSql current sql))
 
                 match selected with
@@ -6017,7 +6045,6 @@ let private runRoutineStatements
                         currentDiagnostics.Value <-
                             { Conditions = [ warning ]
                               RowCount = 0L }
-                        propagatedConditions.Add warning
                         run scope next locals results affectedRows rest
                 | ResultSet(_, [ row ]) ->
                     let values = valuesOfResultRow next row
@@ -6026,11 +6053,9 @@ let private runRoutineStatements
                     match assigned with
                     | Ok locals ->
                         updateDiagnostics generated (Affected 0UL)
-                        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
                         run scope next locals results affectedRows rest
                     | Error error ->
                         updateDiagnostics generated error
-                        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
                         handleQueryResult scope next locals results affectedRows rest error
                 | ResultSet _ ->
                     handleQueryResult
@@ -6043,14 +6068,16 @@ let private runRoutineStatements
                         (Err(1172, "Result consisted of more than one row"))
                 | error -> handleQueryResult scope next locals results affectedRows rest error
             | StoredProgram.SetUserVariables assignments ->
-                executeWithDiagnostics current (fun () ->
+                executeWithDiagnostics false current (fun () ->
                     Executor.withRoutineVariables locals (fun () -> executeUserVariableSet current assignments))
                 ||> continueAfterSql scope locals results affectedRows rest
             | StoredProgram.TextSql sql ->
                 let routineState = ref locals
+                let current = { current with Diagnostics = currentDiagnostics.Value.Conditions }
+                let preserve = preservesDiagnostics (parserOptionsForSession current) sql
 
                 let next, result =
-                    executeWithDiagnostics current (fun () ->
+                    executeWithDiagnostics preserve current (fun () ->
                         Executor.withRoutineVariableState routineState (fun () -> executeText current sql))
 
                 continueAfterSql scope routineState.Value results affectedRows rest next result
@@ -6081,7 +6108,7 @@ let private runRoutineStatements
                     handleQueryResult scope current locals results affectedRows rest (ErrInfo error)
                 | Ok cursor ->
                     let next, opened =
-                        executeWithDiagnostics current (fun () ->
+                        executeWithDiagnostics false current (fun () ->
                             Executor.withRoutineVariables locals (fun () -> executeSql current cursor.Query))
 
                     match opened with
@@ -6120,11 +6147,9 @@ let private runRoutineStatements
                     match assigned with
                     | Ok locals ->
                         updateDiagnostics generated (Affected 0UL)
-                        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
                         run scope current locals results affectedRows rest
                     | Error error ->
                         updateDiagnostics generated error
-                        generated |> Diagnostics.conditions |> List.iter propagatedConditions.Add
                         handleQueryResult scope current locals results affectedRows rest error
             | StoredProgram.CloseCursor name ->
                 match StoredProgram.tryCloseCursor name cursors.Value with
@@ -6423,7 +6448,6 @@ let private runRoutineStatements
 
         match StoredProgram.tryHandler scope.Conditions scope.Statements error with
         | None when StoredProgram.isWarning error ->
-            propagatedConditions.Add(Diagnostics.fromWarning error)
             run scope current locals results affectedRows rest
         | None -> failed current locals results affectedRows (ErrInfo error)
         | Some(action, body) ->
@@ -6456,7 +6480,7 @@ let private runRoutineStatements
     let outcome = run scope initial initialLocals [] 0UL statements
 
     if outcome.Error.IsNone then
-        propagatedConditions |> Seq.iter Diagnostics.record
+        currentDiagnostics.Value.Conditions |> List.iter Diagnostics.record
 
     outcome
 
@@ -6658,6 +6682,8 @@ let rec private invokeStoredFunction
 
     let options = SqlMode.parserOptionsFor routine.SqlMode
 
+    emitRoutineHintDiagnostics caller "FUNCTION" routine.Schema routine.Name options routine.Definition
+
     let parameters, returnType, statements =
         match functionDefinition options routine.Parameters routine.ReturnType routine.Definition with
         | Ok definition -> definition
@@ -6830,6 +6856,17 @@ let private withStoredFunctionRegistry executeText session execute =
 let private normalizeDispatchedSql parserOptions rawSql =
     (Parser.stripVersionCommentsWithOptions parserOptions rawSql).Trim().TrimEnd(';').Trim()
 
+let private withSessionStatementHints (session: Session) options (sql: string) body =
+    let scope, emitWarnings =
+        if not (sql.Contains("/*+", StringComparison.Ordinal)) then StandaloneStatement, true
+        elif not session.RoutineStack.IsEmpty then StoredRoutine, false
+        elif sql.TrimStart().StartsWith("CREATE", StringComparison.OrdinalIgnoreCase) then
+            match tryTextRoutineCommand sql with
+            | Some(CreateProcedure _ | CreateFunction _) -> StoredRoutine, true
+            | _ -> StandaloneStatement, true
+        else StandaloneStatement, true
+    withStatementHintsCore scope emitWarnings options sql body
+
 /// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
 /// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
 /// no `Placeholder` survives and the statement executes through the ordinary
@@ -6840,7 +6877,7 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
     let parserOptions = parserOptionsForSession session
     let sql = normalizeDispatchedSql parserOptions rawSql
 
-    withStatementHints parserOptions rawSql (fun () ->
+    withSessionStatementHints session parserOptions rawSql (fun () ->
         withTriggerSessionExecution session (fun () ->
             dispatchNormalized session rawSql parserOptions sql))
 
@@ -7131,6 +7168,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 | Ok() ->
                     let callerOptions = parserOptionsForSession session
                     let routineOptions = SqlMode.parserOptionsFor routine.SqlMode
+                    emitRoutineHintDiagnostics session "PROCEDURE" routine.Schema routine.Name routineOptions routine.Definition
 
                     match
                         parseRoutineDefinition routineOptions routine.Parameters routine.Definition,
@@ -7682,22 +7720,6 @@ let private recoverExecutionError (session: Session) (description: string) (erro
         Log.diagnostic "fsdb: EXN %s -- %s" ex.Message description
         abortTransaction session, Err(1105, "Internal error")
 
-let private preservesDiagnostics parserOptions (sql: string) =
-    match StoredProgram.parseDiagnostics parserOptions sql with
-    | Ok(Some _) -> true
-    | _ when
-        showWarningsRe.IsMatch sql
-        || showErrorsRe.IsMatch sql
-        || showCountWarningsRe.IsMatch sql
-        || showCountErrorsRe.IsMatch sql
-        -> true
-    | _ ->
-        Regex.IsMatch(
-            sql,
-            @"^\s*SELECT\s+@@(?:SESSION\.)?(?:WARNING_COUNT|ERROR_COUNT)(?:\s+AS\s+\w+)?\s*$",
-            RegexOptions.IgnoreCase
-        )
-
 let private recordDiagnostics
     (session: Session)
     (preserve: bool)
@@ -7716,6 +7738,7 @@ let private countsAsAccountUpdate = function
     | CreateDatabase _
     | DropDatabase _
     | AlterDatabase _
+    | AlterRoutine _
     | CreateTable _
     | CreateTableLike _
     | CreateTableAs _
@@ -7892,7 +7915,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                 | Ok() ->
                     try
                         let executed, result =
-                            withStatementHints parserOptions rawSql (fun () ->
+                            withSessionStatementHints session parserOptions rawSql (fun () ->
                                 withTriggerSessionExecution session (fun () ->
                                     dispatchNormalized session rawSql parserOptions sql))
                         let executed =

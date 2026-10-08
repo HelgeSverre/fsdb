@@ -241,7 +241,10 @@ module Routine =
           SqlMode: string
           CharacterSetClient: string
           CollationConnection: string
-          DatabaseCollation: string }
+          DatabaseCollation: string
+          Comment: string
+          LastAltered: DateTime option
+          SqlDataAccess: string }
 
     let tryRead (row: Value[]) : Entry option =
         readCompleteRow 5
@@ -256,7 +259,10 @@ module Routine =
                   SqlMode = textOr StoredExecutionContext.legacySqlMode 7 row
                   CharacterSetClient = textOr StoredExecutionContext.legacyCharacterSetClient 8 row
                   CollationConnection = textOr StoredExecutionContext.legacyCollationConnection 9 row
-                  DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 10 row })
+                  DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 10 row
+                  Comment = textAt 11 row
+                  LastAltered = dateTimeAt 12 row
+                  SqlDataAccess = textOr "CONTAINS SQL" 13 row })
             row
 
     let matches schema name (entry: Entry) =
@@ -279,7 +285,9 @@ module StoredFunction =
           SqlMode: string
           CharacterSetClient: string
           CollationConnection: string
-          DatabaseCollation: string }
+          DatabaseCollation: string
+          Comment: string
+          LastAltered: DateTime option }
 
     let tryRead (row: Value[]) : Entry option =
         readCompleteRow 6
@@ -297,7 +305,9 @@ module StoredFunction =
                   SqlMode = textOr StoredExecutionContext.legacySqlMode 10 row
                   CharacterSetClient = textOr StoredExecutionContext.legacyCharacterSetClient 11 row
                   CollationConnection = textOr StoredExecutionContext.legacyCollationConnection 12 row
-                  DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 13 row })
+                  DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 13 row
+                  Comment = textAt 14 row
+                  LastAltered = dateTimeAt 15 row })
             row
 
     let matches schema name (entry: Entry) =

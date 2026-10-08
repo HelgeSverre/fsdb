@@ -194,6 +194,92 @@ let tests =
                   (ResultSet([ "Level"; "Code"; "Message" ],
                       [ [ Some "Warning"; Some "1064"; Some "Optimizer hint syntax error near '-1) */ n FROM hinted_view_source' at line 1" ] ])) "malformed hint syntax still warns"
 
+          testCase "routine timeout warnings follow connection loading and routine DDL"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = create 1 store
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              let warnings expected =
+                  let rows =
+                      if expected then
+                          [ [ Some "Warning"; Some "3125"; Some "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only" ] ]
+                      else []
+                  Expect.equal (run "SHOW WARNINGS") (ResultSet([ "Level"; "Code"; "Message" ], rows)) "routine loading warnings"
+              let call expected =
+                  match run "CALL lifetime_p()" with
+                  | ProcedureResult(_, [[Some "1"]]) -> ()
+                  | other -> failtestf "unexpected procedure result: %A" other
+                  warnings expected
+              run "CREATE PROCEDURE lifetime_p() BEGIN IF 0 THEN SELECT /*+ MAX_EXECUTION_TIME(1) */ 2; END IF; SELECT 1 AS n; END" |> ignore
+              warnings true
+              call true
+              call false
+              run "CREATE TABLE lifetime_unrelated(n INT)" |> ignore
+              call false
+              run "CREATE PROCEDURE lifetime_other() SELECT 7" |> ignore
+              call true
+              call false
+              run "DROP PROCEDURE lifetime_other" |> ignore
+              call true
+              call false
+              session <- create 2 store
+              call true
+              call false
+              run "CREATE FUNCTION lifetime_f() RETURNS INT DETERMINISTIC RETURN (SELECT /*+ MAX_EXECUTION_TIME(1) */ 1)" |> ignore
+              warnings true
+              for expected in [true; false] do
+                  Expect.equal (run "SELECT lifetime_f() AS n") (ResultSet([ "n" ], [[Some "1"]])) "function result"
+                  warnings expected
+
+          testCase "procedures expose current warnings and clear them on subsequent statements"
+          <| fun _ ->
+              let run = queryFixture []
+              let warning = [Some "Warning"; Some "3126"; Some "Hint MAX_EXECUTION_TIME(2) is ignored as conflicting/duplicated"]
+              let header = ["Level"; "Code"; "Message"]
+              run "CREATE PROCEDURE diagnostic_p() BEGIN PREPARE s FROM 'SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ 1 AS n'; SHOW WARNINGS; EXECUTE s; END" |> ignore
+              for _ in 1..2 do
+                  match run "CALL diagnostic_p()" with
+                  | MultipleResults [(ResultSet(columns, rows), _); (ResultSet(_, [[Some "1"]]), _); (Affected _, _)] ->
+                      Expect.equal columns header "inner diagnostic columns"
+                      Expect.equal rows [warning] "inner diagnostics use the current PREPARE"
+                  | other -> failtestf "unexpected dynamic procedure result: %A" other
+                  Expect.equal (run "SHOW WARNINGS") (ResultSet(header, [])) "EXECUTE clears preparation warnings"
+              Expect.equal
+                  (run "CREATE PROCEDURE final_warning() BEGIN SIGNAL SQLSTATE '01001' SET MYSQL_ERRNO=60010, MESSAGE_TEXT='routine warning'; END")
+                  (Affected 0UL) "final-warning procedure created"
+              Expect.equal (run "CALL final_warning()") (Affected 0UL) "warning permits completion"
+              Expect.equal (run "SHOW WARNINGS")
+                  (ResultSet(header, [[Some "Warning"; Some "60010"; Some "routine warning"]])) "a final warning remains visible"
+
+          testCase "ALTER routines retain characteristics and original execution context"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE PROCEDURE alter_p() SELECT 1"
+                        "CREATE FUNCTION alter_f() RETURNS INT DETERMINISTIC RETURN 1" ]
+              let metadata name = run ("SELECT ROUTINE_COMMENT,SQL_DATA_ACCESS,SECURITY_TYPE FROM information_schema.routines WHERE ROUTINE_NAME='" + name + "'")
+              let expected comment access security = ResultSet(["ROUTINE_COMMENT"; "SQL_DATA_ACCESS"; "SECURITY_TYPE"], [[Some comment; Some access; Some security]])
+              Expect.equal (run "ALTER PROCEDURE alter_p COMMENT 'first' COMMENT 'it''s changed' SQL SECURITY INVOKER READS SQL DATA LANGUAGE SQL") (Affected 0UL) "procedure alteration"
+              Expect.equal (metadata "alter_p") (expected "it's changed" "READS SQL DATA" "INVOKER") "procedure characteristics"
+              Expect.equal (run "ALTER FUNCTION alter_f NO SQL COMMENT 'fn' SQL SECURITY INVOKER") (Affected 0UL) "function alteration"
+              Expect.equal (metadata "alter_f") (expected "fn" "NO SQL" "INVOKER") "function characteristics"
+              Expect.equal (run "SELECT IS_DETERMINISTIC FROM information_schema.routines WHERE ROUTINE_NAME='alter_f'") (ResultSet(["IS_DETERMINISTIC"], [[Some "YES"]])) "determinism retained"
+              let before = run "SELECT SQL_MODE FROM information_schema.routines WHERE ROUTINE_NAME='alter_p'"
+              run "SET sql_mode='ANSI_QUOTES'" |> ignore
+              Expect.equal (run "ALTER PROCEDURE alter_p COMMENT 'mode'") (Affected 0UL) "alter under another mode"
+              Expect.equal (run "SELECT SQL_MODE FROM information_schema.routines WHERE ROUTINE_NAME='alter_p'") before "creation mode retained"
+              Expect.equal (run "ALTER PROCEDURE alter_p") (Affected 0UL) "empty alteration"
+              for sql in ["ALTER PROCEDURE alter_p DETERMINISTIC"; "ALTER FUNCTION alter_f NOT DETERMINISTIC"] do
+                  match run sql with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected invalid alteration: %A" other
+              match run "ALTER PROCEDURE missing_p COMMENT 'x'" with
+              | Err(1305, _) -> ()
+              | other -> failtestf "expected missing routine: %A" other
+
           testCase "nested derived sources retain enclosing query correlation"
           <| fun _ ->
               let run = queryFixture
@@ -4911,7 +4997,7 @@ let tests =
 
                   match handle session "SHOW CREATE PROCEDURE answer" |> snd with
                   | ResultSet(_, [ [ Some "answer"; _; Some ddl; _; _; _ ] ]) ->
-                      Expect.stringContains ddl "PROCEDURE `answer`() SQL SECURITY DEFINER SELECT 42 AS value" "stored definition"
+                      Expect.stringContains ddl "PROCEDURE `answer`()\nSELECT 42 AS value" "stored definition"
                   | other -> failtestf "expected create procedure, got %A" other
 
                   match handle session "SELECT routine_name FROM information_schema.routines WHERE routine_schema = 'fsdb'" |> snd with
@@ -4975,7 +5061,7 @@ let tests =
 
               match handle session "SHOW CREATE PROCEDURE topics" |> snd with
               | ResultSet(_, [ [ Some "topics"; _; Some ddl; _; _; _ ] ]) ->
-                  Expect.stringContains ddl "PROCEDURE `topics`(IN num INT) SQL SECURITY INVOKER" "signature retained"
+                  Expect.stringContains ddl "PROCEDURE `topics`(IN num INT)\n    SQL SECURITY INVOKER" "signature retained"
               | other -> failtestf "expected parameterized procedure metadata, got %A" other
 
               match handle session "CALL topics(1)" |> snd with
@@ -6466,7 +6552,7 @@ let tests =
               Expect.equal created (Affected 0UL) "created warning procedure"
               let session, called = handle session "CALL warning_signal(@value)"
               Expect.equal called (Affected 0UL) "unhandled warning continued"
-              Expect.equal (session.Diagnostics |> List.map _.Code) [ 60010 ] "warning diagnostics"
+              Expect.isEmpty session.Diagnostics "the subsequent SET clears warning diagnostics"
 
               match handle session "CREATE PROCEDURE stray_resignal() BEGIN RESIGNAL; END" with
               | session, Affected 0UL ->

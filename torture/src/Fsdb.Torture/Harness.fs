@@ -28,6 +28,7 @@ module AstKind =
         | DropTable _ -> "drop_table"
         | AlterTable _ -> "alter_table"
         | AlterDatabase _ -> "alter_database"
+        | AlterRoutine _ -> "alter_routine"
         | RenameTable _ -> "rename_table"
         | CreateIndex _ -> "create_index"
         | DropIndexStmt _ -> "drop_index"

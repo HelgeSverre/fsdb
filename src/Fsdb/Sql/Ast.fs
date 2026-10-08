@@ -1160,7 +1160,18 @@ module SetClause =
             AssignVariable { assignment with Expression = Option.map rewrite assignment.Expression }
         | SetNames _ as clause -> clause
 
+[<RequireQualifiedAccess>]
+type RoutineKind = Procedure | Function
+
+type RoutineAlteration =
+    { RoutineKind: RoutineKind
+      Name: string
+      Comment: string option
+      SecurityType: string option
+      SqlDataAccess: string option }
+
 type Statement =
+    | AlterRoutine of RoutineAlteration
     | CreateDatabase of name: string * ifNotExists: bool * deprecations: SyntaxDeprecation list
     | DropDatabase of name: string * ifExists: bool
     /// `ALTER DATABASE [name] [CHARACTER SET x] [COLLATE y]`; an omitted

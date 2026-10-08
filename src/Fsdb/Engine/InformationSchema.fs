@@ -937,6 +937,8 @@ module StatusCommand =
     let createEvent = create "create_event"
     let createFunction = create "create_function"
     let createIndex = create "create_index"
+    let alterProcedure = create "alter_procedure"
+    let alterFunction = create "alter_function"
     let createProcedure = create "create_procedure"
     let createRole = create "create_role"
     let createServer = create "create_server"
@@ -1712,12 +1714,22 @@ let private routinesColumns =
       strCol "EXTERNAL_LANGUAGE"
       strCol "PARAMETER_STYLE"
       strCol "IS_DETERMINISTIC"
-      strCol "SQL_DATA_ACCESS"
+      col "SQL_DATA_ACCESS" (TEnum [ "CONTAINS SQL"; "NO SQL"; "READS SQL DATA"; "MODIFIES SQL DATA" ])
       strCol "SQL_PATH"
-      strCol "SECURITY_TYPE"
+      col "SECURITY_TYPE" (TEnum [ "DEFAULT"; "INVOKER"; "DEFINER" ])
       col "CREATED" (TDateTime 0)
       col "LAST_ALTERED" (TDateTime 0)
-      strCol "SQL_MODE"
+      // MySQL retains obsolete SET slots in routine metadata.
+      col "SQL_MODE"
+          (TSet [ "REAL_AS_FLOAT"; "PIPES_AS_CONCAT"; "ANSI_QUOTES"; "IGNORE_SPACE"
+                  "NOT_USED"; "ONLY_FULL_GROUP_BY"; "NO_UNSIGNED_SUBTRACTION"; "NO_DIR_IN_CREATE"
+                  "NOT_USED_9"; "NOT_USED_10"; "NOT_USED_11"; "NOT_USED_12"
+                  "NOT_USED_13"; "NOT_USED_14"; "NOT_USED_15"; "NOT_USED_16"
+                  "NOT_USED_17"; "NOT_USED_18"; "ANSI"; "NO_AUTO_VALUE_ON_ZERO"
+                  "NO_BACKSLASH_ESCAPES"; "STRICT_TRANS_TABLES"; "STRICT_ALL_TABLES"; "NO_ZERO_IN_DATE"
+                  "NO_ZERO_DATE"; "ALLOW_INVALID_DATES"; "ERROR_FOR_DIVISION_BY_ZERO"; "TRADITIONAL"
+                  "NOT_USED_29"; "HIGH_NOT_PRECEDENCE"; "NO_ENGINE_SUBSTITUTION"; "PAD_CHAR_TO_FULL_LENGTH"
+                  "TIME_TRUNCATE_FRACTIONAL" ])
       strCol "ROUTINE_COMMENT"
       strCol "DEFINER"
       strCol "CHARACTER_SET_CLIENT"
@@ -1759,15 +1771,19 @@ type private RoutineSummary =
       Kind: string
       Definer: string
       Created: DateTime option
-      Modified: DateTime option }
+      Modified: DateTime option
+      SecurityType: string
+      Comment: string }
 
-let private routineSummary schema name kind definer created =
+let private routineSummary schema name kind definer created modified security comment =
     { Schema = schema
       Name = name
       Kind = kind
       Definer = definer
       Created = created
-      Modified = created }
+      Modified = modified |> Option.orElse created
+      SecurityType = security
+      Comment = comment }
 
 let private routineEntries (catalog: Catalog) =
     let procedures =
@@ -1779,13 +1795,14 @@ let private routineEntries (catalog: Catalog) =
             |> Seq.map (fun routine ->
                 let created = routine.Created |> Option.map VDateTime |> Option.defaultValue VNull
 
-                routineSummary routine.Schema routine.Name "PROCEDURE" routine.Definer routine.Created,
+                routineSummary routine.Schema routine.Name "PROCEDURE" routine.Definer routine.Created routine.LastAltered routine.SecurityType routine.Comment,
                 [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "PROCEDURE"; vs ""; VNull; VNull
                    VNull; VNull; VNull; VNull; VNull; VNull; vs "SQL"
                    (if routineDefinitionVisible routine.Schema routine.Definer then vs routine.Definition else VNull)
                    VNull; vs "SQL"; vs "SQL"
-                   vs "NO"; vs "CONTAINS SQL"; VNull; vs routine.SecurityType; created; created; vs routine.SqlMode
-                   vs ""; vs routine.Definer; vs routine.CharacterSetClient; vs routine.CollationConnection
+                   vs "NO"; vs routine.SqlDataAccess; VNull; vs routine.SecurityType; created
+                   (routine.LastAltered |> Option.map VDateTime |> Option.defaultValue created); vs routine.SqlMode
+                   vs routine.Comment; vs routine.Definer; vs routine.CharacterSetClient; vs routine.CollationConnection
                    vs routine.DatabaseCollation |])
             |> List.ofSeq)
         |> Option.defaultValue []
@@ -1805,7 +1822,7 @@ let private routineEntries (catalog: Catalog) =
                 let temporal = columnType |> Option.bind datetimePrecision
                 let isCharacter = columnType |> Option.exists isStringy
 
-                routineSummary routine.Schema routine.Name "FUNCTION" routine.Definer routine.Created,
+                routineSummary routine.Schema routine.Name "FUNCTION" routine.Definer routine.Created routine.LastAltered routine.SecurityType routine.Comment,
                 [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "FUNCTION"; vs dataType
                    characterLength |> Option.map VInt |> Option.defaultValue VNull
                    columnType |> Option.bind (charOctetLength None) |> Option.map VInt |> Option.defaultValue VNull
@@ -1818,7 +1835,8 @@ let private routineEntries (catalog: Catalog) =
                    (if routineDefinitionVisible routine.Schema routine.Definer then vs routine.Definition else VNull)
                    VNull; vs "SQL"; vs "SQL"
                    vs (if routine.Deterministic then "YES" else "NO"); vs routine.SqlDataAccess; VNull
-                   vs routine.SecurityType; created; created; vs routine.SqlMode; vs ""; vs routine.Definer
+                   vs routine.SecurityType; created; (routine.LastAltered |> Option.map VDateTime |> Option.defaultValue created)
+                   vs routine.SqlMode; vs routine.Comment; vs routine.Definer
                    vs routine.CharacterSetClient; vs routine.CollationConnection; vs routine.DatabaseCollation |])
             |> List.ofSeq)
         |> Option.defaultValue []
@@ -4297,7 +4315,7 @@ let showRoutineStatus (catalog: Catalog) kind : ShowResult =
         |> List.filter (fun routine -> String.Equals(routine.Kind, kind, StringComparison.OrdinalIgnoreCase))
         |> List.map (fun routine ->
             [ Some routine.Schema; Some routine.Name; Some routine.Kind; Some "SQL"; Some routine.Definer
-              dateText routine.Modified; dateText routine.Created; Some "DEFINER"; Some ""; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
+              dateText routine.Modified; dateText routine.Created; Some routine.SecurityType; Some routine.Comment; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
               Some "utf8mb4_0900_ai_ci" ])
 
     Ok(
