@@ -2,7 +2,7 @@
   "mysql_version": "8.4.11",
   "innodb_buffer_pool_size": "64M",
   "innodb_redo_log_capacity": "64M",
-  "fsdb_base_revision": "53e1d2e6",
+  "fsdb_base_revision": "aa0fe164",
   "fsdb_dirty": true,
   "comparison": "Statement errors, SQLSTATE, diagnostic rows, and selected table contents; affected-row metadata is covered separately by the wire contract.",
   "cases": [
@@ -609,7 +609,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `parent_n_foreign` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `child_ibfk_1` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
       "errors": [
         {
           "Item1": 1452,
@@ -617,7 +617,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `child_ibfk_1` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
-      "matches": false,
+      "matches": true,
       "name": "unnamed",
       "statements": [
         "USE probe",

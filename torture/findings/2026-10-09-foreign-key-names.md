@@ -1,11 +1,13 @@
 # Foreign-key constraint and index names
 
-Status: open. Native MySQL 8.4.11 and fsdb at `83d96a0a` differ in all 14
-focused scripts. This count describes scripts, not independent defects.
+Status: partially resolved. CREATE constraint naming matches the audited
+unnamed, explicit-sequence, and mixed-case scripts. Eleven of fourteen scripts
+still differ. The baseline at `83d96a0a` differed in all fourteen; these counts
+describe scripts, not independent defects.
 
 The [native evidence](2026-10-09-foreign-key-names-native.json) retains executable
 statement sequences, metadata, errors, and SQLSTATE. The
-[fsdb baseline](2026-10-09-foreign-key-names-current.json) retains the differing
+[fsdb replay](2026-10-09-foreign-key-names-current.json) retains matching and differing
 results. The oracle uses a disposable server with a 64 MiB buffer pool and redo
 capacity.
 
@@ -34,13 +36,22 @@ capacity.
 
 ## Implementation boundary
 
-The parser currently collapses the optional constraint name and optional index
-name into one string, or invents a parent/column-based name. That loses the
-information required by these rules. Preserve both optional names through
-parsing, then resolve constraint names with the owning table and existing
-schema available. Do not infer whether a name was explicit by recognizing the
-old generated string pattern.
+The parsed foreign-key clause retains separate optional constraint and index
+names. CREATE resolves a table-based constraint name with an independent
+counter. The generic reference record shares column and target fields between
+parsed names and resolved string names; catalog and persistence records still
+carry resolved names.
 
-Constraint diagnostics, SHOW CREATE, information_schema, index metadata,
-ALTER, rename, and persisted catalog recovery must agree on the resolved name.
-The matrix establishes a baseline; no runtime fix is claimed here.
+ALTER still uses the prior name resolution. Backing-index metadata and collision
+validation remain open, including schema-wide generated-name collisions and
+error precedence for duplicate explicit names. Do not infer whether a name was
+explicit by recognizing the old generated string pattern.
+
+## Validation
+
+The CREATE naming regression failed before the fix. The root gate passes
+3,170 tests without build warnings or errors. The full native wire run passes
+97 contracts and 14,360 steps with zero differences at
+`torture/artifacts/runs/20261008T235044805-88372/contracts`. The original
+35-script foreign-key diagnostics/validation matrix now matches completely;
+this broader naming matrix retains the remaining limitations.

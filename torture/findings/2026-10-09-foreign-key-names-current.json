@@ -2,15 +2,14 @@
   "mysql_version": "8.4.11",
   "innodb_buffer_pool_size": "64M",
   "innodb_redo_log_capacity": "64M",
-  "fsdb_revision": "83d96a0a",
-  "fsdb_dirty": false,
+  "fsdb_dirty": true,
   "comparison": "Constraint metadata, backing-index metadata where queried, command errors and SQLSTATE.",
   "cases": [
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\nparent_b_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\n",
-      "matches": false,
+      "matches": true,
       "name": "unnamed",
       "statements": [
         "USE probe",
@@ -23,7 +22,7 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nkey_label\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nTable\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tkey_label\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\n",
       "matches": false,
@@ -40,10 +39,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_7\tchild\nparent_b_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_7\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_7\tchild\n",
-      "matches": false,
+      "matches": true,
       "name": "explicit-sequence",
       "statements": [
         "USE probe",
@@ -56,7 +55,7 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nparent_a_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_1\tchild\n",
       "errors": [],
       "expected": "",
       "matches": false,
@@ -72,7 +71,7 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\nparent_b_foreign\tchild\nCONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\nparent_b_foreign\tchild\nparent_b_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nparent_b_foreign\tchild\nCONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nparent_b_foreign\tchild\nparent_b_foreign\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\nCONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\n",
       "matches": false,
@@ -92,7 +91,7 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\nparent_a_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\n",
       "matches": false,
@@ -110,7 +109,7 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\nchild_ibfk_1\tother\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_1\tother\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tother\n",
       "matches": false,
@@ -127,7 +126,7 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\trenamed\nCONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\trenamed\nparent_a_foreign\trenamed\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nCONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\trenamed\nrenamed_ibfk_1\trenamed\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nCONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nrenamed_ibfk_2\trenamed\n",
       "matches": false,
@@ -180,7 +179,7 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\nparent_a_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_2\tchild\n",
       "matches": false,
@@ -230,10 +229,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tChild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tChild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tChild\n",
-      "matches": false,
+      "matches": true,
       "name": "case-folding",
       "statements": [
         "USE probe",
@@ -245,5 +244,6 @@
         "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
       ]
     }
-  ]
+  ],
+  "fsdb_base_revision": "aa0fe164"
 }

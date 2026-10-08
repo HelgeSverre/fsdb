@@ -2781,7 +2781,11 @@ let private foreignKeyRefOptions: Parser<string option * string option, unit> =
 let private constraintName: Parser<string option, unit> =
     opt (keyword "CONSTRAINT" >>. opt identifier) |>> Option.flatten
 
-let private foreignKeyItem: Parser<ForeignKeyDef, unit> =
+type private ForeignKeyNames =
+    { ConstraintName: string option
+      IndexName: string option }
+
+let private foreignKeyItem: Parser<ForeignKeyDef<ForeignKeyNames>, unit> =
     let referencedTable =
         identifier .>>. opt (sym "." >>. qualifiedIdentifier)
         |>> function
@@ -2796,7 +2800,7 @@ let private foreignKeyItem: Parser<ForeignKeyDef, unit> =
      .>>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
      .>>. foreignKeyRefOptions)
     |>> fun (((((constraintName, keyName), cols), (refDatabase, refTable)), refCols), (onDelete, onUpdate)) ->
-        { Name = constraintName |> Option.orElse keyName |> Option.defaultValue (sprintf "%s_%s_foreign" refTable (List.head cols))
+        { Name = { ConstraintName = constraintName; IndexName = keyName }
           Columns = cols
           RefDatabase = refDatabase
           RefTable = refTable
@@ -2812,7 +2816,7 @@ type private CreateItem =
     | CColumn of ColumnDef * CheckConstraintDef list
     | CPrimaryKey of IndexColumn list
     | CIndex of IndexDef
-    | CForeignKey of ForeignKeyDef
+    | CForeignKey of ForeignKeyDef<ForeignKeyNames>
     | CCheck of CheckConstraintDef
 
 let private createTableItem: Parser<CreateItem, unit> =
@@ -3038,7 +3042,16 @@ let private createTable: Parser<Statement, unit> =
         let primaryKeyParts = items |> List.collect (function CPrimaryKey columns -> columns | _ -> [])
         let pkNames = primaryKeyParts |> List.map _.Name
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
-        let foreignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
+        let declaredForeignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
+        let _, tableName = SqlText.splitObjectName "" name
+        let foreignKeys =
+            declaredForeignKeys
+            |> List.mapFold (fun sequence foreignKey ->
+                match foreignKey.Name.ConstraintName with
+                | Some constraintName -> foreignKey.WithName constraintName, sequence
+                | None ->
+                    foreignKey.WithName(sprintf "%s_ibfk_%d" (tableName.ToLowerInvariant()) sequence), sequence + 1) 1
+            |> fst
 
         let columnDeprecations =
             items
@@ -3255,7 +3268,10 @@ let private addUniqueConstraintAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. namedUniqueConstraint) |>> AddIndex
 
 let private addForeignKeyAction: Parser<AlterAction, unit> =
-    attempt (keyword "ADD" >>. foreignKeyItem) |>> AddForeignKey
+    attempt (keyword "ADD" >>. foreignKeyItem)
+    |>> fun foreignKey ->
+        let name = foreignKey.Name.ConstraintName |> Option.orElse foreignKey.Name.IndexName |> Option.defaultValue (sprintf "%s_%s_foreign" foreignKey.RefTable (List.head foreignKey.Columns))
+        AddForeignKey(foreignKey.WithName name)
 
 let private addCheckAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. checkDefinition)

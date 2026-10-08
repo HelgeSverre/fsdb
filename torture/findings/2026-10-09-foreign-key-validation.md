@@ -25,14 +25,13 @@ INSERT IGNORE candidates never become parents for later rows.
 
 ## Remaining differences and scope
 
-- Unnamed constraints use fsdb's generated name rather than MySQL's
-  `<table>_ibfk_<sequence>` name.
+- CREATE generates the audited native names. [Broader naming behavior](2026-10-09-foreign-key-names.md), including ALTER, collisions, and backing indexes, remains incomplete.
 - ALTER error messages can name MySQL's temporary `#sql...` table; fsdb retains
   the logical table name. Temporary identifiers are not fabricated.
 - Selection among multiple eligible supporting indexes and functional trailing
   key parts is not covered by this matrix.
 
-The replay matches 34 of 35 scripts. [UPDATE IGNORE constraint skipping](2026-10-09-update-ignore.md) is covered separately. This is bounded evidence, not a claim of
+The replay matches all 35 scripts. [UPDATE IGNORE constraint skipping](2026-10-09-update-ignore.md) is covered separately. This is bounded evidence, not a claim of
 complete foreign-key parity.
 
 ## Validation

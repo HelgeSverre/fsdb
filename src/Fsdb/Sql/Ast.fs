@@ -426,14 +426,24 @@ and IndexDef =
         this.KeyColumns
         |> List.choose (fun column -> if column.Name = "" then None else Some column.Name)
 
-and ForeignKeyDef =
-    { Name: string
+and ForeignKeyDef<'Name> =
+    { Name: 'Name
       Columns: string list
       RefDatabase: string option
       RefTable: string
       RefColumns: string list
       OnDelete: string option
       OnUpdate: string option }
+    member this.WithName(name: 'OtherName) : ForeignKeyDef<'OtherName> =
+        { Name = name
+          Columns = this.Columns
+          RefDatabase = this.RefDatabase
+          RefTable = this.RefTable
+          RefColumns = this.RefColumns
+          OnDelete = this.OnDelete
+          OnUpdate = this.OnUpdate }
+
+and ForeignKeyDef = ForeignKeyDef<string>
 
 /// A table- or column-level `[CONSTRAINT name] CHECK (expr) [[NOT]
 /// ENFORCED]`. `Name = None` is resolved to MySQL's `table_chk_N` form once

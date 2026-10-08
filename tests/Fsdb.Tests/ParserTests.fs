@@ -1545,7 +1545,7 @@ let tests =
                     match parseOk "CREATE TABLE posts (user_id INT, FOREIGN KEY (user_id) REFERENCES users (id))" with
                     | CreateTable
                         { Indexes = []
-                          ForeignKeys = [ { Name = "users_user_id_foreign" } ]
+                          ForeignKeys = [ { Name = "posts_ibfk_1" } ]
                           Checks = []
                           IfNotExists = false } -> ()
                     | other -> failtestf "expected a synthesized FK name, got %A" other
@@ -1564,7 +1564,7 @@ let tests =
                     match parseOk "CREATE TABLE posts (user_id INT, CONSTRAINT FOREIGN KEY (user_id) REFERENCES users (id))" with
                     | CreateTable
                         { Indexes = []
-                          ForeignKeys = [ { Name = "users_user_id_foreign" } ]
+                          ForeignKeys = [ { Name = "posts_ibfk_1" } ]
                           Checks = []
                           IfNotExists = false } -> ()
                     | other -> failtestf "expected an unnamed CONSTRAINT to still synthesize a name, got %A" other

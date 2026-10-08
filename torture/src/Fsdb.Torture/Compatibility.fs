@@ -6152,6 +6152,40 @@ module ContractCatalog =
                        | _ -> operation
                    yield step |> Contract.on name |]
 
+    let private createForeignKeyNames =
+        let cases =
+            [
+              "unnamed", None,
+                  [ "USE fk_names_probe"
+                    "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,other,renamed"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n),FOREIGN KEY(b) REFERENCES parent(n))"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_names_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "explicit-sequence", None,
+                  [ "USE fk_names_probe"
+                    "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,other,renamed"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(a INT,b INT,CONSTRAINT child_ibfk_7 FOREIGN KEY(a) REFERENCES parent(n),FOREIGN KEY(b) REFERENCES parent(n))"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_names_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "case-folding", None,
+                  [ "USE fk_names_probe"
+                    "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,other,renamed"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE Child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_names_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+            ]
+        { Name = "create-foreign-key-names"
+          Setup = [| "CREATE DATABASE fk_names_probe" |]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_names_probe" |]
+          Coverage = [| "statement:create-table", [| "text-differential" |] |] }
+
     let private updateIgnoreConstraints =
         let cases =
             [
@@ -7762,6 +7796,7 @@ module ContractCatalog =
            quotedTableNames
            foreignKeyRowValidation
            updateIgnoreConstraints
+           createForeignKeyNames
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings

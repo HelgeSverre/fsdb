@@ -25,7 +25,19 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "UPDATE IGNORE skips rejected rows and preserves trigger order"
+        [ testCase "CREATE generates foreign key names from the owning table"
+          <| fun _ ->
+              for definition, expected in
+                  [ "a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT child_ibfk_7 FOREIGN KEY(b) REFERENCES parent(n)", [ [ Some "child_ibfk_1" ]; [ Some "child_ibfk_7" ] ]
+                    "a INT,FOREIGN KEY key_label(a) REFERENCES parent(n)", [ [ Some "child_ibfk_1" ] ] ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE parent(n INT PRIMARY KEY)"
+                  let session, result = handle session ("CREATE TABLE child(" + definition + ")")
+                  Expect.isNone (errorInfo result) "CREATE accepted"
+                  let _, result = handle session "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fsdb' ORDER BY CONSTRAINT_NAME"
+                  Expect.equal result (ResultSet([ "CONSTRAINT_NAME" ], expected)) "constraint names are independent of index labels"
+
+          testCase "UPDATE IGNORE skips rejected rows and preserves trigger order"
           <| fun _ ->
               for statement in
                   [ "UPDATE IGNORE child SET n=id ORDER BY id"
