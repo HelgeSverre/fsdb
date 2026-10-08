@@ -1341,18 +1341,20 @@ let private resolveStatementHints (session: Session) options sql hints =
 let private emitHintDiagnostics diagnostics =
     for code, message in diagnostics do Diagnostics.warning code message
 
-let private emitContextHintDiagnostics diagnostics =
+let private emitContextHintDiagnostics order diagnostics =
     diagnostics
-    |> List.sortBy (fun (offset, _, _) -> offset)
+    |> List.sortBy (fun (offset, _, _) ->
+        let rank = Map.tryFind offset order |> Option.defaultValue 0
+        rank, offset)
     |> List.iter (fun (_, code, message) -> Diagnostics.warning code message)
 
 let private withStatementHintsCore session scope emitWarnings options sql body =
     let hints = parsedStatementHints emitWarnings options sql
     let resolution =
         if emitWarnings && scope = StandaloneStatement then resolveStatementHints session options sql hints
-        else { OptimizerHintResolution.Context = []; OptimizerHintResolution.Resolution = [] }
+        else OptimizerHintResolution.empty
     let timeout, timeoutDiagnostics = statementTimeoutHint scope options sql hints
-    if emitWarnings then emitContextHintDiagnostics (resolution.Context @ timeoutDiagnostics)
+    if emitWarnings then emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics)
     let pointLimit = statementGeometryPointLimit hints
     emitHintDiagnostics resolution.Resolution
     DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
@@ -1368,7 +1370,7 @@ let private emitRoutineHintDiagnostics (session: Session) kind schema name optio
         parsedStatementHints true options definition
         |> statementTimeoutHint StoredRoutine options definition
         |> snd
-        |> emitContextHintDiagnostics
+        |> emitContextHintDiagnostics Map.empty
 
 let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
     markRoutineVariables connectionVariableNames
@@ -5188,7 +5190,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
         let hints = parsedStatementHints true options sql
         let resolution = resolveStatementHints session options sql hints
         let _, timeoutDiagnostics = statementTimeoutHint StandaloneStatement options sql hints
-        emitContextHintDiagnostics (resolution.Context @ timeoutDiagnostics)
+        emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics)
         emitHintDiagnostics resolution.Resolution
         match statement with
         | None -> Ok(statement, count)

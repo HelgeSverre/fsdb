@@ -4,12 +4,23 @@ module internal Fsdb.OptimizerHints
 open System
 open System.Text
 
+[<RequireQualifiedAccess>]
+type JoinOrderKind = Fixed | Prefix | Suffix | Relative
+
+let joinOrderName = function
+    | JoinOrderKind.Fixed -> "JOIN_FIXED_ORDER"
+    | JoinOrderKind.Prefix -> "JOIN_PREFIX"
+    | JoinOrderKind.Suffix -> "JOIN_SUFFIX"
+    | JoinOrderKind.Relative -> "JOIN_ORDER"
+
 type Value =
     | Timeout of uint64
     | SetVariable of name: string * value: string
     | QueryBlockName of string
     | TableHint of name: string * block: string option * targets: (string * string option) list
     | IndexHint of name: string * table: string * block: string option * indexes: string list
+    | JoinOrderHint of kind: JoinOrderKind * block: string option * targets: (string * string option) list
+    | QueryBlockHint of name: string * block: string option * strategies: string list
     | OtherHint of string
 
 type Hint =
@@ -165,11 +176,11 @@ let parse options (location: Parser.OptimizerHintLocation) =
                     symbol ')' |> ignore
                     Some(if name = "QB_NAME" then QueryBlockName argument else OtherHint name)
                 | "JOIN_FIXED_ORDER" ->
-                    queryBlock () |> ignore
+                    let block = queryBlock ()
                     symbol ')' |> ignore
-                    Some(OtherHint name)
+                    Some(JoinOrderHint(JoinOrderKind.Fixed, block, []))
                 | "SEMIJOIN" | "NO_SEMIJOIN" | "SUBQUERY" ->
-                    queryBlock () |> ignore
+                    let block = queryBlock ()
                     let strategy () =
                         let token = current ()
                         let value = word().ToUpperInvariant()
@@ -178,19 +189,26 @@ let parse options (location: Parser.OptimizerHintLocation) =
                             else [ "FIRSTMATCH"; "LOOSESCAN"; "MATERIALIZATION"; "DUPSWEEDOUT" ]
                         if not (List.contains value accepted) then raise (SyntaxAt token.Start)
                         value
-                    if name = "SUBQUERY" then strategy () |> ignore
-                    else commaList true strategy |> ignore
+                    let strategies = if name = "SUBQUERY" then [ strategy () ] else commaList true strategy
                     symbol ')' |> ignore
-                    Some(OtherHint name)
+                    Some(QueryBlockHint(name, block, strategies))
                 | _ when Set.contains name tableHints ->
                     let block = queryBlock ()
                     let target () =
                         let table = word ()
-                        let targetBlock = if block.IsSome then block else queryBlock ()
+                        let targetBlock = if block.IsSome then None else queryBlock ()
                         table, targetBlock
                     let targets = commaList true target
                     symbol ')' |> ignore
-                    Some(TableHint(name, block, targets))
+                    let joinKind =
+                        match name with
+                        | "JOIN_PREFIX" -> Some JoinOrderKind.Prefix
+                        | "JOIN_SUFFIX" -> Some JoinOrderKind.Suffix
+                        | "JOIN_ORDER" -> Some JoinOrderKind.Relative
+                        | _ -> None
+                    match joinKind with
+                    | Some kind -> Some(JoinOrderHint(kind, block, targets))
+                    | None -> Some(TableHint(name, block, targets))
                 | _ ->
                     let block = queryBlock ()
                     let table = word ()

@@ -393,8 +393,8 @@ an explicit absent table target; missing named blocks use an error value rather
 than a sentinel. Target deduplication retains native warning spelling, including
 index lists and empty BKA arguments. Rejected second QB_NAME declarations do
 not register an alias; an explicit name matching the current block resolves
-locally before other blocks with that name. Timeout and query-block context diagnostics
-merge by source position before SET_VAR and unresolved-name diagnostics.
+through the registered query-block names. Timeout and query-block context diagnostics
+merge in contextualization order before SET_VAR and unresolved-name diagnostics.
 
 SQL PREPARE and binary-protocol preparation emit target-resolution warnings;
 execution does not repeat them. Valid view-definition hints remain discarded.
@@ -409,7 +409,9 @@ protocols:
 `torture/artifacts/runs/20261008T105730829-83074/contracts`.
 No known-gap allowlist was changed.
 
-Broader hint-family conflict rules, DML/stored-program resolution,
-view-expansion interactions, and physical optimizer effects remain open. The common-path performance comparison is in
+The [hint-family audit](2026-10-08-hint-families.md) extends this coverage to
+family conflicts and nested contextualization order. Broader hint combinations,
+DML/stored-program resolution, view-expansion interactions, and physical
+optimizer effects remain open. The common-path performance comparison is in
 `benchmarks/results/d014676b-hint-resolution.md`; concurrent host activity makes
 its elapsed timings unsuitable for a throughput claim.
