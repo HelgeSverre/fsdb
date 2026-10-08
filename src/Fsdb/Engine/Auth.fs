@@ -2949,7 +2949,7 @@ let requiredPrivilegesForExpression (defaultDb: string) (expression: Expr) : (st
 let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * PrivTarget) list =
     let onTables priv tables = tables |> List.map (fun (db, t) -> priv, OnTable(db, t))
     let split (name: string) = splitQualified defaultDb name
-    let referencedTables ownerDb foreignKeys =
+    let referencedTables ownerDb (foreignKeys: ForeignKeyDef<'Name> list) =
         foreignKeys
         |> List.map (fun foreignKey -> foreignKey.RefDatabase |> Option.defaultValue ownerDb, foreignKey.RefTable)
     let filePrivilege select = if select.IntoFile.IsSome then [ "FILE", Global ] else []
@@ -3088,6 +3088,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | AlterTable(table, actions) ->
         let target = split table
         let foreignKeys = actions |> List.choose (function AddForeignKey foreignKey -> Some foreignKey | _ -> None)
+        let unnamedForeignKeys = actions |> List.choose (function AddUnnamedForeignKey foreignKey -> Some foreignKey | _ -> None)
         let truncatesPartitions = actions |> List.exists (function TruncatePartitions _ -> true | _ -> false)
         let renameTarget =
             actions
@@ -3104,7 +3105,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
 
         onTables "ALTER" [ target ]
         @ renamePrivileges
-        @ onTables "REFERENCES" (referencedTables (fst target) foreignKeys)
+        @ onTables "REFERENCES" (referencedTables (fst target) foreignKeys @ referencedTables (fst target) unnamedForeignKeys)
         @ if truncatesPartitions then onTables "DROP" [ target ] else []
     | RenameTable pairs ->
         let sources = pairs |> List.map (fst >> split)

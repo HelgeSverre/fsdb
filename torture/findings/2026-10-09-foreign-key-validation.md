@@ -25,7 +25,7 @@ INSERT IGNORE candidates never become parents for later rows.
 
 ## Remaining differences and scope
 
-- CREATE generates the audited native names. [Broader naming behavior](2026-10-09-foreign-key-names.md), including ALTER, collisions, and backing indexes, remains incomplete.
+- CREATE generates the audited native names. [Broader naming behavior](2026-10-09-foreign-key-names.md), including collisions and backing indexes, remains incomplete.
 - ALTER error messages can name MySQL's temporary `#sql...` table; fsdb retains
   the logical table name. Temporary identifiers are not fabricated.
 - Selection among multiple eligible supporting indexes and functional trailing

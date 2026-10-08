@@ -1,9 +1,10 @@
 # Foreign-key constraint and index names
 
-Status: partially resolved. CREATE constraint naming matches the audited
-unnamed, explicit-sequence, and mixed-case scripts. Eleven of fourteen scripts
-still differ. The baseline at `83d96a0a` differed in all fourteen; these counts
-describe scripts, not independent defects.
+Status: partially resolved. Ten of fourteen scripts match, including the
+audited CREATE and ALTER numbering, suffix reuse, and rename behavior. The
+remaining differences are backing-index metadata, generated-name collisions,
+and duplicate explicit-name error precedence. The baseline at `83d96a0a`
+differed in all fourteen; these counts describe scripts, not independent defects.
 
 The [native evidence](2026-10-09-foreign-key-names-native.json) retains executable
 statement sequences, metadata, errors, and SQLSTATE. The
@@ -42,16 +43,24 @@ counter. The generic reference record shares column and target fields between
 parsed names and resolved string names; catalog and persistence records still
 carry resolved names.
 
-ALTER still uses the prior name resolution. Backing-index metadata and collision
-validation remain open, including schema-wide generated-name collisions and
-error precedence for duplicate explicit names. Do not infer whether a name was
+Unnamed ALTER declarations reach storage without a fabricated constraint name.
+Storage derives their starting counter from the original table definition,
+before applying any action, and generates only the unnamed constraints in
+statement order. The WAL records the resolved actions. REFERENCES privileges
+and algorithm selection recognize both named and unnamed declarations.
+
+Backing-index metadata and collision validation remain open, including
+schema-wide generated-name collisions and error precedence for duplicate
+explicit names. Broader combinations with a rename in the same ALTER and
+extreme numeric suffix limits remain unaudited. Do not infer whether a name was
 explicit by recognizing the old generated string pattern.
 
 ## Validation
 
-The CREATE naming regression failed before the fix. The root gate passes
-3,170 tests without build warnings or errors. The full native wire run passes
-97 contracts and 14,360 steps with zero differences at
-`torture/artifacts/runs/20261008T235044805-88372/contracts`. The original
-35-script foreign-key diagnostics/validation matrix now matches completely;
-this broader naming matrix retains the remaining limitations.
+The CREATE and ALTER naming regressions failed before their fixes. WAL and
+snapshot recovery preserve the generated ALTER name for DROP-and-ADD in one
+statement. The root gate passes 3,172 tests without build warnings or errors.
+The full native wire run passes 97 contracts and 14,422 steps with zero
+differences at `torture/artifacts/runs/20261008T235740987-88809/contracts`.
+The original 35-script foreign-key diagnostics/validation matrix matches
+completely; this broader naming matrix retains the remaining limitations.

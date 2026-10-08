@@ -71,10 +71,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nparent_b_foreign\tchild\nCONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nparent_b_foreign\tchild\nparent_b_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\nCONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\nCONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\n",
-      "matches": false,
+      "matches": true,
       "name": "alter",
       "statements": [
         "USE probe",
@@ -91,10 +91,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\n",
-      "matches": false,
+      "matches": true,
       "name": "drop-all",
       "statements": [
         "USE probe",
@@ -126,10 +126,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nCONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\trenamed\nrenamed_ibfk_1\trenamed\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nCONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nrenamed_ibfk_2\trenamed\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nCONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nrenamed_ibfk_2\trenamed\n",
-      "matches": false,
+      "matches": true,
       "name": "rename",
       "statements": [
         "USE probe",
@@ -145,10 +145,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_7\tchild\nparent_b_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_7\tchild\nchild_ibfk_8\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_7\tchild\nchild_ibfk_8\tchild\n",
-      "matches": false,
+      "matches": true,
       "name": "alter-explicit-sequence",
       "statements": [
         "USE probe",
@@ -162,10 +162,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_7\tchild\nparent_b_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_7\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_7\tchild\n",
-      "matches": false,
+      "matches": true,
       "name": "alter-explicit-batch",
       "statements": [
         "USE probe",
@@ -179,10 +179,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nparent_a_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_2\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_2\tchild\n",
-      "matches": false,
+      "matches": true,
       "name": "alter-drop-add",
       "statements": [
         "USE probe",
@@ -212,10 +212,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_07\tchild\nparent_b_foreign\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_07\tchild\nchild_ibfk_1\tchild\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_07\tchild\nchild_ibfk_1\tchild\n",
-      "matches": false,
+      "matches": true,
       "name": "leading-zero",
       "statements": [
         "USE probe",
@@ -245,5 +245,5 @@
       ]
     }
   ],
-  "fsdb_base_revision": "aa0fe164"
+  "fsdb_base_revision": "23dfd3fa"
 }

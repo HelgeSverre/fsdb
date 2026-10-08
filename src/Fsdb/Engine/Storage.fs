@@ -7095,6 +7095,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                 None
             )
     | AddForeignKey fk -> Ok({ table with ForeignKeys = table.ForeignKeys @ [ fk ] }, None)
+    | AddUnnamedForeignKey _ -> invalidOp "Foreign-key names must be resolved before applying ALTER actions"
     | DropForeignKey name ->
         Ok(
             { table with
@@ -7491,6 +7492,25 @@ let private convertAlterRows mode (original: Table) (candidate: Table) actions c
                     checkUnique values |> Result.bind (fun values -> checkRow candidate values |> Result.map (fun () -> values)))
             |> Result.map (fun rows -> { candidate with RowsArray = rows })))
 
+let private resolveAlterForeignKeyNames (table: Table) actions =
+    let prefix = normalizeTableName table.OriginalName + "_ibfk_"
+    let sequenceOf (foreignKey: ForeignKeyDef) =
+        if foreignKey.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) then
+            let suffix = foreignKey.Name.Substring(prefix.Length)
+            match System.Numerics.BigInteger.TryParse suffix with
+            | true, sequence when sequence >= 0I && string sequence = suffix -> Some sequence
+            | _ -> None
+        else None
+    let nextSequence =
+        table.ForeignKeys |> List.choose sequenceOf |> List.fold max 0I |> (+) 1I
+    actions
+    |> List.mapFold (fun sequence action ->
+        match action with
+        | AddUnnamedForeignKey foreignKey ->
+            AddForeignKey(foreignKey.WithName(prefix + string sequence)), sequence + 1I
+        | _ -> action, sequence) nextSequence
+    |> fst
+
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
@@ -7498,11 +7518,12 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
         store
         dbName
         ExclusiveAccess
-        (fun () -> [ SchemaChanged(dbName, AlterTable(tableName, actions)) ])
+        (fun resolvedActions -> [ SchemaChanged(dbName, AlterTable(tableName, resolvedActions)) ])
         (fun catalog db ->
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
+                let actions = resolveAlterForeignKeyNames table actions
                 let origKey = normalizeTableName tableName
                 let mode = temporalCoercionMode store
                 let convertsColumns = actions |> List.exists (function ModifyColumn _ | ChangeColumn _ -> true | _ -> false)
@@ -7578,9 +7599,11 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                     invalidateAutoIncrementCounter store dbName finalKey
 
                     if finalKey = origKey then
-                        updatedCatalog, ()
+                        updatedCatalog, actions
                     else
-                        retargetForeignKeys (tableAddress dbName origKey) dbName finalTable.OriginalName updatedCatalog, ())))
+                        retargetForeignKeys (tableAddress dbName origKey) dbName finalTable.OriginalName updatedCatalog, actions)))
+
+    |> Result.map ignore
 
 let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
     alterTable store dbName oldName [ RenameTo newName ]

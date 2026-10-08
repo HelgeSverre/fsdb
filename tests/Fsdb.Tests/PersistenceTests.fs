@@ -2663,6 +2663,27 @@ let tests =
               Expect.equal secondary.KeyColumns.Head.PrefixLength None "the marker is not prefix metadata"
               Expect.equal (primaryKeyColumns table) [ markerName ] "ADD PRIMARY KEY resolves the preceding ADD COLUMN"
 
+          testCase "generated ALTER foreign key names survive WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let mutable session = Fsdb.Session.create 1 store
+              for sql in
+                  [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child DROP FOREIGN KEY child_ibfk_1,ADD FOREIGN KEY(b) REFERENCES parent(n)" ] do
+                  let next, result = handle session sql
+                  session <- next
+                  Expect.isNone (errorInfo result) sql
+              let assertNames (recovered: Store) =
+                  let names = recovered.Catalog.[defaultDatabase].["child"].ForeignKeys |> List.map _.Name
+                  Expect.equal names [ "child_ibfk_2" ] "resolved ALTER name survives recovery"
+              assertNames store
+              assertNames (load dir)
+              snapshotNow dir store
+              assertNames (load dir)
+
           testCase "qualified foreign keys survive WAL and snapshot recovery"
           <| fun _ ->
               let dir = tempDataDir ()

@@ -902,6 +902,8 @@ type AlterAction =
     | RenameIndex of oldName: string * newName: string
     | SetIndexVisibility of name: string * visible: bool
     | AddForeignKey of ForeignKeyDef
+    /// The optional name labels the backing index; storage generates the constraint name.
+    | AddUnnamedForeignKey of ForeignKeyDef<string option>
     | DropForeignKey of name: string
     | AddCheck of CheckConstraintDef
     | DropCheck of name: string

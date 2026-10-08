@@ -2302,7 +2302,7 @@ let tests =
                           DropForeignKey "fk_old" ]) -> ()
                     | other -> failtestf "expected add/drop foreign key actions, got %A" other
 
-                testCase "ADD FOREIGN KEY accepts a key name without CONSTRAINT"
+                testCase "ADD FOREIGN KEY keeps the index name separate from the unnamed constraint"
                 <| fun _ ->
                     match
                         parseOk
@@ -2310,8 +2310,8 @@ let tests =
                     with
                     | AlterTable(
                         "theme",
-                        [ AddForeignKey
-                              { Name = "fk.theme.preview_media_id"
+                        [ AddUnnamedForeignKey
+                              { Name = Some "fk.theme.preview_media_id"
                                 Columns = [ "preview_media_id" ]
                                 RefDatabase = None
                                 RefTable = "media"
@@ -2319,7 +2319,7 @@ let tests =
                                 OnDelete = Some "SET NULL"
                                 OnUpdate = Some "CASCADE" } ]
                       ) -> ()
-                    | other -> failtestf "expected the directly named foreign key, got %A" other
+                    | other -> failtestf "expected the unnamed constraint with its index name, got %A" other
 
                 testCase "ADD and DROP PRIMARY KEY"
                 <| fun _ ->

@@ -980,6 +980,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
         w.WriteByte 0x16uy
         writeBool w replacement.IsSome
         replacement |> Option.iter (fun (selected, definitions) -> writeStrList w selected; encodePartitionDefinitions format w definitions)
+    | AddUnnamedForeignKey _
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _

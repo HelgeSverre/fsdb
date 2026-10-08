@@ -20604,12 +20604,13 @@ let private planAlterExecution foreignKeyChecks (table: Storage.Table) actions =
         | ConvertCharset(charset, _) -> if convertsStoredCharset charset then copyAlgorithm else onlineAlgorithms
         | DropPrimaryKey when replacingPrimaryKey -> onlineAlgorithms
         | DropPrimaryKey -> copyAlgorithm
-        | AddForeignKey _ when foreignKeyChecks -> copyAlgorithm
+        | AddForeignKey _ | AddUnnamedForeignKey _ when foreignKeyChecks -> copyAlgorithm
         | AddIndex _
         | DropIndexAction _
         | RenameIndex _
         | SetIndexVisibility _
         | AddForeignKey _
+        | AddUnnamedForeignKey _
         | DropForeignKey _
         | AddPrimaryKey _
         | SetEngine _
@@ -20655,7 +20656,7 @@ let private planAlterExecution foreignKeyChecks (table: Storage.Table) actions =
         hasOperation (function
             | AddColumn({ AutoIncrement = true }, _)
             | AddIndex { Kind = FullTextIndex _ } -> true
-            | AddForeignKey _ when foreignKeyChecks -> true
+            | AddForeignKey _ | AddUnnamedForeignKey _ when foreignKeyChecks -> true
             | _ -> false)
 
     let unsupportedAlgorithm requested =
@@ -20669,7 +20670,7 @@ let private planAlterExecution foreignKeyChecks (table: Storage.Table) actions =
         | (AlgorithmInstant | AlgorithmInplace) when hasOperation (function DropPrimaryKey -> not replacingPrimaryKey | _ -> false) ->
             let retry = if requested = AlgorithmInstant then "COPY/INPLACE" else "COPY"
             Err(1846, sprintf "ALGORITHM=%s is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try ALGORITHM=%s." (algorithmName requested) retry)
-        | (AlgorithmInstant | AlgorithmInplace) when foreignKeyChecks && hasOperation (function AddForeignKey _ -> true | _ -> false) ->
+        | (AlgorithmInstant | AlgorithmInplace) when foreignKeyChecks && hasOperation (function AddForeignKey _ | AddUnnamedForeignKey _ -> true | _ -> false) ->
             let retry = if requested = AlgorithmInstant then "COPY/INPLACE" else "COPY"
             Err(1846, sprintf "ALGORITHM=%s is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=%s." (algorithmName requested) retry)
         | _ ->
@@ -20692,7 +20693,7 @@ let private planAlterExecution foreignKeyChecks (table: Storage.Table) actions =
             Err(1846, "LOCK=NONE is not supported. Reason: Adding an auto-increment column requires a lock. Try LOCK=SHARED.")
         elif hasOperation (function AddIndex { Kind = FullTextIndex _ } -> true | _ -> false) then
             Err(1846, "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED.")
-        elif foreignKeyChecks && hasOperation (function AddForeignKey _ -> true | _ -> false) then
+        elif foreignKeyChecks && hasOperation (function AddForeignKey _ | AddUnnamedForeignKey _ -> true | _ -> false) then
             Err(1846, "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED.")
         elif hasOperation (function DropPrimaryKey -> not replacingPrimaryKey | _ -> false) then
             Err(1846, "LOCK=NONE is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try LOCK=SHARED.")

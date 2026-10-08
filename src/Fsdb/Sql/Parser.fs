@@ -3270,8 +3270,9 @@ let private addUniqueConstraintAction: Parser<AlterAction, unit> =
 let private addForeignKeyAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. foreignKeyItem)
     |>> fun foreignKey ->
-        let name = foreignKey.Name.ConstraintName |> Option.orElse foreignKey.Name.IndexName |> Option.defaultValue (sprintf "%s_%s_foreign" foreignKey.RefTable (List.head foreignKey.Columns))
-        AddForeignKey(foreignKey.WithName name)
+        match foreignKey.Name.ConstraintName with
+        | Some name -> AddForeignKey(foreignKey.WithName name)
+        | None -> AddUnnamedForeignKey(foreignKey.WithName foreignKey.Name.IndexName)
 
 let private addCheckAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. checkDefinition)

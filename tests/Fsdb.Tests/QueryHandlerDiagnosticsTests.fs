@@ -25,7 +25,21 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "CREATE generates foreign key names from the owning table"
+        [ testCase "ALTER foreign key numbering uses the original table definition"
+          <| fun _ ->
+              for initial, alter, expected in
+                  [ "CONSTRAINT child_ibfk_7 FOREIGN KEY(a) REFERENCES parent(n)", "ADD FOREIGN KEY(b) REFERENCES parent(n)", [ "child_ibfk_7"; "child_ibfk_8" ]
+                    "CONSTRAINT child_ibfk_07 FOREIGN KEY(a) REFERENCES parent(n)", "ADD FOREIGN KEY(b) REFERENCES parent(n)", [ "child_ibfk_07"; "child_ibfk_1" ]
+                    "FOREIGN KEY(a) REFERENCES parent(n)", "DROP FOREIGN KEY child_ibfk_1,ADD FOREIGN KEY(b) REFERENCES parent(n)", [ "child_ibfk_2" ] ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE parent(n INT PRIMARY KEY)"
+                  let session, _ = handle session ("CREATE TABLE child(a INT,b INT," + initial + ")")
+                  let session, result = handle session ("ALTER TABLE child " + alter)
+                  Expect.isNone (errorInfo result) "ALTER accepted"
+                  let _, result = handle session "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fsdb' ORDER BY CONSTRAINT_NAME"
+                  Expect.equal result (ResultSet([ "CONSTRAINT_NAME" ], expected |> List.map (fun name -> [ Some name ]))) "resolved names"
+
+          testCase "CREATE generates foreign key names from the owning table"
           <| fun _ ->
               for definition, expected in
                   [ "a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT child_ibfk_7 FOREIGN KEY(b) REFERENCES parent(n)", [ [ Some "child_ibfk_1" ]; [ Some "child_ibfk_7" ] ]
