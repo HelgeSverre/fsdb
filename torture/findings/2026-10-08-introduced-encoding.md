@@ -169,7 +169,7 @@ cases and the length matrix: 62 cases and 7,623 steps pass without differences.
 This closes the audited UCS2 storage boundary; other charset conversions and
 encoded-value expression operations still need separate native evidence.
 
-### Encoded string operations remain open
+### Encoded string operations
 
 The maintained `encoded-expression-oracle.py` probes REVERSE, LEFT, RIGHT,
 SUBSTRING, and same-charset CONCAT over UCS2 surrogate pairs, invalid ASCII,
@@ -183,8 +183,19 @@ these operations unchanged. Each invalid UTF8MB3 byte counts separately:
 LEFT of `61F09F988062` with length two yields `61F0`, while REVERSE yields
 `6280989FF061`. Same-charset CONCAT retains every original byte.
 
-The current functions decode encoded values before manipulating their text,
-losing byte identity. The next change needs a shared charset-aware character
-boundary operation for reversal and slicing, plus concatenation that retains
-the selected result charset and source bytes. Binary values must retain their
-existing byte-oriented behavior.
+Reversal and slicing now share encoded character offsets and retain source
+bytes. CONCAT uses the resolved result charset for the audited same-charset,
+binary, and UCS2-to-UTF8 paths. Binary values retain byte-oriented behavior.
+
+The expanded CONCAT matrix also covers binary inputs, same-charset slices,
+and cross-charset inputs. UCS2-to-UTF8MB4 conversion retains independent
+surrogate units and emits warning 1300 for the converted invalid UTF8 bytes.
+Invalid ASCII and supplementary UTF8MB3 inputs concatenated with ordinary
+UTF8MB4 text fail with 1267/HY000, including the operand collations in the
+message. The maintained oracle pins all 24 cases, now included in the wire
+contracts. The full wire run passed 62 cases and 7,693 steps without differences;
+the root gate passed 3,076 tests with no build warnings or errors.
+
+These checks close the audited expression cases. Other legacy multibyte
+charsets, wider mixed-charset combinations, and additional string functions
+still need native probes before claiming general encoded-expression parity.

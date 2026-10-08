@@ -442,6 +442,30 @@ let private unicodeScalarWidth charset (bytes: byte[]) offset =
         if codePoint <= 0x10FFFFu && Rune.IsValid(int codePoint) then Some 4 else None
     | _ -> None
 
+/// Invalid encoded bytes occupy individual characters; UCS2 uses code units.
+let characterByteOffsets name (bytes: byte[]) =
+    let charset = canonicalName name
+    let offsets = ResizeArray<int>()
+    let mutable offset = 0
+    while offset < bytes.Length do
+        offsets.Add offset
+        let width =
+            if charset = "ucs2" then min 2 (bytes.Length - offset)
+            else unicodeScalarWidth charset bytes offset |> Option.defaultValue 1
+        offset <- offset + width
+    offsets.Add bytes.Length
+    offsets.ToArray()
+
+let reverseCharacterBytes name (bytes: byte[]) =
+    let offsets = characterByteOffsets name bytes
+    let output = Array.zeroCreate<byte> bytes.Length
+    let mutable destination = 0
+    for index in offsets.Length - 2 .. -1 .. 0 do
+        let length = offsets.[index + 1] - offsets.[index]
+        Array.Copy(bytes, offsets.[index], output, destination, length)
+        destination <- destination + length
+    output
+
 /// First malformed byte in UTF-8/16/32 hex or bit literals. Quoted strings
 /// and UCS-2 have different validation rules in MySQL.
 let tryInvalidUnicodeByteOffset (name: string) (bytes: byte[]) =

@@ -351,6 +351,8 @@ let rec projectValueWithStatus encodeText transform value =
     | Some Lowercase, value -> mapTextOrBytes _.ToLowerInvariant() id value, None
     | Some Uppercase, value -> mapTextOrBytes _.ToUpperInvariant() id value, None
     | Some Trimmed, value -> mapTextOrBytes _.Trim(' ') trimBinarySpaces value, None
+    | Some Reversed, VEncodedString(charset, bytes) ->
+        Fsdb.Charset.reverseCharacterBytes charset bytes |> encodedString charset, None
     | Some Reversed, value -> mapTextOrBytes reverseText Array.rev value, None
     | Some CharacterLength, value -> VInt(characterLength value), None
     | Some ByteLength, value -> VInt(byteLengthWith encodeText value), None

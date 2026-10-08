@@ -602,6 +602,56 @@ let tests =
                   else
                       Expect.equal result (Err(1366, message)) "strict conversion fails"
 
+          testCase "CONCAT rejects invalid cross-charset source bytes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for literal, collation in
+                  [ "_ascii X'418042'", "ascii_general_ci"
+                    "_utf8mb3'a😀b'", "utf8mb3_general_ci" ] do
+                  let expected = sprintf "Illegal mix of collations (%s,COERCIBLE) and (utf8mb4_0900_ai_ci,COERCIBLE) for operation 'concat'" collation
+                  Expect.equal (handle session ("SELECT HEX(CONCAT(" + literal + ",'x')) AS h") |> snd)
+                      (Err(1267, expected)) literal
+
+          testCase "CONCAT converts UCS2 surrogate units independently"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "SELECT HEX(CONCAT(_ucs2 X'0041D83DDE000042','x')) AS h"
+              Expect.equal result (ResultSet([ "h" ], [ [ Some "41EDA0BDEDB8804278" ] ])) "converted source bytes"
+              Expect.equal (session.Diagnostics |> List.map (fun warning -> warning.Code, warning.Message))
+                  [ 1287, "'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
+                    1300, "Invalid utf8mb4 character string: 'EDA0BD'" ] "conversion warning follows deprecation"
+
+          testCase "CONCAT preserves encoded source bytes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for literal, expected in
+                  [ "_ucs2 X'0041D83DDE000042'", "0041D83DDE0000420041D83DDE000042"
+                    "_ascii X'418042'", "418042418042"
+                    "_utf8mb3'a😀b'", "61F09F98806261F09F988062" ] do
+                  Expect.equal (handle session ("SELECT HEX(CONCAT(" + literal + "," + literal + ")) AS h") |> snd)
+                      (ResultSet([ "h" ], [ [ Some expected ] ])) literal
+
+          testCase "string slices preserve encoded character bytes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for literal, left, right, middle in
+                  [ "_ucs2 X'0041D83DDE000042'", "0041D83D", "DE000042", "D83D"
+                    "_ascii X'418042'", "4180", "8042", "80"
+                    "_utf8mb3'a😀b'", "61F0", "8062", "F0" ] do
+                  let sql = "SELECT HEX(LEFT(" + literal + ",2)) AS l,HEX(RIGHT(" + literal + ",2)) AS r,HEX(SUBSTRING(" + literal + ",2,1)) AS m"
+                  Expect.equal (handle session sql |> snd)
+                      (ResultSet([ "l"; "r"; "m" ], [ [ Some left; Some right; Some middle ] ])) literal
+
+          testCase "REVERSE preserves encoded character bytes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for literal, expected in
+                  [ "_ucs2 X'0041D83DDE000042'", "0042DE00D83D0041"
+                    "_ascii X'418042'", "428041"
+                    "_utf8mb3'a😀b'", "6280989FF061" ] do
+                  Expect.equal (handle session ("SELECT HEX(REVERSE(" + literal + ")) AS h") |> snd)
+                      (ResultSet([ "h" ], [ [ Some expected ] ])) literal
+
           testCase "UCS2 surrogate pairs count as two code units"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

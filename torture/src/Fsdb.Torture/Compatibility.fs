@@ -994,6 +994,37 @@ module ContractCatalog =
                        else
                            yield Contract.execute label fragment
                yield Contract.execute "ucs2-storage-drop" "DROP TABLE surrogate_target"
+               for index, (sql, rejected) in
+                   [ "SELECT HEX(REVERSE(_ucs2 X'0041D83DDE000042')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(LEFT(_ucs2 X'0041D83DDE000042',2)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(RIGHT(_ucs2 X'0041D83DDE000042',2)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(SUBSTRING(_ucs2 X'0041D83DDE000042',2,1)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_ucs2 X'0041D83DDE000042',_ucs2 X'0041D83DDE000042')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(REVERSE(_ascii X'418042')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(LEFT(_ascii X'418042',2)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(RIGHT(_ascii X'418042',2)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(SUBSTRING(_ascii X'418042',2,1)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_ascii X'418042',_ascii X'418042')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(REVERSE(_utf8mb3'a😀b')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(LEFT(_utf8mb3'a😀b',2)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(RIGHT(_utf8mb3'a😀b',2)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(SUBSTRING(_utf8mb3'a😀b',2,1)) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_utf8mb3'a😀b',_utf8mb3'a😀b')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_ucs2 X'0041D83DDE000042','x')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_ucs2 X'0041D83DDE000042',_binary X'78')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_ucs2 X'0041D83DDE000042',LEFT(_ucs2 X'0041D83DDE000042',1))) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_ascii X'418042','x')) AS h;SHOW WARNINGS", true
+                     "SELECT HEX(CONCAT(_ascii X'418042',_binary X'78')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_ascii X'418042',LEFT(_ascii X'418042',1))) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_utf8mb3'a😀b','x')) AS h;SHOW WARNINGS", true
+                     "SELECT HEX(CONCAT(_utf8mb3'a😀b',_binary X'78')) AS h;SHOW WARNINGS", false
+                     "SELECT HEX(CONCAT(_utf8mb3'a😀b',LEFT(_utf8mb3'a😀b',1))) AS h;SHOW WARNINGS", false ] |> List.indexed do
+                   yield Contract.execute (sprintf "encoded-expression-charset-%d" index) "SET NAMES utf8mb4"
+                   if rejected then
+                       yield Contract.query (sprintf "encoded-expression-error-%d" index) (sql.Split(';').[0]) |> Contract.fails 1267 "HY000"
+                   else
+                       for step, fragment in sql.Split(';') |> Array.indexed do
+                           yield Contract.query (sprintf "encoded-expression-%d-%d" index step) fragment
                yield Contract.execute "encoded-storage-mode" "SET sql_mode=DEFAULT" |]
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential"; "error-contract" |] |] }

@@ -5362,11 +5362,26 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 args
                 |> traverse eval
                 |> Result.bind (fun values ->
+                    validateConcatEncoding ctx name descriptor args values
+                    |> Result.map (fun () -> values))
+                |> Result.bind (fun values ->
                     try
                         let values = prepareScalarArguments ctx name args values
 
                         let invoke () =
-                            let value = fn values
+                            let value =
+                                match descriptor with
+                                | Some descriptor when
+                                    name.Equals("CONCAT", System.StringComparison.OrdinalIgnoreCase)
+                                    && Functions.isUnmodifiedBuiltinScalar name ctx.Registry
+                                    && (values |> List.exists (function VEncodedString _ -> true | _ -> false))
+                                    && (descriptor.Charset = "binary"
+                                        || args |> List.forall (fun argument ->
+                                            let source = sourceCharset ctx argument
+                                            source = descriptor.Charset
+                                            || (source = "ucs2" && (descriptor.Charset = "utf8mb3" || descriptor.Charset = "utf8mb4")))) ->
+                                    Functions.concatInCharset descriptor.Charset values
+                                | _ -> fn values
                             let value =
                                 let hasNumericDescriptor =
                                     descriptor.IsSome
@@ -6607,6 +6622,36 @@ and private displayValueForText (ctx: EvalContext) expression value =
         | _ when format.DecimalScale.IsSome || format.ApproximateScale.IsSome ->
             renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
         | _ -> value
+
+and private validateConcatEncoding ctx name descriptor expressions values =
+    match descriptor with
+    | Some target when target.Charset <> "binary"
+                       && name.Equals("CONCAT", System.StringComparison.OrdinalIgnoreCase)
+                       && Functions.isUnmodifiedBuiltinScalar name ctx.Registry ->
+        let invalidSource =
+            List.zip expressions values
+            |> List.tryFindIndex (fun (_, value) ->
+                match value with
+                | VEncodedString(source, bytes) when source <> target.Charset ->
+                    Charset.tryInvalidTextByteOffset source bytes |> Option.isSome
+                | _ -> false)
+        match invalidSource with
+        | None -> Ok ()
+        | Some index ->
+            expressions
+            |> traverse (expressionCollation ctx)
+            |> Result.bind (fun operands ->
+                let source = operands.[index]
+                let otherIndex, other =
+                    operands
+                    |> List.indexed
+                    |> List.tryFind (fun (_, operand) -> operand.Charset <> source.Charset)
+                    |> Option.defaultValue (operands.Length, target)
+                let left, right = if index < otherIndex then source, other else other, source
+                Error(1267, sprintf "Illegal mix of collations (%s,%s) and (%s,%s) for operation 'concat'"
+                    left.Collation.Name (coercibilityName left.Coercibility)
+                    right.Collation.Name (coercibilityName right.Coercibility)))
+    | _ -> Ok ()
 
 and private prepareScalarArguments ctx name expressions values =
     List.zip expressions values

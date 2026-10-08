@@ -258,6 +258,25 @@ let private concatFn (args: Value list) : Value =
     else
         args |> List.map (toText >> Option.defaultValue "") |> String.concat "" |> VString
 
+let internal concatInCharset charset (args: Value list) =
+    if args |> List.contains VNull then VNull
+    else
+        args
+        |> List.toArray
+        |> Array.collect (function
+            | VEncodedString("ucs2", bytes) when charset = "utf8mb3" || charset = "utf8mb4" ->
+                let converted = Charset.ucs2ToUtf8 bytes
+                match Charset.tryInvalidTextByteOffset charset converted with
+                | Some offset ->
+                    let fragment = Convert.ToHexString(converted, offset, min 3 (converted.Length - offset))
+                    Diagnostics.warning 1300 (sprintf "Invalid %s character string: '%s'" charset fragment)
+                | None -> ()
+                converted
+            | VEncodedString(_, bytes) | VBytes bytes | VBinaryLiteral bytes -> bytes
+            | value when charset = "binary" -> stringBytes value
+            | value -> value |> toText |> Option.defaultValue "" |> Charset.encode charset)
+        |> fun bytes -> if charset = "binary" then VBytes bytes else Value.encodedString charset bytes
+
 let private trimRaw trimLeading trimTrailing (bytes: byte[]) =
     let mutable first = 0
     let mutable last = bytes.Length - 1
@@ -3237,8 +3256,27 @@ let private resolveStart (len: int) (pos: int) : int option =
         if len + pos < 0 then None else Some(len + pos)
     else None
 
+let private sliceEncoded charset bytes selectRange =
+    let offsets = Charset.characterByteOffsets charset bytes
+    let count = offsets.Length - 1
+    let start, length = selectRange count
+    let start = max 0 (min count start)
+    let length = max 0 (min (count - start) length)
+    Array.sub bytes offsets.[start] (offsets.[start + length] - offsets.[start])
+    |> Value.encodedString charset
+
 let private substringFn: Scalar =
     function
+    | [ VEncodedString(charset, bytes); posV ] when posV <> VNull ->
+        sliceEncoded charset bytes (fun count ->
+            match resolveStart count (int (toDouble posV)) with
+            | Some start -> start, count - start
+            | None -> 0, 0)
+    | [ VEncodedString(charset, bytes); posV; lenV ] when not (anyNull [ posV; lenV ]) ->
+        sliceEncoded charset bytes (fun count ->
+            match resolveStart count (int (toDouble posV)) with
+            | Some start -> start, int (toDouble lenV)
+            | None -> 0, 0)
     | [ value; posV ] when not (anyNull [ value; posV ]) ->
         match tryRawBytes value with
         | Some bytes ->
@@ -3448,6 +3486,8 @@ let private padFn (left: bool) : Scalar =
 /// `LEFT` and `RIGHT` count bytes for binary values and characters for text.
 let private leftFn: Scalar =
     function
+    | [ VEncodedString(charset, bytes); n ] when n <> VNull ->
+        sliceEncoded charset bytes (fun _ -> 0, int (toDouble n))
     | [ value; n ] when not (anyNull [ value; n ]) ->
         match tryRawBytes value with
         | Some bytes -> VBytes(Array.truncate (max 0 (int (toDouble n))) bytes)
@@ -3458,6 +3498,10 @@ let private leftFn: Scalar =
 
 let private rightFn: Scalar =
     function
+    | [ VEncodedString(charset, bytes); n ] when n <> VNull ->
+        sliceEncoded charset bytes (fun count ->
+            let length = max 0 (min count (int (toDouble n)))
+            count - length, length)
     | [ value; n ] when not (anyNull [ value; n ]) ->
         match tryRawBytes value with
         | Some bytes ->
