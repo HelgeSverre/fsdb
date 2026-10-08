@@ -631,6 +631,21 @@ let tests =
                   Expect.equal (handle session ("SELECT HEX(CONCAT(" + literal + "," + literal + ")) AS h") |> snd)
                       (ResultSet([ "h" ], [ [ Some expected ] ])) literal
 
+          testCase "EUC and GB2312 literal and character boundaries follow native rules"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for charset in [ "ujis"; "euckr"; "gb2312" ] do
+                  Expect.equal (handle session ("SELECT _" + charset + " X'41804042'") |> snd)
+                      (Err(1300, "Invalid " + charset + " character string: '804042'")) charset
+              for charset, bytes, reversed, count in
+                  [ "euckr", "8181", "42818141", "3"
+                    "gb2312", "F7FE", "42F7FE41", "3"
+                    "ujis", "8FA1A1", "428FA1A141", "3"
+                    "ujis", "8EA0", "42A08E41", "4" ] do
+                  let literal = "_" + charset + " X'41" + bytes + "42'"
+                  Expect.equal (handle session ("SELECT HEX(REVERSE(" + literal + ")) AS h,CHAR_LENGTH(" + literal + ") AS n") |> snd)
+                      (ResultSet([ "h"; "n" ], [ [ Some reversed; Some count ] ])) literal
+
           testCase "Big5 and GBK introduced literals enforce structural byte ranges"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

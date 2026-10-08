@@ -252,7 +252,7 @@ the audited Big5/GBK binary-introducer gap. Quoted-string validation, other
 legacy charset families, conversion diagnostics, and charset mappings remain
 separate compatibility boundaries.
 
-### EUC and GB2312 boundaries remain open
+### EUC and GB2312 boundaries
 
 `euc-expression-oracle.py` pins a native matrix for UJIS, EUC-KR, and GB2312.
 At `de26bab6`, 229 of its 274 probes differ in acceptance, reversal bytes,
@@ -267,3 +267,15 @@ and counted as two characters, whereas `8E A1` and `8E DF` are single
 characters. Literal acceptance therefore needs a separate rule from character
 boundaries for that UJIS edge; the implementation must not erase the native
 distinction by forcing both operations through an identical predicate.
+
+The audited EUC/GB2312 boundary cases now match. Binary literal validation
+uses the pinned structural rules, and reversal, slicing, and encoded
+character counting share character offsets. The UJIS `8E A0` acceptance
+exception remains confined to literal validation. Encoded values remain
+encoded when a lossless platform byte round-trip would change their native
+character count, as with EUC-KR `81 81`.
+
+All 274 native probes match rows and exact errors. The full wire suite passed
+62 cases and 8,251 steps without differences; the root gate passed 3,080 tests
+without build warnings or errors. Broader conversion, output mapping, and
+mixed-sequence behavior remain outside this audited boundary matrix.

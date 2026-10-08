@@ -250,7 +250,7 @@ let private runeLength (text: string) =
 
 let characterLength value =
     match value, tryRawBytes value with
-    | VEncodedString("ucs2", bytes), _ -> int64 (bytes.Length / 2)
+    | VEncodedString(charset, bytes), _ -> int64 ((Fsdb.Charset.characterByteOffsets charset bytes).Length - 1)
     | _, Some bytes -> int64 bytes.Length
     | _, None -> value |> toText |> Option.map runeLength |> Option.defaultValue 0L
 

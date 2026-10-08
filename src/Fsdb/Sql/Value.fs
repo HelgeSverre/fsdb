@@ -1226,7 +1226,8 @@ let bitValue (bytes: byte[]) : uint64 option =
 let encodedString charset bytes =
     let charset = Charset.canonicalName charset
     let text = Charset.decodeBytes charset bytes
-    if Charset.encode charset text = bytes then VString text
+    if Charset.encode charset text = bytes && Charset.textPreservesCharacterCount charset bytes text then
+        VString text
     else VEncodedString(charset, bytes)
 
 /// Numeric literal conversion retains the low 64 bits, including wider literals.

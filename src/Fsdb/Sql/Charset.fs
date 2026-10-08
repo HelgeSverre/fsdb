@@ -442,10 +442,17 @@ let private unicodeScalarWidth charset (bytes: byte[]) offset =
         if codePoint <= 0x10FFFFu && Rune.IsValid(int codePoint) then Some 4 else None
     | _ -> None
 
+let private hasLegacyByteRules = function
+    | "sjis" | "cp932" | "big5" | "gbk" | "gb2312" | "euckr" | "ujis" -> true
+    | _ -> false
+
 let private legacyCharacterWidth charset (bytes: byte[]) offset =
     let lead = bytes.[offset]
     let shiftJis = charset = "sjis" || charset = "cp932"
     if lead <= 0x7Fuy || (shiftJis && lead >= 0xA1uy && lead <= 0xDFuy) then Some 1
+    elif charset = "ujis" && lead = 0x8Fuy && offset + 2 < bytes.Length
+         && bytes.[offset + 1] >= 0xA1uy && bytes.[offset + 1] <= 0xFEuy
+         && bytes.[offset + 2] >= 0xA1uy && bytes.[offset + 2] <= 0xFEuy then Some 3
     elif offset + 1 < bytes.Length then
         let trail = bytes.[offset + 1]
         let validPair =
@@ -456,6 +463,13 @@ let private legacyCharacterWidth charset (bytes: byte[]) offset =
             | "big5" ->
                 lead >= 0xA1uy && lead <= 0xF9uy
                 && ((trail >= 0x40uy && trail <= 0x7Euy) || (trail >= 0xA1uy && trail <= 0xFEuy))
+            | "gb2312" ->
+                lead >= 0xA1uy && lead <= 0xF7uy && trail >= 0xA1uy && trail <= 0xFEuy
+            | "euckr" ->
+                lead >= 0x81uy && lead <= 0xFEuy && trail >= 0x81uy && trail <= 0xFEuy
+            | "ujis" ->
+                (lead >= 0xA1uy && lead <= 0xFEuy && trail >= 0xA1uy && trail <= 0xFEuy)
+                || (lead = 0x8Euy && trail >= 0xA1uy && trail <= 0xDFuy)
             | "gbk" ->
                 lead >= 0x81uy && lead <= 0xFEuy
                 && trail >= 0x40uy && trail <= 0xFEuy && trail <> 0x7Fuy
@@ -481,12 +495,16 @@ let characterByteOffsets name (bytes: byte[]) =
         offsets.Add offset
         let width =
             if charset = "ucs2" then min 2 (bytes.Length - offset)
-            elif charset = "sjis" || charset = "cp932" || charset = "big5" || charset = "gbk" then
+            elif hasLegacyByteRules charset then
                 legacyCharacterWidth charset bytes offset |> Option.defaultValue 1
             else unicodeScalarWidth charset bytes offset |> Option.defaultValue 1
         offset <- offset + width
     offsets.Add bytes.Length
     offsets.ToArray()
+
+let textPreservesCharacterCount name bytes (text: string) =
+    not (hasLegacyByteRules (canonicalName name))
+    || (characterByteOffsets name bytes).Length - 1 = (text.EnumerateRunes() |> Seq.length)
 
 let reverseCharacterBytes name (bytes: byte[]) =
     let offsets = characterByteOffsets name bytes
@@ -510,8 +528,12 @@ let tryInvalidUnicodeByteOffset (name: string) (bytes: byte[]) =
 
 let tryInvalidBinaryLiteralByteOffset name (bytes: byte[]) =
     match canonicalName name with
-    | "sjis" | "cp932" | "big5" | "gbk" as charset ->
-        firstInvalidByte bytes.Length (legacyCharacterWidth charset bytes)
+    | charset when hasLegacyByteRules charset ->
+        firstInvalidByte bytes.Length (fun offset ->
+            // UJIS accepts this literal pair but string functions count each byte.
+            if charset = "ujis" && offset + 1 < bytes.Length
+               && bytes.[offset] = 0x8Euy && bytes.[offset + 1] = 0xA0uy then Some 2
+            else legacyCharacterWidth charset bytes offset)
     | _ -> tryInvalidUnicodeByteOffset name bytes
 
 /// UCS-2 code units remain accepted even when they are isolated surrogates.
