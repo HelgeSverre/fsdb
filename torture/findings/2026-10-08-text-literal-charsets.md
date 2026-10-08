@@ -130,9 +130,9 @@ oracle and direct fsdb probes expose these remaining differences:
 | COERCIBILITY(v) beside a scalar subquery | 4 | 2 |
 | COERCIBILITY(v) through a join | 4 | 2 |
 | COERCIBILITY(v) with GROUP BY v WITH ROLLUP | 4 for both detail and total | 2 for detail, 6 for total |
-| `SELECT v AS alias ... ORDER BY CONCAT(alias,'x')` | succeeds | 1054 for alias |
 
-The native cases are retained in the executable oracle. The fsdb boundary probe
+The literal-view ordering alias case is covered by the [ordering alias implementation](2026-10-08-order-aliases.md).
+The remaining native cases are retained in the executable oracle. The fsdb boundary probe
 is `/tmp/fsdb-view-coercibility-boundary.log`. These are open differences, not
 accepted torture signatures. Stored-program binding combinations beyond the
 tested function, invalid byte sequences, client encodings beyond the current

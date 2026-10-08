@@ -273,6 +273,42 @@ module ContractCatalog =
             [| "statement:select", [| "parser"; "text-differential" |]
                "syntax:comments", [| "parser"; "text-differential" |] |] }
 
+    let private orderAliases =
+        let queries =
+            [| "scalar", "SELECT v AS a FROM contract_order_alias ORDER BY ABS(a)"
+               "source-precedence", "SELECT -v AS v FROM contract_order_alias ORDER BY v+0"
+               "bare-precedence", "SELECT -v AS v FROM contract_order_alias ORDER BY v"
+               "empty", "SELECT v AS a FROM contract_order_alias WHERE FALSE ORDER BY ABS(a)"
+               "grouped", "SELECT v AS a FROM contract_order_alias GROUP BY v ORDER BY ABS(a)"
+               "aggregate", "SELECT SUM(v) AS s FROM contract_order_alias ORDER BY ABS(s)"
+               "window", "SELECT ROW_NUMBER() OVER (ORDER BY v) AS r FROM contract_order_alias ORDER BY ABS(r)"
+               "source-label", "SELECT v+1 FROM contract_order_alias ORDER BY ABS(`v+1`)"
+               "limit", "SELECT v AS a FROM contract_order_alias ORDER BY ABS(a) LIMIT 1"
+               "descending", "SELECT v AS a FROM contract_order_alias ORDER BY ABS(a) DESC" |]
+        { Name = "order-alias-expressions"
+          Setup =
+            [| "DROP TABLE IF EXISTS contract_order_alias"
+               "CREATE TABLE contract_order_alias(v INT)"
+               "INSERT INTO contract_order_alias VALUES(2),(1)" |]
+          Steps =
+            [| for name, sql in queries do
+                   yield Contract.query name sql
+                   yield Contract.preparedQuery (name + "-prepared") sql [||]
+               yield Contract.query "nested-aggregate" "SELECT SUM(v) AS s FROM contract_order_alias ORDER BY SUM(s)" |> Contract.fails 1111 "HY000"
+               yield Contract.preparedQuery "nested-aggregate-prepared" "SELECT SUM(v) AS s FROM contract_order_alias ORDER BY SUM(s)" [||] |> Contract.fails 1111 "HY000"
+               for expression in [ "SUM(@n:=@n+1)"; "SUM(v)+(@n:=@n+1)" ] do
+                   yield Contract.execute ("reset-group-" + expression) "SET @n=0"
+                   yield Contract.query ("group-alias-" + expression) ("SELECT " + expression + " AS s FROM contract_order_alias GROUP BY v ORDER BY ABS(s)")
+                   yield Contract.query ("group-count-" + expression) "SELECT @n"
+               yield Contract.query "group-alias-charset" "SELECT _latin1'a' AS s FROM contract_order_alias GROUP BY v ORDER BY s COLLATE utf8mb4_bin" |> Contract.fails 1253 "42000"
+               yield Contract.query "group-nested-aggregate-metadata" "SELECT SUM(v) AS s FROM contract_order_alias GROUP BY v ORDER BY COERCIBILITY(SUM(s))" |> Contract.fails 1111 "HY000"
+               for order in [ "n"; "n+0" ] do
+                   yield Contract.execute ("reset-" + order) "SET @n=0"
+                   yield Contract.query ("assignment-" + order) ("SELECT (@n:=@n+1) AS n FROM contract_order_alias ORDER BY " + order)
+                   yield Contract.query ("assignment-count-" + order) "SELECT @n" |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_order_alias"; "SET @n=NULL" |]
+          Coverage = [| "statement:select", [| "ordering"; "aliases"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3142,6 +3178,7 @@ module ContractCatalog =
 
     let all =
         [| comments
+           orderAliases
            exactErrors
            noDirInCreate
            semanticErrors

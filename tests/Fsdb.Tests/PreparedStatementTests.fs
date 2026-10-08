@@ -33,7 +33,70 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "ordinary prepared literals retain their preparation collation"
+        [ testCase "ORDER BY expressions resolve aliases with source-column precedence"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE ordering_values(v INT)"; "INSERT INTO ordering_values VALUES(2),(1)" ] do
+                  let next, result = handle session sql
+                  session <- next
+                  match result with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+              for sql, name, values in
+                  [ "SELECT v AS a FROM ordering_values ORDER BY ABS(a)", "a", [ "1"; "2" ]
+                    "SELECT -v AS v FROM ordering_values ORDER BY v+0", "v", [ "-1"; "-2" ]
+                    "SELECT -v AS v FROM ordering_values ORDER BY v", "v", [ "-2"; "-1" ]
+                    "SELECT v AS a FROM ordering_values WHERE FALSE ORDER BY ABS(a)", "a", []
+                    "SELECT v AS a FROM ordering_values GROUP BY v ORDER BY ABS(a)", "a", [ "1"; "2" ]
+                    "SELECT SUM(v) AS s FROM ordering_values ORDER BY ABS(s)", "s", [ "3" ]
+                    "SELECT ROW_NUMBER() OVER (ORDER BY v) AS r FROM ordering_values ORDER BY ABS(r)", "r", [ "1"; "2" ] ] do
+                  let expected = ResultSet([ name ], values |> List.map (fun value -> [ Some value ]))
+                  Expect.equal (handle session sql |> snd) expected sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%s: %A" sql error)
+                  let statement = createPreparedStatement session sql ast count
+                  Expect.equal (executePrepared session statement [] |> snd) expected ("prepared: " + sql)
+
+          testCase "ORDER BY grouped aggregate aliases reuse their projected values"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE ordering_values(v INT)"; "INSERT INTO ordering_values VALUES(2),(1)" ] do
+                  session <- handle session sql |> fst
+              for expression, values in [ "SUM(@n:=@n+1)", [ "1"; "2" ]; "SUM(v)+(@n:=@n+1)", [ "3"; "3" ] ] do
+                  session <- handle session "SET @n=0" |> fst
+                  let sql = "SELECT " + expression + " AS s FROM ordering_values GROUP BY v ORDER BY ABS(s)"
+                  let next, result = handle session sql
+                  session <- next
+                  Expect.equal result (ResultSet([ "s" ], values |> List.map (fun value -> [ Some value ]))) sql
+                  Expect.equal (handle session "SELECT @n" |> snd) (ResultSet([ "@n" ], [ [ Some "2" ] ])) "aggregate alias is materialized"
+
+          testCase "ORDER BY rejects an aggregate applied to an aggregate alias"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "CREATE TABLE ordering_values(v INT)" |> fst
+              for populate in [ false; true ] do
+                  if populate then handle session "INSERT INTO ordering_values VALUES(2),(1)" |> ignore
+                  for sql, expected in
+                      [ "SELECT SUM(v) AS s FROM ordering_values ORDER BY SUM(s)", 1111
+                        "SELECT SUM(v) AS s FROM ordering_values GROUP BY v ORDER BY COERCIBILITY(SUM(s))", 1111
+                        "SELECT _latin1'a' AS s FROM ordering_values GROUP BY v ORDER BY s COLLATE utf8mb4_bin", 1253 ] do
+                      match handle session sql |> snd with
+                      | Err(code, _) -> Expect.equal code expected sql
+                      | result -> failtestf "Expected %d, got %A" expected result
+
+          testCase "ORDER BY nested aliases reevaluate assignments while bare aliases reuse output"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE ordering_values(v INT)"; "INSERT INTO ordering_values VALUES(2),(1)" ] do
+                  session <- handle session sql |> fst
+              for order, values, total in [ "n", [ "1"; "2" ], "2"; "n+0", [ "1"; "3" ], "4" ] do
+                  session <- handle session "SET @n=0" |> fst
+                  let sql = "SELECT (@n:=@n+1) AS n FROM ordering_values ORDER BY " + order
+                  let next, result = handle session sql
+                  session <- next
+                  Expect.equal result (ResultSet([ "n" ], values |> List.map (fun value -> [ Some value ]))) sql
+                  Expect.equal (handle session "SELECT @n" |> snd) (ResultSet([ "@n" ], [ [ Some total ] ])) "assignment count"
+
+          testCase "ordinary prepared literals retain their preparation collation"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session = handle session "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci" |> fst
@@ -105,7 +168,8 @@ let tests =
               Expect.equal (handle session "CREATE VIEW grouped_literal AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
               let session = handle session "SET NAMES utf8mb4" |> fst
               for sql, names, row in
-                  [ "SELECT COLLATION(v) AS c,COERCIBILITY(v) AS n FROM grouped_literal ORDER BY v", [ "c"; "n" ], [ "latin1_bin"; "4" ]
+                  [ "SELECT v AS alias,COERCIBILITY(v) AS n FROM grouped_literal ORDER BY CONCAT(alias,'x')", [ "alias"; "n" ], [ "a"; "4" ]
+                    "SELECT COLLATION(v) AS c,COERCIBILITY(v) AS n FROM grouped_literal ORDER BY v", [ "c"; "n" ], [ "latin1_bin"; "4" ]
                     "SELECT COLLATION(v) AS c,COERCIBILITY(v) AS n FROM grouped_literal GROUP BY v", [ "c"; "n" ], [ "latin1_bin"; "4" ]
                     "SELECT v AS alias,COERCIBILITY(v) AS n FROM grouped_literal GROUP BY alias", [ "alias"; "n" ], [ "a"; "4" ]
                     "SELECT COUNT(*) AS n,COERCIBILITY(v) AS c FROM grouped_literal GROUP BY v", [ "n"; "c" ], [ "1"; "4" ]

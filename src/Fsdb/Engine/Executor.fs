@@ -2128,6 +2128,27 @@ and private overLabel (over: OverClause) : string =
 
 let private projectionLabel = Projection.name exprLabel
 
+let private tryOrderProjectionNamed (projections: Projection list) name =
+    projections
+    |> List.filter (fun projection -> equalsIgnoreCase (projectionLabel projection) name)
+    |> List.tryExactlyOne
+
+/// Nested ORDER BY references prefer source columns; bare aliases use projected values.
+let private bindOrderExpressionWith (columnIndex: Map<string, int list>) resolveAlias expression =
+    match expression with
+    | Col _ -> expression
+    | _ ->
+        Expression.rewrite
+            (function
+            // A window specification binds its own source references, not SELECT aliases.
+            | WindowOver _ as window -> Some window
+            | Col name when not (Map.containsKey (name.ToLowerInvariant()) columnIndex) && (tryRoutineVariable name |> Option.isNone) -> resolveAlias name
+            | _ -> None)
+            expression
+
+let private bindOrderExpression columnIndex projections =
+    bindOrderExpressionWith columnIndex (fun name -> tryOrderProjectionNamed projections name |> Option.map _.Expression)
+
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 
 /// MySQL folds LIKE one character at a time: `ä` matches `a`, but `æ` does
@@ -2253,6 +2274,8 @@ type private EvalContext =
       /// error instead of an index-out-of-range.
       Qualifiers: Map<string, ColumnDef list * int>
       Row: Value[]
+      /// Materialized expressions retain their syntax for type and collation inference.
+      EvaluatedExpressions: (Expr * Value) list
       Store: Store
       DbName: string
       /// The enclosing query's own context, if this one belongs to a
@@ -2332,6 +2355,7 @@ let private contextFactory
           ColumnsByPosition = columnsByPosition
           Qualifiers = qualifiers
           Row = row
+          EvaluatedExpressions = []
           Store = store
           DbName = dbName
           Outer = outer
@@ -4430,21 +4454,31 @@ let private isSubstringSearchFunction (name: string) =
     | _ -> false
 
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
-    try
-        match Expression.tryLiteralDiagnostic expr with
-        | None -> evalExprCore ctx expr
-        | Some _ ->
-            validateExpressionBindings
-                (function
-                | None, name -> resolveCol ctx name |> Result.map ignore
-                | Some qualifier, name -> resolveQualifiedCol ctx qualifier name |> Result.map ignore)
-                (fun _ -> Ok()) id expr
-            |> Result.bind (fun () -> evalExprCore ctx expr)
-    with
-    | Value.UnsignedOutOfRange ->
-        Error(1690, sprintf "BIGINT UNSIGNED value is out of range in '%s'" (InformationSchema.exprToSql expr))
-    | Value.SignedOutOfRange ->
-        Error(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql expr))
+    let evaluated =
+        match ctx.EvaluatedExpressions with
+        | [] -> None
+        | values ->
+            // Equal volatile expressions can have distinct projected values.
+            values |> List.tryPick (fun (bound, value) -> if obj.ReferenceEquals(bound, expr) then Some value else None)
+
+    match evaluated with
+    | Some value -> Ok value
+    | None ->
+        try
+            match Expression.tryLiteralDiagnostic expr with
+            | None -> evalExprCore ctx expr
+            | Some _ ->
+                validateExpressionBindings
+                    (function
+                    | None, name -> resolveCol ctx name |> Result.map ignore
+                    | Some qualifier, name -> resolveQualifiedCol ctx qualifier name |> Result.map ignore)
+                    (fun _ -> Ok()) id expr
+                |> Result.bind (fun () -> evalExprCore ctx expr)
+        with
+        | Value.UnsignedOutOfRange ->
+            Error(1690, sprintf "BIGINT UNSIGNED value is out of range in '%s'" (InformationSchema.exprToSql expr))
+        | Value.SignedOutOfRange ->
+            Error(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql expr))
 
 and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
@@ -14240,6 +14274,19 @@ and private runGroupedSelect
         let representative = representativeOf groupRows
         let ctx = ctxFor representative
 
+        let aliases =
+            outputCols
+            |> List.choose (fun (name, value) ->
+                tryOrderProjectionNamed select.Projections name
+                |> Option.filter (_.Expression >> containsAggregate registry)
+                |> Option.map (fun projection -> name, (RuntimeExpression projection.Expression, value)))
+        let cachedContext = { ctx with EvaluatedExpressions = aliases |> List.map snd }
+        let bindCachedAlias =
+            bindOrderExpressionWith columnIndex (fun name ->
+                aliases
+                |> List.tryPick (fun (alias, (expression, _)) -> if equalsIgnoreCase alias name then Some expression else None)
+                |> Option.orElseWith (fun () -> tryOrderProjectionNamed select.Projections name |> Option.map _.Expression))
+
         // ROLLUP keys lose their ENUM declaration and therefore sort lexically.
         let orderKeyOf (keyCtx: EvalContext) (expr: Expr) (value: Value) =
             if select.Rollup then
@@ -14268,7 +14315,14 @@ and private runGroupedSelect
                 | None ->
                     rewriteAggregates registry ctxFor groupRows (rollup (Col name))
                     |> Result.bind (evalKey ctx))
-            | e -> rewriteAggregates registry ctxFor groupRows (rollup e) |> Result.bind (evalKey ctx))
+            | expression ->
+                let bindAggregate =
+                    Expression.rewrite (fun node ->
+                        if isAggregateCall registry node then Some(bindOrderExpression columnIndex select.Projections node)
+                        else None)
+                rewriteAggregates registry ctxFor groupRows (rollup (bindAggregate expression))
+                |> Result.map bindCachedAlias
+                |> Result.bind (evalKey cachedContext))
 
     // Schema errors are independent of whether the query produces a group.
     match select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections) with
@@ -14323,7 +14377,11 @@ and private runGroupedSelect
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeRewrite ->
 
-    match validateOnlyFullGroupBy store registry dbName columns qualifiers select with
+    let validationSelect =
+        { select with
+            OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> bindOrderExpression columnIndex select.Projections expression, direction) }
+
+    match validateOnlyFullGroupBy store registry dbName columns qualifiers validationSelect with
     | Error(code, message) -> Err(code, message), [], []
     | Ok() ->
 
@@ -16460,14 +16518,24 @@ and private runSelect
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
+    let originalOrderBy = select.OrderBy
+    let columnIndex = columnIndexOf columns
+    let select =
+        { select with
+            OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> bindOrderExpression columnIndex select.Projections expression, direction) }
+
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, Option.map rowCount select.Limit, Option.map rowCount select.Offset
 
-    // A `SELECT` with no `FROM` at all has no columns to expand `*`/`t.*`
-    // against — real MySQL rejects it as 1096 rather than emitting a
-    // resultset with zero columns, which isn't a legal text-resultset
-    // packet and aborts the client's whole session.
-    if select.From.IsNone && projections |> List.exists (_.Expression >> function Star _ -> true | _ -> false) then
+    let hasNestedOrderAggregate =
+        orderBy
+        |> List.collect (fst >> collectAggregateCalls registry)
+        |> List.exists (Expression.children >> List.exists (containsAggregate registry))
+
+    if hasNestedOrderAggregate then
+        Err(1111, "Invalid use of group function"), [], []
+    // A source-free SELECT has no columns to expand into a result header.
+    elif select.From.IsNone && projections |> List.exists (_.Expression >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), [], []
     elif
         [ select.Having; select.Where ]
@@ -16514,10 +16582,8 @@ and private runSelect
         || projections |> List.exists (_.Expression >> containsAggregate registry)
         || orderBy |> List.exists (fst >> containsAggregate registry)
     then
-        runGroupedSelect store registry dbName columns qualifiers rows groupInputOrder select outer
+        runGroupedSelect store registry dbName columns qualifiers rows groupInputOrder { select with OrderBy = originalOrderBy } outer
     else
-
-    let columnIndex = columnIndexOf columns
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 

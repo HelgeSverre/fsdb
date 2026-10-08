@@ -1,6 +1,6 @@
 # ORDER BY alias binding and evaluation
 
-Status: open. Native MySQL 8.4.11 contracts are executable in
+Status: partial. Native MySQL 8.4.11 contracts are executable in
 [`order-alias-oracle.py`](../scripts/order-alias-oracle.py).
 The oracle uses a disposable native server with 64 MiB buffer and redo limits.
 
@@ -33,7 +33,7 @@ SELECT @n;
 
 Both engines return projection values `1,2` and final `@n=2`.
 With `ORDER BY n+0`, MySQL returns projection values `1,3` and final `@n=4`.
-fsdb rejects the nested reference with 1054 before changing `@n`.
+At `09c2720d`, fsdb rejects the nested reference with 1054 before changing `@n`.
 Consequently, replacing every alias reference with its cached output value
 would not match native evaluation semantics.
 
@@ -42,7 +42,60 @@ The fsdb observations use `QueryHandler.handle` one statement at a time, with
 `DOTNET_PROCESSOR_COUNT=8` and a 4 GiB GC heap cap. The maintained script asserts
 native results only; it does not claim fsdb parity.
 
-Binding, evaluation, and metadata must share the same alias scope. Empty-source,
-grouped, and nested-query cases require coverage beyond changing the runtime
-sort-key resolver. Duplicate-name selection needs further native controls before
-changing the existing ambiguity policy.
+## Implemented binding and materialization
+
+Unique projection aliases and source expression labels bind inside scalar
+ordering expressions. Source columns take precedence there; bare aliases retain
+their existing output-value precedence. The binding step runs before scalar,
+grouped, and window execution dispatch, and preserves projection syntax for
+metadata inference. Subquery and window-specification scopes are not rewritten.
+
+Ordinary row assignment aliases reevaluate inside ordering expressions, matching
+the `1,3` projection and final `@n=4` above. Grouped aggregate aliases retain their
+projected value instead. For example, starting with `@n=0`:
+
+```sql
+SELECT SUM(@n:=@n+1) AS s
+FROM ordering_values GROUP BY v ORDER BY ABS(s);
+SELECT @n;
+```
+
+Both engines return `s=1,2` and final `@n=2`. A composite projection
+`SUM(v)+(@n:=@n+1) AS s` returns `3,3` and final `@n=2`. Runtime operands retain
+the original expression for type and collation inference; their evaluated values
+are scoped to the group and matched by node identity.
+
+Aggregate nesting introduced through an alias is rejected with 1111, including
+inside `COERCIBILITY(SUM(s))`. A grouped `_latin1'a' AS s` ordered by
+`s COLLATE utf8mb4_bin` retains error 1253. Empty input still validates these
+expressions. Scalar, grouped, window-result, expression-label, LIMIT, descending,
+and prepared-protocol cases have differential coverage.
+
+Validation: `just check` passes 3,037 tests with zero build warnings or errors,
+using `DOTNET_PROCESSOR_COUNT=8` and a 4 GiB GC heap cap. The maintained native
+oracle passes. Differential contracts pass 50 cases and 5,153 steps with zero
+differences at `torture/artifacts/runs/20261008T000306350-85680/contracts`.
+The [performance measurement](../../benchmarks/results/6451673a-order-aliases.md)
+compares alias and source-expression sorting on the same build.
+
+## Remaining boundaries
+
+- Correlated references such as `ORDER BY (SELECT a)` still fail with 1054.
+- Duplicate aliases are not uniformly ambiguous in MySQL. Two different direct
+  columns named `a` fail with 1052, identical direct columns succeed, and the
+  probed computed projections can take precedence over a direct column. Among
+  the tested pairs of computed projections, the first wins. fsdb's selection
+  remains incomplete; the native oracle retains these cases.
+- Grouped volatile expressions still expose evaluation-order differences. With
+  `@n=0`, `SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM ordering_values
+  GROUP BY v ORDER BY IF(a=b,v,-v)` returns the same rows `(1,2,2),(5,6,1)` but
+  leaves `@n=6` in MySQL and `@n=8` in fsdb. Repeating an assignment-bearing
+  aggregate explicitly in the ordering expression also differs from referring
+  to its alias: MySQL's projection is `2,4`, while fsdb's is `1,3`; both finish
+  at `@n=4`. These observations are fixture-specific evaluation contracts.
+- A non-aggregated SELECT ordered by `SUM(a)` has native error 3029; fsdb reports
+  1140. A window specification referencing the projection alias has native
+  1054 in `window order by`; fsdb uses `order clause` wording.
+
+The native-only oracle includes these open boundaries. They are not enrolled as
+accepted differential failures or presented as implemented behavior.
