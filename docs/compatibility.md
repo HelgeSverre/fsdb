@@ -605,6 +605,14 @@ The `/*+ SET_VAR(max_points_in_geometry=...) */` hint applies the same bound to
 one statement, including prepared execution, without changing the session
 value.
 
+Optimizer hints are parsed in order. A syntax error stops later hints in that
+comment while retaining accepted earlier hints. SELECT hint diagnostics cover
+table aliases, named query blocks, index targets, and duplicate targets,
+including nested queries, CTEs, and UNION branches in the audited cases.
+Target-resolution warnings appear during SQL or binary preparation and do not
+repeat on execution. Recognizing a hint and resolving its targets does not
+imply that its physical optimizer strategy is implemented.
+
 An idle connection uses `wait_timeout`. Once the first packet byte arrives,
 every pause in ordinary, TLS, compressed, and LOCAL INFILE traffic uses
 `net_read_timeout`.

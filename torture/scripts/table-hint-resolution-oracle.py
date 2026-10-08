@@ -124,9 +124,70 @@ cases = [('SELECT /*+ BKA(t) */ 1 AS n;SHOW WARNINGS',
  ('CREATE VIEW v AS SELECT /*+ BKA(t) */ 1 AS n;SHOW WARNINGS', '')]
 
 
+cases += [('SELECT (WITH c AS (SELECT /*+ BKA(c_missing) */ 1 AS n) SELECT /*+ BKA(q_missing) */ n FROM c) AS n;SHOW '
+  'WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  'Warning\t3128\tUnresolved name `q_missing`@`select#2` for BKA hint\n'
+  'Warning\t3128\tUnresolved name `c_missing`@`select#3` for BKA hint\n'),
+ ('SELECT * FROM (WITH c AS (SELECT /*+ BKA(c_missing) */ 1 AS n) SELECT /*+ BKA(q_missing) */ n FROM c) '
+  'a;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  'Warning\t3128\tUnresolved name `q_missing`@`select#2` for BKA hint\n'
+  'Warning\t3128\tUnresolved name `c_missing`@`select#3` for BKA hint\n'),
+ ('SELECT /*+ NO_INDEX(t i1) NO_INDEX(t i2) */ 1 AS n FROM t;SHOW WARNINGS',
+  'Level\tCode\tMessage\nWarning\t3126\tHint NO_INDEX(`t`  `i2`) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ INDEX(t i1) NO_INDEX(t i2) */ 1 AS n FROM t;SHOW WARNINGS',
+  'Level\tCode\tMessage\nWarning\t3126\tHint NO_INDEX(`t`  `i2`) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ NO_INDEX(t i1) NO_INDEX(t i1) */ 1 AS n FROM t;SHOW WARNINGS',
+  'Level\tCode\tMessage\nWarning\t3126\tHint NO_INDEX(`t`  `i1`) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ NO_INDEX(t i1,i2) NO_INDEX(t i2) */ 1 AS n FROM t;SHOW WARNINGS',
+  'Level\tCode\tMessage\nWarning\t3126\tHint NO_INDEX(`t`  `i2`) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ NO_INDEX(t) INDEX(t i1) */ 1 AS n FROM t;SHOW WARNINGS',
+  'Level\tCode\tMessage\nWarning\t3126\tHint INDEX(`t`  `i1`) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ BKA() BKA() */ 1 AS n;SHOW WARNINGS',
+  'n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint BKA( ) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ BKA() NO_BKA() */ 1 AS n;SHOW WARNINGS',
+  'n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint NO_BKA( ) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) QB_NAME(q) QB_NAME(r) */ 1 AS n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  'Warning\t3126\tHint MAX_EXECUTION_TIME(2) is ignored as conflicting/duplicated\n'
+  'Warning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ QB_NAME(q) QB_NAME(r) MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ 1 AS n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  'Warning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\n'
+  'Warning\t3126\tHint MAX_EXECUTION_TIME(2) is ignored as conflicting/duplicated\n'),
+ ('/*!80000 */ SELECT /*+ BKA(x) */ 1 AS n;SHOW WARNINGS',
+  'n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#1` for BKA hint\n'),
+ ('SELECT /*+ BKA(t) */ 1 AS n FROM t;SHOW WARNINGS;SELECT 1;SHOW WARNINGS', '1\n1\n')]
+
+cases += [('SELECT /*+ QB_NAME(q) QB_NAME(r) BKA(t@r) */ 1 AS n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  'Warning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\n'
+  'Warning\t3127\tQuery block name `r` is not found for BKA hint\n'),
+ ('SELECT /*+ QB_NAME(q) QB_NAME(r) BKA(t@q) */ 1 AS n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  'Warning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\n'
+  'Warning\t3128\tUnresolved name `t`@`q` for BKA hint\n'),
+ ('SELECT /*+ QB_NAME(q) */ (SELECT /*+ QB_NAME(q) BKA(t@q) */ 1) AS n FROM t;SHOW WARNINGS',
+  'Level\tCode\tMessage\n'
+  'Warning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\n'
+  'Warning\t3128\tUnresolved name `t`@`q` for BKA hint\n')]
+
 def verify(client, _writer):
     setup = subprocess.run(
-        [*client.process.args, "-e", "USE probe;CREATE TABLE t(id INT)"],
+        [*client.process.args, "-e", "USE probe;CREATE TABLE t(id INT, INDEX i1(id), INDEX i2(id))"],
         capture_output=True, text=True, check=True,
     )
     assert not setup.stderr, setup.stderr

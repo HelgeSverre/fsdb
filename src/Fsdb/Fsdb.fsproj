@@ -40,6 +40,7 @@
     <Compile Include="Sql/PreparedVariables.fs" />
     <Compile Include="Sql/Parser.fs" />
     <Compile Include="Sql/OptimizerHints.fs" />
+    <Compile Include="Sql/OptimizerHintResolution.fs" />
     <Compile Include="Sql/LoadData.fs" />
     <Compile Include="Sql/Xa.fs" />
     <Compile Include="Sql/StoredProgram.fs" />

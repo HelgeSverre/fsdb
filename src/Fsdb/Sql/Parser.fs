@@ -188,6 +188,7 @@ type private ParserState =
       StoredProgramSyntax: bool
       SourceText: string
       SourceOffsets: (int * int) array
+      QueryBlocks: Dictionary<int, SelectStmt> option
       mutable ExpressionDepth: int
       mutable PlaceholderCount: int }
 
@@ -274,6 +275,7 @@ let private lineEnd (sql: string) (start: int) =
 type internal OptimizerHintLocation =
     { Body: string
       BodyOffset: int
+      KeywordOffset: int
       Keyword: string
       StatementKeyword: string
       ParenthesisDepth: int
@@ -297,6 +299,7 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
     let mutable i = 0
     let mutable optimizerHintMayFollow = false
     let mutable hintKeyword = ""
+    let mutable hintKeywordOffset = 0
     let mutable statementKeyword = None
     let mutable parenthesisDepth = 0
     let mutable statementDepth = 0
@@ -402,6 +405,7 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
                     optimizerHints.Add
                         { Body = sql.Substring(i + 3, closeAt - (i + 3))
                           BodyOffset = i + 3
+                          KeywordOffset = hintKeywordOffset
                           Keyword = hintKeyword.ToUpperInvariant()
                           StatementKeyword = (statementKeyword |> Option.defaultValue hintKeyword).ToUpperInvariant()
                           ParenthesisDepth = parenthesisDepth
@@ -459,6 +463,7 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
             let word = sql.Substring(start, i - start)
             appendText word
             hintKeyword <- word
+            hintKeywordOffset <- start
             if statementKeyword.IsNone then
                 statementKeyword <- Some hintKeyword
                 statementDepth <- parenthesisDepth
@@ -512,6 +517,11 @@ let internal optimizerHintsWithOptions options sql =
 
 let private expandVersionComments (options: ParserOptions) (sql: string) =
     rewriteVersionComments false options sql
+
+let internal queryBlockSourceOffset options (sql: string) position =
+    if sql.Contains("/*!", StringComparison.Ordinal) then
+        (expandVersionComments options (sql.Substring(0, position))).Length
+    else position
 
 /// True when `sql` is nothing but whitespace/comments — real MySQL treats
 /// that as a harmless no-op (`Query OK, 0 rows affected`), not a syntax
@@ -1336,7 +1346,7 @@ let private parenthesizedExpr: Parser<Expr, unit> =
             | Some values -> Row(first :: values))
     )
 
-let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star None
+let private starAtom: Parser<Expr, unit> = pstring "*" .>> notFollowedBy (pchar '/') >>. ws >>% Star None
 
 /// MySQL's grammar allows `DISTINCT` inside a call only for these
 /// aggregates; every other name — including `JSON_ARRAYAGG` and
@@ -4277,7 +4287,7 @@ let private selectHead =
     |>> fun (((distinct, calculateFoundRows, straightJoin), projections), destination) ->
         distinct, calculateFoundRows, straightJoin, projections, destination
 
-selectStmtRecordRef.Value <-
+let private selectRecord =
     (keyword "SELECT" >>. selectHead
      .>>. opt (keyword "FROM" >>. fromJoinChain)
      .>>. opt (keyword "WHERE" >>. expr)
@@ -4324,6 +4334,16 @@ selectStmtRecordRef.Value <-
                   Limit = limit
                   Offset = offset
                   Locking = locking }
+
+let private selectRecordWithPosition =
+    pipe2 getPosition selectRecord (fun position select ->
+        let state = parserState ()
+        state.QueryBlocks |> Option.iter (fun blocks -> blocks.[sourcePosition state (int position.Index)] <- select)
+        select)
+
+selectStmtRecordRef.Value <- fun stream ->
+    if (parserState ()).QueryBlocks.IsSome then selectRecordWithPosition stream
+    else selectRecord stream
 
 selectQueryRef.Value <-
     opt withClause .>>. selectOrUnionBranches
@@ -5255,7 +5275,7 @@ let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Res
     | SemanticParseError message -> Result.Error message
     | ex -> Result.Error ex.Message
 
-let private withParserState storedProgramSyntax (options: ParserOptions) (sql: string) parse =
+let private withParserStateCore queryBlocks storedProgramSyntax (options: ParserOptions) (sql: string) parse =
     let source = expandVersionComments options sql
     let rewritten, offsets = rewriteSqlForOptions options source
     let state =
@@ -5263,11 +5283,15 @@ let private withParserState storedProgramSyntax (options: ParserOptions) (sql: s
           StoredProgramSyntax = storedProgramSyntax
           SourceText = source
           SourceOffsets = offsets
+          QueryBlocks = queryBlocks
           ExpressionDepth = 0
           PlaceholderCount = 0 }
 
     DynamicScope.withThreadValue currentState (Some state) (fun () ->
         parse rewritten)
+
+let private withParserState storedProgramSyntax options sql parse =
+    withParserStateCore None storedProgramSyntax options sql parse
 
 let private withStatementParserState options sql parse =
     withParserState false options sql parse
@@ -5275,6 +5299,13 @@ let private withStatementParserState options sql parse =
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     let full = ws >>. statement .>> opt (sym ";") .>> eof
     withStatementParserState options sql (runWithDepthLimit full)
+
+/// Source positions identify hint-owning SELECTs without changing the persisted AST.
+let internal parseQueryBlocksWithOptions options sql =
+    let blocks = Dictionary<int, SelectStmt>()
+    let full = ws >>. statement .>> opt (sym ";") .>> eof
+    withParserStateCore (Some blocks) false options sql (runWithDepthLimit full)
+    |> Result.map (fun statement -> statement, blocks |> Seq.map (fun pair -> pair.Key, pair.Value) |> Seq.sortBy fst |> List.ofSeq)
 
 let parseStoredStatementWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     let full = ws >>. statement .>> opt (sym ";") .>> eof

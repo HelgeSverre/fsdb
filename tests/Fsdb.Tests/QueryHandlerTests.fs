@@ -280,6 +280,89 @@ let tests =
               | Err(1305, _) -> ()
               | other -> failtestf "expected missing routine: %A" other
 
+          testCase "optimizer hints resolve table and query block targets"
+          <| fun _ ->
+              let cases =
+                  [
+                    "SELECT /*+ BKA(t) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\n"
+                    "SELECT /*+ QB_NAME(q) BKA(t) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`q` for BKA hint\n"
+                    "SELECT /*+ BKA(t@q) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3127\tQuery block name `q` is not found for BKA hint\n"
+                    "SELECT /*+ BKA(@q t) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3127\tQuery block name `q` is not found for BKA hint\n"
+                    "SELECT /*+ QB_NAME(q) BKA(t@q) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`q` for BKA hint\n"
+                    "SELECT /*+ BKA(z,t) NO_INDEX(z) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `z`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `z`@`select#1` for NO_INDEX hint\n"
+                    "SELECT /*+ BKA(t) */ 1 AS n FROM t AS a;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\n"
+                    "SELECT /*+ BKA(a) */ 1 AS n FROM t AS a;SHOW WARNINGS", ""
+                    "SELECT /*+ BKA(A) */ 1 AS n FROM t AS a;SHOW WARNINGS", ""
+                    "SELECT /*+ BKA(a) NO_BKA(a) */ 1 AS n FROM t AS a;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint NO_BKA(`a` ) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ BKA(t) BKA(t) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint BKA(`t` ) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\n"
+                    "SELECT /*+ BKA(t) NO_BKA(t) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint NO_BKA(`t` ) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\n"
+                    "SELECT /*+ NO_INDEX(t absent) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`select#1` `absent` for NO_INDEX hint\n"
+                    "SELECT /*+ BKA(a) */ 1 AS n FROM (SELECT 1) a;SHOW WARNINGS", "n\n1\n"
+                    "SELECT (SELECT /*+ BKA(t) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`select#2` for BKA hint\n"
+                    "SELECT /*+ BKA(t) */ 1 AS n UNION ALL SELECT /*+ BKA(t) */ 2;SHOW WARNINGS", "n\n1\n2\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `t`@`select#2` for BKA hint\n"
+                    "SELECT /*+ BKA(t) */ 1 AS n FROM absent;SHOW WARNINGS", "$ERROR:1146"
+                    "SELECT /*+ BKA(t) BOGUS */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t1064\tOptimizer hint syntax error near 'BOGUS */ 1 AS n' at line 1\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\n"
+                    "SELECT /*+ BKA(t) SET_VAR(max_points_in_geometry=2) MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint MAX_EXECUTION_TIME(2) is ignored as conflicting/duplicated\nWarning\t1292\tTruncated incorrect max_points_in_geometry value: '2'\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\n"
+                    "PREPARE s FROM 'SELECT /*+ BKA(t) */ 1 AS n';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\nn\n1\n"
+                    "WITH c AS (SELECT /*+ BKA(x) */ 1 AS n) SELECT /*+ BKA(y) */ * FROM c;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\n"
+                    "SELECT /*+ BKA(x) */ (SELECT /*+ BKA(y) */ 1) AS n FROM (SELECT /*+ BKA(z) */ 1) a;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `z`@`select#3` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#2` for BKA hint\n"
+                    "SELECT /*+ BKA(t@q) */ 1 AS n FROM (SELECT /*+ QB_NAME(q) */ 1 FROM t) a;SHOW WARNINGS", ""
+                    "SELECT /*+ QB_NAME(q) QB_NAME(r) BKA(t) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `t`@`q` for BKA hint\n"
+                    "SELECT /*+ QB_NAME(q) */ (SELECT /*+ QB_NAME(q) BKA(t) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `t`@`q` for BKA hint\n"
+                    "SELECT /*+ BKA(@q) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3127\tQuery block name `q` is not found for BKA hint\n"
+                    "SELECT /*+ BKA(z,a) BKA(y,a) */ 1 AS n FROM t a;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint BKA(`a` ) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `z`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\n"
+                    "SELECT /*+ BKA(z) NO_INDEX(z) BKA(y) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `z`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `z`@`select#1` for NO_INDEX hint\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\n"
+                    "SELECT /*+ NO_INDEX(t absent,missing) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`select#1` `absent` for NO_INDEX hint\nWarning\t3128\tUnresolved name `t`@`select#1` `missing` for NO_INDEX hint\n"
+                    "SELECT /*+ NO_INDEX(z absent) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `z`@`select#1` for NO_INDEX hint\nWarning\t3128\tUnresolved name `z`@`select#1` `absent` for NO_INDEX hint\n"
+                    "SELECT /*+ BKA(t@`select#1`) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`select#1` for BKA hint\n"
+                    "SELECT /*+ BKA(t@q,t@q) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3127\tQuery block name `q` is not found for BKA hint\n"
+                    "SELECT /*+ QB_NAME(Q) BKA(t@q) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `t`@`Q` for BKA hint\n"
+                    "SELECT /*+ BKA(t) */ 1 AS n FROM t;SHOW WARNINGS", ""
+                    "SELECT /*+ BKA(t) */ 1 AS n FROM t AS t;SHOW WARNINGS", ""
+                    "CREATE VIEW v AS SELECT /*+ BKA(t) */ 1 AS n;SHOW WARNINGS", ""
+                    "SELECT (WITH c AS (SELECT /*+ BKA(c_missing) */ 1 AS n) SELECT /*+ BKA(q_missing) */ n FROM c) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `q_missing`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `c_missing`@`select#3` for BKA hint\n"
+                    "SELECT * FROM (WITH c AS (SELECT /*+ BKA(c_missing) */ 1 AS n) SELECT /*+ BKA(q_missing) */ n FROM c) a;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `q_missing`@`select#2` for BKA hint\nWarning\t3128\tUnresolved name `c_missing`@`select#3` for BKA hint\n"
+                    "SELECT /*+ NO_INDEX(t i1) NO_INDEX(t i2) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint NO_INDEX(`t`  `i2`) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ INDEX(t i1) NO_INDEX(t i2) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint NO_INDEX(`t`  `i2`) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ NO_INDEX(t i1) NO_INDEX(t i1) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint NO_INDEX(`t`  `i1`) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ NO_INDEX(t i1,i2) NO_INDEX(t i2) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint NO_INDEX(`t`  `i2`) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ NO_INDEX(t) INDEX(t i1) */ 1 AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint INDEX(`t`  `i1`) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ BKA() BKA() */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint BKA( ) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ BKA() NO_BKA() */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint NO_BKA( ) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) QB_NAME(q) QB_NAME(r) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint MAX_EXECUTION_TIME(2) is ignored as conflicting/duplicated\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\n"
+                    "SELECT /*+ QB_NAME(q) QB_NAME(r) MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\nWarning\t3126\tHint MAX_EXECUTION_TIME(2) is ignored as conflicting/duplicated\n"
+                    "/*!80000 */ SELECT /*+ BKA(x) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#1` for BKA hint\n"
+                    "SELECT /*+ BKA(t) */ 1 AS n FROM t;SHOW WARNINGS;SELECT 1;SHOW WARNINGS", "1\n1\n"
+                    "SELECT /*+ QB_NAME(q) QB_NAME(r) BKA(t@r) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\nWarning\t3127\tQuery block name `r` is not found for BKA hint\n"
+                    "SELECT /*+ QB_NAME(q) QB_NAME(r) BKA(t@q) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `t`@`q` for BKA hint\n"
+                    "SELECT /*+ QB_NAME(q) */ (SELECT /*+ QB_NAME(q) BKA(t@q) */ 1) AS n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\nWarning\t3128\tUnresolved name `t`@`q` for BKA hint\n"
+                  ]
+              for sql, expected in cases do
+                  let run = queryFixture [ "CREATE TABLE t(id INT, INDEX i1(id), INDEX i2(id))" ]
+                  let output = System.Text.StringBuilder()
+                  let mutable failed = false
+                  let statements = Fsdb.Parser.splitStatements sql |> Result.defaultWith failtest
+                  for statement in statements do
+                      if not failed then
+                          match run statement with
+                          | ResultSet(columns, rows) when not rows.IsEmpty ->
+                              output.AppendLine(String.concat "\t" columns) |> ignore
+                              for row in rows do
+                                  output.AppendLine(row |> List.map (Option.defaultValue "NULL") |> String.concat "\t") |> ignore
+                          | ResultSet _ | Affected _ -> ()
+                          | Err(code, _) ->
+                              failed <- true
+                              output.Clear().Append("$ERROR:").Append(code) |> ignore
+                          | other -> failtestf "unexpected hint result: %A" other
+                  Expect.equal (output.ToString()) expected sql
+
+          testCase "stray comment terminators are syntax errors"
+          <| fun _ ->
+              let run = queryFixture []
+              match run "SELECT /*+ MAX_EXECUTION_TIME(10000) /* x */ */ 1 AS n" with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected syntax error: %A" other
+
           testCase "mixed optimizer hints preserve only the valid prefix"
           <| fun _ ->
               let run = queryFixture []

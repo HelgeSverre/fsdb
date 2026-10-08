@@ -1305,10 +1305,10 @@ let private parsedStatementHints emitWarnings options (sql: string) =
 
 type private TimeoutHintScope = StandaloneStatement | StoredRoutine
 
-let private statementTimeoutHint scope emitWarnings options sql (hints: OptimizerHints.Hint list) =
+let private statementTimeoutHint scope options sql (hints: OptimizerHints.Hint list) =
     let mutable timeout = None
-    let warn code message =
-        if emitWarnings then Diagnostics.warning code message
+    let diagnostics = ResizeArray<int * int * string>()
+    let warn offset code message = diagnostics.Add(offset, code, message)
     let viewDefinition =
         lazy (match Parser.parseWithOptions options sql with Ok(CreateView _) -> true | _ -> false)
     for parsed in hints do
@@ -1316,34 +1316,59 @@ let private statementTimeoutHint scope emitWarnings options sql (hints: Optimize
         | OptimizerHints.Timeout value ->
             let hint = parsed.Location
             if scope = StoredRoutine then
-                warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
+                warn parsed.Offset 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
             else
                 match hint.StatementKeyword with
                 | "CREATE" | "ALTER" when viewDefinition.Value -> ()
                 | "SELECT" | "WITH" | "EXPLAIN" when hint.IsLeadingSelect ->
                     match timeout with
-                    | Some _ -> warn 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
+                    | Some _ -> warn parsed.Offset 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
                     | None -> timeout <- Some value
-                | _ -> warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
+                | _ -> warn parsed.Offset 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
         | _ -> ()
-    timeout
+    timeout, List.ofSeq diagnostics
 
-let private withStatementHintsCore scope emitTimeoutWarnings options sql body =
-    let hints = parsedStatementHints emitTimeoutWarnings options sql
-    let timeout = statementTimeoutHint scope emitTimeoutWarnings options sql hints
+let private resolveStatementHints (session: Session) options sql hints =
+    let indexesFor (reference: TableRef) =
+        let database = reference.Database |> Option.orElse session.Database |> Option.defaultValue defaultDatabase
+        CatalogOverlay.tryTable session.TemporaryCatalog (database, reference.Table)
+        |> Option.orElseWith (fun () -> Storage.tableSnapshot (Session.currentStore session) database reference.Table |> Result.toOption)
+        |> Option.map (fun table ->
+            [ if table.Columns |> List.exists _.PrimaryKey then "PRIMARY"
+              yield! table.Indexes |> List.map _.Name ])
+    OptimizerHintResolution.resolve options sql hints indexesFor
+
+let private emitHintDiagnostics diagnostics =
+    for code, message in diagnostics do Diagnostics.warning code message
+
+let private emitContextHintDiagnostics diagnostics =
+    diagnostics
+    |> List.sortBy (fun (offset, _, _) -> offset)
+    |> List.iter (fun (_, code, message) -> Diagnostics.warning code message)
+
+let private withStatementHintsCore session scope emitWarnings options sql body =
+    let hints = parsedStatementHints emitWarnings options sql
+    let resolution =
+        if emitWarnings && scope = StandaloneStatement then resolveStatementHints session options sql hints
+        else { OptimizerHintResolution.Context = []; OptimizerHintResolution.Resolution = [] }
+    let timeout, timeoutDiagnostics = statementTimeoutHint scope options sql hints
+    if emitWarnings then emitContextHintDiagnostics (resolution.Context @ timeoutDiagnostics)
+    let pointLimit = statementGeometryPointLimit hints
+    emitHintDiagnostics resolution.Resolution
     DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
-        match statementGeometryPointLimit hints with
+        match pointLimit with
         | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
         | None -> body ())
 
-let private withPreparedStatementHints options sql body =
-    withStatementHintsCore StandaloneStatement false options sql body
+let private withPreparedStatementHints session options sql body =
+    withStatementHintsCore session StandaloneStatement false options sql body
 
 let private emitRoutineHintDiagnostics (session: Session) kind schema name options (definition: string) =
     if definition.Contains("/*+", StringComparison.Ordinal) && session.RoutineDiagnostics.FirstLoad(session.Store, kind, schema, name) then
         parsedStatementHints true options definition
-        |> statementTimeoutHint StoredRoutine true options definition
-        |> ignore
+        |> statementTimeoutHint StoredRoutine options definition
+        |> snd
+        |> emitContextHintDiagnostics
 
 let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
     markRoutineVariables connectionVariableNames
@@ -5160,9 +5185,11 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
     prepareStatementWithOptions (parserOptionsForSession session) sql
     |> Result.bind (fun (statement, count) ->
         let options = parserOptionsForSession session
-        parsedStatementHints true options sql
-        |> statementTimeoutHint StandaloneStatement true options sql
-        |> ignore
+        let hints = parsedStatementHints true options sql
+        let resolution = resolveStatementHints session options sql hints
+        let _, timeoutDiagnostics = statementTimeoutHint StandaloneStatement options sql hints
+        emitContextHintDiagnostics (resolution.Context @ timeoutDiagnostics)
+        emitHintDiagnostics resolution.Resolution
         match statement with
         | None -> Ok(statement, count)
         | Some ast ->
@@ -6742,7 +6769,7 @@ let private withSessionStatementHints (session: Session) options (sql: string) b
             | Some(CreateProcedure _ | CreateFunction _) -> StoredRoutine, true
             | _ -> StandaloneStatement, true
         else StandaloneStatement, true
-    withStatementHintsCore scope emitWarnings options sql body
+    withStatementHintsCore session scope emitWarnings options sql body
 
 /// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
 /// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
@@ -6850,7 +6877,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
                 match statement.Ast with
                 | Some ast ->
-                    withPreparedStatementHints parserOptions statement.Sql (fun () ->
+                    withPreparedStatementHints session parserOptions statement.Sql (fun () ->
                         withStoredFunctionRegistry dispatch session (fun current ->
                             match bindPreparedPlaceholders PreparedMetadata.UserVariables current statement ast values with
                             | Ok(updated, bound) ->
@@ -7961,7 +7988,7 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
         let executed, result =
             recordDiagnostics session false (fun () ->
                 try
-                    withPreparedStatementHints (parserOptionsForSession session) stmt.Sql (fun () ->
+                    withPreparedStatementHints session (parserOptionsForSession session) stmt.Sql (fun () ->
                         match bindPreparedPlaceholders PreparedMetadata.ProtocolValues session stmt ast values with
                         | Error(code, message) -> session, Err(code, message)
                         | Ok(updated, statement) ->

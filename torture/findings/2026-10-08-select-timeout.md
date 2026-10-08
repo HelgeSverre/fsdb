@@ -285,7 +285,7 @@ that all optimizer-hint behavior is implemented.
 
 ## Mixed optimizer-hint parsing
 
-Status: ordered syntax parsing implemented; table/query-block hint resolution remains open.
+Status: ordered syntax and audited SELECT target resolution implemented; broader hint contexts and optimizer effects remain open.
 
 `mixed-optimizer-hints-oracle.py` passes against native MySQL 8.4.11. Unknown
 names, bare numbers, and commas between hints produce syntax warning 1064 and
@@ -317,10 +317,9 @@ syntax cannot silently enable a later SET_VAR. Syntax diagnostics precede
 execution diagnostics, including duplicate timeout and geometry-clamp warnings.
 The executor no longer scans or validates hint argument syntax independently.
 
-Table and query-block hint arguments are parsed but their name-resolution
-warnings and optimizer effects remain incomplete. In particular, the maintained
-BKA(t) and NO_INDEX(t) unresolved-name cases are still open; the complete native
-fixture must not be described as fsdb parity.
+The SELECT target-resolution implementation below covers the maintained
+BKA(t) and NO_INDEX(t) unresolved-name cases. Physical optimizer effects and
+broader statement contexts remain incomplete.
 
 Validation: all 3,096 root tests pass. The existing native wire suite passes
 68 cases / 8,496 steps with zero differences:
@@ -331,7 +330,7 @@ order, and accepted interleaved hint syntax. No known-gap allowlist was changed.
 
 ## Table and query-block hint resolution
 
-Status: reproduced; name resolution and optimizer effects remain open.
+Status: audited SELECT name resolution implemented; broader contexts and optimizer effects remain open.
 
 `table-hint-resolution-oracle.py` pins native MySQL 8.4.11 diagnostics for
 physical tables, aliases, derived sources, named query blocks, nested queries,
@@ -361,8 +360,8 @@ The observed contract includes:
   names within one hint produce only one missing-block warning.
 - Index hints preserve individual index targets. An absent index warns with
   its index name; an absent table with an index target produces both table and
-  index warnings. The current parser discards index names, so resolution needs
-  a richer parsed hint value before it can reproduce this behavior.
+  index warnings. Parsed index hints retain their index names independently
+  from table hints.
 - SQL PREPARE emits unresolved-name warnings during preparation, without
   repeating them on EXECUTE. CREATE VIEW discards the valid hints in the
   audited case. A missing physical table still returns 1146/42S02.
@@ -378,3 +377,39 @@ not proof that optimizer effects match. Passing alias and view controls guard
 against a resolver that indiscriminately warns about every table hint. The
 native processes use disposable 64 MiB buffer pools and redo capacity. No
 runtime changes or known-gap allowlist additions accompany this evidence.
+
+
+### Audited SELECT target resolution
+
+Hints retain their owning SELECT's source position and their own token position.
+Optional parser capture associates those positions with parsed query blocks;
+ordinary parses do not collect query-block records. Version-comment expansion
+and SQL-mode rewriting preserve the associations. Query-block numbering follows
+parse order, including nested WITH bodies, while unresolved-name diagnostics
+visit source queries before scalar subqueries.
+
+The resolver uses exposed aliases and catalog index names. Block-wide hints use
+an explicit absent table target; missing named blocks use an error value rather
+than a sentinel. Target deduplication retains native warning spelling, including
+index lists and empty BKA arguments. Rejected second QB_NAME declarations do
+not register an alias; an explicit name matching the current block resolves
+locally before other blocks with that name. Timeout and query-block context diagnostics
+merge by source position before SET_VAR and unresolved-name diagnostics.
+
+SQL PREPARE and binary-protocol preparation emit target-resolution warnings;
+execution does not repeat them. Valid view-definition hints remain discarded.
+The mixed-hint wire fixture also exposed a stray comment terminator being
+interpreted as arithmetic; the parser now rejects that audited malformed input
+with 1064/42000.
+
+Validation: all 3,098 root tests pass. All 52 maintained target-resolution native
+cases pass, and the full wire suite passes 70 cases / 8,665 steps with zero
+differences, including all maintained mixed-hint cases and both preparation
+protocols:
+`torture/artifacts/runs/20261008T105730829-83074/contracts`.
+No known-gap allowlist was changed.
+
+Broader hint-family conflict rules, DML/stored-program resolution,
+view-expansion interactions, and physical optimizer effects remain open. The common-path performance comparison is in
+`benchmarks/results/d014676b-hint-resolution.md`; concurrent host activity makes
+its elapsed timings unsuitable for a throughput claim.

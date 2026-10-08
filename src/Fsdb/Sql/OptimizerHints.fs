@@ -8,11 +8,13 @@ type Value =
     | Timeout of uint64
     | SetVariable of name: string * value: string
     | QueryBlockName of string
-    | TableHint of name: string * targets: (string * string option) list
+    | TableHint of name: string * block: string option * targets: (string * string option) list
+    | IndexHint of name: string * table: string * block: string option * indexes: string list
     | OtherHint of string
 
 type Hint =
-    { Location: Parser.OptimizerHintLocation
+    { Offset: int
+      Location: Parser.OptimizerHintLocation
       Value: Value }
 
 type Diagnostic =
@@ -188,14 +190,14 @@ let parse options (location: Parser.OptimizerHintLocation) =
                         table, targetBlock
                     let targets = commaList true target
                     symbol ')' |> ignore
-                    Some(TableHint(name, targets))
+                    Some(TableHint(name, block, targets))
                 | _ ->
                     let block = queryBlock ()
                     let table = word ()
                     let block = if block.IsSome then block else queryBlock ()
-                    commaList true word |> ignore
+                    let indexes = commaList true word
                     symbol ')' |> ignore
-                    Some(TableHint(name, [ table, block ]))
-            value |> Option.iter (fun value -> hints.Add { Location = location; Value = value })
+                    Some(IndexHint(name, table, block, indexes))
+            value |> Option.iter (fun value -> hints.Add { Offset = location.BodyOffset + start; Location = location; Value = value })
     with SyntaxAt offset -> warn "Optimizer hint syntax error" offset
     List.ofSeq hints, List.ofSeq diagnostics
