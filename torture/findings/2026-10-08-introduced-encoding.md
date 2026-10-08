@@ -279,3 +279,18 @@ All 274 native probes match rows and exact errors. The full wire suite passed
 62 cases and 8,251 steps without differences; the root gate passed 3,080 tests
 without build warnings or errors. Broader conversion, output mapping, and
 mixed-sequence behavior remain outside this audited boundary matrix.
+
+### GB18030 validation and supplementary slicing remain open
+
+Six additional mixed UJIS sequences combine `8E A0`, three-byte characters,
+and ordinary pairs in both orders. All match native reversal, character
+count, LEFT, and SUBSTRING at `4b613a00`; they are retained in the EUC oracle.
+
+The GB18030 oracle exposes ten mismatches across sixteen cases at that
+revision. Malformed two/four-byte sequences must fail with 1300/HY000.
+Native MySQL accepts `FE39FE39` structurally even though the platform codec
+cannot map it; reversal and slicing must retain it as one character.
+`90308130` decodes to a supplementary Unicode scalar: reversal and character
+count already match, but LEFT and SUBSTRING cut the UTF-16 surrogate pair,
+producing `3F` instead of its four original bytes. This latter issue belongs
+to decoded text slicing as well as encoded GB18030 handling.
