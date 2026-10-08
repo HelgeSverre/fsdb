@@ -1900,6 +1900,10 @@ type private AggregateInputOrder =
     | SourceRowOrder
     | GroupKeyOrder
 
+type private AggregateInputLifetime =
+    | PerGroupLevel
+    | SharedAcrossGroupLevels
+
 type private GroupInputRow =
     { Values: Value[]
       AggregateInputs: (Expr * Value) list }
@@ -14657,35 +14661,57 @@ and private runGroupedSelect
                     Functions.isUnmodifiedBuiltinAggregate name registry
                 | _ -> false
             | _ -> false
-        if not select.GroupBy.IsEmpty && List.exists needsSortedGroups aggregateCalls then GroupKeyOrder
+        if select.Rollup || (not select.GroupBy.IsEmpty && List.exists needsSortedGroups aggregateCalls) then GroupKeyOrder
         else SourceRowOrder
-    let aggregateArguments =
+    let aggregateInputPlans =
         let seen = HashSet<Expr>(HashIdentity.Reference)
-        aggregateCalls
-        |> List.collect (function
-            | FuncCall(_, arguments) ->
-                arguments |> List.choose (function
-                    | Star _ -> None
-                    | Distinct expression | OrderBy(expression, _) -> Some expression
-                    | expression -> Some expression)
-            | _ -> [])
-        |> List.filter seen.Add
         // Source columns and literals already retain their value in the input row or syntax.
-        |> List.filter (function
+        let needsMaterialization = function
             | LiteralValue _ -> false
             | Col name when (tryRoutineVariable name |> Option.isNone) && Map.containsKey (name.ToLowerInvariant()) columnIndex -> false
             | QualifiedCol(qualifier, name) ->
                 qualifiers |> Map.tryFind (qualifier.ToLowerInvariant())
                 |> Option.exists (fun (columns, _) -> columns |> List.exists (fun column -> equalsIgnoreCase column.Name name))
                 |> not
-            | _ -> true)
+            | _ -> true
+        aggregateCalls
+        |> List.choose (function
+            | FuncCall(name, arguments) ->
+                let lifetime =
+                    match name.ToUpperInvariant(), arguments with
+                    | "GROUP_CONCAT", _ -> SharedAcrossGroupLevels
+                    | "COUNT", Distinct _ :: _ when Functions.isUnmodifiedBuiltinAggregate name registry -> SharedAcrossGroupLevels
+                    | _ -> PerGroupLevel
+                let expressions =
+                    arguments |> List.choose (function
+                        | Star _ -> None
+                        | Distinct expression | OrderBy(expression, _) -> Some expression
+                        | expression -> Some expression)
+                    |> List.filter (fun expression -> seen.Add expression && needsMaterialization expression)
+                if expressions.IsEmpty then None else Some(lifetime, expressions)
+            | _ -> None)
+    let aggregateArguments = aggregateInputPlans |> List.collect snd
+    let evaluateArguments row arguments =
+        let context = ctxFor row
+        arguments |> traverse (fun expression -> evalExpr context expression |> Result.map (fun value -> expression, value))
     let materializeInputs row =
         if aggregateArguments.IsEmpty then Ok { Values = row; AggregateInputs = [] }
         else
-            let context = ctxFor row
-            aggregateArguments
-            |> traverse (fun expression -> evalExpr context expression |> Result.map (fun value -> expression, value))
+            evaluateArguments row aggregateArguments
             |> Result.map (fun inputs -> { Values = row; AggregateInputs = inputs })
+    let materializeRollupInputs total row =
+        aggregateInputPlans
+        |> traverse (fun (lifetime, arguments) ->
+            match lifetime with
+            | SharedAcrossGroupLevels ->
+                evaluateArguments row arguments |> Result.map (Array.create (total + 1))
+            | PerGroupLevel ->
+                [ total .. -1 .. 0 ]
+                |> traverse (fun _ -> evaluateArguments row arguments)
+                |> Result.map (List.rev >> Array.ofList))
+        |> Result.map (fun inputs ->
+            Array.init (total + 1) (fun level ->
+                { Values = row; AggregateInputs = inputs |> List.collect (fun levels -> levels.[level]) }))
     let aggregateContext (row: GroupInputRow) =
         let context = ctxFor row.Values
         if row.AggregateInputs.IsEmpty then context
@@ -14997,8 +15023,7 @@ and private runGroupedSelect
                     | key :: keys, (expression, direction) :: ordering when sameKey key (resolve expression) ->
                         prefixDirections keys ordering |> Option.map (fun directions -> direction :: directions)
                     | _ -> None
-                if select.Rollup then ascending
-                else prefixDirections groupExprs select.OrderBy |> Option.defaultValue ascending
+                prefixDirections groupExprs select.OrderBy |> Option.defaultValue ascending
             let sortGroupsByKey directions groups =
                 let tagged keys = List.map2 (orderValueForExpr probeContext) groupExprs keys
                 groups |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys directions (tagged ka) (tagged kb))
@@ -15013,6 +15038,7 @@ and private runGroupedSelect
                     |> fun groups ->
                         match aggregateInputOrder with
                         | SourceRowOrder -> Ok groups
+                        | GroupKeyOrder when select.Rollup -> Ok groups
                         | GroupKeyOrder ->
                             groups
                             |> sortGroupsByKey groupDirections
@@ -15020,35 +15046,36 @@ and private runGroupedSelect
                                 rows |> traverse (fun row -> materializeInputs row.Values)
                                 |> Result.map (fun inputs -> key, inputs))
 
-            // MySQL emits each rollup subtotal after its key-ordered children.
-            let expandRollup (groups: (Value list * GroupInputRow list) list) : (int * Value list * GroupInputRow list) list =
-                let sortedGroups = sortGroupsByKey ascending groups
-
+            // Deferred rows share subtotal inputs without evaluating groups beyond an unordered LIMIT.
+            let expandRollup (groups: (Value list * GroupInputRow list) list) =
                 let total = List.length groupExprs
-
-                let rec emit (level: int) (groups: (Value list * GroupInputRow list) list) =
+                let sortedGroups =
+                    groups |> sortGroupsByKey groupDirections
+                    |> List.map (fun (key, rows) ->
+                        key, rows |> List.map (fun row -> lazy (materializeRollupInputs total row.Values)))
+                let group rolledCount key (rows: Lazy<Result<GroupInputRow array, EvalError>> list) =
+                    let materialize () =
+                        rows |> traverse (fun row -> row.Value |> Result.map (fun levels -> levels.[rolledCount]))
+                    rolledCount, key, materialize
+                let rec emit level groups =
                     if level = total then
-                        groups |> List.map (fun (key, rows) -> 0, key, rows)
+                        groups |> List.map (fun (key, rows) -> group 0 key rows)
                     else
                         groups
                         |> List.groupBy (fun (key, _) -> List.truncate (level + 1) key)
                         |> List.collect (fun (prefix, subgroups) ->
                             emit (level + 1) subgroups
-                            @ (if level + 1 = total then
-                                   []
-                               else
-                                   [ total - (level + 1), prefix, subgroups |> List.collect snd ]))
-
-                emit 0 sortedGroups @ [ total, [], groups |> List.collect snd ]
+                            @ (if level + 1 = total then []
+                               else [ group (total - level - 1) prefix (subgroups |> List.collect snd) ]))
+                if sortedGroups.IsEmpty then []
+                else emit 0 sortedGroups @ [ group total [] (sortedGroups |> List.collect snd) ]
 
             match buildGroups () with
             | Error(code, message) -> Err(code, message), [], []
             | Ok baseGroups ->
                 let groups =
-                    if select.Rollup then
-                        expandRollup baseGroups
-                    else
-                        baseGroups |> List.map (fun (key, rows) -> 0, key, rows)
+                    if select.Rollup then expandRollup baseGroups
+                    else baseGroups |> List.map (fun (key, rows) -> 0, key, fun () -> Ok rows)
 
                 let processGroup
                     (rolledCount: int, key: Value list, groupRows: GroupInputRow list)
@@ -15066,7 +15093,22 @@ and private runGroupedSelect
                                     let orderKeys = if groupExprs.IsEmpty then Ok [] else orderKeysOf rollup proj groupRows
                                     orderKeys |> Result.map (fun keys -> Some(proj, keys, key)))))
 
-                match groups |> traverseSeq processGroup with
+                let limit = select.Limit |> Option.map rowCount
+                let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
+                let stopAfter =
+                    if select.Rollup && not select.CalculateFoundRows
+                       && (limit = Some 0 || (select.OrderBy.IsEmpty && not select.Distinct)) then
+                        limit |> Option.map (fun count -> if count = 0 then 0L else int64 count + int64 offset)
+                    else None
+                let mutable emitted = 0L
+                let pending = groups |> Seq.takeWhile (fun _ -> stopAfter |> Option.forall (fun count -> emitted < count))
+                let consume (rolledCount, key, materialize) =
+                    materialize ()
+                    |> Result.bind (fun rows -> processGroup (rolledCount, key, rows))
+                    |> Result.map (fun output ->
+                        if output.IsSome then emitted <- emitted + 1L
+                        output)
+                match pending |> traverseSeq consume with
                 | Error(code, message) -> Err(code, message), [], []
                 | Ok kept ->
 

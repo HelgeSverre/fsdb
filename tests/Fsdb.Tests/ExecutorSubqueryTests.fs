@@ -87,6 +87,38 @@ let tests =
                   Expect.equal (execute sql) (ResultSet([ "g"; "h"; "s"; "other" ], rows)) sql
                   Expect.equal (execute "SELECT @n") (ResultSet([ "@n" ], [ [ Some "4" ] ])) "Each source row evaluates once"
 
+          testCase "ROLLUP evaluates aggregate levels only as demanded"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              let execute sql = connection.Query sql
+              execute "CREATE TABLE rollup_input(id INT PRIMARY KEY,g INT,h INT)" |> ignore
+              execute "INSERT INTO rollup_input VALUES(1,2,2),(2,1,1),(3,2,1),(4,1,2),(5,2,1)" |> ignore
+              for sql, expected, counter in
+                  [ "SELECT g,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g WITH ROLLUP", [ [ Some "1"; Some "6" ]; [ Some "2"; Some "24" ]; [ None; Some "25" ] ], "10"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "3" ]; [ Some "1"; Some "2"; Some "6" ]; [ Some "1"; None; Some "7" ]; [ Some "2"; Some "1"; Some "21" ]; [ Some "2"; Some "2"; Some "15" ]; [ Some "2"; None; Some "33" ]; [ None; None; Some "35" ] ], "15"
+                    "SELECT g,h,SUM(@n:=@n+1) AS a,SUM(@n:=@n+1) AS b FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "3"; Some "6" ]; [ Some "1"; Some "2"; Some "9"; Some "12" ]; [ Some "1"; None; Some "10"; Some "16" ]; [ Some "2"; Some "1"; Some "36"; Some "42" ]; [ Some "2"; Some "2"; Some "27"; Some "30" ]; [ Some "2"; None; Some "60"; Some "69" ]; [ None; None; Some "65"; Some "80" ] ], "30"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP ORDER BY g DESC,h DESC", [ [ Some "2"; Some "2"; Some "3" ]; [ Some "2"; Some "1"; Some "15" ]; [ Some "2"; None; Some "15" ]; [ Some "1"; Some "2"; Some "12" ]; [ Some "1"; Some "1"; Some "15" ]; [ Some "1"; None; Some "25" ]; [ None; None; Some "35" ] ], "15"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP HAVING GROUPING(g,h)=0", [ [ Some "1"; Some "1"; Some "3" ]; [ Some "1"; Some "2"; Some "6" ]; [ Some "2"; Some "1"; Some "21" ]; [ Some "2"; Some "2"; Some "15" ] ], "15"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP LIMIT 1", [ [ Some "1"; Some "1"; Some "3" ] ], "3"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP LIMIT 0", [  ], "0"
+                    "SELECT g,h,COUNT(DISTINCT (@n:=@n+1)) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "1" ]; [ Some "1"; Some "2"; Some "1" ]; [ Some "1"; None; Some "2" ]; [ Some "2"; Some "1"; Some "2" ]; [ Some "2"; Some "2"; Some "1" ]; [ Some "2"; None; Some "3" ]; [ None; None; Some "5" ] ], "5"
+                    "SELECT g,h,GROUP_CONCAT(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "1" ]; [ Some "1"; Some "2"; Some "2" ]; [ Some "1"; None; Some "1,2" ]; [ Some "2"; Some "1"; Some "3,4" ]; [ Some "2"; Some "2"; Some "5" ]; [ Some "2"; None; Some "3,4,5" ]; [ None; None; Some "1,2,3,4,5" ] ], "5"
+                    "SELECT g,h,JSON_ARRAYAGG(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "[3]" ]; [ Some "1"; Some "2"; Some "[6]" ]; [ Some "1"; None; Some "[2, 5]" ]; [ Some "2"; Some "1"; Some "[9, 12]" ]; [ Some "2"; Some "2"; Some "[15]" ]; [ Some "2"; None; Some "[8, 11, 14]" ]; [ None; None; Some "[1, 4, 7, 10, 13]" ] ], "15"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input WHERE FALSE GROUP BY g,h WITH ROLLUP", [  ], "0"
+                    "SELECT g,h,SUM(DISTINCT (@n:=@n+1)) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "3" ]; [ Some "1"; Some "2"; Some "6" ]; [ Some "1"; None; Some "7" ]; [ Some "2"; Some "1"; Some "21" ]; [ Some "2"; Some "2"; Some "15" ]; [ Some "2"; None; Some "33" ]; [ None; None; Some "35" ] ], "15"
+                    "SELECT g,h,MIN(@n:=@n+1) AS lo,MAX(@n:=@n+1) AS hi FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "3"; Some "6" ]; [ Some "1"; Some "2"; Some "9"; Some "12" ]; [ Some "1"; None; Some "2"; Some "11" ]; [ Some "2"; Some "1"; Some "15"; Some "24" ]; [ Some "2"; Some "2"; Some "27"; Some "30" ]; [ Some "2"; None; Some "14"; Some "29" ]; [ None; None; Some "1"; Some "28" ] ], "30"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s,COUNT(DISTINCT (@n:=@n+1)) AS n FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "3"; Some "1" ]; [ Some "1"; Some "2"; Some "7"; Some "1" ]; [ Some "1"; None; Some "8"; Some "2" ]; [ Some "2"; Some "1"; Some "26"; Some "2" ]; [ Some "2"; Some "2"; Some "19"; Some "1" ]; [ Some "2"; None; Some "42"; Some "3" ]; [ None; None; Some "45"; Some "5" ] ], "20"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s,GROUP_CONCAT(@n:=@n+1) AS c FROM rollup_input GROUP BY g,h WITH ROLLUP", [ [ Some "1"; Some "1"; Some "3"; Some "4" ]; [ Some "1"; Some "2"; Some "7"; Some "8" ]; [ Some "1"; None; Some "8"; Some "4,8" ]; [ Some "2"; Some "1"; Some "26"; Some "12,16" ]; [ Some "2"; Some "2"; Some "19"; Some "20" ]; [ Some "2"; None; Some "42"; Some "12,16,20" ]; [ None; None; Some "45"; Some "4,8,12,16,20" ] ], "20"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP ORDER BY g DESC,h DESC LIMIT 1", [ [ Some "2"; Some "2"; Some "3" ] ], "15"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP ORDER BY s DESC LIMIT 1", [ [ None; None; Some "35" ] ], "15"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP LIMIT 1 OFFSET 2", [ [ Some "1"; None; Some "7" ] ], "6"
+                    "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP HAVING GROUPING(g,h)=3 LIMIT 1", [ [ None; None; Some "35" ] ], "15" ] do
+                  execute "SET @n=0" |> ignore
+                  match execute sql with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | result -> failtestf "Expected ROLLUP rows, got %A" result
+                  Expect.equal (execute "SELECT @n") (ResultSet([ "@n" ], [ [ Some counter ] ])) sql
+
           testCase "ordering aggregates cannot introduce an implicit group"
           <| fun _ ->
               let store = newStore ()

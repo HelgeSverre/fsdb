@@ -287,6 +287,38 @@ matches only the standalone COUNT DISTINCT and GROUP_CONCAT fixtures. These
 native-only checks remain outside the passing differential contract lane; no
 known-gap signatures are added.
 
-The implementation needs both per-aggregate level ownership and demand-aware
+The `e8ce7bd7` implementation lacks both per-aggregate level ownership and demand-aware
 group emission. Reusing a single materialized argument list at every subtotal,
 or eagerly evaluating every level before LIMIT, cannot satisfy these contracts.
+
+## Deferred ROLLUP inputs
+
+ROLLUP input plans now distinguish arguments shared across levels from arguments
+evaluated separately at each level. Inputs are sorted by grouping keys, with
+compatible output ordering directions retained. Each source row materializes
+its aggregate occurrences in projection-plan order, from grand total down to
+detail within each occurrence. COUNT DISTINCT and GROUP_CONCAT share their
+materialized values across levels; SUM DISTINCT retains level-specific values.
+
+Detail and subtotal groups share deferred source-row materialization. Consuming
+a detail forces the row's level values once; later subtotals reuse those values.
+Unordered LIMIT stops after enough HAVING-accepted groups, including OFFSET.
+Explicit ordering, DISTINCT output, and SQL_CALC_FOUND_ROWS retain complete
+input evaluation. Ordinary LIMIT 0 avoids aggregate evaluation. An empty grouped input
+produces no ROLLUP subtotal or grand-total row.
+
+The Expecto regression matches every fixture in the native ROLLUP oracle.
+The expanded wire lane additionally checks COUNT, AVG DISTINCT, JSON_OBJECTAGG,
+ordered LIMIT 0, DISTINCT output, and SQL_CALC_FOUND_ROWS with FOUND_ROWS().
+It passes 58 cases / 6,493 steps with zero differences at
+`20261008T025741498-5079/contracts`. No known-gap signatures are added.
+
+The [ROLLUP performance snapshot](../../benchmarks/results/05727fa2-rollup-inputs.md)
+records execution time and allocations for immutable source-column inputs and
+ordinary grouping controls. Projection-assignment replay across sorted/limited
+results remains open, as do wider index-selected grouping plans and collation
+combinations beyond the maintained fixtures.
+
+Final source validation: 3,048 tests pass with no build warnings/errors under a
+4 GiB GC heap cap. The working tree contains no known-gap enrollment for these
+ROLLUP fixes.

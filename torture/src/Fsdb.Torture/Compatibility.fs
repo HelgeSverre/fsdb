@@ -647,6 +647,53 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS concat_order"; "DROP TABLE IF EXISTS concat_types"; "SET group_concat_max_len=DEFAULT" |]
           Coverage = [| "statement:select", [| "aggregation"; "ordering"; "text-differential"; "prepared-differential" |] |] }
 
+    let private rollupEvaluation =
+        let queries =
+            [| "SELECT g,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g WITH ROLLUP"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,SUM(@n:=@n+1) AS a,SUM(@n:=@n+1) AS b FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP ORDER BY g DESC,h DESC"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP HAVING GROUPING(g,h)=0"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP LIMIT 1"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP LIMIT 0"
+               "SELECT g,h,COUNT(DISTINCT (@n:=@n+1)) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,GROUP_CONCAT(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,JSON_ARRAYAGG(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input WHERE FALSE GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,SUM(DISTINCT (@n:=@n+1)) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,MIN(@n:=@n+1) AS lo,MAX(@n:=@n+1) AS hi FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,SUM(@n:=@n+1) AS s,COUNT(DISTINCT (@n:=@n+1)) AS n FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,SUM(@n:=@n+1) AS s,GROUP_CONCAT(@n:=@n+1) AS c FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP ORDER BY g DESC,h DESC LIMIT 1"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP ORDER BY s DESC LIMIT 1"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP LIMIT 1 OFFSET 2"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP HAVING GROUPING(g,h)=3 LIMIT 1"
+               "SELECT g,h,COUNT(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,AVG(DISTINCT (@n:=@n+1)) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,JSON_OBJECTAGG(id,@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP"
+               "SELECT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP ORDER BY g DESC,h DESC LIMIT 0"
+               "SELECT DISTINCT g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP LIMIT 1"
+               "SELECT SQL_CALC_FOUND_ROWS g,h,SUM(@n:=@n+1) AS s FROM rollup_input GROUP BY g,h WITH ROLLUP LIMIT 1" |]
+        { Name = "rollup-evaluation"
+          Setup = [| "CREATE TABLE rollup_input(id INT PRIMARY KEY,g INT,h INT)"
+                     "INSERT INTO rollup_input VALUES(1,2,2),(2,1,1),(3,2,1),(4,1,2),(5,2,1)" |]
+          Steps =
+            [| for sql in queries do
+                   yield Contract.execute "reset counter" "SET @n=0"
+                   yield Contract.query sql sql
+                   if sql.Contains("SQL_CALC_FOUND_ROWS") then
+                       yield Contract.query "found rows" "SELECT FOUND_ROWS()"
+                   yield Contract.query "counter" "SELECT @n"
+                   yield Contract.execute "reset prepared counter" "SET @n=0"
+                   yield Contract.execute "prepare rollup" ("PREPARE rollup_evaluation FROM '" + sql.Replace("'", "''") + "'")
+                   yield Contract.query ("prepared: " + sql) "EXECUTE rollup_evaluation"
+                   if sql.Contains("SQL_CALC_FOUND_ROWS") then
+                       yield Contract.query "prepared found rows" "SELECT FOUND_ROWS()"
+                   yield Contract.query "prepared counter" "SELECT @n"
+                   yield Contract.execute "deallocate rollup" "DEALLOCATE PREPARE rollup_evaluation" |]
+          Cleanup = [| "DROP TABLE IF EXISTS rollup_input"; "SET @n=NULL" |]
+          Coverage = [| "statement:select", [| "aggregation"; "rollup"; "evaluation-order"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3524,6 +3571,7 @@ module ContractCatalog =
            groupedAggregateInputs
            groupedAggregateFamilies
            groupConcatOrdering
+           rollupEvaluation
            exactErrors
            noDirInCreate
            semanticErrors
