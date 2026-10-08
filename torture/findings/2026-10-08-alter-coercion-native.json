@@ -1,0 +1,443 @@
+{
+  "mysql_version": "8.4.11",
+  "buffer_pool_mib": 64,
+  "redo_mib": 64,
+  "cases": [
+    {
+      "name": "varchar--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'a'),(2,'bc'),(3,'de')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'v' at row 3\nid\tv\n1\t61\n2\t62\n3\t64\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(1)\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "varchar--unique-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),UNIQUE KEY uq_v(v))",
+        "INSERT INTO target VALUES(1,'aa'),(2,'ab'),(3,'zz')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.uq_v'\nid\tv\n1\t6161\n2\t6162\n3\t7A7A\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(20)\tYES\tUNI\tNULL\t\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry 'a' for key 'target.uq_v'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "char-spaces--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'a  '),(2,'b  ')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v CHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "id\tv\n1\t61\n2\t62\nField\tType\tNull\tKey\tDefault\tExtra\nv\tchar(1)\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "varchar-spaces--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'a  '),(2,'b  ')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\n1\t61\n2\t62\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(1)\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "unicode--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'\u00e9'),(2,'\ud83d\ude42x')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\n1\tC3A9\n2\tF09F9982\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(1)\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "binary--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))",
+        "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v BINARY(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'v' at row 3\nid\tv\n1\t41\n2\t42\n3\t44\nField\tType\tNull\tKey\tDefault\tExtra\nv\tbinary(1)\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "varbinary--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))",
+        "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARBINARY(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'v' at row 3\nid\tv\n1\t41\n2\t42\n3\t44\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarbinary(1)\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "integer--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v INT)",
+        "INSERT INTO target VALUES(1,1),(2,200),(3,300)",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v TINYINT",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1264\tOut of range value for column 'v' at row 2\nWarning\t1264\tOut of range value for column 'v' at row 3\nid\tv\n1\t1\n2\t7F\n3\t7F\nField\tType\tNull\tKey\tDefault\tExtra\nv\ttinyint\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "numeric-text--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'1'),(2,'200'),(3,'x')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v TINYINT",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1264\tOut of range value for column 'v' at row 2\nWarning\t1366\tIncorrect integer value: 'x' for column 'v' at row 3\nid\tv\n1\t1\n2\t7F\n3\t0\nField\tType\tNull\tKey\tDefault\tExtra\nv\ttinyint\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "decimal--unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DECIMAL(8,3))",
+        "INSERT INTO target VALUES(1,1.123),(2,2.456)",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v DECIMAL(4,1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'",
+        "SELECT v FROM target ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nNote\t1265\tData truncated for column 'v' at row 1\nNote\t1265\tData truncated for column 'v' at row 2\nid\tv\n1\t1\n2\t3\nField\tType\tNull\tKey\tDefault\tExtra\nv\tdecimal(4,1)\tYES\t\tNULL\t\nv\n1.1\n2.5\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "varchar-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'a'),(2,'bc'),(3,'de')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 2\nid\tv\n1\t61\n2\t6263\n3\t6465\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(20)\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1265 (01000) at line 1: Data truncated for column 'v' at row 2\n",
+      "errors": [
+        [
+          1265,
+          "01000"
+        ]
+      ]
+    },
+    {
+      "name": "varchar-STRICT_ALL_TABLES-unique-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),UNIQUE KEY uq_v(v))",
+        "INSERT INTO target VALUES(1,'aa'),(2,'ab'),(3,'zz')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\n1\t6161\n2\t6162\n3\t7A7A\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(20)\tYES\tUNI\tNULL\t\n",
+      "stderr": "ERROR 1265 (01000) at line 1: Data truncated for column 'v' at row 1\n",
+      "errors": [
+        [
+          1265,
+          "01000"
+        ]
+      ]
+    },
+    {
+      "name": "char-spaces-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'a  '),(2,'b  ')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v CHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "id\tv\n1\t61\n2\t62\nField\tType\tNull\tKey\tDefault\tExtra\nv\tchar(1)\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "varchar-spaces-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'a  '),(2,'b  ')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\n1\t612020\n2\t622020\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(20)\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1265 (01000) at line 1: Data truncated for column 'v' at row 1\n",
+      "errors": [
+        [
+          1265,
+          "01000"
+        ]
+      ]
+    },
+    {
+      "name": "unicode-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'\u00e9'),(2,'\ud83d\ude42x')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 2\nid\tv\n1\tC3A9\n2\tF09F998278\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(20)\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1265 (01000) at line 1: Data truncated for column 'v' at row 2\n",
+      "errors": [
+        [
+          1265,
+          "01000"
+        ]
+      ]
+    },
+    {
+      "name": "binary-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))",
+        "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v BINARY(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1406\tData too long for column 'v' at row 2\nid\tv\n1\t41\n2\t4243\n3\t4445\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarbinary(20)\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1406 (22001) at line 1: Data too long for column 'v' at row 2\n",
+      "errors": [
+        [
+          1406,
+          "22001"
+        ]
+      ]
+    },
+    {
+      "name": "varbinary-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))",
+        "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v VARBINARY(1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 2\nid\tv\n1\t41\n2\t4243\n3\t4445\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarbinary(20)\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1265 (01000) at line 1: Data truncated for column 'v' at row 2\n",
+      "errors": [
+        [
+          1265,
+          "01000"
+        ]
+      ]
+    },
+    {
+      "name": "integer-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v INT)",
+        "INSERT INTO target VALUES(1,1),(2,200),(3,300)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v TINYINT",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1264\tOut of range value for column 'v' at row 2\nid\tv\n1\t1\n2\tC8\n3\t12C\nField\tType\tNull\tKey\tDefault\tExtra\nv\tint\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1264 (22003) at line 1: Out of range value for column 'v' at row 2\n",
+      "errors": [
+        [
+          1264,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "numeric-text-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'1'),(2,'200'),(3,'x')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v TINYINT",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1264\tOut of range value for column 'v' at row 2\nid\tv\n1\t31\n2\t323030\n3\t78\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(20)\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1264 (22003) at line 1: Out of range value for column 'v' at row 2\n",
+      "errors": [
+        [
+          1264,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "decimal-STRICT_ALL_TABLES-unique-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DECIMAL(8,3))",
+        "INSERT INTO target VALUES(1,1.123),(2,2.456)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v DECIMAL(4,1)",
+        "SHOW WARNINGS",
+        "SELECT id,HEX(v) AS v FROM target ORDER BY id",
+        "SHOW COLUMNS FROM target LIKE 'v'",
+        "SELECT v FROM target ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nNote\t1265\tData truncated for column 'v' at row 1\nNote\t1265\tData truncated for column 'v' at row 2\nid\tv\n1\t1\n2\t3\nField\tType\tNull\tKey\tDefault\tExtra\nv\tdecimal(4,1)\tYES\t\tNULL\t\nv\n1.1\n2.5\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "change",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),w VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd'),(3,'ee','ff')",
+        "SET sql_mode=''",
+        "ALTER TABLE target CHANGE v renamed VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'renamed' at row 1\nWarning\t1265\tData truncated for column 'renamed' at row 2\nWarning\t1265\tData truncated for column 'renamed' at row 3\nid\trenamed\tw\n1\ta\tbb\n2\tc\tdd\n3\te\tff\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "tombstone",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),w VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd'),(3,'ee','ff')",
+        "SET sql_mode=''",
+        "DELETE FROM target WHERE id=1",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\tw\n2\tc\tdd\n3\te\tff\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "multi",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),w VARCHAR(20))",
+        "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd'),(3,'ee','ff')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1), MODIFY w VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'v' at row 3\nWarning\t1265\tData truncated for column 'w' at row 3\nid\tv\tw\n1\ta\tb\n2\tc\td\n3\te\tf\n",
+      "stderr": "",
+      "errors": []
+    }
+  ]
+}

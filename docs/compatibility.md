@@ -546,7 +546,12 @@ rejects an absent destination database. See the
 Duplicate-key errors and IGNORE warnings identify the base table and index,
 including through aliases and views, after table renames, and during unique-index
 creation. The [native diagnostic evidence](../torture/findings/2026-10-08-key-diagnostics.md)
-records the remaining dotted-identifier and narrowing-ALTER warning gaps.
+records the remaining dotted-identifier gap. Single-column MODIFY/CHANGE
+coercions report live row ordinals and stop emitting conditions at the first
+unique-key collision. Strict BINARY truncation retains 1406 / 22001, while
+VARCHAR/VARBINARY narrowing uses 1265 / 01000. Multi-column condition order and
+COPY affected-row counts remain incomplete; see the
+[ALTER coercion evidence](../torture/findings/2026-10-08-alter-coercion.md).
 
 Skipped `INSERT IGNORE` rows and ignored CHECK violations appear in the
 session diagnostics area and through `SHOW WARNINGS`; the OK/EOF warning count

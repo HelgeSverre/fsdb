@@ -1,6 +1,6 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "56b55ac1",
+  "fsdb_base_revision": "0e412e45",
   "fsdb_dirty": true,
   "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
   "cases": [
@@ -282,7 +282,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1062\tDuplicate entry 'a' for key 'target.NamedKey'\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'n' at row 1\nWarning\t1265\tData truncated for column 'n' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.NamedKey'\n",
       "errors": [
         {
           "Item1": 1062,
@@ -290,7 +290,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'n' at row 1\nWarning\t1265\tData truncated for column 'n' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.NamedKey'\n",
-      "matches": false,
+      "matches": true,
       "name": "narrow-column",
       "statements": [
         "USE probe",

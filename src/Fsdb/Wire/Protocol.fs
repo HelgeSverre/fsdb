@@ -563,6 +563,7 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
     let isBinary =
         col.Metadata.TypeId <> TypeJson
+        && not (hasMetadataFlag EnumFlag col.Metadata)
         && (hasMetadataFlag BinaryFlag col.Metadata || col.Metadata.TypeId = TypeBit)
     let collation =
         if isBinary then

@@ -2193,6 +2193,73 @@ let tests =
               Expect.equal updated (Affected 2UL) "IGNORE applies to an upsert update"
               Expect.contains (session.Diagnostics |> List.map _.Code) 3751 "upsert update warning"
 
+          testCase "SHOW COLUMNS key metadata distinguishes persistent and temporary tables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE column_metadata (id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE VIEW column_metadata_view AS SELECT * FROM column_metadata"
+              let session, _ = handle session "CREATE TEMPORARY TABLE column_metadata_temp (id INT PRIMARY KEY)"
+              for name, isTemporary in [ "column_metadata", false; "column_metadata_view", false; "column_metadata_temp", true ] do
+                  for sql in [ "SHOW COLUMNS FROM " + name; "SHOW FULL COLUMNS FROM " + name; "DESCRIBE " + name ] do
+                      let resultSession, result = handle session sql
+                      match result with
+                      | ResultSet(columns, _) ->
+                          let key = resultSession.LastResultColumnMetadata.[List.findIndex ((=) "Key") columns]
+                          Expect.equal key.TypeId (if isTemporary then TypeVarString else TypeString) sql
+                          Expect.equal (key.Flags &&& EnumFlag <> 0us) (not isTemporary) "persistent dictionary key is ENUM"
+                      | other -> failtestf "expected column definitions, got %A" other
+
+          testCase "ALTER narrowing stops warnings at the first duplicate and preserves the table"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE alter_warning_rows (id INT PRIMARY KEY, v VARCHAR(20), UNIQUE KEY uq_v(v))"
+              let session, _ = handle session "INSERT INTO alter_warning_rows VALUES (1,'aa'),(2,'ab'),(3,'zz')"
+              let session, _ = handle session "SET sql_mode=''"
+              let session, result = handle session "ALTER TABLE alter_warning_rows MODIFY v VARCHAR(1)"
+              Expect.equal result (Err(1062, "Duplicate entry 'a' for key 'alter_warning_rows.uq_v'")) "duplicate aborts the copy"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1265, "Data truncated for column 'v' at row 1"
+                    1265, "Data truncated for column 'v' at row 2"
+                    1062, "Duplicate entry 'a' for key 'alter_warning_rows.uq_v'" ]
+                  "only rows reached before the duplicate produce conditions"
+              let _, rows = handle session "SELECT v FROM alter_warning_rows ORDER BY id"
+              Expect.equal rows (ResultSet([ "v" ], [ [ Some "aa" ]; [ Some "ab" ]; [ Some "zz" ] ])) "failed copy preserves all values"
+
+          testCase "ALTER successful CHANGE numbers live rows and uses the new column name"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE alter_live_rows (id INT PRIMARY KEY, v VARCHAR(20))"
+              let session, _ = handle session "INSERT INTO alter_live_rows VALUES (1,'aa'),(2,'cc'),(3,'ee')"
+              let session, _ = handle session "DELETE FROM alter_live_rows WHERE id=1"
+              let session, _ = handle session "SET sql_mode=''"
+              let session, result = handle session "ALTER TABLE alter_live_rows CHANGE v renamed VARCHAR(1)"
+              Expect.isNone (errorInfo result) "successful conversion"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1265, "Data truncated for column 'renamed' at row 1"
+                    1265, "Data truncated for column 'renamed' at row 2" ]
+                  "deleted row identities do not affect the diagnostic ordinal"
+              let _, rows = handle session "SELECT id, renamed FROM alter_live_rows ORDER BY id"
+              Expect.equal rows (ResultSet([ "id"; "renamed" ], [ [ Some "2"; Some "c" ]; [ Some "3"; Some "e" ] ])) "converted values"
+
+          testCase "ALTER strict narrowing reports the live row ordinal and binary error kind"
+          <| fun _ ->
+              for targetType, code, message in
+                  [ "VARCHAR(1)", 1265, "Data truncated for column 'v' at row 2"
+                    "VARBINARY(1)", 1265, "Data truncated for column 'v' at row 2"
+                    "BINARY(1)", 1406, "Data too long for column 'v' at row 2"
+                    "TINYINT", 1264, "Out of range value for column 'v' at row 2" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE alter_strict_rows (id INT PRIMARY KEY, v VARCHAR(20))"
+                  let session, _ = handle session "INSERT INTO alter_strict_rows VALUES (1,'0'),(2,'1'),(3,'200')"
+                  let session, _ = handle session "DELETE FROM alter_strict_rows WHERE id=1"
+                  let session, _ = handle session "SET sql_mode='STRICT_ALL_TABLES'"
+                  let _, result = handle session ("ALTER TABLE alter_strict_rows MODIFY v " + targetType)
+                  Expect.equal result (Err(code, message)) targetType
+                  let expectedState = if code = 1406 then "22001" elif code = 1264 then "22003" else "01000"
+                  Expect.equal (errorInfo result |> Option.map _.State) (Some expectedState) "condition SQLSTATE"
+
           testCase "deprecated utf8 charsets report once per spelling"
           <| fun _ ->
               let aliasWarning =

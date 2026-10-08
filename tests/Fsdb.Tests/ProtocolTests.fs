@@ -453,6 +453,19 @@ let tests =
               Expect.isTrue (flags &&& 0x0010 <> 0) "BLOB flag"
               Expect.isTrue (flags &&& 0x0080 <> 0) "BINARY flag"
 
+          testCase "ENUM definitions retain text collation alongside the binary flag"
+          <| fun _ ->
+              let metadata =
+                  { columnMetadata TypeString with
+                      ColumnLength = 12u
+                      Flags = NotNullFlag ||| BinaryFlag ||| EnumFlag ||| NoDefaultValueFlag
+                      CollationId = Some 255us }
+              let reader = Reader(columnDefPayload { Name = "Key"; Metadata = metadata })
+              for _ in 1..6 do
+                  reader.ReadLenEncString() |> ignore
+              reader.ReadLenEncInt() |> ignore
+              Expect.equal (reader.ReadInt16LE()) 255 "dictionary ENUM remains text for connectors"
+
           testCase "column definitions advertise an explicit text collation"
           <| fun _ ->
               let metadata =

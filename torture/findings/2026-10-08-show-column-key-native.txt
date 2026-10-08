@@ -1,0 +1,470 @@
+--------------
+CREATE TABLE columns_meta(id INT PRIMARY KEY,v VARCHAR(20))
+--------------
+
+Query OK, 0 rows affected (0.00 sec)
+
+--------------
+CREATE TEMPORARY TABLE temp_meta(id INT PRIMARY KEY,v VARCHAR(20))
+--------------
+
+Query OK, 0 rows affected (0.00 sec)
+
+--------------
+CREATE VIEW view_meta AS SELECT * FROM columns_meta
+--------------
+
+Query OK, 0 rows affected (0.00 sec)
+
+--------------
+SHOW COLUMNS FROM columns_meta
+--------------
+
+Field   1:  `Field`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 2
+Decimals:   0
+Flags:      
+
+Field   2:  `Type`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     67108860
+Max_length: 11
+Decimals:   0
+Flags:      NOT_NULL BLOB BINARY NO_DEFAULT_VALUE 
+
+Field   3:  `Null`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL 
+
+Field   4:  `Key`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL BINARY ENUM NO_DEFAULT_VALUE 
+
+Field   5:  `Default`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     262140
+Max_length: 0
+Decimals:   0
+Flags:      BLOB BINARY 
+
+Field   6:  `Extra`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     1024
+Max_length: 0
+Decimals:   0
+Flags:      
+
+
++------+-------------+-----+-----+------+------+
+| id   | int         | NO  | PRI | NULL |      |
+| v    | varchar(20) | YES |     | NULL |      |
++------+-------------+-----+-----+------+------+
+2 rows in set (0.00 sec)
+
+--------------
+SHOW FULL COLUMNS FROM columns_meta
+--------------
+
+Field   1:  `Field`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 2
+Decimals:   0
+Flags:      
+
+Field   2:  `Type`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     67108860
+Max_length: 11
+Decimals:   0
+Flags:      NOT_NULL BLOB BINARY NO_DEFAULT_VALUE 
+
+Field   3:  `Collation`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 18
+Decimals:   0
+Flags:      
+
+Field   4:  `Null`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL 
+
+Field   5:  `Key`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL BINARY ENUM NO_DEFAULT_VALUE 
+
+Field   6:  `Default`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     262140
+Max_length: 0
+Decimals:   0
+Flags:      BLOB BINARY 
+
+Field   7:  `Extra`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     1024
+Max_length: 0
+Decimals:   0
+Flags:      
+
+Field   8:  `Privileges`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     616
+Max_length: 31
+Decimals:   0
+Flags:      
+
+Field   9:  `Comment`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     24576
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL BLOB BINARY 
+
+
++------+-------------+--------------------+-----+-----+------+------+---------------------------------+--+
+| id   | int         | NULL               | NO  | PRI | NULL |      | select,insert,update,references |  |
+| v    | varchar(20) | utf8mb4_0900_ai_ci | YES |     | NULL |      | select,insert,update,references |  |
++------+-------------+--------------------+-----+-----+------+------+---------------------------------+--+
+2 rows in set (0.00 sec)
+
+--------------
+DESCRIBE columns_meta
+--------------
+
+Field   1:  `Field`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 2
+Decimals:   0
+Flags:      
+
+Field   2:  `Type`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     67108860
+Max_length: 11
+Decimals:   0
+Flags:      NOT_NULL BLOB BINARY NO_DEFAULT_VALUE 
+
+Field   3:  `Null`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL 
+
+Field   4:  `Key`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL BINARY ENUM NO_DEFAULT_VALUE 
+
+Field   5:  `Default`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     262140
+Max_length: 0
+Decimals:   0
+Flags:      BLOB BINARY 
+
+Field   6:  `Extra`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     1024
+Max_length: 0
+Decimals:   0
+Flags:      
+
+
++------+-------------+-----+-----+------+------+
+| id   | int         | NO  | PRI | NULL |      |
+| v    | varchar(20) | YES |     | NULL |      |
++------+-------------+-----+-----+------+------+
+2 rows in set (0.00 sec)
+
+--------------
+SHOW COLUMNS FROM temp_meta
+--------------
+
+Field   1:  `Field`
+Catalog:    `def`
+Database:   `information_schema`
+Table:      `TMP_TABLE_COLUMNS`
+Org_table:  `TMP_TABLE_COLUMNS`
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 2
+Decimals:   0
+Flags:      NOT_NULL 
+
+Field   2:  `Type`
+Catalog:    `def`
+Database:   `information_schema`
+Table:      `TMP_TABLE_COLUMNS`
+Org_table:  `TMP_TABLE_COLUMNS`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     786420
+Max_length: 11
+Decimals:   0
+Flags:      NOT_NULL BLOB 
+
+Field   3:  `Null`
+Catalog:    `def`
+Database:   `information_schema`
+Table:      `TMP_TABLE_COLUMNS`
+Org_table:  `TMP_TABLE_COLUMNS`
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL 
+
+Field   4:  `Key`
+Catalog:    `def`
+Database:   `information_schema`
+Table:      `TMP_TABLE_COLUMNS`
+Org_table:  `TMP_TABLE_COLUMNS`
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL 
+
+Field   5:  `Default`
+Catalog:    `def`
+Database:   `information_schema`
+Table:      `TMP_TABLE_COLUMNS`
+Org_table:  `TMP_TABLE_COLUMNS`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     786420
+Max_length: 0
+Decimals:   0
+Flags:      BLOB 
+
+Field   6:  `Extra`
+Catalog:    `def`
+Database:   `information_schema`
+Table:      `TMP_TABLE_COLUMNS`
+Org_table:  `TMP_TABLE_COLUMNS`
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     160
+Max_length: 4
+Decimals:   0
+Flags:      NOT_NULL 
+
+
++----+-------------+-----+-----+------+------+
+| id | int         | NO  | PRI | NULL | NULL |
+| v  | varchar(20) | YES |     | NULL | NULL |
++----+-------------+-----+-----+------+------+
+2 rows in set (0.01 sec)
+
+--------------
+SHOW COLUMNS FROM view_meta
+--------------
+
+Field   1:  `Field`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 2
+Decimals:   0
+Flags:      
+
+Field   2:  `Type`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     67108860
+Max_length: 11
+Decimals:   0
+Flags:      NOT_NULL BLOB BINARY NO_DEFAULT_VALUE 
+
+Field   3:  `Null`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 3
+Decimals:   0
+Flags:      NOT_NULL 
+
+Field   4:  `Key`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL BINARY ENUM NO_DEFAULT_VALUE 
+
+Field   5:  `Default`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  `columns`
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     262140
+Max_length: 0
+Decimals:   0
+Flags:      BLOB BINARY 
+
+Field   6:  `Extra`
+Catalog:    `def`
+Database:   ``
+Table:      `COLUMNS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     1024
+Max_length: 0
+Decimals:   0
+Flags:      
+
+
++------+-------------+-----+--+------+------+
+| id   | int         | NO  |  | NULL |      |
+| v    | varchar(20) | YES |  | NULL |      |
++------+-------------+-----+--+------+------+
+2 rows in set (0.00 sec)
+
+Bye

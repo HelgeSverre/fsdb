@@ -6139,6 +6139,77 @@ module ContractCatalog =
           Cleanup = [| "DROP VIEW IF EXISTS absent_view"; "DROP TABLE IF EXISTS copied" |]
           Coverage = [| "statement:select", [| "text-differential" |]; "statement:drop-table", [| "text-differential" |]; "statement:create-view", [| "text-differential" |] |] }
 
+    let private alterCoercionFailures =
+        let cases =
+            [
+              "varchar--unique-True",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),UNIQUE KEY uq_v(v))"
+                    "INSERT INTO target VALUES(1,'aa'),(2,'ab'),(3,'zz')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1062, "23000"
+              "varchar-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'a'),(2,'bc'),(3,'de')"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1265, "01000"
+              "varchar-STRICT_ALL_TABLES-unique-True",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),UNIQUE KEY uq_v(v))"
+                    "INSERT INTO target VALUES(1,'aa'),(2,'ab'),(3,'zz')"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1265, "01000"
+              "varchar-spaces-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'a  '),(2,'b  ')"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1265, "01000"
+              "unicode-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'é'),(2,'🙂x')"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1265, "01000"
+              "binary-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))"
+                    "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v BINARY(1)", 1406, "22001"
+              "varbinary-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))"
+                    "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v VARBINARY(1)", 1265, "01000"
+              "integer-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v INT)"
+                    "INSERT INTO target VALUES(1,1),(2,200),(3,300)"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v TINYINT", 1264, "22003"
+              "numeric-text-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'1'),(2,'200'),(3,'x')"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v TINYINT", 1264, "22003"
+            ]
+        { Name = "alter-coercion-failures"
+          Setup = [||]
+          Steps =
+            [| for name, setup, statement, code, state in cases do
+                   for index, sql in List.indexed setup do
+                       yield Contract.execute (sprintf "%s-setup-%d" name index) sql
+                   yield Contract.execute name statement |> Contract.fails code state
+                   yield Contract.query (name + "-warnings") "SHOW WARNINGS"
+                   yield Contract.query (name + "-rows") "SELECT id,HEX(v) AS v FROM target ORDER BY id"
+                   yield Contract.query (name + "-definition") "SHOW COLUMNS FROM target LIKE 'v'" |]
+          Cleanup = [| "DROP TABLE IF EXISTS target"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
+
     let private qualifiedDuplicateKeys =
         let keyed =
             [ "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))"
@@ -6494,6 +6565,7 @@ module ContractCatalog =
     let all =
         [| missingTableDiagnostics
            qualifiedDuplicateKeys
+           alterCoercionFailures
            integerCastConditions
            triggerWarningLifetimes
            deleteIgnoreForeignKeys

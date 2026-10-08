@@ -6829,33 +6829,28 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | AddIndex index -> AddIndex(normalizeGeometryIndex table.Columns index)
         | action -> action
 
-    // ALTER uses 1265 for strict CHAR/VARCHAR narrowing; other conversions
-    // share the regular coercer's range checks and temporal rounding.
-    let recoerce (newDef: ColumnDef) (v: Value) : Result<Value, StorageError> =
-        let value =
-            match newDef.Type, v with
-            | (TChar n | TVarchar n), VString s ->
-                let text =
-                    match newDef.Type with
-                    | TChar _ -> s.TrimEnd([| ' ' |])
-                    | _ -> s
+    let recoerce (newDef: ColumnDef) (value: Value) =
+        let row = Diagnostics.currentRowNumber ()
+        let truncated column = ExpressionError(1265, sprintf "Data truncated for column '%s' at row %d" column row)
 
-                match truncateRunes n text with
-                | Some _ when mode.Strict -> Error(DataTruncatedForColumn newDef.Name)
-                | Some truncated -> Ok(VString truncated)
-                | None -> Ok(VString text)
-            | _ -> Ok v
-
-        value
-        |> Result.bind (coerceValueWithMode mode newDef)
+        coerceStoredValueWithMode mode newDef value
+        |> Result.mapError (fun error ->
+            match newDef.Type, error with
+            // ALTER reports 1265 for variable-width binary and character truncation.
+            | (TChar _ | TVarchar _ | TVarBinary _), DataTooLongForColumn(column, _)
+            | _, DataTruncatedForColumn column -> truncated column
+            | _, OutOfRangeForColumn column ->
+                ExpressionError(1264, sprintf "Out of range value for column '%s' at row %d" column row)
+            | _, error -> error)
 
     let mapRows transform =
         let builder = table.RowsArray.ToBuilder()
 
         table.RowsArray.Indexed
+        |> Seq.mapi (fun ordinal entry -> ordinal + 1, entry)
         |> List.ofSeq
-        |> traverse (fun (rowId, row) ->
-            transform row
+        |> traverse (fun (ordinal, (rowId, row)) ->
+            Diagnostics.withRowNumber ordinal (fun () -> transform row)
             |> Result.map (fun updated -> builder.[rowId] <- updated))
         |> Result.map (fun _ -> builder.DrainToImmutable())
 
@@ -6988,30 +6983,32 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
 
             resolvePosition columnsExcludingSelf oldIdx position
             |> Result.bind (fun newIdx ->
+                let candidate =
+                    { table with
+                        Columns = columnsExcludingSelf |> insertAt newIdx newDef
+                        Indexes = renameIndexColumn oldName newDef.Name table.Indexes }
+
+                let uniqueKeys =
+                    uniqueKeyGroups candidate
+                    |> List.map (fun group -> group, System.Collections.Generic.HashSet<string>(StringComparer.Ordinal))
+
+                let checkUnique row =
+                    uniqueKeys
+                    |> List.tryPick (fun (group, seen) ->
+                        match encodeUniqueKey candidate.Columns group row with
+                        | Some key when not (seen.Add key) ->
+                            Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices row))
+                        | _ -> None)
+                    |> function
+                        | Some error -> Error error
+                        | None -> Ok row
+
+                // Stop at the first conflicting row so later conversions emit no conditions.
                 mapRows (fun row ->
                     recoerce newDef row.[oldIdx]
-                    |> Result.map (fun value -> row |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx value |> Array.ofList))
-                |> Result.bind (fun rows ->
-                    let candidate =
-                        { table with
-                            Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                            RowsArray = rows
-                            Indexes = renameIndexColumn oldName newDef.Name table.Indexes }
-
-                    // A narrowing re-coercion that folds two unique-key
-                    // values together must fail with 1062 (MySQL errors even
-                    // non-strict) — otherwise `reindexTable`'s last-wins
-                    // rebuild would silently drop rows from the index.
-                    let collision =
-                        uniqueKeyGroups candidate
-                        |> List.tryPick (fun group ->
-                            rows
-                            |> tryDuplicateUniqueValue candidate.Columns group
-                            |> Option.map (fun value -> DuplicateKey(table.OriginalName, group.Name, value)))
-
-                    match collision with
-                    | Some e -> Error e
-                    | None -> Ok(candidate, None))))
+                    |> Result.map (fun value -> row |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx value |> Array.ofList)
+                    |> Result.bind checkUnique)
+                |> Result.map (fun rows -> { candidate with RowsArray = rows }, None)))
     | RenameTo newName -> Ok({ table with OriginalName = newName }, Some(normalizeTableName newName))
     | RenameColumnTo(oldName, newName) ->
         resolveColumn table.Columns oldName

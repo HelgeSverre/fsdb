@@ -3910,7 +3910,27 @@ let private probeResultMetadata session probe result =
                 ||| (if notNull then NotNullFlag else 0us)
             CollationId = Some Collation.binaryId }
 
+    let columnDefinitions name dbOverride =
+        let database, table = splitQualified (session.Database |> Option.defaultValue defaultDatabase) name
+        let database = dbOverride |> Option.map stripIdentifierQuotes |> Option.defaultValue database
+        let temporary = CatalogOverlay.containsTable session.TemporaryCatalog database table
+        let metadata = completeResultMetadata session result []
+
+        match result with
+        | ResultSet(columns, _) ->
+            List.map2 (fun name column ->
+                if name <> "Key" then column
+                else
+                    { column with
+                        TypeId = if temporary then TypeVarString else TypeString
+                        ColumnLength = 12u
+                        Flags = NotNullFlag ||| (if temporary then 0us else BinaryFlag ||| EnumFlag ||| NoDefaultValueFlag)
+                        Decimals = 0uy }) columns metadata
+        | _ -> metadata
+
     match probe with
+    | ShowColumns(_, name, dbOverride) -> columnDefinitions name dbOverride
+    | Describe name -> columnDefinitions name None
     | ShowConditions _ -> [ text 28u; unsignedInteger TypeLong 5u true; text 2048u ]
     | ShowMessageCount _ -> [ unsignedInteger TypeLongLong 21u false ]
     | _ -> completeResultMetadata session result []
