@@ -165,3 +165,38 @@ wire validation passes 66 cases / 8,445 steps with zero differences:
 An additional native routine probe shows that a second CALL on the same
 connection does not repeat the timeout-hint warning. Routine diagnostic lifetime
 and mixed-hint grammar remain open.
+
+## Stored-routine diagnostic lifetime
+
+Status: reproduced; runtime parity remains open.
+
+`select-timeout-routine-hints-oracle.py` pins seven scripts on native MySQL
+8.4.11 with a disposable 64 MiB buffer pool and redo capacity. Scripts use
+separate connections against one schema and compare exact output, including
+warning absence. The fixture rejects stderr even when the client uses `--force`.
+
+- CREATE PROCEDURE and CREATE FUNCTION emit 3125 for timeout hints in their
+  bodies. The first invocation on a connection emits the warning again;
+  subsequent invocations do not.
+- An unreachable IF branch still contributes a warning at declaration and
+  first invocation. Diagnostics belong to routine loading, not statement
+  execution within the selected branch.
+- A new connection gets its own first-invocation warning.
+- ALTER PROCEDURE restores the first-invocation warning. Creating or dropping
+  a different procedure also restores it. Creating an unrelated table does not.
+- Dropping and recreating the hinted procedure produces declaration and
+  first-invocation warnings for the replacement body.
+- Dynamic PREPARE inside a procedure emits its duplicate-hint warning each
+  time PREPARE runs; the enclosing routine declaration does not warn for the
+  hint text inside that string literal.
+
+The unchanged fsdb runtime reproduces the mismatch: declaration emits 3125,
+while both the first and second CALL leave SHOW WARNINGS empty. A correction
+must preserve connection-local lifetime and routine-DDL invalidation; emitting
+warnings for every nested SELECT or remembering each routine forever would
+contradict the native fixture. Stored-function parsing already has a global
+parsed-definition cache, whose lifetime cannot substitute for connection-local
+diagnostics.
+
+Validation: the maintained native fixture passes in full. No runtime code or
+known-gap allowlist changes accompany this evidence.
