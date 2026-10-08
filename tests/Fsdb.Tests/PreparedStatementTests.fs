@@ -631,6 +631,15 @@ let tests =
                   Expect.equal (handle session ("SELECT HEX(CONCAT(" + literal + "," + literal + ")) AS h") |> snd)
                       (ResultSet([ "h" ], [ [ Some expected ] ])) literal
 
+          testCase "Shift-JIS introduced hex rejects malformed byte sequences"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for charset in [ "sjis"; "cp932" ] do
+                  for bytes, fragment in [ "41817F42", "817F42"; "41804042", "804042" ] do
+                      let sql = "SELECT _" + charset + " X'" + bytes + "'"
+                      Expect.equal (handle session sql |> snd)
+                          (Err(1300, "Invalid " + charset + " character string: '" + fragment + "'")) sql
+
           testCase "Shift-JIS byte boundaries survive unmapped characters"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

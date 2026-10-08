@@ -442,6 +442,25 @@ let private unicodeScalarWidth charset (bytes: byte[]) offset =
         if codePoint <= 0x10FFFFu && Rune.IsValid(int codePoint) then Some 4 else None
     | _ -> None
 
+let private shiftJisCharacterWidth (bytes: byte[]) offset =
+    let lead = bytes.[offset]
+    if lead <= 0x7Fuy || (lead >= 0xA1uy && lead <= 0xDFuy) then Some 1
+    elif offset + 1 < bytes.Length then
+        let trail = bytes.[offset + 1]
+        let isLead = (lead >= 0x81uy && lead <= 0x9Fuy) || (lead >= 0xE0uy && lead <= 0xFCuy)
+        let isTrail = (trail >= 0x40uy && trail <= 0x7Euy) || (trail >= 0x80uy && trail <= 0xFCuy)
+        if isLead && isTrail then Some 2 else None
+    else None
+
+let private firstInvalidByte length characterWidth =
+    let mutable offset = 0
+    let mutable invalid = None
+    while offset < length && invalid.IsNone do
+        match characterWidth offset with
+        | Some width -> offset <- offset + width
+        | None -> invalid <- Some offset
+    invalid
+
 /// Invalid encoded bytes occupy individual characters; UCS2 uses code units.
 let characterByteOffsets name (bytes: byte[]) =
     let charset = canonicalName name
@@ -451,11 +470,8 @@ let characterByteOffsets name (bytes: byte[]) =
         offsets.Add offset
         let width =
             if charset = "ucs2" then min 2 (bytes.Length - offset)
-            elif (charset = "sjis" || charset = "cp932") && offset + 1 < bytes.Length then
-                let lead, trail = bytes.[offset], bytes.[offset + 1]
-                let isLead = (lead >= 0x81uy && lead <= 0x9Fuy) || (lead >= 0xE0uy && lead <= 0xFCuy)
-                let isTrail = (trail >= 0x40uy && trail <= 0x7Euy) || (trail >= 0x80uy && trail <= 0xFCuy)
-                if isLead && isTrail then 2 else 1
+            elif charset = "sjis" || charset = "cp932" then
+                shiftJisCharacterWidth bytes offset |> Option.defaultValue 1
             else unicodeScalarWidth charset bytes offset |> Option.defaultValue 1
         offset <- offset + width
     offsets.Add bytes.Length
@@ -478,14 +494,13 @@ let tryInvalidUnicodeByteOffset (name: string) (bytes: byte[]) =
 
     match charset with
     | "utf8mb3" | "utf8mb4" | "utf16" | "utf16le" | "utf32" ->
-        let mutable offset = 0
-        let mutable invalid = None
-        while offset < bytes.Length && invalid.IsNone do
-            match unicodeScalarWidth charset bytes offset with
-            | Some width -> offset <- offset + width
-            | None -> invalid <- Some offset
-        invalid
+        firstInvalidByte bytes.Length (unicodeScalarWidth charset bytes)
     | _ -> None
+
+let tryInvalidBinaryLiteralByteOffset name (bytes: byte[]) =
+    match canonicalName name with
+    | "sjis" | "cp932" -> firstInvalidByte bytes.Length (shiftJisCharacterWidth bytes)
+    | _ -> tryInvalidUnicodeByteOffset name bytes
 
 /// UCS-2 code units remain accepted even when they are isolated surrogates.
 let tryInvalidTextByteOffset name bytes =

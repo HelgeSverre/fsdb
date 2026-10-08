@@ -220,3 +220,17 @@ malformed Big5 `41A440FF42` and GBK `41D6D0FF42` introduced hex literals with
 1300/HY000; fsdb currently accepts both. Strict structural validation of
 legacy introduced literals remains open. The SJIS/CP932 matrix includes
 82 native rejection cases for that follow-up, alongside the accepted cases.
+
+### Shift-JIS literal validation
+
+SJIS and CP932 introduced hex/bit literals now use the same structural
+character-width rule as encoded string operations. ASCII and half-width kana
+are single bytes; valid lead/trail pairs remain accepted even without a
+platform Unicode mapping. Malformed sequences raise 1300/HY000 at the first
+invalid byte, with the native three-byte diagnostic preview.
+
+The shared invalid-byte scanner also serves Unicode validation. All 140
+native SJIS/CP932 boundary cases match, including 82 rejections. The full wire
+run passed 62 cases and 7,833 steps without differences; the root gate passed
+3,078 tests without build warnings or errors. Big5 and GBK malformed-literal
+validation remains open.

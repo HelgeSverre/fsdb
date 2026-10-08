@@ -45,7 +45,7 @@ let trySemanticError (detail: string) =
     | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
     | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
     | message when
-        [ "utf8mb3"; "utf8mb4"; "utf16"; "utf16le"; "utf32" ]
+        [ "utf8mb3"; "utf8mb4"; "utf16"; "utf16le"; "utf32"; "sjis"; "cp932" ]
         |> List.exists (fun charset -> message.StartsWith("Invalid " + charset + " character string: '", StringComparison.Ordinal)) ->
         Some(1300, message)
     | _ -> None
@@ -868,7 +868,7 @@ let private introducedStringLit: Parser<Expr, unit> =
             let invalidOffset =
                 match value with
                 | VString _ -> None
-                | _ -> Charset.tryInvalidUnicodeByteOffset charset bytes
+                | _ -> Charset.tryInvalidBinaryLiteralByteOffset charset bytes
             match invalidOffset with
             | Some offset ->
                 let fragment = Convert.ToHexString(bytes, offset, min 3 (bytes.Length - offset))
