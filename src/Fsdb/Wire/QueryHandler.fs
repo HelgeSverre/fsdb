@@ -3449,8 +3449,8 @@ let private directAutocommitTarget =
     | Insert(table, _, _, _, _)
     | Replace(table, _, _)
     | ReplaceSet(table, _) -> Some table
-    | Update { Ctes = []; Joins = []; From = source } -> Some source.Table
-    | Delete { Ctes = []; Joins = []; Targets = [ _ ]; From = source } -> Some source.Table
+    | Update { Ctes = []; Joins = []; From = source } -> Some(SqlText.objectName source.Database source.Table)
+    | Delete { Ctes = []; Joins = []; Targets = [ _ ]; From = source } -> Some(SqlText.objectName source.Database source.Table)
     | _ -> None
 
 let private canExecuteDirectAutocommit (session: Session) dbName statement =
@@ -3951,6 +3951,29 @@ let private probeResultMetadata session probe result =
     match probe with
     | ShowColumns(_, name, dbOverride) -> columnDefinitions name dbOverride
     | Describe name -> columnDefinitions name None
+    | ShowIndex _ ->
+        let indexText length flags =
+            { textResultMetadata session with ColumnLength = length; Flags = flags }
+        let indexNumber typeId length flags =
+            { Value.columnMetadata typeId with
+                ColumnLength = length
+                Flags = flags ||| NumFlag
+                CollationId = Some Collation.binaryId }
+        [ indexText 256u 0us
+          indexNumber TypeLong 2u NotNullFlag
+          indexText 256u 0us
+          indexNumber TypeLong 10u (NotNullFlag ||| UnsignedFlag ||| NoDefaultValueFlag)
+          indexText 256u 0us
+          indexText 4u 0us
+          indexNumber TypeLongLong 21u 0us
+          indexNumber TypeLongLong 21u 0us
+          indexNumber TypeNull 0u BinaryFlag
+          indexText 12u NotNullFlag
+          indexText 44u (NotNullFlag ||| BinaryFlag)
+          indexText 32u NotNullFlag
+          indexText 8192u (NotNullFlag ||| BinaryFlag ||| NoDefaultValueFlag)
+          indexText 12u NotNullFlag
+          { indexText UInt32.MaxValue (BlobFlag ||| BinaryFlag) with TypeId = TypeBlob } ]
     | ShowConditions _ -> [ text 28u; unsignedInteger TypeLong 5u true; text 2048u ]
     | ShowMessageCount _ -> [ unsignedInteger TypeLongLong 21u false ]
     | _ -> completeResultMetadata session result []

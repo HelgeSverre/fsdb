@@ -358,30 +358,11 @@ type DurableCommitSlot = { mutable Sink: DurableCommitSink option }
 
 let defaultDatabase = "fsdb"
 
-let internal stripIdentifierQuotes (s: string) =
-    let text = s.Trim()
+let internal stripIdentifierQuotes = SqlText.unquoteIdentifier
 
-    if
-        text.Length >= 2
-        && ((text.[0] = '`' && text.[text.Length - 1] = '`')
-            || (text.[0] = '"' && text.[text.Length - 1] = '"'))
-    then
-        text.Substring(1, text.Length - 2)
-    else
-        text
-
-/// Splits a `` `db`.`table` `` (or bare `table`) name into its two parts,
-/// defaulting the database to `defaultDb` — the one place every qualified
-/// name resolves through, whether it came from the real parser
-/// (`Parser.qualifiedTableName`, via `Executor.execute`) or a text-probed
-/// `SHOW ...`/`DESCRIBE` statement (`QueryHandler.dispatch`). Strips
-/// backticks per component, *after* splitting on `.`, not before —
-/// `` `shop`.`users` ``.Trim('`') first leaves `` shop`.`users `` (the
-/// backticks straddling the dot survive), which then splits wrong.
+/// Resolves a parsed or text-probed object name without splitting quoted dots.
 let splitQualified (defaultDb: string) (name: string) : string * string =
-    match name.Trim().Split('.') with
-    | [| db; tbl |] -> stripIdentifierQuotes db, stripIdentifierQuotes tbl
-    | _ -> defaultDb, stripIdentifierQuotes name
+    SqlText.splitObjectName defaultDb name
 
 type RowLockStripe =
     { SyncRoot: obj

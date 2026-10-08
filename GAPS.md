@@ -71,8 +71,10 @@ under `torture/findings/`.
 
 ## 1. SQL statements and parser
 
-Quoted table names containing a dot can be misinterpreted as database/table
-qualification; the [native identifier counterexample](torture/findings/2026-10-08-key-diagnostics.md#remaining-counterexamples) remains open.
+Quoted table targets preserve literal dots and escaped backticks through the
+[audited DDL, DML, view-write, and cross-database rename paths](torture/findings/2026-10-09-quoted-table-names.md).
+The same audit covers CREATE DATABASE affected counts and empty SHOW INDEX
+result types, including text collations paired with binary metadata flags.
 
 The application-facing DML surface includes `INSERT`/`REPLACE ... SET`, ODKU,
 `IGNORE`, and multi-table forms. `DELETE IGNORE` covers the

@@ -21817,7 +21817,7 @@ let rec executeAs
             if not access.Retarget then
                 statement
             else
-                let qualified = access.Database + "." + access.Table
+                let qualified = SqlText.objectName (Some access.Database) access.Table
 
                 match statement with
                 | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, columns, rows, updates, ignore)
@@ -21859,7 +21859,7 @@ let rec executeAs
                         { Database = target.Database
                           Table = target.Table
                           Qualifier = target.Qualifier
-                          View = view.ViewDatabase + "." + view.ViewName
+                          View = view.ViewDatabase + "." + normalizeTableName view.ViewName
                           CheckPredicate = checkPredicate
                           VisibilityPredicate = visibilityPredicate })
                     execute
@@ -21897,10 +21897,10 @@ let rec executeAs
 
     | CreateDatabase(name, ifNotExists, _) ->
         match Storage.createDatabase store name with
-        | Ok() -> ids, Affected 0UL
+        | Ok() -> ids, Affected 1UL
         | Error(DatabaseExists _) when ifNotExists ->
             Diagnostics.note 1007 (sprintf "Can't create database '%s'; database exists" name)
-            ids, Affected 0UL
+            ids, Affected 1UL
         | Error e -> ids, storageErr e
 
     | DropDatabase(name, ifExists) ->
@@ -22084,7 +22084,7 @@ let rec executeAs
     | CreateTable table ->
         let db, name = splitQualified dbName table.Name
 
-        match Map.containsKey (db.ToLowerInvariant()) store.Catalog, validateCreateEngine store name table.Partitioning table.RequestedEngine with
+        match Map.containsKey db store.Catalog, validateCreateEngine store name table.Partitioning table.RequestedEngine with
         | false, _ -> ids, storageErr (NoSuchDatabase db)
         | true, Some error -> ids, error
         | true, None ->
@@ -22395,7 +22395,7 @@ let rec executeAs
                     | _ -> alterTable snapshot db table physicalActions)
                 |> Result.bind (fun () ->
                     if crossesDatabases then
-                        renameTables snapshot db [ table, finalDb + "." + finalTable ]
+                        renameTables snapshot db [ SqlText.objectName None table, SqlText.objectName (Some finalDb) finalTable ]
                     else
                         Ok())
 
@@ -23073,7 +23073,7 @@ let rec executeAs
                     let rewritten =
                         LoadData
                             { load with
-                                Table = target.Database + "." + target.Table
+                                Table = SqlText.objectName (Some target.Database) target.Table
                                 Fields = baseFields
                                 Assignments = assignments }
 
@@ -23221,7 +23221,7 @@ let rec executeAs
                 | Error error, _
                 | _, Error error -> ids, error
                 | Ok(), Ok assignments ->
-                    let rewritten = Insert(target.Database + "." + target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
+                    let rewritten = Insert(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
                     executeViewWrite view target rewritten
 
@@ -23275,7 +23275,7 @@ let rec executeAs
                 | Error error, _
                 | _, Error error -> ids, error
                 | Ok(), Ok assignments ->
-                    let rewritten = InsertSelect(target.Database + "." + target.Table, baseColumns, select, assignments, ignoreDuplicates)
+                    let rewritten = InsertSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select, assignments, ignoreDuplicates)
 
                     executeViewWrite view target rewritten
 
@@ -23349,7 +23349,7 @@ let rec executeAs
             match resolveViewInsertTarget view viewColumns with
             | Error error -> ids, error
             | Ok(target, baseColumns) ->
-                let rewritten = Replace(target.Database + "." + target.Table, baseColumns, rowsExprs)
+                let rewritten = Replace(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs)
 
                 executeViewWrite view target rewritten
 
@@ -23377,7 +23377,7 @@ let rec executeAs
             match resolveViewInsertTarget view viewColumns with
             | Error error -> ids, error
             | Ok(target, baseColumns) ->
-                let rewritten = ReplaceSelect(target.Database + "." + target.Table, baseColumns, select)
+                let rewritten = ReplaceSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select)
 
                 executeViewWrite view target rewritten
 
@@ -23407,7 +23407,7 @@ let rec executeAs
             | Error error, _
             | _, Error error -> ids, error
             | Ok(target, _), Ok rewrittenAssignments ->
-                let rewritten = ReplaceSet(target.Database + "." + target.Table, rewrittenAssignments)
+                let rewritten = ReplaceSet(SqlText.objectName (Some target.Database) target.Table, rewrittenAssignments)
 
                 executeViewWrite view target rewritten
 

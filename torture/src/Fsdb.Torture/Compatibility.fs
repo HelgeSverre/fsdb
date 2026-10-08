@@ -6144,7 +6144,7 @@ module ContractCatalog =
                for index, sql in List.indexed statements do
                    let label = sprintf "%s-%d" name index
                    let operation =
-                       if sql.StartsWith("SHOW", StringComparison.Ordinal) || sql.StartsWith("SELECT", StringComparison.Ordinal) then Contract.query label sql
+                       if sql.StartsWith("SHOW", StringComparison.Ordinal) || sql.StartsWith("SELECT", StringComparison.Ordinal) || sql.StartsWith("DESCRIBE", StringComparison.Ordinal) then Contract.query label sql
                        else Contract.execute label sql
                    let step =
                        match error with
@@ -6613,6 +6613,120 @@ module ContractCatalog =
                    yield Contract.query (name + "-rows") ("SELECT id,n FROM " + table + " ORDER BY id") |]
           Cleanup = [| "DROP TABLE IF EXISTS target"; "DROP TABLE IF EXISTS renamed"; "DROP TABLE IF EXISTS parent"; "SET foreign_key_checks=1" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
+
+    let private quotedTableNames =
+        let reset =
+            [ "USE quoted_names_probe"
+              "DROP VIEW IF EXISTS `Odd.View`"
+              "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain" ]
+        let cases =
+            [
+              "duplicate", Some(5, 1062, "23000"),
+                  [ "CREATE TABLE `Odd.Table`(n INT, UNIQUE KEY `Odd.Key`(n))"
+                    "INSERT INTO `Odd.Table` VALUES(1)"
+                    "INSERT INTO `Odd.Table` VALUES(1)"
+                    "SHOW WARNINGS" ]
+              "qualified", None,
+                  [ "CREATE TABLE quoted_names_probe.`Odd.Table`(n INT)"
+                    "INSERT INTO `quoted_names_probe`.`Odd.Table` VALUES(1)"
+                    "SELECT n FROM quoted_names_probe.`Odd.Table`"
+                    "UPDATE quoted_names_probe.`Odd.Table` SET n=2"
+                    "SELECT `Odd.Table`.n FROM `Odd.Table`"
+                    "DELETE FROM quoted_names_probe.`Odd.Table` WHERE n=2"
+                    "SELECT COUNT(*) AS n FROM `Odd.Table`" ]
+              "escaped", None,
+                  [ "CREATE TABLE `Odd``.Table`(n INT)"
+                    "INSERT INTO `Odd``.Table` VALUES(1)"
+                    "SELECT n FROM `Odd``.Table`"
+                    "ALTER TABLE `Odd``.Table` ADD v INT DEFAULT 7"
+                    "SELECT * FROM `Odd``.Table`"
+                    "DESCRIBE `Odd``.Table`" ]
+              "rename", None,
+                  [ "CREATE TABLE `Odd.Table`(n INT)"
+                    "INSERT INTO `Odd.Table` VALUES(1)"
+                    "RENAME TABLE `Odd.Table` TO `New.Table`"
+                    "SELECT n FROM `New.Table`"
+                    "ALTER TABLE `New.Table` RENAME TO `Odd.Table`"
+                    "SELECT n FROM `Odd.Table`" ]
+              "like", None,
+                  [ "CREATE TABLE `Odd.Table`(n INT)"
+                    "CREATE TABLE `New.Table` LIKE `Odd.Table`"
+                    "INSERT INTO `New.Table` VALUES(2)"
+                    "SELECT n FROM `New.Table`" ]
+              "view", None,
+                  [ "CREATE TABLE `Odd.Table`(n INT)"
+                    "CREATE VIEW `Odd.View` AS SELECT n FROM `Odd.Table`"
+                    "INSERT INTO `Odd.View` VALUES(3)"
+                    "SELECT n FROM `Odd.View`"
+                    "UPDATE `Odd.View` SET n=4"
+                    "SELECT n FROM `Odd.Table`" ]
+              "show", None,
+                  [ "CREATE TABLE `Odd.Table`(n INT)"
+                    "SHOW COLUMNS FROM `Odd.Table`"
+                    "SHOW INDEX FROM quoted_names_probe.`Odd.Table`"
+                    "SHOW CREATE TABLE `Odd.Table`" ]
+              "truncate", None,
+                  [ "CREATE TABLE `Odd.Table`(n INT)"
+                    "INSERT INTO `Odd.Table` VALUES(1)"
+                    "TRUNCATE TABLE `Odd.Table`"
+                    "SELECT COUNT(*) AS n FROM `Odd.Table`"
+                    "DROP TABLE `Odd.Table`" ]
+              "foreign", None,
+                  [ "CREATE TABLE `Odd.Table`(n INT PRIMARY KEY)"
+                    "CREATE TABLE plain(n INT, CONSTRAINT fk FOREIGN KEY(n) REFERENCES `Odd.Table`(n))"
+                    "INSERT INTO `Odd.Table` VALUES(1)"
+                    "INSERT INTO plain VALUES(1)"
+                    "SELECT n FROM plain"
+                    "DROP TABLE plain" ]
+              "missing-select", Some(3, 1146, "42S02"),
+                  [ "SELECT * FROM `Missing.Table`"
+                    "SHOW WARNINGS" ]
+              "missing-insert", Some(3, 1146, "42S02"),
+                  [ "INSERT INTO `Missing.Table` VALUES(1)"
+                    "SHOW WARNINGS" ]
+              "ansi", None,
+                  [ "SET sql_mode='ANSI_QUOTES'"
+                    "CREATE TABLE \"Odd.Table\"(n INT)"
+                    "INSERT INTO \"Odd.Table\" VALUES(1)"
+                    "SELECT n FROM \"Odd.Table\"" ]
+              "backtick", None,
+                  [ "CREATE TABLE `Odd``.Table`(n INT)"
+                    "CREATE TABLE `New.Table` AS SELECT * FROM `Odd``.Table`"
+                    "INSERT INTO `New.Table` VALUES(8)"
+                    "SELECT n FROM `New.Table`" ]
+              "view-check", Some(5, 1369, "HY000"),
+                  [ "CREATE TABLE `Odd.Table`(n INT)"
+                    "CREATE VIEW `Odd.View` AS SELECT n FROM `Odd.Table` WHERE n>0 WITH CHECK OPTION"
+                    "INSERT INTO `Odd.View` VALUES(-1)"
+                    "SHOW WARNINGS" ]
+              "cross-schema", None,
+                  [ "CREATE DATABASE IF NOT EXISTS quoted_names_other"
+                    "DROP TABLE IF EXISTS quoted_names_other.`New.Table`"
+                    "CREATE TABLE `Odd.Table`(n INT)"
+                    "INSERT INTO `Odd.Table` VALUES(9)"
+                    "ALTER TABLE `Odd.Table` RENAME TO quoted_names_other.`New.Table`"
+                    "SELECT n FROM quoted_names_other.`New.Table`"
+                    "RENAME TABLE quoted_names_other.`New.Table` TO quoted_names_probe.`Odd.Table`"
+                    "SELECT n FROM `Odd.Table`" ]
+              "distinct", None,
+                  [ "CREATE DATABASE IF NOT EXISTS quoted_names_odd"
+                    "DROP TABLE IF EXISTS quoted_names_odd.Target, `quoted_names_odd.Target`"
+                    "CREATE TABLE quoted_names_odd.Target(n INT)"
+                    "CREATE TABLE `quoted_names_odd.Target`(n INT)"
+                    "INSERT INTO quoted_names_odd.Target VALUES(1)"
+                    "INSERT INTO `quoted_names_odd.Target` VALUES(2)"
+                    "SELECT n FROM quoted_names_odd.Target"
+                    "SELECT n FROM `quoted_names_odd.Target`"
+                    "DROP TABLE quoted_names_odd.Target, `quoted_names_odd.Target`" ]
+            ]
+        { Name = "quoted-table-names"
+          Setup = [| "CREATE DATABASE quoted_names_probe" |]
+          Steps = cases |> List.map (fun (name, error, statements) -> name, error, reset @ statements) |> isolatedScriptSteps
+          Cleanup =
+            [| "DROP DATABASE IF EXISTS quoted_names_probe"
+               "DROP DATABASE IF EXISTS quoted_names_other"
+               "DROP DATABASE IF EXISTS quoted_names_odd" |]
+          Coverage = [| "statement:create-table", [| "text-differential" |] |] }
 
     let private expressionAssignmentWarnings =
         let cases =
@@ -7392,6 +7506,7 @@ module ContractCatalog =
            hexNumericConversion
            hexExpressionConversion
            expressionAssignmentWarnings
+           quotedTableNames
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings

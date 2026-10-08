@@ -25,7 +25,93 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "Expression assignments warn per syntax occurrence"
+        [ testCase "Quoted table targets retain dots and escaped backticks"
+          <| fun _ ->
+              for name in [ "Odd.Table"; "Odd`.Table" ] do
+                  let quoted = "`" + name.Replace("`", "``") + "`"
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, result = handle session (sprintf "CREATE TABLE %s(n INT, UNIQUE KEY `Odd.Key`(n))" quoted)
+                  Expect.isNone (errorInfo result) "quoted table created"
+                  let session, result = handle session (sprintf "INSERT INTO %s VALUES(1)" quoted)
+                  Expect.isNone (errorInfo result) "quoted table populated"
+                  let session, result = handle session (sprintf "INSERT INTO %s VALUES(1)" quoted)
+                  Expect.equal (errorInfo result |> Option.map _.Code) (Some 1062) "duplicate key"
+                  Expect.equal (session.Diagnostics |> List.map _.Message)
+                      [ sprintf "Duplicate entry '1' for key '%s.Odd.Key'" (name.ToLowerInvariant()) ] "literal dot survives diagnostics"
+                  let _, result = handle session (sprintf "SELECT n FROM %s" quoted)
+                  Expect.equal result (ResultSet([ "n" ], [ [ Some "1" ] ])) "same table resolved for reading"
+
+          testCase "Quoted view writes and cross-schema renames retain table identity"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  Expect.isNone (errorInfo result) sql
+                  result
+              for sql in
+                  [ "CREATE DATABASE other"
+                    "CREATE TABLE `Odd.Table`(n INT)"
+                    "CREATE VIEW `Odd.View` AS SELECT n FROM `Odd.Table`"
+                    "INSERT INTO `Odd.View` VALUES(3)"
+                    "ALTER TABLE `Odd.Table` RENAME TO other.`New.Table`" ] do
+                  run sql |> ignore
+              Expect.equal (run "SELECT n FROM other.`New.Table`")
+                  (ResultSet([ "n" ], [ [ Some "3" ] ])) "view write and rename use the same physical table"
+
+          testCase "Quoted dots remain distinct from database qualification"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE DATABASE Odd"
+                    "CREATE TABLE Odd.Target(n INT)"
+                    "CREATE TABLE `Odd.Target`(n INT)"
+                    "INSERT INTO Odd.Target VALUES(1)"
+                    "INSERT INTO `Odd.Target` VALUES(2)" ] do
+                  Expect.isNone (run sql |> errorInfo) sql
+              Expect.equal (run "SELECT n FROM Odd.Target") (ResultSet([ "n" ], [ [ Some "1" ] ])) "qualified target"
+              Expect.equal (run "SELECT n FROM `Odd.Target`") (ResultSet([ "n" ], [ [ Some "2" ] ])) "literal dot"
+
+          testCase "CHECK OPTION diagnostics normalize the view name"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE checked(n INT)"
+              let session, _ = handle session "CREATE VIEW `Odd.View` AS SELECT n FROM checked WHERE n>0 WITH CHECK OPTION"
+              let _, result = handle session "INSERT INTO `Odd.View` VALUES(-1)"
+              Expect.equal (errorInfo result |> Option.map (fun error -> error.Code, error.Message))
+                  (Some(1369, "CHECK OPTION failed 'fsdb.odd.view'")) "physical view identity"
+
+          testCase "CREATE DATABASE reports one affected row even when it already exists"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "CREATE DATABASE counted"
+              Expect.equal result (Affected 1UL) "created database"
+              let _, count = handle session "SELECT ROW_COUNT()"
+              Expect.equal count (ResultSet([ "ROW_COUNT()" ], [ [ Some "1" ] ])) "created count"
+              let session, result = handle session "CREATE DATABASE IF NOT EXISTS counted"
+              Expect.equal result (Affected 1UL) "existing database"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1007 ] "existing database note"
+              let _, count = handle session "SELECT ROW_COUNT()"
+              Expect.equal count (ResultSet([ "ROW_COUNT()" ], [ [ Some "1" ] ])) "existing count"
+
+          testCase "SHOW INDEX declares numeric types for empty results"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE unindexed(n INT)"
+              let session, result = handle session "SHOW INDEX FROM unindexed"
+              match result with
+              | ResultSet(_, rows) -> Expect.isEmpty rows "no index rows"
+              | other -> failtestf "expected SHOW INDEX result, got %A" other
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId)
+                  [ TypeVarString; TypeLong; TypeVarString; TypeLong; TypeVarString; TypeVarString
+                    TypeLongLong; TypeLongLong; TypeNull; TypeVarString; TypeVarString
+                    TypeVarString; TypeVarString; TypeVarString; TypeBlob ] "native declared types survive empty rows"
+
+          testCase "Expression assignments warn per syntax occurrence"
           <| fun _ ->
               for sql, expected in
                   [ "SELECT @a:=1 AS value", 1
@@ -240,11 +326,10 @@ let tests =
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE DATABASE diagnostics_db"
-              let session =
-                  handle session "CREATE DATABASE IF NOT EXISTS diagnostics_db"
-                  |> expectAffectedWithConditions
-                      "existing database is ignored"
-                      [ note 1007 "Can't create database 'diagnostics_db'; database exists" ]
+              let session, result = handle session "CREATE DATABASE IF NOT EXISTS diagnostics_db"
+              Expect.equal result (Affected 1UL) "existing database reports one affected row"
+              Expect.equal (conditionTriples session)
+                  [ note 1007 "Can't create database 'diagnostics_db'; database exists" ] "existing database note"
 
               let session, _ = handle session "CREATE TABLE diagnostics_table (id INT)"
               let session =

@@ -1,6 +1,6 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "0e412e45",
+  "fsdb_base_revision": "b88484cf",
   "fsdb_dirty": true,
   "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
   "cases": [
@@ -190,23 +190,15 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1049\tUnknown database 'Odd'\n",
+      "actual": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'odd.table.Odd.Key'\n",
       "errors": [
         {
-          "Item1": 1049,
-          "Item2": "42000"
-        },
-        {
-          "Item1": 1049,
-          "Item2": "42000"
-        },
-        {
-          "Item1": 1049,
-          "Item2": "42000"
+          "Item1": 1062,
+          "Item2": "23000"
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'odd.table.Odd.Key'\n",
-      "matches": false,
+      "matches": true,
       "name": "odd-name",
       "statements": [
         "USE probe",

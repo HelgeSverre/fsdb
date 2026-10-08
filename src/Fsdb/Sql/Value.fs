@@ -1195,6 +1195,7 @@ let internal carriesRawBytes metadata =
         || typeId = TypeVarString
         || typeId = TypeBlob ->
         hasMetadataFlag BinaryFlag metadata
+        && (metadata.CollationId |> Option.forall ((=) Fsdb.Collation.binaryId))
     | _ -> false
 
 let columnMetadata typeId =

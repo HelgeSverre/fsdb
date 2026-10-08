@@ -734,18 +734,12 @@ let private identifier: Parser<string, unit> =
 let private qualifiedIdentifier: Parser<string, unit> =
     (backtickIdent <|> many1Satisfy2 isIdentStart isIdentChar) .>> ws
 
-/// `[db.]table` — like `tableRef` below but with no alias, for statements
-/// that target exactly one table rather than projecting columns (DDL,
-/// INSERT/UPDATE/DELETE/TRUNCATE). Encoded as a single "db.table" string
-/// rather than widening every `Ast.Statement` table field to a record —
-/// `Storage.splitQualified` peels it back apart right before resolving
-/// against `Storage`, which already takes database and table name as two
-/// separate arguments everywhere.
+/// Retains component quoting until the target is resolved against the catalog.
 let private qualifiedTableName: Parser<string, unit> =
     (identifier .>>. opt (sym "." >>. qualifiedIdentifier))
     |>> function
-        | first, Some second -> first + "." + second
-        | first, None -> first
+        | first, Some second -> SqlText.objectName (Some first) second
+        | first, None -> SqlText.objectName None first
 
 // ---------------------------------------------------------------------------
 // Literals

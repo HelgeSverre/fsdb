@@ -99,6 +99,40 @@ let private sameName (left: string) (right: string) = String.Equals(left, right,
 let private identifier (value: string) = "`" + value.Replace("`", "``") + "`"
 let private identifiers (values: string list) = values |> List.map identifier |> String.concat ","
 
+/// Quotes components whose spelling would otherwise be mistaken for qualification.
+let objectName database (name: string) =
+    let render (value: string) =
+        if value.Contains('.') || value.Contains('`') || value.Contains('"') || value.Trim() <> value then identifier value
+        else value
+    let prefix = database |> Option.map (fun schema -> render schema + ".") |> Option.defaultValue ""
+    prefix + render name
+
+let unquoteIdentifier (value: string) =
+    let text = value.Trim()
+    if text.Length >= 2 && (text.[0] = '`' || text.[0] = '"') && text.[text.Length - 1] = text.[0] then
+        let quote = string text.[0]
+        text.Substring(1, text.Length - 2).Replace(quote + quote, quote)
+    else text
+
+/// Separators inside quoted components are part of the identifier.
+let splitObjectName defaultDatabase (name: string) =
+    let rec components start index quote parts =
+        if index = name.Length then List.rev (name.Substring(start) :: parts)
+        else
+            let current = name.[index]
+            match quote with
+            | Some delimiter when current = delimiter ->
+                if index + 1 < name.Length && name.[index + 1] = delimiter then
+                    components start (index + 2) quote parts
+                else components start (index + 1) None parts
+            | Some _ -> components start (index + 1) quote parts
+            | None when current = '`' || current = '"' -> components start (index + 1) (Some current) parts
+            | None when current = '.' -> components (index + 1) (index + 1) None (name.Substring(start, index - start) :: parts)
+            | None -> components start (index + 1) None parts
+    match components 0 0 None [] with
+    | [ database; table ] -> unquoteIdentifier database, unquoteIdentifier table
+    | _ -> defaultDatabase, unquoteIdentifier name
+
 let private directionSuffix =
     function
     | Asc -> ""

@@ -1,0 +1,288 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "b88484cf",
+  "fsdb_dirty": true,
+  "comparison": "rendered result rows and conditions, numeric error codes, and SQLSTATEs",
+  "cases": [
+    {
+      "actual": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'odd.table.Odd.Key'\n",
+      "errors": [
+        {
+          "Item1": 1062,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'odd.table.Odd.Key'\n",
+      "matches": true,
+      "name": "duplicate",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd.Table`(n INT, UNIQUE KEY `Odd.Key`(n))",
+        "INSERT INTO `Odd.Table` VALUES(1)",
+        "INSERT INTO `Odd.Table` VALUES(1)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nn\n2\nn\n0\n",
+      "errors": [],
+      "expected": "n\n1\nn\n2\nn\n0\n",
+      "matches": true,
+      "name": "qualified",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE probe.`Odd.Table`(n INT)",
+        "INSERT INTO `probe`.`Odd.Table` VALUES(1)",
+        "SELECT n FROM probe.`Odd.Table`",
+        "UPDATE probe.`Odd.Table` SET n=2",
+        "SELECT `Odd.Table`.n FROM `Odd.Table`",
+        "DELETE FROM probe.`Odd.Table` WHERE n=2",
+        "SELECT COUNT(*) AS n FROM `Odd.Table`"
+      ]
+    },
+    {
+      "actual": "n\n1\nn\tv\n1\t7\nField\tType\tNull\tKey\tDefault\tExtra\nn\tint\tYES\t\tNULL\t\nv\tint\tYES\t\t7\t\n",
+      "errors": [],
+      "expected": "n\n1\nn\tv\n1\t7\nField\tType\tNull\tKey\tDefault\tExtra\nn\tint\tYES\t\tNULL\t\nv\tint\tYES\t\t7\t\n",
+      "matches": true,
+      "name": "escaped",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd``.Table`(n INT)",
+        "INSERT INTO `Odd``.Table` VALUES(1)",
+        "SELECT n FROM `Odd``.Table`",
+        "ALTER TABLE `Odd``.Table` ADD v INT DEFAULT 7",
+        "SELECT * FROM `Odd``.Table`",
+        "DESCRIBE `Odd``.Table`"
+      ]
+    },
+    {
+      "actual": "n\n1\nn\n1\n",
+      "errors": [],
+      "expected": "n\n1\nn\n1\n",
+      "matches": true,
+      "name": "rename",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd.Table`(n INT)",
+        "INSERT INTO `Odd.Table` VALUES(1)",
+        "RENAME TABLE `Odd.Table` TO `New.Table`",
+        "SELECT n FROM `New.Table`",
+        "ALTER TABLE `New.Table` RENAME TO `Odd.Table`",
+        "SELECT n FROM `Odd.Table`"
+      ]
+    },
+    {
+      "actual": "n\n2\n",
+      "errors": [],
+      "expected": "n\n2\n",
+      "matches": true,
+      "name": "like",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd.Table`(n INT)",
+        "CREATE TABLE `New.Table` LIKE `Odd.Table`",
+        "INSERT INTO `New.Table` VALUES(2)",
+        "SELECT n FROM `New.Table`"
+      ]
+    },
+    {
+      "actual": "n\n3\nn\n4\n",
+      "errors": [],
+      "expected": "n\n3\nn\n4\n",
+      "matches": true,
+      "name": "view",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd.Table`(n INT)",
+        "CREATE VIEW `Odd.View` AS SELECT n FROM `Odd.Table`",
+        "INSERT INTO `Odd.View` VALUES(3)",
+        "SELECT n FROM `Odd.View`",
+        "UPDATE `Odd.View` SET n=4",
+        "SELECT n FROM `Odd.Table`"
+      ]
+    },
+    {
+      "actual": "Field\tType\tNull\tKey\tDefault\tExtra\nn\tint\tYES\t\tNULL\t\nTable\tCreate Table\nOdd.Table\tCREATE TABLE `Odd.Table` (\n  `n` int DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci\n",
+      "errors": [],
+      "expected": "Field\tType\tNull\tKey\tDefault\tExtra\nn\tint\tYES\t\tNULL\t\nTable\tCreate Table\nOdd.Table\tCREATE TABLE `Odd.Table` (\n  `n` int DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci\n",
+      "matches": true,
+      "name": "show",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd.Table`(n INT)",
+        "SHOW COLUMNS FROM `Odd.Table`",
+        "SHOW INDEX FROM probe.`Odd.Table`",
+        "SHOW CREATE TABLE `Odd.Table`"
+      ]
+    },
+    {
+      "actual": "n\n0\n",
+      "errors": [],
+      "expected": "n\n0\n",
+      "matches": true,
+      "name": "truncate",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd.Table`(n INT)",
+        "INSERT INTO `Odd.Table` VALUES(1)",
+        "TRUNCATE TABLE `Odd.Table`",
+        "SELECT COUNT(*) AS n FROM `Odd.Table`",
+        "DROP TABLE `Odd.Table`"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "foreign",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd.Table`(n INT PRIMARY KEY)",
+        "CREATE TABLE plain(n INT, CONSTRAINT fk FOREIGN KEY(n) REFERENCES `Odd.Table`(n))",
+        "INSERT INTO `Odd.Table` VALUES(1)",
+        "INSERT INTO plain VALUES(1)",
+        "SELECT n FROM plain",
+        "DROP TABLE plain"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.missing.table' doesn't exist\nLevel\tCode\tMessage\nError\t1146\tTable 'probe.missing.table' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        },
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.missing.table' doesn't exist\nLevel\tCode\tMessage\nError\t1146\tTable 'probe.missing.table' doesn't exist\n",
+      "matches": true,
+      "name": "missing",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "SELECT * FROM `Missing.Table`",
+        "SHOW WARNINGS",
+        "INSERT INTO `Missing.Table` VALUES(1)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "ansi",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "SET sql_mode='ANSI_QUOTES'",
+        "CREATE TABLE \"Odd.Table\"(n INT)",
+        "INSERT INTO \"Odd.Table\" VALUES(1)",
+        "SELECT n FROM \"Odd.Table\""
+      ]
+    },
+    {
+      "actual": "n\n8\n",
+      "errors": [],
+      "expected": "n\n8\n",
+      "matches": true,
+      "name": "backtick",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd``.Table`(n INT)",
+        "CREATE TABLE `New.Table` AS SELECT * FROM `Odd``.Table`",
+        "INSERT INTO `New.Table` VALUES(8)",
+        "SELECT n FROM `New.Table`"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1369\tCHECK OPTION failed 'probe.odd.view'\n",
+      "errors": [
+        {
+          "Item1": 1369,
+          "Item2": "HY000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1369\tCHECK OPTION failed 'probe.odd.view'\n",
+      "matches": true,
+      "name": "view-check",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE TABLE `Odd.Table`(n INT)",
+        "CREATE VIEW `Odd.View` AS SELECT n FROM `Odd.Table` WHERE n>0 WITH CHECK OPTION",
+        "INSERT INTO `Odd.View` VALUES(-1)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9\nn\n9\n",
+      "errors": [],
+      "expected": "n\n9\nn\n9\n",
+      "matches": true,
+      "name": "cross-schema",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE DATABASE IF NOT EXISTS other",
+        "DROP TABLE IF EXISTS other.`New.Table`",
+        "CREATE TABLE `Odd.Table`(n INT)",
+        "INSERT INTO `Odd.Table` VALUES(9)",
+        "ALTER TABLE `Odd.Table` RENAME TO other.`New.Table`",
+        "SELECT n FROM other.`New.Table`",
+        "RENAME TABLE other.`New.Table` TO probe.`Odd.Table`",
+        "SELECT n FROM `Odd.Table`"
+      ]
+    },
+    {
+      "actual": "n\n1\nn\n2\n",
+      "errors": [],
+      "expected": "n\n1\nn\n2\n",
+      "matches": true,
+      "name": "distinct",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS `Odd.View`",
+        "DROP TABLE IF EXISTS `Odd.Table`, `New.Table`, `Odd``.Table`, plain",
+        "CREATE DATABASE IF NOT EXISTS Odd",
+        "DROP TABLE IF EXISTS Odd.Target, `Odd.Target`",
+        "CREATE TABLE Odd.Target(n INT)",
+        "CREATE TABLE `Odd.Target`(n INT)",
+        "INSERT INTO Odd.Target VALUES(1)",
+        "INSERT INTO `Odd.Target` VALUES(2)",
+        "SELECT n FROM Odd.Target",
+        "SELECT n FROM `Odd.Target`",
+        "DROP TABLE Odd.Target, `Odd.Target`"
+      ]
+    }
+  ]
+}

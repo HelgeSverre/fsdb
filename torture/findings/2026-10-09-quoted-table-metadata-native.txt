@@ -1,0 +1,257 @@
+version: '8.4.11'
+--------------
+CREATE TABLE index_types(n INT)
+--------------
+
+Query OK, 0 rows affected (0.00 sec)
+
+--------------
+SHOW INDEX FROM index_types
+--------------
+
+Field   1:  `Table`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 0
+Decimals:   0
+Flags:
+
+Field   2:  `Non_unique`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       LONG
+Collation:  binary (63)
+Length:     2
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL NUM
+
+Field   3:  `Key_name`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 0
+Decimals:   0
+Flags:
+
+Field   4:  `Seq_in_index`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  `index_column_usage`
+Type:       LONG
+Collation:  binary (63)
+Length:     10
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL UNSIGNED NO_DEFAULT_VALUE NUM
+
+Field   5:  `Column_name`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     256
+Max_length: 0
+Decimals:   0
+Flags:
+
+Field   6:  `Collation`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     4
+Max_length: 0
+Decimals:   0
+Flags:
+
+Field   7:  `Cardinality`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       LONGLONG
+Collation:  binary (63)
+Length:     21
+Max_length: 0
+Decimals:   0
+Flags:      NUM
+
+Field   8:  `Sub_part`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       LONGLONG
+Collation:  binary (63)
+Length:     21
+Max_length: 0
+Decimals:   0
+Flags:      NUM
+
+Field   9:  `Packed`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       NULL
+Collation:  binary (63)
+Length:     0
+Max_length: 0
+Decimals:   0
+Flags:      BINARY NUM
+
+Field  10:  `Null`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL
+
+Field  11:  `Index_type`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     44
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL BINARY
+
+Field  12:  `Comment`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     32
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL
+
+Field  13:  `Index_comment`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  `indexes`
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     8192
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL BINARY NO_DEFAULT_VALUE
+
+Field  14:  `Visible`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       VAR_STRING
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     12
+Max_length: 0
+Decimals:   0
+Flags:      NOT_NULL
+
+Field  15:  `Expression`
+Catalog:    `def`
+Database:   ``
+Table:      `SHOW_STATISTICS`
+Org_table:  ``
+Type:       BLOB
+Collation:  utf8mb4_0900_ai_ci (255)
+Length:     4294967295
+Max_length: 0
+Decimals:   0
+Flags:      BLOB BINARY
+
+
+0 rows in set (0.00 sec)
+
+--------------
+CREATE DATABASE count_probe
+--------------
+
+Query OK, 1 row affected (0.00 sec)
+
+--------------
+SELECT ROW_COUNT() AS created
+--------------
+
+Field   1:  `created`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       LONGLONG
+Collation:  binary (63)
+Length:     21
+Max_length: 1
+Decimals:   0
+Flags:      NOT_NULL BINARY NUM
+
+
++---------+
+| created |
++---------+
+|       1 |
++---------+
+1 row in set (0.00 sec)
+
+--------------
+CREATE DATABASE IF NOT EXISTS count_probe
+--------------
+
+Query OK, 1 row affected, 1 warning (0.00 sec)
+
+--------------
+SELECT ROW_COUNT() AS existing
+--------------
+
+Field   1:  `existing`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       LONGLONG
+Collation:  binary (63)
+Length:     21
+Max_length: 1
+Decimals:   0
+Flags:      NOT_NULL BINARY NUM
+
+
++----------+
+| existing |
++----------+
+|        1 |
++----------+
+1 row in set (0.00 sec)
+
+Bye
+
+Full-text native oracle passed

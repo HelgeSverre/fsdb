@@ -466,6 +466,31 @@ let tests =
               reader.ReadLenEncInt() |> ignore
               Expect.equal (reader.ReadInt16LE()) 255 "dictionary ENUM remains text for connectors"
 
+          testCase "text collations retain binary flags without changing payload encoding"
+          <| fun _ ->
+              for typeId in [ TypeVarString; TypeBlob ] do
+                  let metadata =
+                      { columnMetadata typeId with
+                          Flags = BinaryFlag
+                          CollationId = Some 255us }
+                  let definition = Reader(columnDefPayload { Name = "Comment"; Metadata = metadata })
+                  for _ in 1..6 do definition.ReadLenEncString() |> ignore
+                  definition.ReadLenEncInt() |> ignore
+                  Expect.equal (definition.ReadInt16LE()) 255 "explicit text collation wins over the binary flag"
+                  definition.ReadInt32LE() |> ignore
+                  definition.ReadByte() |> ignore
+                  Expect.isTrue (definition.ReadInt16LE() &&& int BinaryFlag <> 0) "native binary flag remains"
+                  let value = "blåbær"
+                  let expected = Text.Encoding.UTF8.GetBytes value
+                  for binary in [ false; true ] do
+                      let payload =
+                          if binary then binaryRowPayload [ metadata ] [ Some value ]
+                          else textRowPayloadTyped [ metadata ] [ Some value ]
+                      let reader = Reader payload
+                      if binary then reader.ReadBytes 2 |> ignore
+                      Expect.equal (reader.ReadLenEncInt()) (Some(uint64 expected.Length)) "UTF-8 byte length"
+                      Expect.equal (reader.ReadBytes expected.Length) expected "text remains UTF-8"
+
           testCase "column definitions advertise an explicit text collation"
           <| fun _ ->
               let metadata =

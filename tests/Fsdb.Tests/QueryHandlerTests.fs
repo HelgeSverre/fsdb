@@ -8505,7 +8505,7 @@ let tests =
               let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "CREATE DATABASE crescat_testing CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" |> snd with
-              | Affected 0UL -> ()
+              | Affected 1UL -> ()
               | other -> failtestf "expected the CREATE DATABASE to succeed, got %A" other
 
               match handle session "USE crescat_testing" |> snd with

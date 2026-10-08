@@ -3699,7 +3699,7 @@ let tests =
                     let store = newStore ()
 
                     match runDefault store "CREATE DATABASE app" with
-                    | Affected 0UL -> ()
+                    | Affected 1UL -> ()
                     | other -> failtestf "expected CREATE DATABASE to succeed, got %A" other
 
                     match runDefault store "CREATE DATABASE app" with

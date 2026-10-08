@@ -1,15 +1,15 @@
 # Duplicate-key diagnostic qualification
 
-Status: base-table qualification and single-column ALTER truncation warnings
-implemented; dotted quoted identifiers remain a counterexample.
+Status: audited base-table qualification, ALTER truncation warnings, and dotted
+quoted identifiers implemented.
 
 ## Native evidence
 
 `python3 torture/scripts/condition-oracle.py torture/findings/2026-10-08-key-diagnostics-native.json`
 verifies 16 scripts on disposable native MySQL 8.4.11 with a 64 MiB buffer pool
 and redo capacity. The fixtures preserve statements, rendered diagnostics,
-error codes, and SQLSTATEs. The fsdb replay matches 15 scripts; the remaining
-difference are retained in `2026-10-08-key-diagnostics-current.json`.
+error codes, and SQLSTATEs. The fsdb replay matches all 16 scripts; results are retained in
+`2026-10-08-key-diagnostics-current.json`.
 
 ## Established behavior
 
@@ -29,25 +29,22 @@ before duplicate-key failures in INSERT and UPDATE. They are included in the
 passing trigger wire contract. Its replay now matches all 34 scripts, including
 [qualified missing-table errors](2026-10-08-missing-table.md).
 
-## Remaining counterexamples
+## Dotted identifiers and ALTER conversion
 
-- `odd-name`: MySQL preserves a dot inside the quoted table name `Odd.Table`,
-  reporting `odd.table.Odd.Key`. fsdb interprets that dot as qualification and
-  rejects the absent database `Odd` with error 1049. This requires preserving identifier structure beyond
-  diagnostic formatting; the discrepancy is not corrected by adding a string
-  prefix at the error boundary.
-The `narrow-column` case now matches, including both truncation warnings before
-error 1062. A three-row variant in the [ALTER coercion contract](2026-10-08-alter-coercion.md)
-also verifies that conversion stops before the third row can emit a warning.
+The `odd-name` case preserves the literal dot in `Odd.Table` and reports
+`odd.table.Odd.Key`. The [expanded quoted-name audit](2026-10-09-quoted-table-names.md)
+covers resolution, generated view writes, and cross-database renames.
 
-The dotted-identifier script remains outside the passing wire contract.
+The `narrow-column` case matches both truncation warnings before error 1062.
+A three-row variant in the [ALTER coercion contract](2026-10-08-alter-coercion.md)
+verifies that conversion stops before the third row can emit a warning.
 Nothing is enrolled in the known-gap allowlist.
 
 ## Validation
 
-- `just check`: 3,136 tests pass, no build warnings or errors.
-- Full native wire suite: 86 contracts / 11,724 steps / zero differences.
-- Native key-diagnostic fixture: all 16 scripts reproduced.
-- Key replay: 15 of 16 exact matches; trigger replay: all 34 exact matches.
+- `just check`: 3,162 tests pass, no build warnings or errors.
+- Full native wire suite: 94 contracts / 14,125 steps / zero differences.
+- Key replay: all 16 scripts match exactly.
+- Expanded quoted-name replay: all 15 scripts match exactly.
 
-Wire artifact: `torture/artifacts/runs/20261008T211512610-76070/contracts`.
+Wire artifact: `torture/artifacts/runs/20261008T230516003-85155/contracts`.

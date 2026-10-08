@@ -566,10 +566,9 @@ let columnDefPayload (col: ColumnDef) : byte[] =
         && not (hasMetadataFlag EnumFlag col.Metadata)
         && (hasMetadataFlag BinaryFlag col.Metadata || col.Metadata.TypeId = TypeBit)
     let collation =
-        if isBinary then
-            BinaryCollation
-        else
-            col.Metadata.CollationId |> Option.map int |> Option.defaultValue Utf8Mb4GeneralCi
+        col.Metadata.CollationId
+        |> Option.map int
+        |> Option.defaultValue (if isBinary then BinaryCollation else Utf8Mb4GeneralCi)
 
     w.WriteInt16LE collation
     w.WriteInt32LE(int col.Metadata.ColumnLength)
@@ -760,7 +759,7 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
         w.WriteInt16LE(int (int16 (parseIntOr 0L s)))
     elif typeId = TypeLong then
         w.WriteInt32LE(int (int32 (parseIntOr 0L s)))
-    elif hasMetadataFlag BinaryFlag metadata then
+    elif carriesRawBytes metadata then
         w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
     else
         w.WriteLenEncString s
