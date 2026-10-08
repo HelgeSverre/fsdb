@@ -373,6 +373,7 @@ let private numericSystemVariables =
           "max_points_in_geometry"
           "max_prepared_stmt_count"
           "max_sp_recursion_depth"
+          "max_execution_time"
           "div_precision_increment"
           "net_read_timeout"
           "net_write_timeout"
@@ -1091,8 +1092,14 @@ let private setVar =
 let private quotedSetLiteral = Regex("^(['\"])(.*)\\1$", RegexOptions.Singleline)
 let private bareSetIdentifier = Regex("^\\w+$")
 
+let private boundedIntegerVariables =
+    Map.ofList
+        [ "max_sp_recursion_depth", 255UL
+          "div_precision_increment", 30UL
+          "max_execution_time", UInt64.MaxValue ]
+
 let private typedSetVariables =
-    Set.union fullTextStopwordTableVariables (Set.ofList [ "max_sp_recursion_depth"; "div_precision_increment" ])
+    Set.union fullTextStopwordTableVariables (boundedIntegerVariables |> Map.keys |> Set.ofSeq)
 
 let private literalSetRhs (options: Parser.ParserOptions) (rhs: string) : Value option =
     let rhs = rhs.Trim()
@@ -1175,7 +1182,7 @@ type private TransactionIsolationScope =
 type private SetAction =
     | SetNamesAction of charset: string * collation: string option
     | SetVarAction of name: string * value: string option * isGlobal: bool
-    | SetBoundedIntegerAction of name: string * value: int * isGlobal: bool * warning: string option
+    | SetBoundedIntegerAction of name: string * value: uint64 * isGlobal: bool * warning: string option
     | SetTransactionIsolationAction of scope: TransactionIsolationScope * isolation: TransactionIsolation
     | SetUserVarAction of name: string * value: Value
 
@@ -1204,9 +1211,9 @@ let private connectionVariableNames =
 
 let private normalizeBoundedInteger name maximum =
     let bounded original value =
-        let boundedValue = min value (uint64 maximum) |> int
+        let boundedValue = min value maximum
         let warning =
-            if uint64 boundedValue = value then
+            if boundedValue = value then
                 None
             else
                 Some(sprintf "Truncated incorrect %s value: '%s'" name original)
@@ -1215,7 +1222,7 @@ let private normalizeBoundedInteger name maximum =
 
     function
     | VInt value when value < 0L ->
-        Ok(0, Some(sprintf "Truncated incorrect %s value: '%d'" name value))
+        Ok(0UL, Some(sprintf "Truncated incorrect %s value: '%d'" name value))
     | VInt value -> bounded (string value) (uint64 value)
     | VUInt value -> bounded (string value) value
     | _ -> Error(Err(1232, sprintf "Incorrect argument type to variable '%s'" name))
@@ -1506,18 +1513,11 @@ let private systemSetAction
     | Error result -> Error result
     | Ok(value, sideEffects) when readOnlySystemVariables.Contains name ->
         Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
-    | Ok(_, sideEffects) when usesDefault && (name = "max_sp_recursion_depth" || name = "div_precision_increment") ->
-        let defaultValue = if name = "div_precision_increment" then 4 else 0
-        let settingValue =
-            if isGlobal then
-                defaultValue
-            else
-                Session.tryGlobalVariable session.Store name
-                |> Option.flatten
-                |> Option.bind tryInt32
-                |> Option.defaultValue defaultValue
-
-        Ok(SetBoundedIntegerAction(name, settingValue, isGlobal, None), sideEffects)
+    | Ok(_, sideEffects) when usesDefault && Map.containsKey name boundedIntegerVariables ->
+        let value =
+            if isGlobal then Session.defaultVariables.[name]
+            else Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
+        Ok(SetVarAction(name, value, isGlobal), sideEffects)
     | Ok(_, sideEffects) when usesDefault && name = "max_points_in_geometry" ->
         let limit =
             if isGlobal then
@@ -1566,8 +1566,8 @@ let private systemSetAction
                 |> Option.defaultValue Session.defaultVariables.[name]
 
         Ok(SetVarAction(name, value, isGlobal), sideEffects)
-    | Ok(value, sideEffects) when name = "max_sp_recursion_depth" || name = "div_precision_increment" ->
-        normalizeBoundedInteger name (if name = "div_precision_increment" then 30 else 255) value
+    | Ok(value, sideEffects) when Map.containsKey name boundedIntegerVariables ->
+        normalizeBoundedInteger name boundedIntegerVariables.[name] value
         |> Result.map (fun (value, warning) ->
             SetBoundedIntegerAction(name, value, isGlobal, warning), sideEffects)
     | Ok(value, sideEffects) when name = "max_points_in_geometry" ->

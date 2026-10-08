@@ -83,6 +83,7 @@ let defaultVariables: Map<string, string option> =
           "license", "GPL"
           "group_concat_max_len", "1024"
           "max_sp_recursion_depth", "0"
+          "max_execution_time", "0"
           "div_precision_increment", "4"
           "max_heap_table_size", "16777216"
           "tmp_table_size", "16777216"

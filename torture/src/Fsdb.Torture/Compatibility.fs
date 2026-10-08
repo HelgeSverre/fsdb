@@ -4545,8 +4545,32 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE candidate_rows" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private selectTimeoutSettings =
+        { Name = "select-timeout-settings"
+          Setup = [||]
+          Steps =
+            [| Contract.query "defaults" "SELECT @@session.max_execution_time,@@global.max_execution_time"
+               for value in [ "1"; "4294967296"; "18446744073709551615" ] do
+                   Contract.execute ("set-" + value) ("SET max_execution_time=" + value)
+                   Contract.preparedQuery ("read-" + value) "SELECT /*+ MAX_EXECUTION_TIME(10000) */ @@max_execution_time AS n" [||]
+               for value in [ "1.5"; "'2'"; "NULL" ] do
+                   Contract.execute ("reject-" + value) ("SET max_execution_time=" + value) |> Contract.fails 1232 "42000"
+               Contract.execute "negative" "SET max_execution_time=-1"
+               Contract.query "negative-warning" "SHOW WARNINGS"
+               Contract.query "clamped" "SELECT @@max_execution_time"
+               Contract.execute "global" "SET GLOBAL max_execution_time=12"
+               Contract.query "existing-session" "SELECT @@session.max_execution_time,@@global.max_execution_time"
+               Contract.query "new-session" "SELECT @@max_execution_time" |> Contract.on "timeout-observer"
+               Contract.execute "session-default" "SET max_execution_time=DEFAULT"
+               Contract.query "inherited-default" "SELECT @@max_execution_time"
+               Contract.execute "global-default" "SET GLOBAL max_execution_time=DEFAULT"
+               Contract.query "retained-session" "SELECT @@session.max_execution_time,@@global.max_execution_time" |]
+          Cleanup = [| "SET GLOBAL max_execution_time=DEFAULT"; "SET max_execution_time=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
+
     let all =
-        [| joinCandidateTraversal
+        [| selectTimeoutSettings
+           joinCandidateTraversal
            comments
            orderAliases
            duplicateOrderAliases

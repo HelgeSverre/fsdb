@@ -49,7 +49,40 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "nested derived sources retain enclosing query correlation"
+        [ testCase "maximum execution time retains unsigned settings and scope defaults"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = create 1 store
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              let expectValue expected =
+                  Expect.equal (execute "SELECT @@max_execution_time AS n")
+                      (ResultSet([ "n" ], [ [ Some expected ] ])) "session setting"
+              expectValue "0"
+              for value in [ "1"; "4294967296"; "18446744073709551615" ] do
+                  Expect.equal (execute ("SET max_execution_time=" + value)) (Affected 0UL) value
+                  expectValue value
+              for value in [ "1.5"; "'2'"; "NULL" ] do
+                  Expect.equal (execute ("SET max_execution_time=" + value))
+                      (Err(1232, "Incorrect argument type to variable 'max_execution_time'")) value
+              Expect.equal (execute "SET max_execution_time=-1") (Affected 0UL) "negative clamp"
+              Expect.equal (execute "SHOW WARNINGS")
+                  (ResultSet([ "Level"; "Code"; "Message" ],
+                      [ [ Some "Warning"; Some "1292"; Some "Truncated incorrect max_execution_time value: '-1'" ] ])) "clamp warning"
+              expectValue "0"
+              Expect.equal (execute "SET GLOBAL max_execution_time=12") (Affected 0UL) "global assignment"
+              expectValue "0"
+              let _, inherited = handle (create 2 store) "SELECT @@max_execution_time AS n"
+              Expect.equal inherited (ResultSet([ "n" ], [ [ Some "12" ] ])) "new sessions inherit the global value"
+              Expect.equal (execute "SET max_execution_time=DEFAULT") (Affected 0UL) "session default"
+              expectValue "12"
+              Expect.equal (execute "SET GLOBAL max_execution_time=DEFAULT") (Affected 0UL) "global default"
+              let _, reset = handle (create 3 store) "SELECT @@max_execution_time AS n"
+              Expect.equal reset (ResultSet([ "n" ], [ [ Some "0" ] ])) "global default is zero"
+
+          testCase "nested derived sources retain enclosing query correlation"
           <| fun _ ->
               let run = queryFixture
                             [ "CREATE TABLE a(id INT)"
