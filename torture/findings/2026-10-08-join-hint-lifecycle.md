@@ -74,11 +74,9 @@ allowlist:
 
 The repeated mergeable CTE and NO_MERGE child under a statically false parent
 now match; see [source warning ownership](2026-10-08-join-hint-merging.md).
-The current replay matches 61 of 62 cases, retaining this independent gap:
-
-- `SELECT n FROM t WHERE 'x'` emits native warning 1292 for numeric conversion;
-  fsdb returns the correct empty result but omits that warning. This is a
-  predicate-conversion diagnostic gap independent of join-order hints.
+The [Boolean conversion fix](2026-10-08-predicate-conversion.md) supplies the
+previously missing warning 1292 for `WHERE 'x'`. The current replay matches all
+62 lifecycle cases; exact outputs are retained with the conversion evidence.
 
 Physical join-plan controls and more general predicate propagation remain
 incomplete. The passing cases establish the audited behavior above, not full

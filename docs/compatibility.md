@@ -541,6 +541,15 @@ Skipped `INSERT IGNORE` rows and ignored CHECK violations appear in the
 session diagnostics area and through `SHOW WARNINGS`; the OK/EOF warning count
 reports the same conditions.
 
+Audited Boolean contexts report numeric-string conversion warnings. Constant
+WHERE, HAVING, and JOIN ON predicates convert once; column predicates retain
+per-evaluated-row warnings and short-circuit behavior. Strict UPDATE/DELETE
+conversion errors preserve table rows. Prepared numeric parameters distinguish
+valid numeric strings from malformed prefixes and retain INTEGER or DECIMAL
+conversion diagnostics across repeated executions. Column assignments keep
+their storage conversion rules. See the [native conversion evidence](../torture/findings/2026-10-08-predicate-conversion.md)
+for the bounded coverage.
+
 ## Server settings
 
 The process-wide numeric and boolean knobs live in `Fsdb.Limits`. Standard

@@ -27,6 +27,7 @@ let private active = AsyncLocal<ResizeArray<Condition> option>()
 let private deferred = AsyncLocal<ResizeArray<Condition> option>()
 let private rowNumber = AsyncLocal<int option>()
 let private divisionByZeroPolicy = AsyncLocal<DivisionByZeroPolicy>()
+let private strictNumericConversion = AsyncLocal<bool>()
 
 let record (condition: Condition) : unit =
     active.Value |> Option.iter (fun conditions -> conditions.Add condition)
@@ -38,6 +39,14 @@ let warning code message =
           State = SqlState.forCode code
           Message = message
           Information = Map.empty }
+
+let numericConversion kind text =
+    let message = sprintf "Truncated incorrect %s value: '%s'" kind text
+    if strictNumericConversion.Value then raise (RaisedCondition(SqlState.create 1292 message))
+    else warning 1292 message
+
+let withStrictNumericConversion strict body =
+    DynamicScope.withValue strictNumericConversion strict body
 
 let error code message =
     record
@@ -130,4 +139,5 @@ let afterError (body: unit -> 'a) : 'a =
     DynamicScope.withValue active deferred.Value body
 
 let suppress (body: unit -> 'a) : 'a =
-    DynamicScope.withValue deferred None (fun () -> DynamicScope.withValue active None body)
+    withStrictNumericConversion false (fun () ->
+        DynamicScope.withValue deferred None (fun () -> DynamicScope.withValue active None body))

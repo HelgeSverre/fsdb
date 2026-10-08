@@ -52,8 +52,9 @@ SQL regression reproduced the same mismatch before the parameter-origin fix.
 
 `SET optimizer_switch='derived_merge=off'` is unsupported (1193); the native
 script remains in the oracle and replay, outside the passing regression/wire
-cases. The lifecycle replay still lacks warning 1292 for `WHERE 'x'` numeric
-conversion. Neither difference is enrolled in a known-gap allowlist.
+cases. The [Boolean conversion fix](2026-10-08-predicate-conversion.md) closes the
+lifecycle replay's missing `WHERE 'x'` warning. The remaining configuration
+difference is not enrolled in a known-gap allowlist.
 
 This implementation governs observable warning ownership. It does not implement
 physical MERGE/NO_MERGE strategy controls or establish full optimizer equivalence.

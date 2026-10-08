@@ -93,6 +93,297 @@ cases = [("SELECT 1 AS n WHERE 'x';SHOW WARNINGS",
   '@v;SHOW WARNINGS',
   "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n")]
 
+cases += [("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n"),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n"),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n"),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n"),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n"),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n"),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n")]
+
+cases += [("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n"),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS",
+  'n\n0\n'),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW WARNINGS",
+  'n\n0\n'),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW WARNINGS",
+  'n\n0\n'),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n"),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW WARNINGS",
+  'n\n0\n'),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n"),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n'),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW "
+  'WARNINGS',
+  'n\n1\n')]
+
+cases += [("PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS",
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: 'x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '1x'\n"
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: ''\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS",
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: 'x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '1x'\n"
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: ''\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS",
+  'n\n'
+  '0\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: 'x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '1x'\n"
+  'n\n'
+  '0\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"
+  'n\n'
+  '1\n'
+  'n\n'
+  '0\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: ''\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS",
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: 'x'\n"
+  'n\n'
+  '0\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '1x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"
+  'n\n'
+  '0\n'
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: ''\n"
+  'n\n'
+  '0\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS",
+  'n\n'
+  '0\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: 'x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '1x'\n"
+  'n\n'
+  '0\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"
+  'n\n'
+  '1\n'
+  'n\n'
+  '0\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: ''\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: '1e2x'\n"),
+ ("PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW "
+  "WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS",
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: 'x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '1x'\n"
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect INTEGER value: '0.5x'\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: ''\n"
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DECIMAL value: '1e2x'\n")]
+
 def verify(client, _writer):
     arguments["verify_cases"](client, [(setup + sql, expected) for sql, expected in cases])
 

@@ -5917,8 +5917,139 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS merge_base" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
+    let private predicateConversion =
+        let scripts =
+                [ "SELECT 1 AS n WHERE 'x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE 'x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base HAVING 'x';SHOW WARNINGS", None
+                  "SELECT IF('x',1,0) AS n;SHOW WARNINGS", None
+                  "SELECT NOT 'x' AS n;SHOW WARNINGS", None
+                  "SELECT 'x' IS TRUE AS n;SHOW WARNINGS", None
+                  "SELECT 1 AS n WHERE '1x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE '1x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base HAVING '1x';SHOW WARNINGS", None
+                  "SELECT IF('1x',1,0) AS n;SHOW WARNINGS", None
+                  "SELECT NOT '1x' AS n;SHOW WARNINGS", None
+                  "SELECT '1x' IS TRUE AS n;SHOW WARNINGS", None
+                  "SELECT 1 AS n WHERE '0x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE '0x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base HAVING '0x';SHOW WARNINGS", None
+                  "SELECT IF('0x',1,0) AS n;SHOW WARNINGS", None
+                  "SELECT NOT '0x' AS n;SHOW WARNINGS", None
+                  "SELECT '0x' IS TRUE AS n;SHOW WARNINGS", None
+                  "SELECT 1 AS n WHERE '';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE '';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base HAVING '';SHOW WARNINGS", None
+                  "SELECT IF('',1,0) AS n;SHOW WARNINGS", None
+                  "SELECT NOT '' AS n;SHOW WARNINGS", None
+                  "SELECT '' IS TRUE AS n;SHOW WARNINGS", None
+                  "SELECT 1 AS n WHERE ' 1 ';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE ' 1 ';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base HAVING ' 1 ';SHOW WARNINGS", None
+                  "SELECT IF(' 1 ',1,0) AS n;SHOW WARNINGS", None
+                  "SELECT NOT ' 1 ' AS n;SHOW WARNINGS", None
+                  "SELECT ' 1 ' IS TRUE AS n;SHOW WARNINGS", None
+                  "SELECT 1 AS n WHERE '1e2x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE '1e2x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base HAVING '1e2x';SHOW WARNINGS", None
+                  "SELECT IF('1e2x',1,0) AS n;SHOW WARNINGS", None
+                  "SELECT NOT '1e2x' AS n;SHOW WARNINGS", None
+                  "SELECT '1e2x' IS TRUE AS n;SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE 0 AND 'x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE 1 OR 'x';SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE 'x' AND 0;SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE 'x' OR 1;SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE 'x' LIMIT 0;SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE s;SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE n=1 AND s;SHOW WARNINGS", None
+                  "SELECT n FROM predicate_base WHERE '1x';SHOW WARNINGS", None
+                  "DELETE FROM predicate_base WHERE 'x';SHOW WARNINGS", Some(1292, "22007")
+                  "UPDATE predicate_base SET n=n+1 WHERE 'x';SHOW WARNINGS", Some(1292, "22007")
+                  "SELECT a.n FROM predicate_base a JOIN predicate_base b ON 'x';SHOW WARNINGS", None
+                  "DELETE FROM predicate_base;SELECT n FROM predicate_base WHERE 'x';SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT n FROM predicate_base WHERE ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='1x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='0.5x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n HAVING ?';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT IF(?,1,0) AS n';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT NOT ? AS n';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT ? IS TRUE AS n';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='0.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='1.5';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='1e2';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='1e2x';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v='';EXECUTE p USING @v;SHOW WARNINGS", None
+                  "PREPARE p FROM 'SELECT 1 AS n WHERE ?+0';SHOW WARNINGS;SET @v=0.5;EXECUTE p USING @v;SHOW WARNINGS", None ]
+        { Name = "predicate-conversion"
+          Setup = [| "CREATE TABLE predicate_base(n INT,s VARCHAR(20))" |]
+          Steps =
+            [| for index, (sql, error) in List.indexed scripts do
+                   yield Contract.execute (sprintf "reset-%d" index) "DELETE FROM predicate_base"
+                   yield Contract.execute (sprintf "seed-%d" index) "INSERT INTO predicate_base VALUES(1,'x'),(2,'1x'),(3,'0x')"
+                   for part, statement in sql.Split(';', StringSplitOptions.RemoveEmptyEntries) |> Array.indexed do
+                       let step = Contract.query (sprintf "case-%d-%d" index part) statement
+                       yield match error with
+                             | Some(code, state) when part = 0 -> Contract.fails code state step
+                             | _ -> step
+               for index, sql in
+                   [ "SELECT 1 AS n WHERE ?"; "SELECT 1 AS n HAVING ?"
+                     "SELECT IF(?,1,0) AS n"; "SELECT NOT ? AS n"
+                     "SELECT ? IS TRUE AS n"; "SELECT 1 AS n WHERE ?+0" ] |> List.indexed do
+                   let handle = sprintf "boolean-%d" index
+                   yield Contract.prepare (handle + "-prepare") handle Query sql [| box "x" |]
+                   yield Contract.query (handle + "-prepare-warnings") "SHOW WARNINGS"
+                   for value in [ "x"; "1x"; "0.5x"; "0.5"; ""; "1e2x" ] do
+                       yield Contract.invokeWith (handle + "-" + value) handle [| box value |]
+                       yield Contract.query (handle + "-warnings-" + value) "SHOW WARNINGS"
+                   yield Contract.close (handle + "-close") handle |]
+          Cleanup = [| "DROP TABLE IF EXISTS predicate_base" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
+
     let all =
-        [| joinHintMerging
+        [| predicateConversion
+           joinHintMerging
            joinHintLifecycle
            cteHintSyntax
            cteHintInstances

@@ -3185,7 +3185,9 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             try
                 DynamicScope.withValue storedFunctionSession (Some session) (fun () ->
                     Executor.withCommittedFullTextStore session.Store (fun () ->
-                        Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView))
+                        let strictConversion = store.ExecutionSettings.SqlMode.Strict && isDataChangeStatement stmt && not (ignoresDataChangeErrors stmt)
+                        Diagnostics.withStrictNumericConversion strictConversion (fun () ->
+                            Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView)))
             finally
                 if startedDynamicWriteRebase then
                     dynamicWriteBase <- Storage.finishDynamicWriteRebase store

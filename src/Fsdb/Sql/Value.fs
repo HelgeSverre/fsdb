@@ -2042,6 +2042,12 @@ let equals (a: Value) (b: Value) : bool option =
 let truthy (v: Value) : bool option =
     match v with
     | VNull -> None
+    | VString _ | VEncodedString _ | VBytes _ ->
+        let text = toText v |> Option.defaultValue ""
+        let number, truncated = coerceLeadingDouble text
+        if truncated then
+            Diagnostics.numericConversion "DOUBLE" text
+        Some(number <> 0.0)
     | _ -> Some(toDouble v <> 0.0)
 
 /// Arithmetic keeps numeric and temporal fields exact until an approximate

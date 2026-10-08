@@ -258,9 +258,14 @@ let private inferParameters
         let inferExpected metadata child = inferExpression scope metadata DescribeOnly child
         let inferConverted metadata child = inferExpression scope metadata CoerceNumeric child
         let inferred child = metadataOfExpression scope child
+        let inferBoolean child = inferExpected (Some(ColumnWire.parameterMetadataOfType(TBigInt false))) child
 
         match expression with
         | Placeholder index -> expected |> Option.iter (setParameter index treatment)
+        | Not operand | IsTrue operand | IsFalse operand -> inferBoolean operand
+        | BinOp((And | Or | Xor), left, right) ->
+            inferBoolean left
+            inferBoolean right
         | Neg operand -> inferConverted (Some(ColumnWire.parameterMetadataOfType(TDouble false))) operand
         | BinOp(operator, left, right) ->
             let leftMetadata = inferred left
@@ -300,7 +305,7 @@ let private inferParameters
             let output = values |> List.tryPick inferred |> Option.orElse expected |> Option.orElse (Some generic)
             values |> List.iter (inferExpected output)
         | FuncCall(name, [ condition; whenTrue; whenFalse ]) when name.Equals("IF", StringComparison.OrdinalIgnoreCase) ->
-            inferUnknown condition
+            inferBoolean condition
             let output = inferred whenTrue |> Option.orElse (inferred whenFalse) |> Option.orElse expected |> Option.orElse (Some generic)
             inferExpected output whenTrue
             inferExpected output whenFalse
@@ -412,9 +417,10 @@ let private inferParameters
                     projectedParameters
                     expression
             infer expression)
-        select.Where |> Option.iter infer
+        let inferBoolean = inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt false))) DescribeOnly
+        select.Where |> Option.iter inferBoolean
         select.GroupBy |> List.iter infer
-        select.Having |> Option.iter infer
+        select.Having |> Option.iter inferBoolean
         select.OrderBy |> List.iter (fst >> infer)
         select.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
         select.Offset |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
@@ -649,10 +655,19 @@ let internal bindParameters source store registry schema schemaChanged refreshVa
         Diagnostics.suppress (fun () -> Storage.coerceValueWithMode mode (parameterColumn columnType) value)
         |> Result.defaultValue value
 
-    let convert expected value =
+    let convert binding expected value =
         match family expected, value with
         | (Integral _ | ExactNumeric | ApproximateNumeric), VString text ->
-            convertedNumericString expected text |> Option.defaultValue value
+            convertedNumericString expected text |> Option.defaultWith (fun () ->
+                match family expected with
+                | Integral unsigned when binding <> Some ColumnAssignment ->
+                    Diagnostics.numericConversion "INTEGER" text
+                    let kind = if unsigned then UserVariableType.UnsignedInteger else UserVariableType.SignedInteger
+                    PreparedVariables.convert kind value |> Result.defaultValue value
+                | ExactNumeric when binding <> Some ColumnAssignment ->
+                    Diagnostics.numericConversion "DECIMAL" text
+                    VDecimal(Value.tryLeadingDecimal text |> Option.defaultValue 0M)
+                | _ -> value)
         | (CalendarDate | ClockTime | CalendarTime), (VString _ | VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
             let strict = { mode with Strict = true }
             let value =
@@ -680,7 +695,7 @@ let internal bindParameters source store registry schema schemaChanged refreshVa
         |> List.map (fun (binding, expected, value) ->
             match binding with
             | Some UnsignedIntegerOnly -> value
-            | _ -> convert expected value)
+            | _ -> convert binding expected value)
     let reprepare =
         schemaChanged
         || retained.Context <> original

@@ -5636,9 +5636,10 @@ and private tryClosedNumericValue ctx expression =
 /// retain MySQL's boundary instead of recursively simplifying their operands.
 and private possibleConditionTruths ctx expression =
     let evaluate expression =
-        Diagnostics.suppress (fun () -> evalExpr ctx expression)
-        |> Result.map (truthy >> Set.singleton)
-        |> Result.defaultValue allConditionTruths
+        Diagnostics.suppress (fun () ->
+            evalExpr ctx expression
+            |> Result.map (truthy >> Set.singleton)
+            |> Result.defaultValue allConditionTruths)
     match expression with
     | BinOp((And | Or as operator), left, right) ->
         let combine = if operator = And then evalLogicalAnd else evalLogicalOr
@@ -8284,6 +8285,9 @@ and private prepareWhereMatches
 
     match where with
     | None -> fun _ -> Ok true
+    | Some expression when isLiteralConstantExpression context.Registry expression ->
+        let result = evaluate expression [||] |> Result.map (truthy >> (=) (Some true))
+        fun _ -> result
     | Some expression when storedRowsMatchReadRows context.Store (context.ColumnsByPosition |> Seq.choose id) ->
         let prepared = prepare expression
         fun row -> prepared row |> Result.map (truthy >> (=) (Some true))
@@ -8820,6 +8824,7 @@ and private expandJsonTableJoinRows
         validateReferencesWith resolveArgumentReference source
         |> Result.mapError Err
         |> Result.bind (fun () -> resolvedJoinCondition sourcesSoFar [ alias, joinColumns ] leftOperand join)
+        |> Result.bind (prepareJoinCondition (ctxFor [||]))
         |> Result.bind (fun effectiveOn ->
             let expandLeft (row: 'Row) : Result<'Result list, QueryResult> =
                 let left = flatRow row
@@ -9269,6 +9274,13 @@ and private prepareJoinSource
                     |> Result.map (fun rows -> { Sources = [ joinQualifier, columns ]; Columns = columns; Rows = rows; PhysicalTable = None })))
 
 
+and private prepareJoinCondition context expression =
+    if isLiteralConstantExpression context.Registry expression then
+        evalExpr { context with Clause = OnClause } expression
+        |> Result.map (truthy >> Option.map boolToValue >> Option.defaultValue VNull >> Lit)
+        |> Result.mapError Err
+    else Ok expression
+
 and private resolvedJoinCondition
     (sourcesSoFar: (string * ColumnDef list) list)
     (rightSources: (string * ColumnDef list) list)
@@ -9397,7 +9409,9 @@ and private applyPreparedJoin
 
         newSources, combinedRows
 
-    let condition = resolvedJoinCondition sourcesSoFar rightSources leftOperand join
+    let condition =
+        resolvedJoinCondition sourcesSoFar rightSources leftOperand join
+        |> Result.bind (prepareJoinCondition (ctxFor [||]))
 
     match condition with
     | Error error -> Error error
@@ -9819,7 +9833,9 @@ and private applyPreparedMutationJoin
         newSources, rows
 
     let columnsOf (sources: MutationSource list) = sources |> List.map (fun source -> source.Qualifier, source.Columns)
-    let condition = resolvedJoinCondition (columnsOf sourcesSoFar) (columnsOf rightSources) leftOperand join
+    let condition =
+        resolvedJoinCondition (columnsOf sourcesSoFar) (columnsOf rightSources) leftOperand join
+        |> Result.bind (prepareJoinCondition (ctxFor [||]))
 
     match condition with
     | Error error -> Error error
@@ -17361,6 +17377,12 @@ and private runSelect
     // `containsAggregate`/`GroupBy.IsEmpty` routing above) — so it's just
     // ANDed onto the same per-row `matches` check here.
     let matchesWhere = prepareWhereMatches ctxFor whereExpr
+    let constantHaving =
+        select.Having |> Option.bind (fun expression ->
+            let context = { ctxFor [||] with Clause = HavingClause }
+            if isLiteralConstantExpression registry expression then
+                Some(evalExpr context expression |> Result.map (truthy >> (=) (Some true)))
+            else None)
 
     let matches (row: Value[]) : Result<bool, EvalError> =
         matchesWhere row
@@ -17368,9 +17390,10 @@ and private runSelect
             if not keep then
                 Ok false
             else
-                match select.Having with
-                | None -> Ok true
-                | Some expr -> evalExpr { ctxFor row with Clause = HavingClause } expr |> Result.map (fun v -> truthy v = Some true))
+                match constantHaving, select.Having with
+                | Some result, _ -> result
+                | None, None -> Ok true
+                | None, Some expr -> evalExpr { ctxFor row with Clause = HavingClause } expr |> Result.map (fun v -> truthy v = Some true))
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections
