@@ -5166,50 +5166,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                             else VInt 1L))
     | Distinct e
     | OrderBy(e, _) -> eval e
-    | (Case(subject, whens, elseBranch) as caseExpression) ->
-        let fallback () =
-            match elseBranch with
-            | Some e -> eval e
-            | None -> Ok VNull
-
-        let evaluate () =
-            match subject with
-            | Some se ->
-                eval se
-                |> Result.bind (fun sv ->
-                    let rec tryWhens =
-                        function
-                        | [] -> fallback ()
-                        | (whenExpr, resExpr) :: rest ->
-                            eval whenExpr
-                            |> Result.bind (fun wv ->
-                                comparisonResult
-                                    ctx
-                                    se
-                                    (tryColumnDefForExpr ctx se)
-                                    sv
-                                    whenExpr
-                                    (tryColumnDefForExpr ctx whenExpr)
-                                    Eq
-                                    wv
-                                |> Result.bind (function
-                                    | VInt 1L -> eval resExpr
-                                    | _ -> tryWhens rest))
-
-                    tryWhens whens)
-            | None ->
-                let rec tryWhens =
-                    function
-                    | [] -> fallback ()
-                    | (condExpr, resExpr) :: rest ->
-                        eval condExpr
-                        |> Result.bind (fun cv -> if truthy cv = Some true then eval resExpr else tryWhens rest)
-
-                tryWhens whens
-
-        expressionCollation ctx caseExpression
-        |> Result.bind (fun _ -> evaluate ())
-        |> Result.map (normalizeNumericResult ctx caseExpression)
+    | Case(subject, whens, elseBranch) ->
+        evalCaseResult ctx expr subject whens elseBranch eval
     | Between(e, lo, hi) ->
         eval e
         |> Result.bind (fun ve ->
@@ -5331,9 +5289,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
         eval argument |> Result.map (Functions.weightString (keyCollation ctx source))
     | NamedFunction "IF" [ condition; whenTrue; whenFalse ] when Functions.isUnmodifiedBuiltinScalar "IF" ctx.Registry ->
-        evalConditionalResult ctx expr (fun () ->
-            eval condition |> Result.bind (fun value ->
-                eval (if truthy value = Some true then whenTrue else whenFalse)))
+        evalIfResult ctx expr condition whenTrue whenFalse eval
     | FuncCall(name, arguments) when
         Functions.isUnmodifiedBuiltinScalar name ctx.Registry
         && (match name.ToUpperInvariant(), arguments with
@@ -5388,6 +5344,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         match Functions.regexpFunction name collation with
                         | Some function_ -> function_ arguments
                         | None -> VNull))))
+    | NamedFunction "HEX" [ argument ] when Functions.isUnmodifiedBuiltinScalar "HEX" ctx.Registry ->
+        evalHexArgument ctx argument
+        |> Result.map (fun value -> prepareScalarArguments ctx "HEX" [ argument ] [ value ] |> Functions.hexFn)
     | FuncCall(name, args) ->
         let scalar =
             match Functions.lookup name ctx.Registry with
@@ -5630,6 +5589,100 @@ and private validateExpressionInContext ctx expression =
             | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
             | _ -> Ok())
         Expression.tryLiteralNodeDiagnostic id expression
+
+and private evalCaseResult ctx caseExpression subject whens elseBranch evaluateResult =
+    let eval = evalExpr ctx
+    let fallback () =
+        match elseBranch with
+        | Some e -> evaluateResult e
+        | None -> Ok VNull
+
+    let evaluate () =
+        match subject with
+        | Some se ->
+            eval se
+            |> Result.bind (fun sv ->
+                let rec tryWhens =
+                    function
+                    | [] -> fallback ()
+                    | (whenExpr, resExpr) :: rest ->
+                        eval whenExpr
+                        |> Result.bind (fun wv ->
+                            comparisonResult
+                                ctx
+                                se
+                                (tryColumnDefForExpr ctx se)
+                                sv
+                                whenExpr
+                                (tryColumnDefForExpr ctx whenExpr)
+                                Eq
+                                wv
+                            |> Result.bind (function
+                                | VInt 1L -> evaluateResult resExpr
+                                | _ -> tryWhens rest))
+
+                tryWhens whens)
+        | None ->
+            let rec tryWhens =
+                function
+                | [] -> fallback ()
+                | (condExpr, resExpr) :: rest ->
+                    eval condExpr
+                    |> Result.bind (fun cv -> if truthy cv = Some true then evaluateResult resExpr else tryWhens rest)
+
+            tryWhens whens
+
+    expressionCollation ctx caseExpression
+    |> Result.bind (fun _ -> evaluate ())
+    |> Result.map (normalizeNumericResult ctx caseExpression)
+
+and private evalIfResult ctx expression condition whenTrue whenFalse evaluateResult =
+    evalConditionalResult ctx expression (fun () ->
+        evalExpr ctx condition |> Result.bind (fun value ->
+            evaluateResult (if truthy value = Some true then whenTrue else whenFalse)))
+
+and private evalHexArgument ctx expression =
+    let evaluate () = evalExpr ctx expression |> Result.bind (validateHexArgumentValue expression)
+    match expression with
+    | NamedFunction "IF" [ condition; whenTrue; whenFalse ] when Functions.isUnmodifiedBuiltinScalar "IF" ctx.Registry ->
+        evalIfResult ctx expression condition whenTrue whenFalse (evalHexArgument ctx)
+    | Case(subject, branches, otherwise) ->
+        evalCaseResult ctx expression subject branches otherwise (evalHexArgument ctx)
+    | Subquery select when
+        select.Where.IsNone && select.GroupBy.IsEmpty && select.OrderBy.IsEmpty
+        && select.Ctes.IsEmpty && select.Limit.IsNone && select.Offset.IsNone ->
+        match tryReducedScalarProjection ctx select with
+        | Some projection ->
+            validateExpressionInContext ctx expression
+            |> Result.bind (fun () -> evalHexArgument ctx projection)
+        | None -> evaluate ()
+    | _ -> evaluate ()
+
+and private validateHexArgumentValue expression value =
+    let overflow expression =
+        let rec diagnosticExpression expression =
+            match Expression.mapChildren diagnosticExpression expression with
+            | NamedFunction "ROUND" [ argument ] -> FuncCall("ROUND", [ argument; Lit(VInt 0L) ])
+            | NamedFunction "CEIL" arguments -> FuncCall("CEILING", arguments)
+            | expression -> expression
+        Error(1690, sprintf "BIGINT value is out of range in '%s'" (expression |> diagnosticExpression |> InformationSchema.exprToSql))
+
+    match expression with
+    | RuntimeExpression inner | Distinct inner | OrderBy(inner, _) | Collate(inner, _) ->
+        validateHexArgumentValue inner value
+    | _ ->
+        match value with
+        | VDouble number ->
+            let rounded = System.Math.Round(number, System.MidpointRounding.ToEven)
+            let outside = rounded < float System.Int64.MinValue || rounded >= float System.Int64.MaxValue
+            match expression with
+            | Col _ | QualifiedCol _ when outside ->
+                Diagnostics.numericConversion "INTEGER" (Value.toText value |> Option.defaultValue "")
+                Ok value
+            | Cast(_, (TDouble _ | TFloat _)) when outside || rounded = float System.Int64.MinValue -> overflow expression
+            | Neg _ | BinOp _ | FuncCall _ | Cast _ when outside -> overflow expression
+            | _ -> Ok value
+        | _ -> Ok value
 
 and private evalConditionalResult ctx expression evaluate =
     validateExpressionInContext ctx expression

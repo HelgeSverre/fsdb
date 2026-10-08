@@ -1,0 +1,661 @@
+{
+  "mysql_version": "8.4.11",
+  "innodb_buffer_pool_size": "64M",
+  "innodb_redo_log_capacity": "64M",
+  "cases": [
+    {
+      "name": "1e30",
+      "statements": [
+        "SELECT HEX(1e30) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-1e30",
+      "statements": [
+        "SELECT HEX(-1e30) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '-(1e30)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in '-(1e30)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "1e19",
+      "statements": [
+        "SELECT HEX(1e19) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-1e19",
+      "statements": [
+        "SELECT HEX(-1e19) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '-(1e19)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in '-(1e19)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "9.223372036854776e18",
+      "statements": [
+        "SELECT HEX(9.223372036854776e18) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-9.223372036854776e18",
+      "statements": [
+        "SELECT HEX(-9.223372036854776e18) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n8000000000000000\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "9.223372036854775e18",
+      "statements": [
+        "SELECT HEX(9.223372036854775e18) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFC00\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-9.223372036854775e18",
+      "statements": [
+        "SELECT HEX(-9.223372036854775e18) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n8000000000000400\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "CAST('1e30' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('1e30' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CAST('-1e30' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('-1e30' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('-1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('-1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CAST('1e19' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('1e19' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e19' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('1e19' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "1e30+0e0",
+      "statements": [
+        "SELECT HEX(1e30+0e0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '(1e30 + 0e0)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in '(1e30 + 0e0)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "0e0-1e30",
+      "statements": [
+        "SELECT HEX(0e0-1e30) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '(0e0 - 1e30)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in '(0e0 - 1e30)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "ABS(1e30)",
+      "statements": [
+        "SELECT HEX(ABS(1e30)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'abs(1e30)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'abs(1e30)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "ROUND(1e30)",
+      "statements": [
+        "SELECT HEX(ROUND(1e30)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'round(1e30,0)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'round(1e30,0)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "FLOOR(1e30)",
+      "statements": [
+        "SELECT HEX(FLOOR(1e30)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'floor(1e30)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'floor(1e30)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CEIL(1e30)",
+      "statements": [
+        "SELECT HEX(CEIL(1e30)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'ceiling(1e30)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'ceiling(1e30)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "COALESCE(1e30,0e0)",
+      "statements": [
+        "SELECT HEX(COALESCE(1e30,0e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'coalesce(1e30,0e0)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'coalesce(1e30,0e0)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "IFNULL(1e30,0e0)",
+      "statements": [
+        "SELECT HEX(IFNULL(1e30,0e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'ifnull(1e30,0e0)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'ifnull(1e30,0e0)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "IF(1,1e30,0e0)",
+      "statements": [
+        "SELECT HEX(IF(1,1e30,0e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "CASE WHEN 1 THEN 1e30 ELSE 0e0 END",
+      "statements": [
+        "SELECT HEX(CASE WHEN 1 THEN 1e30 ELSE 0e0 END) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "GREATEST(1e30,0e0)",
+      "statements": [
+        "SELECT HEX(GREATEST(1e30,0e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'greatest(1e30,0e0)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'greatest(1e30,0e0)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "LEAST(1e30,1e31)",
+      "statements": [
+        "SELECT HEX(LEAST(1e30,1e31)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'least(1e30,1e31)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'least(1e30,1e31)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "(SELECT 1e30)",
+      "statements": [
+        "SELECT HEX((SELECT 1e30)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-(1e30+0e0)",
+      "statements": [
+        "SELECT HEX(-(1e30+0e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '-((1e30 + 0e0))'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in '-((1e30 + 0e0))'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CAST('9.223372036854776e18' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('9.223372036854776e18' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('9.223372036854776e18' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('9.223372036854776e18' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CAST('-9.223372036854776e18' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('-9.223372036854776e18' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('-9.223372036854776e18' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('-9.223372036854776e18' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CAST('9.223372036854775e18' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('9.223372036854775e18' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFC00\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "2.5e0+0e0",
+      "statements": [
+        "SELECT HEX(2.5e0+0e0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n2\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "ABS(-2.5e0)",
+      "statements": [
+        "SELECT HEX(ABS(-2.5e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n2\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "COALESCE(2.5e0,0e0)",
+      "statements": [
+        "SELECT HEX(COALESCE(2.5e0,0e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n2\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "0e0-9.223372036854776e18",
+      "statements": [
+        "SELECT HEX(0e0-9.223372036854776e18) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n8000000000000000\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "ABS(-9.223372036854776e18)",
+      "statements": [
+        "SELECT HEX(ABS(-9.223372036854776e18)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'abs(-(9.223372036854776e18))'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'abs(-(9.223372036854776e18))'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "COALESCE(-9.223372036854776e18,0e0)",
+      "statements": [
+        "SELECT HEX(COALESCE(-9.223372036854776e18,0e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n8000000000000000\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-9.223372036854777e18",
+      "statements": [
+        "SELECT HEX(-9.223372036854777e18) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '-(9.223372036854777e18)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in '-(9.223372036854777e18)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CAST('-9.223372036854775e18' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('-9.223372036854775e18' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n8000000000000400\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "IF(1,CAST('1e30' AS DOUBLE),0e0)",
+      "statements": [
+        "SELECT HEX(IF(1,CAST('1e30' AS DOUBLE),0e0)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "IF(0,CAST('1e30' AS DOUBLE),1e30)",
+      "statements": [
+        "SELECT HEX(IF(0,CAST('1e30' AS DOUBLE),1e30)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "CASE WHEN 1 THEN CAST('1e30' AS DOUBLE) ELSE 0e0 END",
+      "statements": [
+        "SELECT HEX(CASE WHEN 1 THEN CAST('1e30' AS DOUBLE) ELSE 0e0 END) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CASE WHEN 0 THEN CAST('1e30' AS DOUBLE) ELSE 1e30 END",
+      "statements": [
+        "SELECT HEX(CASE WHEN 0 THEN CAST('1e30' AS DOUBLE) ELSE 1e30 END) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "COALESCE(NULL,1e30)",
+      "statements": [
+        "SELECT HEX(COALESCE(NULL,1e30)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'coalesce(NULL,1e30)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'coalesce(NULL,1e30)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "IFNULL(NULL,1e30)",
+      "statements": [
+        "SELECT HEX(IFNULL(NULL,1e30)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'ifnull(NULL,1e30)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'ifnull(NULL,1e30)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "(SELECT CAST('1e30' AS DOUBLE))",
+      "statements": [
+        "SELECT HEX((SELECT CAST('1e30' AS DOUBLE))) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "(SELECT IF(1,1e30,0e0))",
+      "statements": [
+        "SELECT HEX((SELECT IF(1,1e30,0e0))) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "(SELECT IF(1,CAST('1e30' AS DOUBLE),0e0))",
+      "statements": [
+        "SELECT HEX((SELECT IF(1,CAST('1e30' AS DOUBLE),0e0))) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "(SELECT CASE WHEN 1 THEN 1e30 ELSE 0e0 END)",
+      "statements": [
+        "SELECT HEX((SELECT CASE WHEN 1 THEN 1e30 ELSE 0e0 END)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "(SELECT CASE WHEN 1 THEN CAST('1e30' AS DOUBLE) ELSE 0e0 END)",
+      "statements": [
+        "SELECT HEX((SELECT CASE WHEN 1 THEN CAST('1e30' AS DOUBLE) ELSE 0e0 END)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "variable",
+      "statements": [
+        "SET @n=1e30",
+        "SELECT HEX(@n) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "column",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n DOUBLE)",
+        "INSERT INTO target VALUES(1e30)",
+        "SELECT HEX(n) AS value FROM target",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e30'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "if-once",
+      "statements": [
+        "SET @calls=0",
+        "SELECT HEX(IF((@calls:=@calls+1),1e30,CAST('1e30' AS DOUBLE))) AS value",
+        "SHOW WARNINGS",
+        "SELECT @calls AS calls"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\ncalls\n1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "case-once",
+      "statements": [
+        "SET @calls=0",
+        "SELECT HEX(CASE (@calls:=@calls+1) WHEN 1 THEN 1e30 ELSE CAST('1e30' AS DOUBLE) END) AS value",
+        "SHOW WARNINGS",
+        "SELECT @calls AS calls"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\ncalls\n1\n",
+      "stderr": "",
+      "errors": []
+    }
+  ]
+}

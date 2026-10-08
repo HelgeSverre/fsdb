@@ -3602,7 +3602,7 @@ let private charFn: Scalar =
         |> String
         |> VString
 
-let private hexFn: Scalar =
+let internal hexFn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
         match tryRawBytes value with

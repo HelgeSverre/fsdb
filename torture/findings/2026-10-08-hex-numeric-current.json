@@ -1,8 +1,8 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "ff9f2f14",
+  "fsdb_base_revision": "abb4d0b4",
   "fsdb_dirty": true,
-  "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
+  "comparison": "rendered results and conditions, numeric error codes, and SQLSTATEs",
   "cases": [
     {
       "actual": "value\n1\n",
@@ -225,10 +225,15 @@
       ]
     },
     {
-      "actual": "value\n8000000000000000\n",
-      "errors": [],
+      "actual": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '-(1e30)'\n",
+      "errors": [
+        {
+          "Item1": 1690,
+          "Item2": "22003"
+        }
+      ],
       "expected": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '-(1e30)'\n",
-      "matches": false,
+      "matches": true,
       "name": "-1e30",
       "statements": [
         "SELECT HEX(-1e30) AS value",
@@ -335,10 +340,15 @@
       ]
     },
     {
-      "actual": "value\n8000000000000000\n",
-      "errors": [],
+      "actual": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('-1e30' as double)'\n",
+      "errors": [
+        {
+          "Item1": 1690,
+          "Item2": "22003"
+        }
+      ],
       "expected": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('-1e30' as double)'\n",
-      "matches": false,
+      "matches": true,
       "name": "CAST('-1e30' AS DOUBLE)",
       "statements": [
         "SELECT HEX(CAST('-1e30' AS DOUBLE)) AS value",
@@ -346,10 +356,15 @@
       ]
     },
     {
-      "actual": "value\n7FFFFFFFFFFFFFFF\n",
-      "errors": [],
+      "actual": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "errors": [
+        {
+          "Item1": 1690,
+          "Item2": "22003"
+        }
+      ],
       "expected": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
-      "matches": false,
+      "matches": true,
       "name": "CAST('1e30' AS DOUBLE)",
       "statements": [
         "SELECT HEX(CAST('1e30' AS DOUBLE)) AS value",

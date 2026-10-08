@@ -25,7 +25,44 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "ALTER converts complete rows in final column order"
+        [ testCase "HEX rejects overflowing computed DOUBLE arguments"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, rendered in
+                  [ "-1e30", "-(1e30)"
+                    "CAST('1e30' AS DOUBLE)", "cast('1e30' as double)"
+                    "1e30+0e0", "(1e30 + 0e0)"
+                    "IF(1,CAST('1e30' AS DOUBLE),0e0)", "cast('1e30' as double)"
+                    "(SELECT IF(1,CAST('1e30' AS DOUBLE),0e0))", "cast('1e30' as double)" ] do
+                  let _, result = handle session (sprintf "SELECT HEX(%s)" expression)
+                  Expect.equal result (Err(1690, sprintf "BIGINT value is out of range in '%s'" rendered)) expression
+              let session, result = handle session "SELECT HEX(1e30) AS value"
+              Expect.equal result (ResultSet([ "value" ], [ [ Some "7FFFFFFFFFFFFFFF" ] ])) "literal clamps"
+              Expect.isEmpty session.Diagnostics "literal has no warning"
+
+          testCase "HEX evaluates a selected conditional branch once"
+          <| fun _ ->
+              for expression in
+                  [ "IF((@calls:=@calls+1),1e30,CAST('1e30' AS DOUBLE))"
+                    "CASE (@calls:=@calls+1) WHEN 1 THEN 1e30 ELSE CAST('1e30' AS DOUBLE) END" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "SET @calls=0"
+                  let session, result = handle session (sprintf "SELECT HEX(%s) AS value" expression)
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some "7FFFFFFFFFFFFFFF" ] ])) "unchosen overflowing branch is not evaluated"
+                  let _, calls = handle session "SELECT @calls AS calls"
+                  Expect.equal calls (ResultSet([ "calls" ], [ [ Some "1" ] ])) "condition evaluated once"
+
+          testCase "HEX clamps stored DOUBLE overflow with an integer warning"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE hex_double(n DOUBLE)"
+              let session, _ = handle session "INSERT INTO hex_double VALUES(1e30)"
+              let session, result = handle session "SELECT HEX(n) AS value FROM hex_double"
+              Expect.equal result (ResultSet([ "value" ], [ [ Some "7FFFFFFFFFFFFFFF" ] ])) "column clamps"
+              Expect.equal (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect INTEGER value: '1e30'" ] "column warning"
+
+          testCase "ALTER converts complete rows in final column order"
           <| fun _ ->
               for mode in [ ""; "STRICT_ALL_TABLES" ] do
                   let session = create 1 (Fsdb.Storage.create ())

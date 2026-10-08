@@ -6614,6 +6614,71 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS target"; "DROP TABLE IF EXISTS renamed"; "DROP TABLE IF EXISTS parent"; "SET foreign_key_checks=1" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
+    let private hexExpressionConversion =
+        let expressions =
+            [
+              "1e30", None
+              "-1e30", Some(1690, "22003")
+              "1e19", None
+              "-1e19", Some(1690, "22003")
+              "9.223372036854776e18", None
+              "-9.223372036854776e18", None
+              "9.223372036854775e18", None
+              "-9.223372036854775e18", None
+              "CAST('1e30' AS DOUBLE)", Some(1690, "22003")
+              "CAST('-1e30' AS DOUBLE)", Some(1690, "22003")
+              "CAST('1e19' AS DOUBLE)", Some(1690, "22003")
+              "1e30+0e0", Some(1690, "22003")
+              "0e0-1e30", Some(1690, "22003")
+              "ABS(1e30)", Some(1690, "22003")
+              "ROUND(1e30)", Some(1690, "22003")
+              "FLOOR(1e30)", Some(1690, "22003")
+              "CEIL(1e30)", Some(1690, "22003")
+              "COALESCE(1e30,0e0)", Some(1690, "22003")
+              "IFNULL(1e30,0e0)", Some(1690, "22003")
+              "IF(1,1e30,0e0)", None
+              "CASE WHEN 1 THEN 1e30 ELSE 0e0 END", None
+              "GREATEST(1e30,0e0)", Some(1690, "22003")
+              "LEAST(1e30,1e31)", Some(1690, "22003")
+              "(SELECT 1e30)", None
+              "-(1e30+0e0)", Some(1690, "22003")
+              "CAST('9.223372036854776e18' AS DOUBLE)", Some(1690, "22003")
+              "CAST('-9.223372036854776e18' AS DOUBLE)", Some(1690, "22003")
+              "CAST('9.223372036854775e18' AS DOUBLE)", None
+              "2.5e0+0e0", None
+              "ABS(-2.5e0)", None
+              "COALESCE(2.5e0,0e0)", None
+              "0e0-9.223372036854776e18", None
+              "ABS(-9.223372036854776e18)", Some(1690, "22003")
+              "COALESCE(-9.223372036854776e18,0e0)", None
+              "-9.223372036854777e18", Some(1690, "22003")
+              "CAST('-9.223372036854775e18' AS DOUBLE)", None
+              "IF(1,CAST('1e30' AS DOUBLE),0e0)", Some(1690, "22003")
+              "IF(0,CAST('1e30' AS DOUBLE),1e30)", None
+              "CASE WHEN 1 THEN CAST('1e30' AS DOUBLE) ELSE 0e0 END", Some(1690, "22003")
+              "CASE WHEN 0 THEN CAST('1e30' AS DOUBLE) ELSE 1e30 END", None
+              "COALESCE(NULL,1e30)", Some(1690, "22003")
+              "IFNULL(NULL,1e30)", Some(1690, "22003")
+              "(SELECT CAST('1e30' AS DOUBLE))", Some(1690, "22003")
+              "(SELECT IF(1,1e30,0e0))", None
+              "(SELECT IF(1,CAST('1e30' AS DOUBLE),0e0))", Some(1690, "22003")
+              "(SELECT CASE WHEN 1 THEN 1e30 ELSE 0e0 END)", None
+              "(SELECT CASE WHEN 1 THEN CAST('1e30' AS DOUBLE) ELSE 0e0 END)", Some(1690, "22003")
+            ]
+        let cases =
+            [ for expression, error in expressions do
+                  yield expression, error |> Option.map (fun (code, state) -> 0, code, state),
+                      [ sprintf "SELECT HEX(%s) AS value" expression; "SHOW WARNINGS" ]
+              yield "variable", None, [ "SET @n=1e30"; "SELECT HEX(@n) AS value"; "SHOW WARNINGS" ]
+              yield "column", None,
+                  [ "CREATE TABLE target(n DOUBLE)"; "INSERT INTO target VALUES(1e30)"
+                    "SELECT HEX(n) AS value FROM target"; "SHOW WARNINGS" ] ]
+        { Name = "hex-expression-conversion"
+          Setup = [||]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [| "DROP TABLE IF EXISTS target" |]
+          Coverage = [| "function:HEX", [| "text-differential" |] |] }
+
     let private hexNumericConversion =
         let expressions =
             [
@@ -7270,6 +7335,7 @@ module ContractCatalog =
            alterCoercion
            alterRowOrder
            hexNumericConversion
+           hexExpressionConversion
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings
