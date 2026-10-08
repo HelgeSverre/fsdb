@@ -9,9 +9,10 @@ open Fsdb.Sql
 type Diagnostics =
     { Context: (int * int * string) list
       ContextOrder: Map<int, int>
+      Ignored: Set<int>
       Resolution: (int * string) list }
 
-let empty = { Context = []; ContextOrder = Map.empty; Resolution = [] }
+let empty = { Context = []; ContextOrder = Map.empty; Ignored = Set.empty; Resolution = [] }
 let private sameName left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
 let private quote (name: string) = "`" + name.Replace("`", "``") + "`"
 
@@ -48,10 +49,74 @@ and private queryBlocks order = function
         selectBlocks order first @ (rest |> List.collect (snd >> selectBlocks order))
         @ ((ordering |> List.map fst) @ Option.toList limit @ Option.toList offset |> List.collect (expressionQueries order))
 
-let rec private statementBlocks order = function
-    | Select select -> selectBlocks order select
-    | Union(first, rest, ordering, limit, offset) -> queryBlocks order (UnionSelect(first, rest, ordering, limit, offset))
-    | Explain(_, statement) -> statementBlocks order statement
+type private BlockKey = StatementBlock | SelectBlock of int
+
+let private selectSources (select: SelectStmt) =
+    Option.toList select.From @ (select.Joins |> List.map _.Table)
+
+let private mutationSource (name: string) =
+    let separator = name.IndexOf '.'
+    let database, table =
+        if separator < 0 then None, name
+        else Some(name.Substring(0, separator)), name.Substring(separator + 1)
+    FromTable { Database = database; Table = table; Alias = None; Partitions = [] }
+
+let rec private statementScopes positionOf order statement =
+    let scopes selects =
+        selects |> List.choose (fun select ->
+            positionOf select |> Option.map (fun position -> SelectBlock position, selectSources select))
+    let expressionBlocks expressions = expressions |> List.collect (expressionQueries order)
+    let mutation ctes sources children =
+        let referencedCtes = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        let rec visit sources =
+            [ for source in sources |> List.collect FromItem.leaves do
+                match source with
+                | FromTable table when table.Database.IsNone ->
+                    match ctes |> List.tryFind (fun cte -> sameName cte.CteName table.Table) with
+                    | Some cte when referencedCtes.Add cte.CteName ->
+                        let body = queryBlocks order cte.Body
+                        let dependencies = visit (body |> List.collect selectSources)
+                        if order = Contextualization then yield! dependencies
+                        yield! body
+                        if order <> Contextualization then yield! dependencies
+                    | _ -> ()
+                | _ -> () ]
+        // Mutation CTEs are numbered when referenced, after the body subqueries.
+        let cteBlocks = visit (sources @ (children |> List.collect selectSources))
+        [ if order = Contextualization then
+              yield! scopes cteBlocks
+              yield! scopes children
+          yield StatementBlock, sources
+          if order <> Contextualization then
+              yield! scopes children
+              yield! scopes cteBlocks ]
+    let insertSelect table select assignments =
+        let body = scopes (selectBlocks order select)
+        let first = scopes (selectBlocks Numbering select) |> List.tryHead |> Option.map fst
+        [ for key, sources in body do
+              yield key, if Some key = first then mutationSource table :: sources else sources
+          yield! scopes (expressionBlocks assignments) ]
+    match statement with
+    | Select select -> scopes (selectBlocks order select)
+    | Union(first, rest, ordering, limit, offset) -> scopes (queryBlocks order (UnionSelect(first, rest, ordering, limit, offset)))
+    | Explain(_, inner) -> statementScopes positionOf order inner
+    | Update update ->
+        let children =
+            (update.Joins |> List.collect (joinQueries order))
+            @ expressionBlocks ((update.Assignments |> List.map _.Value) @ Option.toList update.Where
+                                @ (update.OrderBy |> List.map fst) @ Option.toList update.Limit)
+        mutation update.Ctes (FromTable update.From :: (update.Joins |> List.map _.Table)) children
+    | Delete delete ->
+        let children =
+            (delete.Joins |> List.collect (joinQueries order))
+            @ expressionBlocks (Option.toList delete.Where @ (delete.OrderBy |> List.map fst) @ Option.toList delete.Limit)
+        mutation delete.Ctes (FromTable delete.From :: (delete.Joins |> List.map _.Table)) children
+    | Insert(table, _, rows, assignments, _) ->
+        mutation [] [ mutationSource table ] (expressionBlocks (List.concat rows @ (assignments |> List.map snd)))
+    | Replace(table, _, rows) -> mutation [] [ mutationSource table ] (expressionBlocks (List.concat rows))
+    | ReplaceSet(table, assignments) -> mutation [] [ mutationSource table ] (expressionBlocks (assignments |> List.map snd))
+    | InsertSelect(table, _, select, assignments, _) -> insertSelect table select (assignments |> List.map snd)
+    | ReplaceSelect(table, _, select) -> insertSelect table select []
     | _ -> []
 
 type private Target =
@@ -66,7 +131,7 @@ type private ConflictTarget =
 
 type private Block =
     { Number: int
-      Select: SelectStmt
+      Sources: FromItem list
       mutable Name: string option
       Targets: ResizeArray<Target>
       Seen: HashSet<string * ConflictTarget>
@@ -111,7 +176,7 @@ let private joinConflict kind (seen: HashSet<OptimizerHints.JoinOrderKind>) =
 
 let private targetWarnings indexesFor (block: Block) =
     let warnings = ResizeArray<int * string>()
-    let sources = (Option.toList block.Select.From @ (block.Select.Joins |> List.map _.Table)) |> List.collect FromItem.leaves
+    let sources = block.Sources |> List.collect FromItem.leaves
     let sourceFor table = sources |> List.tryFind (fun source -> FromItem.tryQualifier source |> Option.exists (sameName table))
     let unresolved name label = warnings.Add(3128, sprintf "Unresolved name %s for %s hint" label name)
     let indexExists source index =
@@ -163,6 +228,7 @@ let resolve options sql (hints: OptimizerHints.Hint list) (indexesFor: TableRef 
         match hint.Value with
         | OptimizerHints.QueryBlockName _ | OptimizerHints.TableHint _ | OptimizerHints.IndexHint _
         | OptimizerHints.JoinOrderHint _ | OptimizerHints.QueryBlockHint _ -> true
+        | OptimizerHints.SetVariable _ -> not (hint.Location.StatementKeyword.Equals("SELECT", StringComparison.OrdinalIgnoreCase))
         | _ -> false))
     if not needsResolution then empty
     else
@@ -174,29 +240,35 @@ let resolve options sql (hints: OptimizerHints.Hint list) (indexesFor: TableRef 
                 positions |> List.tryPick (fun (position, parsed) ->
                     if Object.ReferenceEquals(select.Projections, parsed.Projections) then Some position else None)
             let orderedBlocks order =
-                statementBlocks order statement
-                |> List.choose (fun select -> positionOf select |> Option.map (fun position -> position, select))
+                statementScopes positionOf order statement
                 |> List.distinctBy fst
             let ordered = orderedBlocks NameResolution
             match ordered with
             | [] -> empty
             | _ ->
-                let blocks = orderedBlocks Numbering |> List.mapi (fun index (position, select) ->
+                let blocks = orderedBlocks Numbering |> List.mapi (fun index (position, sources) ->
                     position,
-                    { Number = index + 1; Select = select; Name = None
+                    { Number = index + 1; Sources = sources; Name = None
                       Targets = ResizeArray(); Seen = HashSet(); JoinOrders = HashSet() }) |> Map.ofList
                 let context = ResizeArray<int * int * string>()
                 let named = Dictionary<string, Block>(StringComparer.OrdinalIgnoreCase)
                 let warn offset code text = context.Add(offset, code, text)
                 let duplicate offset text = warn offset 3126 ("Hint " + text + " is ignored as conflicting/duplicated")
-                let owner (hint: OptimizerHints.Hint) =
-                    Map.tryFind (Parser.queryBlockSourceOffset options sql hint.Location.KeywordOffset) blocks
-                let hintsByOwner =
-                    hints |> List.groupBy (fun hint -> Parser.queryBlockSourceOffset options sql hint.Location.KeywordOffset) |> Map.ofList
+                let root = orderedBlocks Numbering |> List.head |> fst
+                let ownerKey (hint: OptimizerHints.Hint) =
+                    if hint.Location.Keyword.Equals("SELECT", StringComparison.OrdinalIgnoreCase) then
+                        SelectBlock(Parser.queryBlockSourceOffset options sql hint.Location.KeywordOffset)
+                    else root
+                let owner hint = Map.tryFind (ownerKey hint) blocks
+                let selectHints, statementHints =
+                    hints |> List.partition (fun hint -> hint.Location.Keyword.Equals("SELECT", StringComparison.OrdinalIgnoreCase))
+                let hintsByOwner = selectHints |> List.groupBy ownerKey |> Map.ofList
                 let contextHints =
-                    orderedBlocks Contextualization
-                    |> List.collect (fun (position, _) -> Map.tryFind position hintsByOwner |> Option.defaultValue [])
+                    [ for key, _ in orderedBlocks Contextualization do
+                          yield! Map.tryFind key hintsByOwner |> Option.defaultValue []
+                      yield! statementHints ]
                 let contextOrder = contextHints |> List.mapi (fun index hint -> hint.Offset, index) |> Map.ofList
+                let ignored = hints |> List.choose (fun hint -> if contextOrder.ContainsKey hint.Offset then None else Some hint.Offset) |> Set.ofList
                 let resolveBlock current requested =
                     match requested with
                     | None -> Ok current
@@ -262,4 +334,4 @@ let resolve options sql (hints: OptimizerHints.Hint list) (indexesFor: TableRef 
                         | _ -> ()
                 let resolution =
                     ordered |> List.collect (fun (position, _) -> targetWarnings indexesFor blocks.[position])
-                { Context = List.ofSeq context; ContextOrder = contextOrder; Resolution = resolution }
+                { Context = List.ofSeq context; ContextOrder = contextOrder; Ignored = ignored; Resolution = resolution }

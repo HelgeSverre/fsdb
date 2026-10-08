@@ -414,7 +414,8 @@ No known-gap allowlist was changed.
 
 The [hint-family audit](2026-10-08-hint-families.md) extends this coverage to
 family conflicts and nested contextualization order. Broader hint combinations,
-DML/stored-program resolution, view-expansion interactions, and physical
-optimizer effects remain open. The common-path performance comparison is in
+stored-program resolution, view-expansion interactions, and physical
+optimizer effects remain open. The [mutation-hint audit](2026-10-08-mutation-hints.md)
+covers the audited DML ownership and diagnostic cases. The common-path performance comparison is in
 `benchmarks/results/d014676b-hint-resolution.md`; concurrent host activity makes
 its elapsed timings unsuitable for a throughput claim.

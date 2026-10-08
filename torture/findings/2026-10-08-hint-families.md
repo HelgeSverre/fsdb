@@ -1,7 +1,8 @@
 # SELECT optimizer hint families
 
 Status: audited diagnostic cases fixed. Physical optimizer controls and broader
-DML, stored-program, and view-expansion interactions remain open.
+stored-program and view-expansion interactions remain open. Audited DML
+resolution is covered by the [mutation-hint audit](2026-10-08-mutation-hints.md).
 
 ## Native behavior
 

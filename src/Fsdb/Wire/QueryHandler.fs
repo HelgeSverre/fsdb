@@ -1360,6 +1360,7 @@ let private withStatementHintsCore session scope emitWarnings options sql body =
     let resolution =
         if scope = StandaloneStatement then resolveStatementHints session options sql hints
         else OptimizerHintResolution.empty
+    let hints = hints |> List.filter (fun hint -> not (resolution.Ignored.Contains hint.Offset))
     let timeout, timeoutDiagnostics = statementTimeoutHint scope options sql hints
     let assignment, variableDiagnostics = geometryAssignmentInContext resolution.ContextOrder hints
     if emitWarnings then
@@ -5198,6 +5199,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
         let options = parserOptionsForSession session
         let hints = parsedStatementHints true options sql
         let resolution = resolveStatementHints session options sql hints
+        let hints = hints |> List.filter (fun hint -> not (resolution.Ignored.Contains hint.Offset))
         let _, timeoutDiagnostics = statementTimeoutHint StandaloneStatement options sql hints
         let assignment, variableDiagnostics = geometryAssignmentInContext resolution.ContextOrder hints
         emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics @ variableDiagnostics)

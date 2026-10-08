@@ -609,12 +609,17 @@ duplicate and unknown-variable hints once, while execution repeats value
 validation warnings when applicable.
 
 Optimizer hints are parsed in order. A syntax error stops later hints in that
-comment while retaining accepted earlier hints. SELECT hint diagnostics cover
+comment while retaining accepted earlier hints. SELECT and audited mutation
+hint diagnostics cover
 table aliases, named query blocks, index targets, and duplicate targets,
 including nested queries, CTEs, and UNION branches in the audited cases.
 Audited conflict rules distinguish table-wide and per-index hints, join-order
 hints, and subquery strategies. Nested query blocks contextualize their hints
 before their parent; unresolved-target diagnostics follow a separate order.
+INSERT SELECT and REPLACE SELECT share the first SELECT block with the target
+table, and SELECT hints are considered before statement hints. Unused mutation
+CTEs do not apply setting overrides or semantic hint warnings in the audited
+cases.
 Target-resolution warnings appear during SQL or binary preparation and do not
 repeat on execution. Recognizing a hint and resolving its targets does not
 imply that its physical optimizer strategy is implemented.
