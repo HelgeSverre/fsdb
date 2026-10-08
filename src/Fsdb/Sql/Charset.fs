@@ -488,13 +488,32 @@ let decodeWithByteReplacement name (bytes: byte[]) =
     appendValid offset
     output.ToString()
 
-let invalidBytePreview (bytes: byte[]) offset =
+/// UCS2 converts each 16-bit code unit independently, including surrogates.
+let ucs2ToUtf8 (bytes: byte[]) =
+    let output = ResizeArray<byte>()
+    for offset in 0 .. 2 .. bytes.Length - 2 do
+        let value = (int bytes.[offset] <<< 8) ||| int bytes.[offset + 1]
+        if value < 0x80 then output.Add(byte value)
+        elif value < 0x800 then
+            output.Add(byte (0xC0 ||| (value >>> 6)))
+            output.Add(byte (0x80 ||| (value &&& 0x3F)))
+        else
+            output.Add(byte (0xE0 ||| (value >>> 12)))
+            output.Add(byte (0x80 ||| ((value >>> 6) &&& 0x3F)))
+            output.Add(byte (0x80 ||| (value &&& 0x3F)))
+    output.ToArray()
+
+let private bytePreview escapeAscii (bytes: byte[]) offset =
     let remaining = bytes.Length - offset
     let preview =
         bytes.[offset .. offset + min 6 remaining - 1]
-        |> Array.map (fun value -> if value < 0x80uy then string (char value) else sprintf "\\x%02X" value)
+        |> Array.map (fun value -> if not escapeAscii && value < 0x80uy then string (char value) else sprintf "\\x%02X" value)
         |> String.concat ""
     if remaining > 6 then preview + "..." else preview
+
+let invalidBytePreview bytes offset = bytePreview false bytes offset
+
+let wideBytePreview bytes offset = bytePreview true bytes offset
 
 let decodeLoadData (name: string) (bytes: byte[]) =
     match tryCodec name with

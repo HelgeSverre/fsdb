@@ -964,6 +964,36 @@ module ContractCatalog =
                    yield Contract.query (label "strict-warnings") "SHOW WARNINGS"
                    yield Contract.query (label "empty") "SELECT COUNT(*) AS n FROM encoded_target"
                yield Contract.execute "encoded-storage-drop" "DROP TABLE encoded_target"
+               for index, (sql, rejected) in
+                   [ "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET ucs2);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET utf8mb4);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET ascii);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET ucs2);SET sql_mode='STRICT_TRANS_TABLES';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET utf8mb4);SET sql_mode='STRICT_TRANS_TABLES';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET ascii);SET sql_mode='STRICT_TRANS_TABLES';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target", true
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(1) CHARACTER SET ucs2);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(2) CHARACTER SET ucs2);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(3) CHARACTER SET ucs2);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(1) CHARACTER SET ucs2);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'D83DDE00');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(2) CHARACTER SET ucs2);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'D83DDE00');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(3) CHARACTER SET ucs2);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'D83DDE00');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(1) CHARACTER SET utf8mb4);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(2) CHARACTER SET utf8mb4);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(3) CHARACTER SET utf8mb4);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(1) CHARACTER SET utf8mb4);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'D83DDE00');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(2) CHARACTER SET utf8mb4);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'D83DDE00');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(3) CHARACTER SET utf8mb4);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'D83DDE00');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET ascii);SET sql_mode='';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D83DDE0000420043');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target", false
+                     "DROP TABLE IF EXISTS surrogate_target;CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET ascii);SET sql_mode='STRICT_TRANS_TABLES';INSERT INTO surrogate_target VALUES(_ucs2 X'0041D83DDE0000420043');SHOW WARNINGS;SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target", true ] |> List.indexed do
+                   for step, fragment in sql.Split(';') |> Array.indexed do
+                       let label = sprintf "ucs2-storage-%d-%d" index step
+                       if fragment.StartsWith("SELECT") || fragment.StartsWith("SHOW") then
+                           yield Contract.query label fragment
+                       elif rejected && fragment.StartsWith("INSERT") then
+                           yield Contract.execute label fragment |> Contract.fails 1366 "HY000"
+                       else
+                           yield Contract.execute label fragment
+               yield Contract.execute "ucs2-storage-drop" "DROP TABLE surrogate_target"
                yield Contract.execute "encoded-storage-mode" "SET sql_mode=DEFAULT" |]
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential"; "error-contract" |] |] }

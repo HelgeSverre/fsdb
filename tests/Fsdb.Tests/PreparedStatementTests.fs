@@ -564,6 +564,56 @@ let tests =
                           Expect.equal (run "SELECT HEX(v) AS h FROM encoded_target")
                               (ResultSet([ "h" ], [ [ Some expected ] ])) (literal + " to " + charset)
 
+          testCase "UCS2 storage preserves surrogate code units across Unicode targets"
+          <| fun _ ->
+              for charset, expected, length in
+                  [ "ucs2", "0041D8000042", "6"
+                    "utf8mb4", "41EDA08042", "5" ] do
+                  for mode in [ ""; "STRICT_TRANS_TABLES" ] do
+                      let mutable session = create 1 (Fsdb.Storage.create ())
+                      let run sql =
+                          let next, result = handle session sql
+                          session <- next
+                          result
+                      run ("CREATE TABLE surrogate_target(v VARCHAR(20) CHARACTER SET " + charset + ")") |> ignore
+                      run ("SET sql_mode='" + mode + "'") |> ignore
+                      Expect.equal (run "INSERT INTO surrogate_target VALUES(_ucs2 X'0041D8000042')") (Affected 1UL) "accepted surrogate"
+                      Expect.equal (session.Diagnostics |> List.map _.Code) [ 1287 ] "only charset deprecation"
+                      Expect.equal (run "SELECT HEX(v) AS h,LENGTH(v) AS n FROM surrogate_target")
+                          (ResultSet([ "h"; "n" ], [ [ Some expected; Some length ] ])) (charset + " " + mode)
+
+          testCase "UCS2 ASCII conversion replaces individual surrogate units"
+          <| fun _ ->
+              for mode in [ ""; "STRICT_TRANS_TABLES" ] do
+                  let mutable session = create 1 (Fsdb.Storage.create ())
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  run "CREATE TABLE ascii_target(v VARCHAR(20) CHARACTER SET ascii)" |> ignore
+                  run ("SET sql_mode='" + mode + "'") |> ignore
+                  let result = run "INSERT INTO ascii_target VALUES(_ucs2 X'0041D83DDE0000420043')"
+                  let message = "Incorrect string value: '\\xD8\\x3D\\xDE\\x00\\x00\\x42...' for column 'v' at row 1"
+                  if mode = "" then
+                      Expect.equal result (Affected 1UL) "non-strict replacement"
+                      Expect.equal (session.Diagnostics |> List.find (fun warning -> warning.Code = 1366) |> _.Message) message "original source bytes"
+                      Expect.equal (run "SELECT HEX(v) AS h FROM ascii_target")
+                          (ResultSet([ "h" ], [ [ Some "413F3F4243" ] ])) "each surrogate becomes a question mark"
+                  else
+                      Expect.equal result (Err(1366, message)) "strict conversion fails"
+
+          testCase "UCS2 surrogate pairs count as two code units"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              run "CREATE TABLE pair_target(v VARCHAR(2) CHARACTER SET ucs2)" |> ignore
+              Expect.equal (run "INSERT INTO pair_target VALUES(_ucs2 X'D83DDE00')") (Affected 1UL) "pair fits two code units"
+              Expect.equal (run "SELECT HEX(v) AS h,LENGTH(v) AS n,CHAR_LENGTH(v) AS c FROM pair_target")
+                  (ResultSet([ "h"; "n"; "c" ], [ [ Some "D83DDE00"; Some "4"; Some "2" ] ])) "UCS2 does not combine surrogate pairs"
+
           testCase "ordinary literal parser caches distinguish connection collations"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

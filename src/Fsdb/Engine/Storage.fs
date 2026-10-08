@@ -1678,6 +1678,19 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             if text = converted then Ok text
             else conversionFailure (escapedUtf8Suffix text converted) converted
         match v with
+        | VEncodedString("ucs2", bytes) ->
+            let converted = Text.StringBuilder(bytes.Length / 2)
+            let mutable firstChanged = None
+            for offset in 0 .. 2 .. bytes.Length - 2 do
+                let unit = char ((int bytes.[offset] <<< 8) ||| int bytes.[offset + 1])
+                let original = string unit
+                let replacement = transcode original
+                if firstChanged.IsNone && original <> replacement then
+                    firstChanged <- Some offset
+                converted.Append replacement |> ignore
+            match firstChanged with
+            | Some offset -> conversionFailure (Charset.wideBytePreview bytes offset) (converted.ToString())
+            | None -> Ok(converted.ToString())
         | VEncodedString(source, bytes) ->
             match Charset.tryInvalidTextByteOffset source bytes with
             | Some offset ->
@@ -1700,6 +1713,32 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | Some truncated ->
             truncationWarning ()
             Ok truncated
+
+    let coerceText length trimSpaces =
+        let target = col.Charset |> Option.map Charset.canonicalName |> Option.defaultValue "utf8mb4"
+        match v with
+        | VEncodedString("ucs2", bytes) when target = "ucs2" || target = "utf8mb3" || target = "utf8mb4" ->
+            let mutable byteLength = bytes.Length
+            if trimSpaces && enforceLengths then
+                while byteLength >= 2 && bytes.[byteLength - 2] = 0uy && bytes.[byteLength - 1] = 0x20uy do
+                    byteLength <- byteLength - 2
+            let limit = length |> Option.defaultValue (byteLength / 2)
+            let exceeds = byteLength / 2 > limit
+            if enforceLengths && exceeds && strict then
+                Error(DataTooLongForColumn(col.Name, Diagnostics.currentRowNumber ()))
+            else
+                if enforceLengths && exceeds then
+                    truncationWarning ()
+                    byteLength <- 2 * limit
+                let bytes = bytes.[0 .. byteLength - 1]
+                let converted = if target = "ucs2" then bytes else Charset.ucs2ToUtf8 bytes
+                Ok(Value.encodedString target converted)
+        | _ ->
+            charsetChecked (v |> toText |> Option.defaultValue "")
+            |> Result.bind (fun text ->
+                let text = if trimSpaces && enforceLengths then text.TrimEnd([| ' ' |]) else text
+                match length with Some limit -> truncateText limit text | None -> Ok text)
+            |> Result.map VString
 
     let truncateBytes length (bytes: byte[]) =
         if not enforceLengths || bytes.Length <= length then
@@ -1991,21 +2030,12 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 | Some d -> finish d
                 | None -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
             | _ -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
-        | TChar length
-        | TVarchar length ->
-            charsetChecked (v |> toText |> Option.defaultValue "")
-            |> Result.bind (fun text ->
-                let text =
-                    match col.Type with
-                    | TChar _ when enforceLengths -> text.TrimEnd([| ' ' |])
-                    | _ -> text
-
-                truncateText length text)
-            |> Result.map VString
+        | TChar length -> coerceText (Some length) true
+        | TVarchar length -> coerceText (Some length) false
         | TTinyText
         | TText
         | TMediumText
-        | TLongText -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VString
+        | TLongText -> coerceText None false
         // A JSON column's value must carry its JSON-ness in the `Value` itself:
         // `Value.compare` puts a `VJson` operand's whole comparison into the
         // JSON domain (type precedence, then content), and a `VString` there

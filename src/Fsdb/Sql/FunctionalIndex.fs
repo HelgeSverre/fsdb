@@ -249,9 +249,10 @@ let private runeLength (text: string) =
     text.EnumerateRunes() |> Seq.length |> int64
 
 let characterLength value =
-    match tryRawBytes value with
-    | Some bytes -> int64 bytes.Length
-    | None -> value |> toText |> Option.map runeLength |> Option.defaultValue 0L
+    match value, tryRawBytes value with
+    | VEncodedString("ucs2", bytes), _ -> int64 (bytes.Length / 2)
+    | _, Some bytes -> int64 bytes.Length
+    | _, None -> value |> toText |> Option.map runeLength |> Option.defaultValue 0L
 
 /// Text byte length follows the source character set; callers without a
 /// declared source use UTF-8, matching ordinary string literals.

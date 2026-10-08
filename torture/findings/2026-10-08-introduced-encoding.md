@@ -139,3 +139,32 @@ The maintained wire contract compares rows, warnings, strict errors, and
 post-error table state. Run `20261008T050419021-25285/contracts` passed
 62 cases and 7,502 steps without differences. The root gate passed 3,068
 tests with no build warnings or errors under the usual 4 GiB heap cap.
+
+### UCS2 code-unit storage semantics
+
+Native MySQL accepts `0041D8000042` in UCS2 columns in both strict and
+non-strict modes, retaining all six bytes. Conversion to UTF8MB4 retains the
+surrogate encoding as `41EDA08042`, without a conversion warning. ASCII
+conversion produces `413F42` and warning 1366 in non-strict mode; strict mode
+rejects it, with the diagnostic preview based on the original UCS2 bytes.
+
+UCS2 surrogate pairs are two independent code units. `D83DDE00` converts to
+UTF8MB4 `EDA0BDEDB880`, not the four-byte scalar encoding. VARCHAR limits
+apply during conversion by source code unit: VARCHAR(1) retains the first
+surrogate, and VARCHAR(2) retains both. `CHAR_LENGTH` then reports two for
+the UCS2 value but six for the invalid UTF8MB4 byte sequence. Likewise,
+VARCHAR(2) converts `0041D8000042` to `41EDA080`, whose UTF8MB4 character
+length is four. The maintained storage oracle contains the size-one-through-
+three controls for both source strings and both targets.
+
+Text-column coercion now preserves encoded UCS2 values through length
+enforcement and conversion, and character counting uses UCS2 code units.
+ASCII conversion replaces each surrogate independently: `0041D83DDE0000420043`
+becomes `413F3F4243`. Its warning previews the original six-byte suffix,
+`\xD8\x3D\xDE\x00\x00\x42...`; strict mode rejects the same input.
+
+Focused Expecto regressions cover preservation, character counting, and
+strict/non-strict ASCII conversion. The native wire contracts cover these
+cases and the length matrix: 62 cases and 7,623 steps pass without differences.
+This closes the audited UCS2 storage boundary; other charset conversions and
+encoded-value expression operations still need separate native evidence.
