@@ -96,6 +96,38 @@ cases = [('SELECT /*+ BOGUS */ 1 AS n;SHOW WARNINGS',
   "Warning\t1064\tOptimizer hint syntax error near 'BOGUS */ @@max_points_in_geometry AS n' at line 1\n")]
 
 
+cases += [('SELECT /*+ MAX_EXECUTION_TIME(10000) MAX_EXECUTION_TIME(2) BOGUS */ 1 AS n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1064\tOptimizer hint syntax error near 'BOGUS */ 1 AS n' at line 1\n"
+  'Warning\t3126\tHint MAX_EXECUTION_TIME(2) is ignored as conflicting/duplicated\n'),
+ ('SELECT /*+ SET_VAR(max_points_in_geometry=2) BOGUS */ 1 AS n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1064\tOptimizer hint syntax error near 'BOGUS */ 1 AS n' at line 1\n"
+  "Warning\t1292\tTruncated incorrect max_points_in_geometry value: '2'\n"),
+ ('SELECT /*+ BKA(t) BOGUS */ 1 AS n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1064\tOptimizer hint syntax error near 'BOGUS */ 1 AS n' at line 1\n"
+  'Warning\t3128\tUnresolved name `t`@`select#1` for BKA hint\n'),
+ ('SELECT /*+ MAX_EXECUTION_TIME(10000) SET_VAR(max_points_in_geometry=2) MAX_EXECUTION_TIME(3) */ 1 AS '
+  'n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  'Warning\t3126\tHint MAX_EXECUTION_TIME(3) is ignored as conflicting/duplicated\n'
+  "Warning\t1292\tTruncated incorrect max_points_in_geometry value: '2'\n"),
+ ('SELECT /*+ SET_VAR(max_points_in_geometry=3) MAX_EXECUTION_TIME(-1) SET_VAR(no_such_variable=1) */ 1 AS '
+  'n;SHOW WARNINGS',
+  'n\n'
+  '1\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1064\tOptimizer hint syntax error near '-1) SET_VAR(no_such_variable=1) */ 1 AS n' at line 1\n")]
+
 def verify(client, _writer):
     arguments["verify_cases"](client, cases)
 

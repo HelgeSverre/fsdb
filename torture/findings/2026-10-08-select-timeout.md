@@ -327,3 +327,54 @@ Validation: all 3,096 root tests pass. The existing native wire suite passes
 `torture/artifacts/runs/20261008T101635784-59333/contracts`.
 The focused regression covers prefix retention, rejected suffixes, warning
 order, and accepted interleaved hint syntax. No known-gap allowlist was changed.
+
+
+## Table and query-block hint resolution
+
+Status: reproduced; name resolution and optimizer effects remain open.
+
+`table-hint-resolution-oracle.py` pins native MySQL 8.4.11 diagnostics for
+physical tables, aliases, derived sources, named query blocks, nested queries,
+CTEs, UNION branches, indexes, duplicate hints, views, and SQL PREPARE. Run it
+with `python3 torture/scripts/table-hint-resolution-oracle.py`. The fixture
+creates its own empty table in the disposable oracle database.
+
+The observed contract includes:
+
+- Table targets resolve against the exposed alias. `BKA(t)` is unresolved for
+  `FROM t AS a`; `BKA(a)` and `BKA(A)` resolve on this native macOS server.
+  A derived-table alias is also a valid target.
+- Missing table targets warn with 3128 and a table/query-block label. Missing
+  explicit query blocks warn with 3127. Named blocks resolve across nested
+  queries, and matching is case-insensitive in the audited cases; warning text
+  retains the declared name's spelling.
+- A CTE's SELECT appears first in the SQL but the outer query is `select#1` and
+  the CTE is `select#2`. UNION branches have distinct query-block numbers.
+  Query-block depth alone cannot identify the owning SELECT.
+- Diagnostic order differs from lexical order: in the audited outer SELECT
+  with a scalar subquery and a derived table, unresolved-name warnings appear
+  for the outer query, derived table, then scalar subquery. Their numbers remain
+  1, 3, and 2 respectively.
+- Duplicate or opposing BKA hints warn with 3126 before unresolved-name
+  warnings. Duplication is tracked per target, so a repeated target does not
+  discard another target in the same hint. Repeated missing explicit block
+  names within one hint produce only one missing-block warning.
+- Index hints preserve individual index targets. An absent index warns with
+  its index name; an absent table with an index target produces both table and
+  index warnings. The current parser discards index names, so resolution needs
+  a richer parsed hint value before it can reproduce this behavior.
+- SQL PREPARE emits unresolved-name warnings during preparation, without
+  repeating them on EXECUTE. CREATE VIEW discards the valid hints in the
+  audited case. A missing physical table still returns 1146/42S02.
+
+The expanded mixed-hint fixture also pins syntax warnings before duplicate and
+SET_VAR diagnostics, and those diagnostics before unresolved-table warnings.
+Valid hints before a syntax error remain effective; hints after it are ignored.
+
+Validation: the maintained table-resolution fixture passes all 36 native cases,
+and the expanded mixed-hint native fixture passes. A replay against fsdb
+`e7685266` found 28 differing cases; these are principally absent diagnostics,
+not proof that optimizer effects match. Passing alias and view controls guard
+against a resolver that indiscriminately warns about every table hint. The
+native processes use disposable 64 MiB buffer pools and redo capacity. No
+runtime changes or known-gap allowlist additions accompany this evidence.
