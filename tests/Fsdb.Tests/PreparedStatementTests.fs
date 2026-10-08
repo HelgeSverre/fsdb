@@ -631,6 +631,18 @@ let tests =
                   Expect.equal (handle session ("SELECT HEX(CONCAT(" + literal + "," + literal + ")) AS h") |> snd)
                       (ResultSet([ "h" ], [ [ Some expected ] ])) literal
 
+          testCase "Big5 and GBK introduced literals enforce structural byte ranges"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for charset in [ "big5"; "gbk" ] do
+                  let sql = "SELECT _" + charset + " X'41804042'"
+                  Expect.equal (handle session sql |> snd)
+                      (Err(1300, "Invalid " + charset + " character string: '804042'")) sql
+              for charset, bytes in [ "big5", "A1FE"; "gbk", "FEFE" ] do
+                  let sql = "SELECT HEX(REVERSE(_" + charset + " X'41" + bytes + "42')) AS h"
+                  Expect.equal (handle session sql |> snd)
+                      (ResultSet([ "h" ], [ [ Some("42" + bytes + "41") ] ])) sql
+
           testCase "Shift-JIS introduced hex rejects malformed byte sequences"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

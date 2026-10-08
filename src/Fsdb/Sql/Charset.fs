@@ -442,14 +442,25 @@ let private unicodeScalarWidth charset (bytes: byte[]) offset =
         if codePoint <= 0x10FFFFu && Rune.IsValid(int codePoint) then Some 4 else None
     | _ -> None
 
-let private shiftJisCharacterWidth (bytes: byte[]) offset =
+let private legacyCharacterWidth charset (bytes: byte[]) offset =
     let lead = bytes.[offset]
-    if lead <= 0x7Fuy || (lead >= 0xA1uy && lead <= 0xDFuy) then Some 1
+    let shiftJis = charset = "sjis" || charset = "cp932"
+    if lead <= 0x7Fuy || (shiftJis && lead >= 0xA1uy && lead <= 0xDFuy) then Some 1
     elif offset + 1 < bytes.Length then
         let trail = bytes.[offset + 1]
-        let isLead = (lead >= 0x81uy && lead <= 0x9Fuy) || (lead >= 0xE0uy && lead <= 0xFCuy)
-        let isTrail = (trail >= 0x40uy && trail <= 0x7Euy) || (trail >= 0x80uy && trail <= 0xFCuy)
-        if isLead && isTrail then Some 2 else None
+        let validPair =
+            match charset with
+            | "sjis" | "cp932" ->
+                ((lead >= 0x81uy && lead <= 0x9Fuy) || (lead >= 0xE0uy && lead <= 0xFCuy))
+                && ((trail >= 0x40uy && trail <= 0x7Euy) || (trail >= 0x80uy && trail <= 0xFCuy))
+            | "big5" ->
+                lead >= 0xA1uy && lead <= 0xF9uy
+                && ((trail >= 0x40uy && trail <= 0x7Euy) || (trail >= 0xA1uy && trail <= 0xFEuy))
+            | "gbk" ->
+                lead >= 0x81uy && lead <= 0xFEuy
+                && trail >= 0x40uy && trail <= 0xFEuy && trail <> 0x7Fuy
+            | _ -> false
+        if validPair then Some 2 else None
     else None
 
 let private firstInvalidByte length characterWidth =
@@ -470,8 +481,8 @@ let characterByteOffsets name (bytes: byte[]) =
         offsets.Add offset
         let width =
             if charset = "ucs2" then min 2 (bytes.Length - offset)
-            elif charset = "sjis" || charset = "cp932" then
-                shiftJisCharacterWidth bytes offset |> Option.defaultValue 1
+            elif charset = "sjis" || charset = "cp932" || charset = "big5" || charset = "gbk" then
+                legacyCharacterWidth charset bytes offset |> Option.defaultValue 1
             else unicodeScalarWidth charset bytes offset |> Option.defaultValue 1
         offset <- offset + width
     offsets.Add bytes.Length
@@ -499,7 +510,8 @@ let tryInvalidUnicodeByteOffset (name: string) (bytes: byte[]) =
 
 let tryInvalidBinaryLiteralByteOffset name (bytes: byte[]) =
     match canonicalName name with
-    | "sjis" | "cp932" -> firstInvalidByte bytes.Length (shiftJisCharacterWidth bytes)
+    | "sjis" | "cp932" | "big5" | "gbk" as charset ->
+        firstInvalidByte bytes.Length (legacyCharacterWidth charset bytes)
     | _ -> tryInvalidUnicodeByteOffset name bytes
 
 /// UCS-2 code units remain accepted even when they are isolated surrogates.

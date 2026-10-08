@@ -234,3 +234,20 @@ native SJIS/CP932 boundary cases match, including 82 rejections. The full wire
 run passed 62 cases and 7,833 steps without differences; the root gate passed
 3,078 tests without build warnings or errors. Big5 and GBK malformed-literal
 validation remains open.
+
+### Big5 and GBK structural validation
+
+Big5 and GBK introduced hex/bit literals now reject malformed byte sequences
+with 1300/HY000 and the native diagnostic preview. Character boundaries use
+the same byte rules for reversal and slicing. Big5 accepts leads A1–F9 and
+trails 40–7E or A1–FE; GBK accepts leads 81–FE and trails 40–FE except 7F.
+ASCII remains single-byte in both families. These checks do not depend on
+whether the platform codec has a Unicode mapping for an accepted pair.
+
+The native boundary matrix covers 144 accepted and rejected inputs, all
+matching fsdb rows or exact errors. The maintained legacy oracle and full
+wire suite pass; the latter covers 62 cases and 7,977 steps without differences.
+The root gate passed 3,079 tests without build warnings or errors. This closes
+the audited Big5/GBK binary-introducer gap. Quoted-string validation, other
+legacy charset families, conversion diagnostics, and charset mappings remain
+separate compatibility boundaries.
