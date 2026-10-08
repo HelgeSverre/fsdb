@@ -1,0 +1,100 @@
+"""Pin native Boolean-context numeric conversion diagnostics."""
+import pathlib
+import runpy
+
+arguments = runpy.run_path(str(pathlib.Path(__file__).with_name("name-const-oracle.py")))
+setup = "DROP TABLE IF EXISTS predicate_base;CREATE TABLE predicate_base(n INT,s VARCHAR(20));INSERT INTO predicate_base VALUES(1,'x'),(2,'1x'),(3,'0x');"
+cases = [("SELECT 1 AS n WHERE 'x';SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT n FROM predicate_base WHERE 'x';SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT n FROM predicate_base HAVING 'x';SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT IF('x',1,0) AS n;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT NOT 'x' AS n;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT 'x' IS TRUE AS n;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT 1 AS n WHERE '1x';SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n"),
+ ("SELECT n FROM predicate_base WHERE '1x';SHOW WARNINGS",
+  "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n"),
+ ("SELECT n FROM predicate_base HAVING '1x';SHOW WARNINGS",
+  "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n"),
+ ("SELECT IF('1x',1,0) AS n;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n"),
+ ("SELECT NOT '1x' AS n;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n"),
+ ("SELECT '1x' IS TRUE AS n;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n"),
+ ("SELECT 1 AS n WHERE '0x';SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n"),
+ ("SELECT n FROM predicate_base WHERE '0x';SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n"),
+ ("SELECT n FROM predicate_base HAVING '0x';SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n"),
+ ("SELECT IF('0x',1,0) AS n;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n"),
+ ("SELECT NOT '0x' AS n;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n"),
+ ("SELECT '0x' IS TRUE AS n;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n"),
+ ("SELECT 1 AS n WHERE '';SHOW WARNINGS", ''),
+ ("SELECT n FROM predicate_base WHERE '';SHOW WARNINGS", ''),
+ ("SELECT n FROM predicate_base HAVING '';SHOW WARNINGS", ''),
+ ("SELECT IF('',1,0) AS n;SHOW WARNINGS", 'n\n0\n'),
+ ("SELECT NOT '' AS n;SHOW WARNINGS", 'n\n1\n'),
+ ("SELECT '' IS TRUE AS n;SHOW WARNINGS", 'n\n0\n'),
+ ("SELECT 1 AS n WHERE ' 1 ';SHOW WARNINGS", 'n\n1\n'),
+ ("SELECT n FROM predicate_base WHERE ' 1 ';SHOW WARNINGS", 'n\n1\n2\n3\n'),
+ ("SELECT n FROM predicate_base HAVING ' 1 ';SHOW WARNINGS", 'n\n1\n2\n3\n'),
+ ("SELECT IF(' 1 ',1,0) AS n;SHOW WARNINGS", 'n\n1\n'),
+ ("SELECT NOT ' 1 ' AS n;SHOW WARNINGS", 'n\n0\n'),
+ ("SELECT ' 1 ' IS TRUE AS n;SHOW WARNINGS", 'n\n1\n'),
+ ("SELECT 1 AS n WHERE '1e2x';SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n"),
+ ("SELECT n FROM predicate_base WHERE '1e2x';SHOW WARNINGS",
+  "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n"),
+ ("SELECT n FROM predicate_base HAVING '1e2x';SHOW WARNINGS",
+  "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n"),
+ ("SELECT IF('1e2x',1,0) AS n;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n"),
+ ("SELECT NOT '1e2x' AS n;SHOW WARNINGS",
+  "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n"),
+ ("SELECT '1e2x' IS TRUE AS n;SHOW WARNINGS",
+  "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n"),
+ ("SELECT n FROM predicate_base WHERE 0 AND 'x';SHOW WARNINGS", ''),
+ ("SELECT n FROM predicate_base WHERE 1 OR 'x';SHOW WARNINGS", 'n\n1\n2\n3\n'),
+ ("SELECT n FROM predicate_base WHERE 'x' AND 0;SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT n FROM predicate_base WHERE 'x' OR 1;SHOW WARNINGS",
+  "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT n FROM predicate_base WHERE 'x' LIMIT 0;SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ('SELECT n FROM predicate_base WHERE s;SHOW WARNINGS',
+  'n\n'
+  '2\n'
+  'Level\tCode\tMessage\n'
+  "Warning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"
+  "Warning\t1292\tTruncated incorrect DOUBLE value: '1x'\n"
+  "Warning\t1292\tTruncated incorrect DOUBLE value: '0x'\n"),
+ ('SELECT n FROM predicate_base WHERE n=1 AND s;SHOW WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("SELECT n FROM predicate_base WHERE '1x';SHOW WARNINGS",
+  "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n"),
+ ("DELETE FROM predicate_base WHERE 'x';SHOW WARNINGS", (1292, '22007')),
+ ("UPDATE predicate_base SET n=n+1 WHERE 'x';SHOW WARNINGS", (1292, '22007')),
+ ("SELECT a.n FROM predicate_base a JOIN predicate_base b ON 'x';SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("DELETE FROM predicate_base;SELECT n FROM predicate_base WHERE 'x';SHOW WARNINGS",
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n"),
+ ("PREPARE p FROM 'SELECT n FROM predicate_base WHERE ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING "
+  '@v;SHOW WARNINGS',
+  "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n")]
+
+def verify(client, _writer):
+    arguments["verify_cases"](client, [(setup + sql, expected) for sql, expected in cases])
+
+if __name__ == "__main__":
+    arguments["oracle"]["run"](verify)

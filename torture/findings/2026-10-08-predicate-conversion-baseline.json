@@ -1,0 +1,301 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_revision": "24dba8e9",
+  "setup": "CREATE TABLE predicate_base(n INT,s VARCHAR(20));INSERT INTO predicate_base VALUES(1,'x'),(2,'1x'),(3,'0x')",
+  "cases": [
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT 1 AS n WHERE 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base HAVING 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT IF('x',1,0) AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT NOT 'x' AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT 'x' IS TRUE AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": false,
+      "sql": "SELECT 1 AS n WHERE '1x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE '1x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base HAVING '1x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": false,
+      "sql": "SELECT IF('1x',1,0) AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": false,
+      "sql": "SELECT NOT '1x' AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": false,
+      "sql": "SELECT '1x' IS TRUE AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n",
+      "matches": false,
+      "sql": "SELECT 1 AS n WHERE '0x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE '0x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base HAVING '0x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n",
+      "matches": false,
+      "sql": "SELECT IF('0x',1,0) AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n",
+      "matches": false,
+      "sql": "SELECT NOT '0x' AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n",
+      "matches": false,
+      "sql": "SELECT '0x' IS TRUE AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "",
+      "matches": true,
+      "sql": "SELECT 1 AS n WHERE '';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "",
+      "matches": true,
+      "sql": "SELECT n FROM predicate_base WHERE '';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "",
+      "matches": true,
+      "sql": "SELECT n FROM predicate_base HAVING '';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\n",
+      "matches": true,
+      "sql": "SELECT IF('',1,0) AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\n",
+      "matches": true,
+      "sql": "SELECT NOT '' AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\n",
+      "matches": true,
+      "sql": "SELECT '' IS TRUE AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\n",
+      "matches": true,
+      "sql": "SELECT 1 AS n WHERE ' 1 ';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\n",
+      "matches": true,
+      "sql": "SELECT n FROM predicate_base WHERE ' 1 ';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\n",
+      "matches": true,
+      "sql": "SELECT n FROM predicate_base HAVING ' 1 ';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\n",
+      "matches": true,
+      "sql": "SELECT IF(' 1 ',1,0) AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\n",
+      "matches": true,
+      "sql": "SELECT NOT ' 1 ' AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\n",
+      "matches": true,
+      "sql": "SELECT ' 1 ' IS TRUE AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n",
+      "matches": false,
+      "sql": "SELECT 1 AS n WHERE '1e2x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE '1e2x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base HAVING '1e2x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n",
+      "matches": false,
+      "sql": "SELECT IF('1e2x',1,0) AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n0\n",
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n",
+      "matches": false,
+      "sql": "SELECT NOT '1e2x' AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n",
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1e2x'\n",
+      "matches": false,
+      "sql": "SELECT '1e2x' IS TRUE AS n;SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "",
+      "matches": true,
+      "sql": "SELECT n FROM predicate_base WHERE 0 AND 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\n",
+      "matches": true,
+      "sql": "SELECT n FROM predicate_base WHERE 1 OR 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE 'x' AND 0;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE 'x' OR 1;SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE 'x' LIMIT 0;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n2\n",
+      "expected": "n\n2\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '0x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE s;SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE n=1 AND s;SHOW WARNINGS"
+    },
+    {
+      "actual": "n\n1\n2\n3\n",
+      "expected": "n\n1\n2\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": false,
+      "sql": "SELECT n FROM predicate_base WHERE '1x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "$ERROR:1292",
+      "matches": false,
+      "sql": "DELETE FROM predicate_base WHERE 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "$ERROR:1292",
+      "matches": false,
+      "sql": "UPDATE predicate_base SET n=n+1 WHERE 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "SELECT a.n FROM predicate_base a JOIN predicate_base b ON 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: 'x'\n",
+      "matches": false,
+      "sql": "DELETE FROM predicate_base;SELECT n FROM predicate_base WHERE 'x';SHOW WARNINGS"
+    },
+    {
+      "actual": "",
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "matches": false,
+      "sql": "PREPARE p FROM 'SELECT n FROM predicate_base WHERE ?';SHOW WARNINGS;SET @v='x';EXECUTE p USING @v;SHOW WARNINGS"
+    }
+  ]
+}
