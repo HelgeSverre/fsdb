@@ -4752,7 +4752,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
     match evaluated with
     | Some value -> Ok value
-    | None when ctx.RollupKeys |> List.contains expr -> Ok VNull
+    | None when not ctx.RollupKeys.IsEmpty && List.contains expr ctx.RollupKeys -> Ok VNull
     | None ->
         try
             match Expression.tryLiteralDiagnostic expr with
