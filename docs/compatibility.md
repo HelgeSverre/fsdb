@@ -537,6 +537,11 @@ expression validator rejects subqueries, aggregates, window functions,
 nondeterministic functions, cross-table references, auto-increment references,
 and DirectOnly or nondeterministic host extensions.
 
+Duplicate-key errors and IGNORE warnings identify the base table and index,
+including through aliases and views, after table renames, and during unique-index
+creation. The [native diagnostic evidence](../torture/findings/2026-10-08-key-diagnostics.md)
+records the remaining dotted-identifier and narrowing-ALTER warning gaps.
+
 Skipped `INSERT IGNORE` rows and ignored CHECK violations appear in the
 session diagnostics area and through `SHOW WARNINGS`; the OK/EOF warning count
 reports the same conditions.

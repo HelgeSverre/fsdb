@@ -1,7 +1,7 @@
 # Trigger warning lifetimes and RESIGNAL
 
 Status: audited warning lifetimes and RESIGNAL condition handling implemented;
-qualified diagnostic-text differences remain.
+missing-table diagnostic qualification remains.
 
 ## Native evidence
 
@@ -9,7 +9,7 @@ qualified diagnostic-text differences remain.
 The disposable native server uses a 64 MiB buffer pool and redo capacity.
 Inputs, outputs, and expected error codes/SQLSTATEs are preserved in
 `2026-10-08-trigger-warnings-native.json`; the client continues after errors.
-The fsdb replay matches 29 rendered outputs, with the five differences below
+The fsdb replay matches 33 rendered outputs, with the remaining difference below
 preserved in `2026-10-08-trigger-warnings-current.json`.
 
 ## Established behavior
@@ -38,25 +38,21 @@ from changing the invoking statement's diagnostics.
 
 ## Remaining differences
 
-The maintained replay keeps these counterexamples visible:
+The `warning-then-missing-table` case reports error 1146 with `absent` instead
+of `probe.absent`. It stays outside the passing wire contract, with exact native
+and fsdb output retained in the replay. Nothing is enrolled in the known-gap
+allowlist.
 
-- `warning-in-failed-insert`, `warning-in-failed-update`, and their Boolean
-  controls: error 1062 names `PRIMARY` instead of `audit.PRIMARY`.
-- `warning-then-missing-table`: error 1146 names `absent` instead of
-  `probe.absent`.
-
-Both CAST and Boolean conversions retain the correct warning counts and order.
-The INSERT controls have focused regressions, including validation before value
-execution. Exact diagnostic text remains divergent. These five
-cases stay outside the passing wire contract, with exact native and fsdb output
-retained in the replay. Nothing is enrolled in the known-gap allowlist.
+The four CAST/Boolean duplicate-key cases now retain the correct warning counts,
+order, and qualified key text. They are included in the passing wire contract;
+see [duplicate-key evidence](2026-10-08-key-diagnostics.md).
 
 ## Validation
 
-- `just check`: 3,128 tests pass with no build warnings or errors.
+- `just check`: 3,129 tests pass with no build warnings or errors.
 - Maintained native oracle: all 34 scripts pass.
 - The original DELETE IGNORE replay: all 14 scripts match.
-- Full wire suite: 83 contracts / 11,408 steps / zero differences. Trigger
+- Full wire suite: 84 contracts / 11,577 steps / zero differences. Trigger
   lifetime cases compare exact diagnostics, SQLSTATEs, affected rows, table
   state, local diagnostics, and warning/fatal RESIGNAL variants.
-  Artifact: `torture/artifacts/runs/20261008T201853608-72130/contracts`.
+  Artifact: `torture/artifacts/runs/20261008T202819420-72996/contracts`.

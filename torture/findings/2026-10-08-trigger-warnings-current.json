@@ -1,6 +1,6 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "49d8df53",
+  "fsdb_base_revision": "651e38ab",
   "fsdb_dirty": true,
   "comparison": "rendered result rows; SQLSTATEs are separately asserted by unit and wire contracts",
   "cases": [
@@ -469,7 +469,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nError\t1062\tDuplicate entry '1' for key 'PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nError\t1062\tDuplicate entry '1' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
       "errors": [
         {
           "Item1": 1062,
@@ -477,7 +477,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nError\t1062\tDuplicate entry '1' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
-      "matches": false,
+      "matches": true,
       "name": "warning-in-failed-insert",
       "statements": [
         "USE probe",
@@ -503,7 +503,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nError\t1062\tDuplicate entry '0' for key 'PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nError\t1062\tDuplicate entry '0' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
       "errors": [
         {
           "Item1": 1062,
@@ -511,7 +511,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nError\t1062\tDuplicate entry '0' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
-      "matches": false,
+      "matches": true,
       "name": "warning-in-failed-update",
       "statements": [
         "USE probe",
@@ -569,7 +569,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '1' for key 'PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '1' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
       "errors": [
         {
           "Item1": 1062,
@@ -577,7 +577,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '1' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
-      "matches": false,
+      "matches": true,
       "name": "boolean-warning-in-failed-insert",
       "statements": [
         "USE probe",
@@ -603,7 +603,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '0' for key 'PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '0' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
       "errors": [
         {
           "Item1": 1062,
@@ -611,7 +611,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '0' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
-      "matches": false,
+      "matches": true,
       "name": "boolean-warning-in-failed-update",
       "statements": [
         "USE probe",

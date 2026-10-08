@@ -1204,7 +1204,7 @@ let tests =
               | other -> failtestf "expected id 1 to be free again after replay, got %A" other
 
               match insertRows reloaded defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 10L; VString "e" ] ] with
-              | Error(DuplicateKey("PRIMARY", _)) -> ()
+              | Error(DuplicateKey(_, "PRIMARY", _)) -> ()
               | other -> failtestf "expected id 10 to be rejected as a duplicate after replay, got %A" other
 
           testCase "WAL replay accepts an INSERT that reuses a deleted primary key"

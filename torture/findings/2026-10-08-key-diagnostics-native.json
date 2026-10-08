@@ -1,0 +1,326 @@
+{
+  "mysql_version": "8.4.11",
+  "buffer_pool_mib": 64,
+  "redo_mib": 64,
+  "cases": [
+    {
+      "name": "insert-primary",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "INSERT INTO target VALUES(1,30)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.PRIMARY'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.PRIMARY'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "insert-unique",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "INSERT INTO target VALUES(3,10)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '10' for key 'target.NamedKey'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '10' for key 'target.NamedKey'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "ignore",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "INSERT IGNORE INTO target VALUES(1,30)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'target.PRIMARY'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "update-primary",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "UPDATE target SET id=1 WHERE id=2",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.PRIMARY'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.PRIMARY'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "update-unique",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "UPDATE target SET n=10 WHERE id=2",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '10' for key 'target.NamedKey'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '10' for key 'target.NamedKey'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "upsert",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "INSERT INTO target VALUES(1,20) ON DUPLICATE KEY UPDATE n=VALUES(n)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead\nError\t1062\tDuplicate entry '20' for key 'target.NamedKey'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '20' for key 'target.NamedKey'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "qualified",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "INSERT INTO probe.target VALUES(1,30)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.PRIMARY'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.PRIMARY'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "alias-update",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "UPDATE target AS t SET t.id=1 WHERE t.id=2",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.PRIMARY'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.PRIMARY'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "view",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "CREATE VIEW key_view AS SELECT * FROM target",
+        "INSERT INTO key_view VALUES(1,30)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.PRIMARY'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.PRIMARY'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "odd-name",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE `Odd.Table`(n INT, UNIQUE KEY `Odd.Key`(n))",
+        "INSERT INTO `Odd.Table` VALUES(1)",
+        "INSERT INTO `Odd.Table` VALUES(1)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'odd.table.Odd.Key'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'odd.table.Odd.Key'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "add-unique",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "INSERT INTO target VALUES(1),(1)",
+        "ALTER TABLE target ADD UNIQUE KEY NamedKey(n)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.NamedKey'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.NamedKey'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "add-primary",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "INSERT INTO target VALUES(1),(1)",
+        "ALTER TABLE target ADD PRIMARY KEY(n)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.PRIMARY'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.PRIMARY'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "create-index",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "INSERT INTO target VALUES(1),(1)",
+        "CREATE UNIQUE INDEX NamedKey ON target(n)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.NamedKey'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.NamedKey'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "narrow-column",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n VARCHAR(20),UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES('aa'),('ab')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY n VARCHAR(1)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'n' at row 1\nWarning\t1265\tData truncated for column 'n' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.NamedKey'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry 'a' for key 'target.NamedKey'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "rename",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1,10),(2,20)",
+        "ALTER TABLE target RENAME TO renamed",
+        "INSERT INTO renamed VALUES(1,30)",
+        "SHOW WARNINGS",
+        "DROP TABLE renamed"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'renamed.PRIMARY'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'renamed.PRIMARY'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "mixed-case",
+      "statements": [
+        "USE probe",
+        "DROP VIEW IF EXISTS key_view",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT, UNIQUE KEY NamedKey(n))",
+        "INSERT INTO target VALUES(1)",
+        "INSERT INTO TARGET VALUES(1)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'target.NamedKey'\n",
+      "stderr": "ERROR 1062 (23000) at line 1: Duplicate entry '1' for key 'target.NamedKey'\n",
+      "errors": [
+        [
+          1062,
+          "23000"
+        ]
+      ]
+    }
+  ]
+}

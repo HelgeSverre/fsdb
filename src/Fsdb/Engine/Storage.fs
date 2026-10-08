@@ -70,7 +70,7 @@ type StorageError =
     | ExpressionError of code: int * message: string
     /// A unique index (or the primary key, reported as `"PRIMARY"`) already
     /// has a row with this value.
-    | DuplicateKey of keyName: string * value: string
+    | DuplicateKey of table: string * keyName: string * value: string
     /// `DELETE`/parent-row `UPDATE` blocked by a child row through a
     /// `RESTRICT`/`NO ACTION` (or unspecified) `ON DELETE` foreign key.
     | ForeignKeyRestrict of database: string * table: string * foreignKey: ForeignKeyDef
@@ -117,7 +117,8 @@ let toMySqlError (err: StorageError) : int * string =
     | FullTextColumnNotAllowed column -> 1283, sprintf "Column '%s' cannot be part of FULLTEXT index" column
     | OutOfRangeForColumn column -> 1264, sprintf "Out of range value for column '%s' at row 1" column
     | ExpressionError(code, message) -> code, message
-    | DuplicateKey(keyName, value) -> 1062, sprintf "Duplicate entry '%s' for key '%s'" value keyName
+    | DuplicateKey(table, keyName, value) ->
+        1062, sprintf "Duplicate entry '%s' for key '%s.%s'" value (table.ToLowerInvariant()) keyName
     | ForeignKeyRestrict(database, table, foreignKey) ->
         let quote (name: string) = "`" + name.Replace("`", "``") + "`"
         let columns = List.map quote >> String.concat ", "
@@ -7028,7 +7029,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                             rows
                             |> Seq.map snd
                             |> tryDuplicateUniqueValue candidate.Columns group
-                            |> Option.map (fun value -> DuplicateKey(group.Name, value)))
+                            |> Option.map (fun value -> DuplicateKey(table.OriginalName, group.Name, value)))
 
                     match collision with
                     | Some e -> Error e
@@ -7059,7 +7060,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                   Visible = ix.Visible }
 
             match tryDuplicateUniqueValue table.Columns group table.RowsArray with
-            | Some value -> Error(DuplicateKey(ix.Name, value))
+            | Some value -> Error(DuplicateKey(table.OriginalName, ix.Name, value))
             | None -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None))
     | AddIndex ix ->
         checkIndexLengths table.Columns [ ix ]
@@ -7124,7 +7125,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     Error(ExpressionError(1138, "Invalid use of NULL value"))
                 else
                     match tryDuplicateConstraintValue table.Columns indices rows with
-                    | Some value -> Error(DuplicateKey("PRIMARY", value))
+                    | Some value -> Error(DuplicateKey(table.OriginalName, "PRIMARY", value))
                     | None ->
                         let primaryIndices = Set.ofList indices
 
@@ -8029,7 +8030,7 @@ let private insertCore
                                     |> List.tryPick (fun group ->
                                         match encodeUniqueKey table.Columns group candidate with
                                         | Some key when Map.find group.Name state.UniqueIndex |> Map.containsKey key ->
-                                            Some(DuplicateKey(group.Name, formatDuplicateKeyValue group.Indices candidate))
+                                            Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices candidate))
                                         | _ -> None)
 
                                 match uniqueCollision with
@@ -8254,7 +8255,7 @@ let internal insertPreparedCandidate
                             Map.tryFind group.Name table.UniqueIndex
                             |> Option.bind (Map.tryFind key)
                             |> Option.map (fun _ ->
-                                DuplicateKey(group.Name, formatDuplicateKeyValue group.Indices prepared.Values))))
+                                DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices prepared.Values))))
 
                 match collision with
                 | Some error -> Error error
@@ -8777,7 +8778,7 @@ and private upsertRowsInTable
                                                             | Some key ->
                                                                 match Map.tryFind key (Map.find group.Name state.UniqueIndex) with
                                                                 | Some otherPos when otherPos <> pos ->
-                                                                    Some(DuplicateKey(group.Name, formatDuplicateKeyValue group.Indices applied))
+                                                                    Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices applied))
                                                                 | _ -> None
                                                             | None -> None)
 
@@ -10051,7 +10052,7 @@ let updateRows
                                                     | Some k ->
                                                         match Map.tryFind k (Map.find group.Name index) with
                                                         | Some otherRowId when otherRowId <> rowId ->
-                                                            Some(DuplicateKey(group.Name, formatDuplicateKeyValue group.Indices newRow))
+                                                            Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices newRow))
                                                         | _ -> None
                                                     | None -> None)
 

@@ -465,6 +465,24 @@ let tests =
                   [ "CREATE TABLE predicate_base(n INT,s VARCHAR(20))"
                     "INSERT INTO predicate_base VALUES(1,'x'),(2,'1x'),(3,'0x')" ]
 
+          testCase "Duplicate-key diagnostics identify the base table and index" <| fun _ ->
+              for statement, value, key in
+                  [ "INSERT INTO target VALUES(1,30)", "1", "PRIMARY"
+                    "INSERT INTO target VALUES(3,10)", "10", "NamedKey"
+                    "UPDATE target AS t SET t.id=1 WHERE t.id=2", "1", "PRIMARY"
+                    "INSERT INTO key_view VALUES(1,30)", "1", "PRIMARY" ] do
+                  let run =
+                      queryFixture
+                          [ "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))"
+                            "INSERT INTO target VALUES(1,10),(2,20)"
+                            "CREATE VIEW key_view AS SELECT * FROM target" ]
+                  Expect.equal (run statement)
+                      (Err(1062, sprintf "Duplicate entry '%s' for key 'target.%s'" value key)) statement
+                  Expect.equal (run "SHOW WARNINGS")
+                      (ResultSet([ "Level"; "Code"; "Message" ],
+                          [ [ Some "Error"; Some "1062"; Some(sprintf "Duplicate entry '%s' for key 'target.%s'" value key) ] ]))
+                      "the diagnostics area retains the qualified key"
+
           testCase "Integer text casts report truncation and signedness conditions" <| fun _ ->
               for expression, expected, codes in
                   [ "CAST('x' AS SIGNED)", "0", [ 1292 ]

@@ -1013,8 +1013,8 @@ let tests =
                     insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
 
                     match insertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] with
-                    | Error(DuplicateKey("uq_email", "a@x.com")) ->
-                        let code, _ = toMySqlError (DuplicateKey("uq_email", "a@x.com"))
+                    | Error(DuplicateKey(_, "uq_email", "a@x.com")) ->
+                        let code, _ = toMySqlError (DuplicateKey("emails", "uq_email", "a@x.com"))
                         Expect.equal code 1062 "MySQL error code"
                     | other -> failtestf "expected DuplicateKey, got %A" other
 
@@ -1044,7 +1044,7 @@ let tests =
                     | other -> failtestf "expected a prefix-index candidate, got %A" other
 
                     match insertRows store defaultDatabase "prefixed" None [ [ VString "1234567890 bar" ] ] with
-                    | Error(DuplicateKey("uq_value", _)) -> ()
+                    | Error(DuplicateKey(_, "uq_value", _)) -> ()
                     | other -> failtestf "expected DuplicateKey from the shared prefix, got %A" other
 
                 testCase "a binary prefix index groups candidate bytes"
@@ -1107,7 +1107,7 @@ let tests =
                     |> ignore
 
                     match insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "bob"; VInt 25L ] ] with
-                    | Error(DuplicateKey("PRIMARY", "1")) -> ()
+                    | Error(DuplicateKey(_, "PRIMARY", "1")) -> ()
                     | other -> failtestf "expected DuplicateKey on PRIMARY, got %A" other
 
                 testCase "the unique check is collation-aware: case folds, trailing spaces stay distinct (NO PAD)"
@@ -1118,7 +1118,7 @@ let tests =
 
                     // case-insensitive: 'A@X.COM' collides with 'a@x.com'
                     match insertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "A@X.COM" ] ] with
-                    | Error(DuplicateKey("uq_email", _)) -> ()
+                    | Error(DuplicateKey(_, "uq_email", _)) -> ()
                     | other -> failtestf "expected DuplicateKey, got %A" other
 
                     // NO PAD: a trailing space makes it a different value,
@@ -1141,7 +1141,7 @@ let tests =
                             [ [ VInt 1L; VString "a@x.com" ]
                               [ VInt 2L; VString "a@x.com" ] ]
                     with
-                    | Error(DuplicateKey("uq_email", "a@x.com")) -> ()
+                    | Error(DuplicateKey(_, "uq_email", "a@x.com")) -> ()
                     | other -> failtestf "expected DuplicateKey, got %A" other
 
                 testCase "UPDATE colliding with another row's unique value returns error 1062"
@@ -1161,7 +1161,7 @@ let tests =
                     let updater (row: Value[]) = Ok [| row.[0]; VString "a@x.com" |]
 
                     match updateRows store defaultDatabase "emails" None (fun row -> Ok(row.[0] = VInt 2L)) updater with
-                    | Error(DuplicateKey("uq_email", "a@x.com")) -> ()
+                    | Error(DuplicateKey(_, "uq_email", "a@x.com")) -> ()
                     | other -> failtestf "expected DuplicateKey, got %A" other
 
                 testCase "UPDATE that leaves a row's own unique value unchanged doesn't collide with itself"
@@ -1195,7 +1195,7 @@ let tests =
                     insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 2L ] ] |> ignore
 
                     match insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 2L ] ] with
-                    | Error(DuplicateKey("PRIMARY", _)) -> ()
+                    | Error(DuplicateKey(_, "PRIMARY", _)) -> ()
                     | other -> failtestf "expected DuplicateKey on the composite PRIMARY, got %A" other
 
                 testCase "a composite primary key allows rows that differ in either column"
@@ -1235,7 +1235,7 @@ let tests =
                     |> ignore
 
                     match updateRows store defaultDatabase "emails" None (fun _ -> Ok true) (fun row -> Ok [| row.[0]; VString "same@x.com" |]) with
-                    | Error(DuplicateKey("uq_email", "same@x.com")) -> ()
+                    | Error(DuplicateKey(_, "uq_email", "same@x.com")) -> ()
                     | other -> failtestf "expected DuplicateKey, got %A" other ]
 
           testList
@@ -2311,7 +2311,7 @@ let tests =
                     let ix = { Name = "uq_name"; KeyColumns = indexColumns [ "name" ]; Unique = true; Visible = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
-                    | Error(DuplicateKey("uq_name", _)) -> ()
+                    | Error(DuplicateKey(_, "uq_name", _)) -> ()
                     | other -> failtestf "expected DuplicateKey for the two 'dup' rows, got %A" other
 
                     // Rejected DDL must leave the table exactly as it was —
@@ -2367,7 +2367,7 @@ let tests =
                     let withDuplicate = withValues "duplicate_key" [ VInt 1L; VInt 1L ]
 
                     match alterTable withDuplicate defaultDatabase "duplicate_key" [ AddPrimaryKey(indexColumns [ "id" ]) ] with
-                    | Error(DuplicateKey("PRIMARY", "1")) -> ()
+                    | Error(DuplicateKey(_, "PRIMARY", "1")) -> ()
                     | other -> failtestf "expected a duplicate PRIMARY rejection, got %A" other
 
                 testCase "multiple actions in one call apply in order"
@@ -2392,7 +2392,7 @@ let tests =
                     | Error e -> failtestf "expected Ok, got %A" e
                     | Ok() ->
                         match insertRows store defaultDatabase "users" None [ [ VNull; VInt 1L; VString "bob"; VInt 40L ] ] with
-                        | Error(DuplicateKey("PRIMARY", _)) -> ()
+                        | Error(DuplicateKey(_, "PRIMARY", _)) -> ()
                         | other -> failtestf "expected id 1 to still be rejected as a duplicate after the shift, got %A" other
 
                         match insertRows store defaultDatabase "users" None [ [ VNull; VInt 2L; VString "carol"; VInt 50L ] ] with
@@ -4319,7 +4319,7 @@ let tests =
                     Expect.equal before.RowsArray.Count 1000 "the captured root retains every row"
 
                     match insertRows store defaultDatabase "users" None [ [ VInt 500L; VString "duplicate"; VInt 0L ] ] with
-                    | Error(DuplicateKey("PRIMARY", _)) -> ()
+                    | Error(DuplicateKey(_, "PRIMARY", _)) -> ()
                     | result -> failtestf "expected the compacted primary index to reject a duplicate, got %A" result ]
 
           testList

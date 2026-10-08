@@ -6090,6 +6090,52 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS predicate_base"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:update", [| "text-differential" |]; "statement:delete", [| "text-differential" |] |] }
 
+    let private qualifiedDuplicateKeys =
+        let keyed =
+            [ "CREATE TABLE target(id INT PRIMARY KEY,n INT,UNIQUE KEY NamedKey(n))"
+              "INSERT INTO target VALUES(1,10),(2,20)" ]
+        let cases =
+            [
+              "insert-primary", keyed,
+                  "INSERT INTO target VALUES(1,30)", true
+              "insert-unique", keyed,
+                  "INSERT INTO target VALUES(3,10)", true
+              "ignore", keyed,
+                  "INSERT IGNORE INTO target VALUES(1,30)", false
+              "update-primary", keyed,
+                  "UPDATE target SET id=1 WHERE id=2", true
+              "update-unique", keyed,
+                  "UPDATE target SET n=10 WHERE id=2", true
+              "upsert", keyed,
+                  "INSERT INTO target VALUES(1,20) ON DUPLICATE KEY UPDATE n=VALUES(n)", true
+              "alias-update", keyed,
+                  "UPDATE target AS t SET t.id=1 WHERE t.id=2", true
+              "view", keyed @ [ "CREATE VIEW key_view AS SELECT * FROM target" ],
+                  "INSERT INTO key_view VALUES(1,30)", true
+              "add-unique", [ "CREATE TABLE target(n INT)"; "INSERT INTO target VALUES(1),(1)" ],
+                  "ALTER TABLE target ADD UNIQUE KEY NamedKey(n)", true
+              "add-primary", [ "CREATE TABLE target(n INT)"; "INSERT INTO target VALUES(1),(1)" ],
+                  "ALTER TABLE target ADD PRIMARY KEY(n)", true
+              "create-index", [ "CREATE TABLE target(n INT)"; "INSERT INTO target VALUES(1),(1)" ],
+                  "CREATE UNIQUE INDEX NamedKey ON target(n)", true
+              "rename", keyed @ [ "ALTER TABLE target RENAME TO renamed" ],
+                  "INSERT INTO renamed VALUES(1,30)", true
+              "mixed-case", [ "CREATE TABLE target(n INT, UNIQUE KEY NamedKey(n))"; "INSERT INTO target VALUES(1)" ],
+                  "INSERT INTO TARGET VALUES(1)", true
+            ]
+        let cleanup = [ "DROP VIEW IF EXISTS key_view"; "DROP TABLE IF EXISTS target"; "DROP TABLE IF EXISTS renamed" ]
+        { Name = "qualified-duplicate-keys"
+          Setup = [| "SET sql_mode=DEFAULT" |]
+          Steps =
+            [| for name, setup, statement, fails in cases do
+                   for index, sql in List.indexed (cleanup @ setup) do
+                       yield Contract.execute (sprintf "%s-setup-%d" name index) sql
+                   let operation = Contract.execute name statement
+                   yield if fails then operation |> Contract.fails 1062 "23000" else operation
+                   yield Contract.query (name + "-warnings") "SHOW WARNINGS" |]
+          Cleanup = Array.ofList cleanup
+          Coverage = [| "statement:insert", [| "text-differential" |]; "statement:update", [| "text-differential" |]; "statement:alter-table", [| "text-differential" |] |] }
+
     let private integerCastConditions =
         let inputs =
             [
@@ -6205,6 +6251,26 @@ module ContractCatalog =
               "SELECT n FROM audit ORDER BY n"; "SELECT @seen AS seen" ]
         let cases =
             [
+              "warning-in-failed-insert", Some(1062, "23000"),
+                  [ "ALTER TABLE audit ADD PRIMARY KEY(n)"
+                    "INSERT INTO audit VALUES(1)"
+                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(CAST('x' AS SIGNED)),(1)"
+                    "DELETE FROM parent WHERE id=1" ]
+              "warning-in-failed-update", Some(1062, "23000"),
+                  [ "ALTER TABLE audit ADD PRIMARY KEY(n)"
+                    "INSERT INTO audit VALUES(1),(2)"
+                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW UPDATE audit SET n=CAST('x' AS SIGNED)"
+                    "DELETE FROM parent WHERE id=1" ]
+              "boolean-warning-in-failed-insert", Some(1062, "23000"),
+                  [ "ALTER TABLE audit ADD PRIMARY KEY(n)"
+                    "INSERT INTO audit VALUES(1)"
+                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(IF('1x',0,0)),(1)"
+                    "DELETE FROM parent WHERE id=1" ]
+              "boolean-warning-in-failed-update", Some(1062, "23000"),
+                  [ "ALTER TABLE audit ADD PRIMARY KEY(n)"
+                    "INSERT INTO audit VALUES(1),(2)"
+                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW UPDATE audit SET n=IF('1x',0,0)"
+                    "DELETE FROM parent WHERE id=1" ]
               "before-warning", None,
                   [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
                     "DELETE FROM parent WHERE id=1" ]
@@ -6374,7 +6440,8 @@ module ContractCatalog =
           Coverage = [| "statement:delete", [| "text-differential" |] |] }
 
     let all =
-        [| integerCastConditions
+        [| qualifiedDuplicateKeys
+           integerCastConditions
            triggerWarningLifetimes
            deleteIgnoreForeignKeys
            bareTriggerConditions
