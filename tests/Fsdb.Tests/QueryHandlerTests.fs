@@ -156,6 +156,29 @@ let tests =
                   Expect.equal (run "SHOW WARNINGS")
                       (ResultSet([ "Level"; "Code"; "Message" ], [ [ Some "Warning"; Some "1064"; Some message ] ])) argument
 
+          testCase "timeout hints belong to the leading SELECT query block"
+          <| fun _ ->
+              let run = queryFixture []
+              let noWarnings = ResultSet([ "Level"; "Code"; "Message" ], [])
+              let misplaced =
+                  ResultSet([ "Level"; "Code"; "Message" ],
+                      [ [ Some "Warning"; Some "3125"; Some "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only" ] ])
+              for sql in
+                  [ "(SELECT /*+ MAX_EXECUTION_TIME(10000) */ 1 AS n)"
+                    "WITH c AS (SELECT 1 AS n) SELECT /*+ MAX_EXECUTION_TIME(10000) */ n FROM c" ] do
+                  Expect.equal (run sql) (ResultSet([ "n" ], [ [ Some "1" ] ])) sql
+                  Expect.equal (run "SHOW WARNINGS") noWarnings "outer query accepts the hint"
+              for sql in
+                  [ "SELECT 1 AS n UNION ALL SELECT /*+ MAX_EXECUTION_TIME(10000) */ 2"
+                    "SELECT /*+ MAX_EXECUTION_TIME(10000) */ 1 AS n UNION ALL SELECT /*+ MAX_EXECUTION_TIME(2) */ 2" ] do
+                  Expect.equal (run sql) (ResultSet([ "n" ], [ [ Some "1" ]; [ Some "2" ] ])) sql
+                  Expect.equal (run "SHOW WARNINGS") misplaced "later UNION members do not own the statement timer"
+              run "EXPLAIN SELECT /*+ MAX_EXECUTION_TIME(10000) */ 1" |> ignore
+              match run "SHOW WARNINGS" with
+              | ResultSet(_, rows) ->
+                  Expect.isFalse (rows |> List.exists (fun row -> row |> List.contains (Some "3125"))) "EXPLAIN accepts the SELECT hint"
+              | other -> failtestf "expected diagnostics, got %A" other
+
           testCase "nested derived sources retain enclosing query correlation"
           <| fun _ ->
               let run = queryFixture

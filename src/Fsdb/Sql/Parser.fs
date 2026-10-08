@@ -276,7 +276,8 @@ type internal OptimizerHintLocation =
       BodyOffset: int
       Keyword: string
       StatementKeyword: string
-      ParenthesisDepth: int }
+      ParenthesisDepth: int
+      IsLeadingSelect: bool }
 
 /// mysqldump wraps version-specific SQL in `/*!NNNNN ... */` (or a bare
 /// `/*! ... */` for "any version") so one dump can target several server
@@ -298,6 +299,9 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
     let mutable hintKeyword = ""
     let mutable statementKeyword = None
     let mutable parenthesisDepth = 0
+    let mutable statementDepth = 0
+    let mutable statementSelectSeen = false
+    let mutable leadingSelect = false
 
     let appendChar (value: char) =
         if not (isNull output) then
@@ -400,7 +404,8 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
                           BodyOffset = i + 3
                           Keyword = hintKeyword.ToUpperInvariant()
                           StatementKeyword = (statementKeyword |> Option.defaultValue hintKeyword).ToUpperInvariant()
-                          ParenthesisDepth = parenthesisDepth }
+                          ParenthesisDepth = parenthesisDepth
+                          IsLeadingSelect = leadingSelect }
 
                 optimizerHintMayFollow <- false
 
@@ -454,7 +459,13 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
             let word = sql.Substring(start, i - start)
             appendText word
             hintKeyword <- word
-            if statementKeyword.IsNone then statementKeyword <- Some hintKeyword
+            if statementKeyword.IsNone then
+                statementKeyword <- Some hintKeyword
+                statementDepth <- parenthesisDepth
+            leadingSelect <- false
+            if word.Equals("SELECT", StringComparison.OrdinalIgnoreCase) && parenthesisDepth = statementDepth then
+                leadingSelect <- not statementSelectSeen
+                statementSelectSeen <- true
 
             optimizerHintMayFollow <-
                 word.Equals("SELECT", StringComparison.OrdinalIgnoreCase)
@@ -466,7 +477,9 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
             match sql.[i] with
             | '(' -> parenthesisDepth <- parenthesisDepth + 1
             | ')' -> parenthesisDepth <- max 0 (parenthesisDepth - 1)
-            | ';' when parenthesisDepth = 0 -> statementKeyword <- None
+            | ';' when parenthesisDepth = 0 ->
+                statementKeyword <- None
+                statementSelectSeen <- false
             | _ -> ()
             if not (Char.IsWhiteSpace sql.[i]) then
                 optimizerHintMayFollow <- false

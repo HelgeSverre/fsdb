@@ -128,3 +128,25 @@ precedence, and zero fallback:
 `torture/artifacts/runs/20261008T083317596-15973/contracts`.
 Broader hint scope and grammar combinations and extreme-duration behavior remain
 open; this does not establish complete optimizer-hint compatibility.
+
+## Leading SELECT ownership
+
+`select-timeout-hint-context-oracle.py` pins query-block ownership. Parenthesized
+standalone SELECTs and the outer SELECT following a CTE accept the hint. Later
+UNION members warn with 3125 even when the first member already has a timeout;
+they do not warn as duplicate statement hints. EXPLAIN SELECT accepts its hint.
+The scanner tracks the leading SELECT at the statement's nesting level, and
+timeout interpretation uses that ownership rather than absolute parenthesis
+depth. Existing nested-query rejection remains covered.
+
+All 3,091 tests pass. Wire validation covers the parenthesized, CTE, and UNION
+cases: 66 cases / 8,436 steps / zero differences, at
+`torture/artifacts/runs/20261008T084405153-28484/contracts`.
+The EXPLAIN regression checks removal of the incorrect 3125 warning; it does not
+claim parity for MySQL's rewritten-query note 1003.
+
+The context fixture also preserves remaining differences: CREATE VIEW silently
+discards its timeout hint; procedure declarations and executions warn with 3125;
+an unknown hint before MAX_EXECUTION_TIME stops hint parsing, whereas a valid
+timeout before that unknown token still applies. These grammar/lifetime cases
+remain open along with extreme-duration behavior.

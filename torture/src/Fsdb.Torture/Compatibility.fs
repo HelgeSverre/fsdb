@@ -4598,6 +4598,10 @@ module ContractCatalog =
           Steps =
             [| for index, sql in
                    [
+                      "(SELECT /*+ MAX_EXECUTION_TIME(10000) */ 1 AS n)"
+                      "WITH c AS (SELECT 1 AS n) SELECT /*+ MAX_EXECUTION_TIME(10000) */ n FROM c"
+                      "SELECT 1 AS n UNION ALL SELECT /*+ MAX_EXECUTION_TIME(10000) */ 2"
+                      "SELECT /*+ MAX_EXECUTION_TIME(10000) */ 1 AS n UNION ALL SELECT /*+ MAX_EXECUTION_TIME(2) */ 2"
                       "SELECT /*+ MAX_EXECUTION_TIME(0) */ 1 AS n"
                       "SELECT /*+ MAX_EXECUTION_TIME(1) */ 1 AS n"
                       "SELECT /*+ MAX_EXECUTION_TIME(01) */ 1 AS n"

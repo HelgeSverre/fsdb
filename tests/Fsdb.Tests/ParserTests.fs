@@ -3828,8 +3828,8 @@ let tests =
               let sql = "SELECT /*+ MAX_EXECUTION_TIME(10) */ '(', (SELECT /*+ MAX_EXECUTION_TIME(2) */ 1) AS n /*+ ignored */; UPDATE /*+ MAX_EXECUTION_TIME(3) */ t SET n=1"
               let hints = optimizerHintLocationsWithOptions defaultOptions sql
               Expect.equal
-                  (hints |> List.map (fun hint -> hint.Keyword, hint.StatementKeyword, hint.ParenthesisDepth))
-                  [ "SELECT", "SELECT", 0; "SELECT", "SELECT", 1; "UPDATE", "UPDATE", 0 ]
+                  (hints |> List.map (fun hint -> hint.Keyword, hint.StatementKeyword, hint.ParenthesisDepth, hint.IsLeadingSelect))
+                  [ "SELECT", "SELECT", 0, true; "SELECT", "SELECT", 1, false; "UPDATE", "UPDATE", 0, false ]
                   "quoted parentheses and misplaced hints do not alter scope"
               for hint in hints do
                   Expect.equal (sql.Substring(hint.BodyOffset, hint.Body.Length)) hint.Body "body points into original SQL"

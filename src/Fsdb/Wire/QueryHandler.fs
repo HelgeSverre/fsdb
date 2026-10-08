@@ -1426,8 +1426,8 @@ let private statementTimeoutHint emitWarnings options (sql: string) =
                         | true, value when value > uint64 UInt32.MaxValue ->
                             near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + closeAt)
                         | true, value ->
-                            if hint.Keyword <> "SELECT" || hint.ParenthesisDepth <> 0
-                               || (hint.StatementKeyword <> "SELECT" && hint.StatementKeyword <> "WITH") then
+                            if not hint.IsLeadingSelect
+                               || (hint.StatementKeyword <> "SELECT" && hint.StatementKeyword <> "WITH" && hint.StatementKeyword <> "EXPLAIN") then
                                 warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
                             elif timeout.IsSome then
                                 warn 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
