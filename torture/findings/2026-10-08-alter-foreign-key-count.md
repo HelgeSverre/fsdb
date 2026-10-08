@@ -1,30 +1,17 @@
 # ALTER ADD FOREIGN KEY affected-row count
 
-Status: open.
+Status: fixed for the audited algorithm and foreign-key-check combinations.
 
-MySQL 8.4.11 reports one affected row when adding a foreign key with checks
-enabled to a table containing one row. fsdb reports zero. Both operations
-succeed and enforce the constraint afterward. The mismatch occurs with either
-ON DELETE CASCADE or ON UPDATE CASCADE; exact SQL and protocol results are in
-`2026-10-08-alter-foreign-key-count.json`.
+Adding a foreign key with checks enabled to a populated table uses COPY and
+reports the live row count in both MySQL 8.4.11 and fsdb. With checks disabled,
+default and explicit INPLACE report zero; explicit COPY still reports the row
+count. The shared ALTER plan controls validation, rebuilding, and result counts.
 
-Reproduce by creating `parent(id INT PRIMARY KEY)` and
-`child(id INT PRIMARY KEY,pid INT)`, inserting parent `(2)` and child `(1,2)`,
-then executing:
+The original one-row mismatch is retained in
+`2026-10-08-alter-foreign-key-count.json`. The broader
+[algorithm and affected-row matrix](2026-10-08-alter-copy-counts.md) covers explicit
+and default algorithms, enabled/disabled checks, empty tables, deleted rows,
+and other COPY operations. Expecto and native wire regressions cover the fix.
 
-```sql
-ALTER TABLE child ADD CONSTRAINT fk_parent
-  FOREIGN KEY(pid) REFERENCES parent(id) ON DELETE CASCADE;
-```
-
-`Executor.validateAlterExecutionOptions` already requires COPY for adding a
-foreign key with checks enabled, but the successful ALTER path always returns
-zero affected rows. Algorithm selection and result counts need native coverage
-for explicit/default algorithms and disabled foreign-key checks before changing
-the general ALTER result policy.
-
-The native comparison used a disposable server with 64 MiB buffer pool and redo.
-Artifact: `torture/artifacts/runs/20261008T192947703-68753/contracts`.
-The DELETE IGNORE contract creates each constraint with its intended action
-in CREATE TABLE so its setup does not depend on ALTER's result-count behavior.
-No mismatch is enrolled in the known-gap allowlist.
+The DELETE IGNORE contract retains CREATE TABLE constraints to keep its setup
+focused on row deletion. No mismatch is enrolled in the known-gap allowlist.

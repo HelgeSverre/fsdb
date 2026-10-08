@@ -20429,7 +20429,8 @@ let private storeTriggerDefinition
                 |> Result.map (fun _ ->
                     Storage.commitCatalogInto store baseCatalog snapshot))
 
-let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: ColumnDef list) actions =
+let private planAlterExecution foreignKeyChecks (table: Storage.Table) actions =
+    let existingColumns = table.Columns
     let algorithm =
         actions
         |> List.choose (function
@@ -20465,6 +20466,17 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
     let copyAlgorithm = Set.singleton AlgorithmCopy
     let replacingPrimaryKey = actions |> List.exists (function AddPrimaryKey _ -> true | _ -> false)
 
+    let normalizeTextDefaults (column: ColumnDef) =
+        if not (InformationSchema.isStringy column.Type) then column
+        else
+            let charset = column.Charset |> Option.orElse table.TableCharset |> Option.defaultValue "utf8mb4" |> Charset.canonicalName
+            let collation =
+                column.Collation
+                |> Option.orElseWith (fun () -> column.Charset |> Option.map Collation.defaultNameForCharset)
+                |> Option.orElse table.TableCollation
+                |> Option.defaultValue (Collation.defaultNameForCharset charset)
+            { column with Charset = Some charset; Collation = Some collation }
+
     let columnChangeAlgorithms oldName (newColumn: ColumnDef) =
         existingColumns
         |> List.tryFind (fun (column: ColumnDef) -> System.String.Equals(column.Name, oldName, System.StringComparison.OrdinalIgnoreCase))
@@ -20475,15 +20487,22 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
                     PrimaryKey = oldColumn.PrimaryKey || newColumn.PrimaryKey
                     Unique = oldColumn.Unique || newColumn.Unique }
 
-            if oldColumn = effectiveNew then
+            let previous = normalizeTextDefaults oldColumn
+            let current = normalizeTextDefaults effectiveNew
+            if previous = current then
                 allAlgorithms
+            elif previous.Charset = current.Charset && Storage.columnTypeChangePreservesLayout previous current.Type then
+                onlineAlgorithms
             else
-                match oldColumn.Type, effectiveNew.Type with
-                | oldType, newType when oldType = newType -> onlineAlgorithms
-                | TVarchar oldLength, TVarchar newLength when newLength >= oldLength -> onlineAlgorithms
-                | TVarBinary oldLength, TVarBinary newLength when newLength >= oldLength -> onlineAlgorithms
-                | _ -> copyAlgorithm)
+                copyAlgorithm)
         |> Option.defaultValue copyAlgorithm
+
+    let convertsStoredCharset charset =
+        existingColumns
+        |> List.exists (fun column ->
+            InformationSchema.isStringy column.Type
+            && (column.Charset |> Option.orElse table.TableCharset |> Option.defaultValue "utf8mb4" |> Charset.canonicalName)
+               <> Charset.canonicalName charset)
 
     let algorithmsFor = function
         | AddColumn({ Generated = Some(_, Stored) }, _) -> copyAlgorithm
@@ -20498,8 +20517,8 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         | SetDefault _ -> allAlgorithms
         | ModifyColumn(column, _) -> columnChangeAlgorithms column.Name column
         | ChangeColumn(oldName, column, _) -> columnChangeAlgorithms oldName column
-        | AddCheck _
-        | ConvertCharset _ -> copyAlgorithm
+        | AddCheck _ -> copyAlgorithm
+        | ConvertCharset(charset, _) -> if convertsStoredCharset charset then copyAlgorithm else onlineAlgorithms
         | DropPrimaryKey when replacingPrimaryKey -> onlineAlgorithms
         | DropPrimaryKey -> copyAlgorithm
         | AddForeignKey _ when foreignKeyChecks -> copyAlgorithm
@@ -20546,7 +20565,7 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
     let requiresColumnRebuild =
         hasOperation (function
             | (ModifyColumn _ | ChangeColumn _) as action -> algorithmsFor action = copyAlgorithm
-            | ConvertCharset _ -> true
+            | ConvertCharset(charset, _) -> convertsStoredCharset charset
             | _ -> false)
 
     let requiresSharedLock =
@@ -20597,26 +20616,39 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         else
             Err(1846, "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED.")
 
-    if truncatesPartitions && operations.Length <> 1 then
-        Some(Err(1064, "You have an error in your SQL syntax"))
-    elif
-        hasExecutionOption
-        && operations
-           |> List.exists (function AddHashPartitions _ | AddNamedHashPartitions _ | CoalesceHashPartitions _ | ReorganizeHashPartitions _ | DropPartitions _ | TruncatePartitions _ -> true | _ -> false)
-    then
-        Some(Err(1064, "You have an error in your SQL syntax"))
-    elif algorithm = AlgorithmInstant && lockMode <> LockDefault then
-        Some(Err(1221, "Incorrect usage of ALGORITHM=INSTANT and LOCK=NONE/SHARED/EXCLUSIVE"))
-    elif algorithm <> AlgorithmDefault && not (supportedAlgorithms.Contains algorithm) then
-        Some(unsupportedAlgorithm algorithm)
-    elif algorithm = AlgorithmCopy && lockMode = LockNone then
-        Some(lockNoneError ())
-    elif lockMode = LockNone && (requiresSharedLock || not (supportedAlgorithms.Contains AlgorithmInplace)) then
-        Some(lockNoneError ())
-    elif operations.IsEmpty && (lockMode = LockNone || lockMode = LockShared) then
-        Some(lockNoneError ())
-    else
-        None
+    let validationError =
+        if truncatesPartitions && operations.Length <> 1 then
+            Some(Err(1064, "You have an error in your SQL syntax"))
+        elif
+            hasExecutionOption
+            && operations
+               |> List.exists (function AddHashPartitions _ | AddNamedHashPartitions _ | CoalesceHashPartitions _ | ReorganizeHashPartitions _ | DropPartitions _ | TruncatePartitions _ -> true | _ -> false)
+        then
+            Some(Err(1064, "You have an error in your SQL syntax"))
+        elif algorithm = AlgorithmInstant && lockMode <> LockDefault then
+            Some(Err(1221, "Incorrect usage of ALGORITHM=INSTANT and LOCK=NONE/SHARED/EXCLUSIVE"))
+        elif algorithm <> AlgorithmDefault && not (supportedAlgorithms.Contains algorithm) then
+            Some(unsupportedAlgorithm algorithm)
+        elif algorithm = AlgorithmCopy && lockMode = LockNone then
+            Some(lockNoneError ())
+        elif lockMode = LockNone && (requiresSharedLock || not (supportedAlgorithms.Contains AlgorithmInplace)) then
+            Some(lockNoneError ())
+        elif operations.IsEmpty && (lockMode = LockNone || lockMode = LockShared) then
+            Some(lockNoneError ())
+        else
+            None
+
+    match validationError with
+    | Some error -> Error error
+    | None ->
+        let effectiveAlgorithm =
+            if algorithm <> AlgorithmDefault then algorithm
+            else
+                [ AlgorithmInstant; AlgorithmInplace; AlgorithmCopy ]
+                |> List.tryFind supportedAlgorithms.Contains
+                |> Option.defaultValue AlgorithmDefault
+
+        Ok effectiveAlgorithm
 
 let private truncateHashPartitions
     (store: Store)
@@ -22089,10 +22121,14 @@ let rec executeAs
             | Ok actions -> actions, None
             | Error error -> actions, Some error
         let db, table = splitQualified dbName table
+        let executionPlan =
+            match tableSnapshot store db table with
+            | Ok table -> planAlterExecution store.ForeignKeyChecks table actions
+            | Error _ -> Ok AlgorithmDefault
         let executionOptionError =
-            match scan store db table with
-            | Ok(columns, _) -> validateAlterExecutionOptions store.ForeignKeyChecks columns actions
-            | Error _ -> None
+            match executionPlan with
+            | Error error -> Some error
+            | Ok _ -> None
 
         let requestedEngine =
             actions
@@ -22129,9 +22165,10 @@ let rec executeAs
               rejectUnsafeFunctionalDefaults registry addedColumns ]
             |> List.tryPick id
 
-        match error with
-        | Some error -> ids, error
-        | None ->
+        match error, executionPlan with
+        | Some error, _
+        | _, Error error -> ids, error
+        | None, Ok algorithm ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
@@ -22149,14 +22186,10 @@ let rec executeAs
 
             let crossesDatabases = not (sameObjectName db finalDb)
 
-            let copyRequested =
-                actions
-                |> List.choose (function SetAlterAlgorithm algorithm -> Some algorithm | _ -> None)
-                |> List.tryLast
-                |> Option.contains AlgorithmCopy
+            let copyRequired = algorithm = AlgorithmCopy
 
             let rebuildRequested =
-                copyRequested
+                copyRequired
                 || (actions |> List.exists (function
                     | SetEngine _
                     | SetRowFormat _
@@ -22382,13 +22415,15 @@ let rec executeAs
                     |> Result.bind (fun () -> actions |> List.fold (fun state action -> state |> Result.bind (fun () -> applyCheckAction columns action)) (Ok()))
                     |> Result.bind (fun () ->
                         tableSnapshot snapshot finalDb finalTable
-                        |> Result.bind (fun storedTable -> validateCheckForeignKeys snapshot finalDb finalTable storedTable.ForeignKeys)))
+                        |> Result.bind (fun storedTable ->
+                            validateCheckForeignKeys snapshot finalDb finalTable storedTable.ForeignKeys
+                            |> Result.map (fun () -> if copyRequired then uint64 storedTable.RowsArray.Count else 0UL))))
 
             match altered with
-            | Ok() ->
+            | Ok affectedRows ->
                 Storage.commitCatalogInto store baseCatalog snapshot
                 Deprecation.reportNumericDisplays addedColumns
-                ids, Affected 0UL
+                ids, Affected affectedRows
             | Error e -> ids, storageErr e
 
     | RenameTable pairs ->

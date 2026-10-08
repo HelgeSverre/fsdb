@@ -201,7 +201,7 @@ let tests =
                     let truncated, _ = handle truncated "CREATE TABLE truncate_alter (d DATETIME(3), tm TIME(3))"
                     let truncated, _ = handle truncated "INSERT INTO truncate_alter VALUES ('2024-01-01 00:00:00.129', '12:34:56.129')"
                     let truncated, alterResult = handle truncated "ALTER TABLE truncate_alter MODIFY d DATETIME(2), MODIFY tm TIME(2)"
-                    Expect.equal alterResult (Fsdb.Executor.Affected 0UL) "truncate-mode ALTER"
+                    Expect.equal alterResult (Fsdb.Executor.Affected 1UL) "truncate-mode ALTER copies one row"
                     Expect.isEmpty truncated.Diagnostics "ALTER truncation is silent"
 
                     expectRow

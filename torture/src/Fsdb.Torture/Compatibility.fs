@@ -6139,74 +6139,251 @@ module ContractCatalog =
           Cleanup = [| "DROP VIEW IF EXISTS absent_view"; "DROP TABLE IF EXISTS copied" |]
           Coverage = [| "statement:select", [| "text-differential" |]; "statement:drop-table", [| "text-differential" |]; "statement:create-view", [| "text-differential" |] |] }
 
-    let private alterCoercionFailures =
+    let private alterCopyCounts =
+        let operations =
+            [
+              "add-column", "ADD COLUMN added INT", [ None; None; None; None ]
+              "drop-column", "DROP COLUMN v", [ None; None; None; None ]
+              "add-stored", "ADD COLUMN added INT GENERATED ALWAYS AS(n+1) STORED", [ None; None; Some 1845; Some 1845 ]
+              "add-check", "ADD CONSTRAINT ck CHECK(n>0)", [ None; None; Some 1845; Some 1845 ]
+              "add-index", "ADD INDEX ix(n)", [ None; None; None; Some 1845 ]
+              "narrow-text", "MODIFY v VARCHAR(1)", [ None; None; Some 1846; Some 1846 ]
+              "widen-text", "MODIFY v VARCHAR(30)", [ None; None; None; Some 1845 ]
+              "widen-byte-boundary", "MODIFY v VARCHAR(300)", [ None; None; Some 1846; Some 1846 ]
+              "change-type", "MODIFY n BIGINT", [ None; None; Some 1846; Some 1846 ]
+              "same-type", "MODIFY n INT", [ None; None; None; None ]
+              "nullability", "MODIFY n INT NOT NULL", [ None; None; None; Some 1845 ]
+              "rename-column", "RENAME COLUMN v TO renamed_v", [ None; None; None; None ]
+              "change-column", "CHANGE v renamed_v VARCHAR(20)", [ None; None; None; None ]
+              "drop-primary", "DROP PRIMARY KEY", [ None; None; Some 1846; Some 1846 ]
+              "add-foreign-key", "ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id)", [ None; None; Some 1846; Some 1846 ]
+              "charset-same", "CONVERT TO CHARACTER SET utf8mb4", [ None; None; None; Some 1845 ]
+              "charset-latin1", "CONVERT TO CHARACTER SET latin1", [ None; None; Some 1846; Some 1846 ]
+              "engine", "ENGINE=InnoDB", [ None; None; None; Some 1845 ]
+              "comment", "COMMENT='test'", [ None; None; None; Some 1845 ]
+              "rename-table", "RENAME TO renamed", [ None; None; None; None ]
+              "no-operation", "", [ None; None; None; None ]
+            ]
+        let defaultTable = "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)"
+        let cases =
+            [ for name, operation, errors in operations do
+                  for algorithm, error in List.zip [ ""; "COPY"; "INPLACE"; "INSTANT" ] errors do
+                      if operation <> "" || algorithm <> "" then
+                          let suffix = if algorithm = "" then "" else (if operation = "" then "" else ", ") + "ALGORITHM=" + algorithm
+                          yield name + "-" + algorithm, defaultTable, [], "ALTER TABLE target " + operation + suffix, error
+              yield "foreign-key-checks-0-default", defaultTable, [ "SET foreign_key_checks=0" ], "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id)", None
+              yield "foreign-key-checks-0-COPY", defaultTable, [ "SET foreign_key_checks=0" ], "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=COPY", None
+              yield "foreign-key-checks-0-INPLACE", defaultTable, [ "SET foreign_key_checks=0" ], "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=INPLACE", None
+              yield "foreign-key-checks-1-default", defaultTable, [ "SET foreign_key_checks=1" ], "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id)", None
+              yield "foreign-key-checks-1-COPY", defaultTable, [ "SET foreign_key_checks=1" ], "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=COPY", None
+              yield "foreign-key-checks-1-INPLACE", defaultTable, [ "SET foreign_key_checks=1" ], "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=INPLACE", Some 1846
+              yield "empty", defaultTable, [ "DELETE FROM target" ], "ALTER TABLE target MODIFY v VARCHAR(1)", None
+              yield "tombstone", defaultTable, [ "DELETE FROM target WHERE id=2" ], "ALTER TABLE target MODIFY v VARCHAR(1)", None
+              yield "mixed", defaultTable, [], "ALTER TABLE target ADD COLUMN added INT, MODIFY n BIGINT", None
+              yield "copy-rename", defaultTable, [], "ALTER TABLE target MODIFY n BIGINT, RENAME TO renamed", None
+              yield "boundary-utf8mb4-63-64-default", "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(63),n INT) CHARACTER SET utf8mb4", [], "ALTER TABLE target MODIFY v VARCHAR(64)", None
+              yield "boundary-utf8mb4-63-64-INPLACE", "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(63),n INT) CHARACTER SET utf8mb4", [], "ALTER TABLE target MODIFY v VARCHAR(64), ALGORITHM=INPLACE", Some 1846
+              yield "boundary-utf8mb4-64-65-default", "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(64),n INT) CHARACTER SET utf8mb4", [], "ALTER TABLE target MODIFY v VARCHAR(65)", None
+              yield "boundary-utf8mb4-64-65-INPLACE", "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(64),n INT) CHARACTER SET utf8mb4", [], "ALTER TABLE target MODIFY v VARCHAR(65), ALGORITHM=INPLACE", None
+              yield "boundary-latin1-255-256-default", "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(255),n INT) CHARACTER SET latin1", [], "ALTER TABLE target MODIFY v VARCHAR(256)", None
+              yield "boundary-latin1-255-256-INPLACE", "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(255),n INT) CHARACTER SET latin1", [], "ALTER TABLE target MODIFY v VARCHAR(256), ALGORITHM=INPLACE", Some 1846
+              yield "boundary-latin1-256-257-default", "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(256),n INT) CHARACTER SET latin1", [], "ALTER TABLE target MODIFY v VARCHAR(257)", None
+              yield "boundary-latin1-256-257-INPLACE", "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(256),n INT) CHARACTER SET latin1", [], "ALTER TABLE target MODIFY v VARCHAR(257), ALGORITHM=INPLACE", None
+              yield "default-expression-default", defaultTable, [], "ALTER TABLE target ADD COLUMN added INT DEFAULT (ABS(-1))", None
+              yield "default-expression-COPY", defaultTable, [], "ALTER TABLE target ADD COLUMN added INT DEFAULT (ABS(-1)), ALGORITHM=COPY", None
+              yield "default-expression-INPLACE", defaultTable, [], "ALTER TABLE target ADD COLUMN added INT DEFAULT (ABS(-1)), ALGORITHM=INPLACE", Some 1845
+              yield "default-expression-INSTANT", defaultTable, [], "ALTER TABLE target ADD COLUMN added INT DEFAULT (ABS(-1)), ALGORITHM=INSTANT", Some 1845
+              yield "collation-default", defaultTable, [], "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin", None
+              yield "collation-COPY", defaultTable, [], "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, ALGORITHM=COPY", None
+              yield "collation-INPLACE", defaultTable, [], "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, ALGORITHM=INPLACE", None
+              yield "collation-INSTANT", defaultTable, [], "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, ALGORITHM=INSTANT", Some 1845
+              yield "modify-charset-default", defaultTable, [], "ALTER TABLE target MODIFY v VARCHAR(20) CHARACTER SET latin1", None
+              yield "modify-charset-COPY", defaultTable, [], "ALTER TABLE target MODIFY v VARCHAR(20) CHARACTER SET latin1, ALGORITHM=COPY", None
+              yield "modify-charset-INPLACE", defaultTable, [], "ALTER TABLE target MODIFY v VARCHAR(20) CHARACTER SET latin1, ALGORITHM=INPLACE", Some 1846
+              yield "modify-charset-INSTANT", defaultTable, [], "ALTER TABLE target MODIFY v VARCHAR(20) CHARACTER SET latin1, ALGORITHM=INSTANT", Some 1846
+              yield "modify-collation-default", defaultTable, [], "ALTER TABLE target MODIFY v VARCHAR(20) COLLATE utf8mb4_bin", None
+              yield "modify-collation-COPY", defaultTable, [], "ALTER TABLE target MODIFY v VARCHAR(20) COLLATE utf8mb4_bin, ALGORITHM=COPY", None
+              yield "modify-collation-INPLACE", defaultTable, [], "ALTER TABLE target MODIFY v VARCHAR(20) COLLATE utf8mb4_bin, ALGORITHM=INPLACE", None
+              yield "modify-collation-INSTANT", defaultTable, [], "ALTER TABLE target MODIFY v VARCHAR(20) COLLATE utf8mb4_bin, ALGORITHM=INSTANT", Some 1845
+            ]
+        { Name = "alter-copy-counts"
+          Setup = [||]
+          Steps =
+            [| for name, definition, setup, statement, error in cases do
+                   let initialize =
+                       [ "SET foreign_key_checks=1"
+                         "DROP TABLE IF EXISTS target"
+                         "DROP TABLE IF EXISTS renamed"
+                         "DROP TABLE IF EXISTS parent"
+                         "CREATE TABLE parent(id INT PRIMARY KEY)"
+                         "INSERT INTO parent VALUES(1),(2),(3)"
+                         definition
+                         "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)" ] @ setup
+                   for index, sql in List.indexed initialize do
+                       yield Contract.execute (sprintf "%s-setup-%d" name index) sql
+                   let operation = Contract.execute name statement
+                   yield match error with Some code -> operation |> Contract.fails code "0A000" | None -> operation
+                   yield Contract.query (name + "-row-count") "SELECT ROW_COUNT() AS affected"
+                   let table = if error.IsNone && statement.Contains("RENAME TO renamed", StringComparison.Ordinal) then "renamed" else "target"
+                   yield Contract.query (name + "-rows") ("SELECT id,n FROM " + table + " ORDER BY id") |]
+          Cleanup = [| "DROP TABLE IF EXISTS target"; "DROP TABLE IF EXISTS renamed"; "DROP TABLE IF EXISTS parent"; "SET foreign_key_checks=1" |]
+          Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
+
+    let private alterCoercion =
         let cases =
             [
+              "varchar--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'a'),(2,'bc'),(3,'de')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "varchar--unique-True",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),UNIQUE KEY uq_v(v))"
                     "INSERT INTO target VALUES(1,'aa'),(2,'ab'),(3,'zz')"
                     "SET sql_mode=''" ],
-                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1062, "23000"
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", Some(1062, "23000"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "char-spaces--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'a  '),(2,'b  ')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v CHAR(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "varchar-spaces--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'a  '),(2,'b  ')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "unicode--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'é'),(2,'🙂x')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "binary--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))"
+                    "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v BINARY(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "varbinary--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))"
+                    "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v VARBINARY(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "integer--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v INT)"
+                    "INSERT INTO target VALUES(1,1),(2,200),(3,300)"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v TINYINT", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "numeric-text--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'1'),(2,'200'),(3,'x')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v TINYINT", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "varchar-STRICT_ALL_TABLES-unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
                     "INSERT INTO target VALUES(1,'a'),(2,'bc'),(3,'de')"
                     "SET sql_mode='STRICT_ALL_TABLES'" ],
-                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1265, "01000"
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", Some(1265, "01000"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "varchar-STRICT_ALL_TABLES-unique-True",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),UNIQUE KEY uq_v(v))"
                     "INSERT INTO target VALUES(1,'aa'),(2,'ab'),(3,'zz')"
                     "SET sql_mode='STRICT_ALL_TABLES'" ],
-                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1265, "01000"
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", Some(1265, "01000"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "char-spaces-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'a  '),(2,'b  ')"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v CHAR(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "varchar-spaces-STRICT_ALL_TABLES-unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
                     "INSERT INTO target VALUES(1,'a  '),(2,'b  ')"
                     "SET sql_mode='STRICT_ALL_TABLES'" ],
-                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1265, "01000"
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", Some(1265, "01000"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "unicode-STRICT_ALL_TABLES-unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
                     "INSERT INTO target VALUES(1,'é'),(2,'🙂x')"
                     "SET sql_mode='STRICT_ALL_TABLES'" ],
-                  "ALTER TABLE target MODIFY v VARCHAR(1)", 1265, "01000"
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", Some(1265, "01000"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "binary-STRICT_ALL_TABLES-unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))"
                     "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')"
                     "SET sql_mode='STRICT_ALL_TABLES'" ],
-                  "ALTER TABLE target MODIFY v BINARY(1)", 1406, "22001"
+                  "ALTER TABLE target MODIFY v BINARY(1)", Some(1406, "22001"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "varbinary-STRICT_ALL_TABLES-unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARBINARY(20))"
                     "INSERT INTO target VALUES(1,X'41'),(2,X'4243'),(3,X'4445')"
                     "SET sql_mode='STRICT_ALL_TABLES'" ],
-                  "ALTER TABLE target MODIFY v VARBINARY(1)", 1265, "01000"
+                  "ALTER TABLE target MODIFY v VARBINARY(1)", Some(1265, "01000"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "integer-STRICT_ALL_TABLES-unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v INT)"
                     "INSERT INTO target VALUES(1,1),(2,200),(3,300)"
                     "SET sql_mode='STRICT_ALL_TABLES'" ],
-                  "ALTER TABLE target MODIFY v TINYINT", 1264, "22003"
+                  "ALTER TABLE target MODIFY v TINYINT", Some(1264, "22003"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
               "numeric-text-STRICT_ALL_TABLES-unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
                     "INSERT INTO target VALUES(1,'1'),(2,'200'),(3,'x')"
                     "SET sql_mode='STRICT_ALL_TABLES'" ],
-                  "ALTER TABLE target MODIFY v TINYINT", 1264, "22003"
+                  "ALTER TABLE target MODIFY v TINYINT", Some(1264, "22003"),
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'" ]
+              "change",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),w VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd'),(3,'ee','ff')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target CHANGE v renamed VARCHAR(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT * FROM target ORDER BY id" ]
+              "tombstone",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),w VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd'),(3,'ee','ff')"
+                    "SET sql_mode=''"
+                    "DELETE FROM target WHERE id=1" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT * FROM target ORDER BY id" ]
             ]
-        { Name = "alter-coercion-failures"
+        { Name = "alter-coercion"
           Setup = [||]
           Steps =
-            [| for name, setup, statement, code, state in cases do
+            [| for name, setup, statement, error, queries in cases do
                    for index, sql in List.indexed setup do
                        yield Contract.execute (sprintf "%s-setup-%d" name index) sql
-                   yield Contract.execute name statement |> Contract.fails code state
-                   yield Contract.query (name + "-warnings") "SHOW WARNINGS"
-                   yield Contract.query (name + "-rows") "SELECT id,HEX(v) AS v FROM target ORDER BY id"
-                   yield Contract.query (name + "-definition") "SHOW COLUMNS FROM target LIKE 'v'" |]
+                   let operation = Contract.execute name statement
+                   yield match error with Some(code, state) -> operation |> Contract.fails code state | None -> operation
+                   for index, sql in List.indexed queries do
+                       yield Contract.query (sprintf "%s-result-%d" name index) sql |]
           Cleanup = [| "DROP TABLE IF EXISTS target"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
@@ -6565,7 +6742,8 @@ module ContractCatalog =
     let all =
         [| missingTableDiagnostics
            qualifiedDuplicateKeys
-           alterCoercionFailures
+           alterCoercion
+           alterCopyCounts
            integerCastConditions
            triggerWarningLifetimes
            deleteIgnoreForeignKeys

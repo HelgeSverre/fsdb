@@ -1773,7 +1773,7 @@ let tests =
                     | other -> failtestf "expected upserted and replaced defaults, got %A" other
 
                     match runDefault store "ALTER TABLE defaults_expr ADD COLUMN shifted INT DEFAULT (base + 2)" with
-                    | Affected 0UL -> ()
+                    | Affected 3UL -> ()
                     | other -> failtestf "expected the functional column to be added, got %A" other
 
                     match runDefault store "SELECT shifted FROM defaults_expr ORDER BY id" with
@@ -2280,7 +2280,7 @@ let tests =
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT, name VARCHAR(20))" |> ignore
                     runDefault store "INSERT INTO t VALUES (1, 'blå')" |> ignore
-                    Expect.equal (runDefault store "ALTER TABLE t CONVERT TO CHARACTER SET latin1") (Affected 0UL) "converted"
+                    Expect.equal (runDefault store "ALTER TABLE t CONVERT TO CHARACTER SET latin1") (Affected 1UL) "converted"
 
                     let table = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
                     Expect.equal table.TableCharset (Some "latin1") "table charset"
@@ -2456,6 +2456,51 @@ let tests =
                     Expect.isFalse (table.Columns |> List.exists (fun column -> column.Name = "instant_value")) "rejected column absent"
                     Expect.isFalse (table.Columns |> List.exists (fun column -> column.Name = "copy_value")) "rejected copy column absent"
                     Expect.equal table.Columns.[1].Type (TInt false) "rejected type change absent"
+
+                testCase "ALTER COPY reports live rows while online algorithms report zero"
+                <| fun _ ->
+                    for action, expected in
+                        [ "MODIFY value BIGINT", 2UL
+                          "ADD COLUMN added INT, ALGORITHM=COPY", 2UL
+                          "ADD COLUMN added INT, ALGORITHM=INPLACE", 0UL
+                          "ADD COLUMN added INT, ALGORITHM=INSTANT", 0UL
+                          "ADD COLUMN added INT AS (value+1) STORED", 2UL
+                          "ADD CONSTRAINT ck CHECK(value>0)", 2UL
+                          "CONVERT TO CHARACTER SET utf8mb4", 0UL
+                          "CONVERT TO CHARACTER SET latin1", 2UL
+                          "MODIFY label VARCHAR(20) CHARACTER SET latin1", 2UL
+                          "ALGORITHM=COPY", 2UL ] do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE t(id INT PRIMARY KEY, value INT, label VARCHAR(20))" |> ignore
+                        runDefault store "INSERT INTO t VALUES(1,1,'a'),(2,2,'b'),(3,3,'c')" |> ignore
+                        runDefault store "DELETE FROM t WHERE id=2" |> ignore
+                        Expect.equal (runDefault store ("ALTER TABLE t " + action)) (Affected expected) action
+
+                testCase "ALTER foreign-key copy counts depend on checks and the selected algorithm"
+                <| fun _ ->
+                    for checks, algorithm, expected in [ true, "", 2UL; false, "", 0UL; false, ", ALGORITHM=COPY", 2UL ] do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE parent(id INT PRIMARY KEY)" |> ignore
+                        runDefault store "INSERT INTO parent VALUES(1),(2)" |> ignore
+                        runDefault store "CREATE TABLE child(id INT PRIMARY KEY,pid INT)" |> ignore
+                        runDefault store "INSERT INTO child VALUES(1,1),(2,2)" |> ignore
+                        setForeignKeyChecks store checks
+                        Expect.equal
+                            (runDefault store ("ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY(pid) REFERENCES parent(id)" + algorithm))
+                            (Affected expected)
+                            "foreign-key algorithm determines affected rows"
+
+                testCase "ALTER widening respects the charset-dependent length prefix boundary"
+                <| fun _ ->
+                    for charset, oldLength, newLength, expected in
+                        [ "utf8mb4", 63, 64, 1UL
+                          "utf8mb4", 64, 65, 0UL
+                          "latin1", 255, 256, 1UL
+                          "latin1", 256, 257, 0UL ] do
+                        let store = newStore ()
+                        runDefault store (sprintf "CREATE TABLE t(v VARCHAR(%d)) CHARACTER SET %s" oldLength charset) |> ignore
+                        runDefault store "INSERT INTO t VALUES('a')" |> ignore
+                        Expect.equal (runDefault store (sprintf "ALTER TABLE t MODIFY v VARCHAR(%d)" newLength)) (Affected expected) charset
 
                 testCase "ALTER TABLE accepts supported INSTANT and COPY operations"
                 <| fun _ ->

@@ -1,0 +1,2601 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "7aea1124",
+  "fsdb_dirty": true,
+  "comparison": "ROW_COUNT result rows, numeric error codes, and SQLSTATEs",
+  "cases": [
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "add-column-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "add-column-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "add-column-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "add-column-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "drop-column-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target DROP COLUMN v",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "drop-column-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target DROP COLUMN v, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "drop-column-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target DROP COLUMN v, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "drop-column-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target DROP COLUMN v, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "add-stored-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT GENERATED ALWAYS AS(n+1) STORED",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "add-stored-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT GENERATED ALWAYS AS(n+1) STORED, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "add-stored-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT GENERATED ALWAYS AS(n+1) STORED, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "add-stored-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT GENERATED ALWAYS AS(n+1) STORED, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n-1\n",
+      "matches": false,
+      "name": "add-expression-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n-1\n",
+      "matches": false,
+      "name": "add-expression-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": false,
+      "name": "add-expression-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": false,
+      "name": "add-expression-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "add-check-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD CONSTRAINT ck CHECK(n>0)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "add-check-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD CONSTRAINT ck CHECK(n>0), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "add-check-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD CONSTRAINT ck CHECK(n>0), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "add-check-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD CONSTRAINT ck CHECK(n>0), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "add-index-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD INDEX ix(n)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "add-index-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD INDEX ix(n), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "add-index-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD INDEX ix(n), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "add-index-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD INDEX ix(n), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "narrow-text-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "narrow-text-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(1), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "narrow-text-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(1), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "narrow-text-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(1), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "widen-text-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(30)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "widen-text-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(30), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "widen-text-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(30), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "widen-text-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(30), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "widen-byte-boundary-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(300)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "widen-byte-boundary-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(300), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "widen-byte-boundary-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(300), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "widen-byte-boundary-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(300), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "change-type-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n BIGINT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "change-type-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n BIGINT, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "change-type-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n BIGINT, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "change-type-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n BIGINT, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "same-type-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n INT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "same-type-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n INT, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "same-type-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n INT, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "same-type-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n INT, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "nullability-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n INT NOT NULL",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "nullability-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n INT NOT NULL, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "nullability-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n INT NOT NULL, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "nullability-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n INT NOT NULL, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "rename-column-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target RENAME COLUMN v TO renamed_v",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "rename-column-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target RENAME COLUMN v TO renamed_v, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "rename-column-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target RENAME COLUMN v TO renamed_v, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "rename-column-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target RENAME COLUMN v TO renamed_v, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "change-column-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CHANGE v renamed_v VARCHAR(20)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "change-column-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CHANGE v renamed_v VARCHAR(20), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "change-column-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CHANGE v renamed_v VARCHAR(20), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "change-column-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CHANGE v renamed_v VARCHAR(20), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "drop-primary-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target DROP PRIMARY KEY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "drop-primary-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target DROP PRIMARY KEY, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "drop-primary-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target DROP PRIMARY KEY, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "drop-primary-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target DROP PRIMARY KEY, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "add-foreign-key-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "add-foreign-key-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "add-foreign-key-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "add-foreign-key-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "charset-same-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "charset-same-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "charset-same-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "charset-same-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "charset-latin1-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET latin1",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "charset-latin1-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET latin1, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "charset-latin1-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET latin1, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "charset-latin1-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET latin1, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "engine-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ENGINE=InnoDB",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "engine-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ENGINE=InnoDB, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "engine-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ENGINE=InnoDB, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "engine-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ENGINE=InnoDB, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "comment-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target COMMENT='test'",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "comment-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target COMMENT='test', ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "comment-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target COMMENT='test', ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "comment-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target COMMENT='test', ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "rename-table-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target RENAME TO renamed",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "rename-table-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target RENAME TO renamed, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "rename-table-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target RENAME TO renamed, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "rename-table-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target RENAME TO renamed, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "no-operation-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "no-operation-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "no-operation-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "foreign-key-checks-0-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "SET foreign_key_checks=0",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "foreign-key-checks-0-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "SET foreign_key_checks=0",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "foreign-key-checks-0-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "SET foreign_key_checks=0",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "foreign-key-checks-1-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "SET foreign_key_checks=1",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "foreign-key-checks-1-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "SET foreign_key_checks=1",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "foreign-key-checks-1-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "SET foreign_key_checks=1",
+        "ALTER TABLE target ADD CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(id), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "empty",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "DELETE FROM target",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n2\n",
+      "errors": [],
+      "expected": "affected\n2\n",
+      "matches": true,
+      "name": "tombstone",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "DELETE FROM target WHERE id=2",
+        "ALTER TABLE target MODIFY v VARCHAR(1)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "mixed",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT, MODIFY n BIGINT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "copy-rename",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY n BIGINT, RENAME TO renamed",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "boundary-utf8mb4-63-64-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(63),n INT) CHARACTER SET utf8mb4",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(64)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "boundary-utf8mb4-63-64-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(63),n INT) CHARACTER SET utf8mb4",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(64), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "boundary-utf8mb4-64-65-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(64),n INT) CHARACTER SET utf8mb4",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(65)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "boundary-utf8mb4-64-65-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(64),n INT) CHARACTER SET utf8mb4",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(65), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "boundary-latin1-255-256-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(255),n INT) CHARACTER SET latin1",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(256)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "boundary-latin1-255-256-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(255),n INT) CHARACTER SET latin1",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(256), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "boundary-latin1-256-257-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(256),n INT) CHARACTER SET latin1",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(257)",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "boundary-latin1-256-257-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(256),n INT) CHARACTER SET latin1",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(257), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "default-expression-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT DEFAULT (ABS(-1))",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "default-expression-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT DEFAULT (ABS(-1)), ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "default-expression-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT DEFAULT (ABS(-1)), ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "default-expression-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target ADD COLUMN added INT DEFAULT (ABS(-1)), ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "collation-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "collation-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "collation-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "collation-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "modify-charset-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(20) CHARACTER SET latin1",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "modify-charset-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(20) CHARACTER SET latin1, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "modify-charset-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(20) CHARACTER SET latin1, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1846,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "modify-charset-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(20) CHARACTER SET latin1, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "modify-collation-default",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(20) COLLATE utf8mb4_bin",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n3\n",
+      "errors": [],
+      "expected": "affected\n3\n",
+      "matches": true,
+      "name": "modify-collation-COPY",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(20) COLLATE utf8mb4_bin, ALGORITHM=COPY",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n0\n",
+      "errors": [],
+      "expected": "affected\n0\n",
+      "matches": true,
+      "name": "modify-collation-INPLACE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(20) COLLATE utf8mb4_bin, ALGORITHM=INPLACE",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    },
+    {
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1845,
+          "Item2": "0A000"
+        }
+      ],
+      "expected": "affected\n-1\n",
+      "matches": true,
+      "name": "modify-collation-INSTANT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=1",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS renamed",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),n INT)",
+        "INSERT INTO target VALUES(1,'a',1),(2,'b',2),(3,'c',3)",
+        "ALTER TABLE target MODIFY v VARCHAR(20) COLLATE utf8mb4_bin, ALGORITHM=INSTANT",
+        "SELECT ROW_COUNT() AS affected"
+      ]
+    }
+  ]
+}

@@ -919,7 +919,9 @@ let tests =
                   Expect.equal (connection.Query "INSERT INTO docs(id,body) VALUES(2,'生日快乐')") (Affected 1UL) "current write"
                   if action.StartsWith "DROP INDEX second" then
                       Expect.equal (connection.Query "ALTER TABLE docs ADD FULLTEXT KEY second(body) WITH PARSER ngram") (Affected 0UL) "new destination index"
-                  Expect.equal (connection.Query ("ALTER TABLE docs " + action)) (Affected 0UL) action
+                  match connection.Query ("ALTER TABLE docs " + action) with
+                  | Affected _ -> ()
+                  | result -> failtestf "%s failed: %A" action result
                   let verify (connection: Db.Connection) =
                       for term, expected in
                           [ "生日", (if rebuilt then [] else [ [ Some "1" ] ])

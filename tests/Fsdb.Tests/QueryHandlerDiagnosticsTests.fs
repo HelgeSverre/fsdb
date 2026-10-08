@@ -717,7 +717,7 @@ let tests =
               let session, _ = handle session "CREATE TABLE t (v VARCHAR(2))"
               let session, _ = handle session "INSERT INTO t VALUES ('😀')"
               let session, result = handle session "ALTER TABLE t MODIFY v VARCHAR(1)"
-              Expect.equal result (Affected 0UL) "one scalar value fits VARCHAR(1)"
+              Expect.equal result (Affected 1UL) "one scalar value fits VARCHAR(1) and is copied"
 
               match handle session "SELECT v FROM t" |> snd with
               | ResultSet(_, [ [ Some "😀" ] ]) -> ()

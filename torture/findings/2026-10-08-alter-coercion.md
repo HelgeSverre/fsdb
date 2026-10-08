@@ -1,7 +1,7 @@
 # ALTER stored-value coercion conditions
 
-Status: audited single-column conditions implemented; multi-column ordering,
-COPY affected-row counts, and decimal HEX conversion remain open.
+Status: audited single-column conditions and COPY affected-row counts implemented;
+multi-column ordering and decimal HEX conversion remain open.
 
 ## Native evidence
 
@@ -31,10 +31,10 @@ narrowed to VARCHAR(1), MySQL emits truncation warnings for rows 1 and 2, then
 1062. It emits no warning for row 3. The engine shares stored-value coercion with
 ordinary writes and checks unique keys as each converted row is built.
 
-The `alter-coercion-failures` wire contract checks all nine failing scripts,
-including error codes, SQLSTATEs, ordered conditions, retained rows, and schema.
-Successful-copy scripts remain standalone evidence because their protocol
-row counts still differ; they are not passed through a result-ignoring contract.
+The `alter-coercion` wire contract covers all 20 matching scripts, including
+successful COPY affected-row counts, error codes, SQLSTATEs, ordered conditions,
+retained or converted rows, and schema. The [ALTER count finding](2026-10-08-alter-copy-counts.md)
+records the algorithm matrix supporting the result policy.
 
 The schema checks exposed a separate SHOW metadata difference. Native
 SHOW COLUMNS, SHOW FULL COLUMNS, and DESCRIBE expose `Key` as a STRING carrying
@@ -54,19 +54,15 @@ all three commands and object kinds.
   same scale-loss notes. `HEX(2.5)` returns `3` in MySQL and `2` in fsdb. The direct
   value query retained in each script distinguishes HEX conversion from storage
   rounding.
-- Successful COPY ALTER operations still report zero affected rows in fsdb.
-  The [foreign-key count finding](2026-10-08-alter-foreign-key-count.md) records
-  the existing protocol counterexample. Explicit/default algorithm selection
-  needs broader native coverage before the common result policy changes.
 
 No mismatch is enrolled in the known-gap allowlist.
 
 ## Validation
 
-- `just check`: 3,136 tests pass, no build warnings or errors.
+- `just check`: 3,139 tests pass, no build warnings or errors.
 - The duplicate-key regression fails before the implementation and passes after.
 - Native fixture: all 23 scripts reproduced; fsdb replay: 20 exact matches.
 - Key-diagnostic replay: 15 of 16 scripts match, including narrowing ALTER.
-- Full native wire suite: 86 contracts / 11,724 steps / zero differences.
+- Full native wire suite: 87 contracts / 13,106 steps / zero differences.
 
-Wire artifact: `torture/artifacts/runs/20261008T211512610-76070/contracts`.
+Wire artifact: `torture/artifacts/runs/20261008T213004035-77251/contracts`.

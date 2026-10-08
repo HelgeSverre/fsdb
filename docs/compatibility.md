@@ -451,7 +451,13 @@ event privileges guard the corresponding operations.
 last-option-wins rule. Unsupported algorithms and incompatible lock requests
 fail before any schema change. The compatibility matrix covers ordinary and
 generated columns, indexes, checks, foreign keys, primary-key replacement,
-table options, and character-set conversion.
+table options, and character-set conversion. The selected algorithm also controls
+affected-row counts: COPY reports live rows copied, while INPLACE and INSTANT
+report zero. The count comes from the published candidate table, excluding
+deleted rows. VARCHAR widening respects its charset-dependent one-/two-byte
+length prefix, and same-charset conversion can remain INPLACE. See the
+[native ALTER count evidence](../torture/findings/2026-10-08-alter-copy-counts.md)
+for coverage and the remaining RAND default-expression counterexample.
 
 The in-memory engine publishes every accepted schema change as one immutable
 database-root replacement, so InnoDB's physical COPY/INPLACE/INSTANT lock
@@ -549,8 +555,7 @@ creation. The [native diagnostic evidence](../torture/findings/2026-10-08-key-di
 records the remaining dotted-identifier gap. Single-column MODIFY/CHANGE
 coercions report live row ordinals and stop emitting conditions at the first
 unique-key collision. Strict BINARY truncation retains 1406 / 22001, while
-VARCHAR/VARBINARY narrowing uses 1265 / 01000. Multi-column condition order and
-COPY affected-row counts remain incomplete; see the
+VARCHAR/VARBINARY narrowing uses 1265 / 01000. Multi-column condition order remains incomplete; see the
 [ALTER coercion evidence](../torture/findings/2026-10-08-alter-coercion.md).
 
 Skipped `INSERT IGNORE` rows and ignored CHECK violations appear in the

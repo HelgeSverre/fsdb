@@ -7310,19 +7310,24 @@ let private columnStorageDefinition (column: ColumnDef) =
         Collation = Some((Collation.findOrDefault column.Collation).Name)
         Charset = Some charset }
 
+/// Widening preserves storage layout only within the same length-prefix width.
+let internal columnTypeChangePreservesLayout (previous: ColumnDef) currentType =
+    let sameLengthPrefix bytesPerCharacter oldLength newLength =
+        let usesLongLength length = int64 length * int64 bytesPerCharacter > 255L
+        newLength >= oldLength && usesLongLength oldLength = usesLongLength newLength
+
+    match previous.Type, currentType with
+    | TVarchar oldLength, TVarchar newLength ->
+        sameLengthPrefix (Collation.maxBytesPerCharacter previous.Charset) oldLength newLength
+    | TVarBinary oldLength, TVarBinary newLength -> sameLengthPrefix 1 oldLength newLength
+    | oldType, newType -> oldType = newType
+
 let private columnChangePreservesFullText (before: Table) (after: Table) oldName newName =
     match resolveColumn before.Columns oldName, resolveColumn after.Columns newName with
     | Ok oldPosition, Ok newPosition when oldPosition = newPosition ->
         let previous = columnStorageDefinition before.Columns.[oldPosition]
         let current = columnStorageDefinition after.Columns.[newPosition]
-        let sameStorageType =
-            match previous.Type, current.Type with
-            | TVarchar oldLength, TVarchar newLength when newLength >= oldLength ->
-                let bytesPerCharacter = previous.Charset |> Option.bind Charset.maxBytes |> Option.defaultValue 4
-                // MySQL widening is metadata-only while the one-/two-byte length prefix is unchanged.
-                let usesLongLength length = int64 length * int64 bytesPerCharacter > 255L
-                usesLongLength oldLength = usesLongLength newLength
-            | oldType, newType -> oldType = newType
+        let sameStorageType = columnTypeChangePreservesLayout previous current.Type
 
         sameStorageType && { previous with Type = current.Type } = current
     | _ -> false
