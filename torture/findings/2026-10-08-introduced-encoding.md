@@ -168,3 +168,23 @@ strict/non-strict ASCII conversion. The native wire contracts cover these
 cases and the length matrix: 62 cases and 7,623 steps pass without differences.
 This closes the audited UCS2 storage boundary; other charset conversions and
 encoded-value expression operations still need separate native evidence.
+
+### Encoded string operations remain open
+
+The maintained `encoded-expression-oracle.py` probes REVERSE, LEFT, RIGHT,
+SUBSTRING, and same-charset CONCAT over UCS2 surrogate pairs, invalid ASCII,
+and supplementary UTF8MB3 input. All fifteen native results differ from fsdb
+at `82890893`, although warning order and text match.
+
+MySQL reverses UCS2 code units independently: `0041D83DDE000042` becomes
+`0042DE00D83D0041`. LEFT with length two retains `0041D83D`, and SUBSTRING
+at position two with length one retains `D83D`. Invalid ASCII bytes survive
+these operations unchanged. Each invalid UTF8MB3 byte counts separately:
+LEFT of `61F09F988062` with length two yields `61F0`, while REVERSE yields
+`6280989FF061`. Same-charset CONCAT retains every original byte.
+
+The current functions decode encoded values before manipulating their text,
+losing byte identity. The next change needs a shared charset-aware character
+boundary operation for reversal and slicing, plus concatenation that retains
+the selected result charset and source bytes. Binary values must retain their
+existing byte-oriented behavior.
