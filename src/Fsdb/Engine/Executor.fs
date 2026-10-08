@@ -13818,16 +13818,16 @@ and private evalAggregateUsing<'row>
     | _ -> Error(1064, sprintf "Incorrect parameter count in the call to native function '%s'" name)
 
 /// Replaces aggregate subtrees with their values for ordinary expression evaluation.
-and private rewriteAggregates
+and private rewriteAggregateValues
     (registry: Registry)
-    (ctxFor: Value[] -> EvalContext)
-    (rows: Value[] list)
+    (context: unit -> EvalContext)
+    (aggregateValue: string -> Expr list -> Result<Value, EvalError>)
     (expr: Expr)
     : Result<Expr, EvalError> =
-    let sub = rewriteAggregates registry ctxFor rows
+    let sub = rewriteAggregateValues registry context aggregateValue
 
     let rewriteSubqueries expr =
-        let context = ctxFor (rows |> List.tryHead |> Option.defaultValue [||])
+        let context = context ()
         (bindNestedAggregates context.Store registry context.DbName context.ColumnIndex context.Qualifiers expr).Aggregates
         |> traverse (fun aggregate -> sub aggregate |> Result.map (fun value -> aggregate, value))
         |> Result.map (function
@@ -13847,7 +13847,7 @@ and private rewriteAggregates
              || name.Equals("CHARSET", System.StringComparison.OrdinalIgnoreCase)
              || name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
         Ok expr
-    | FuncCall(name, args) when isAggregateCall registry expr -> evalAggregate registry ctxFor rows name args |> Result.map Lit
+    | FuncCall(name, args) when isAggregateCall registry expr -> aggregateValue name args |> Result.map Lit
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
@@ -13891,6 +13891,10 @@ and private rewriteAggregates
     | Exists _
     | Subquery _ ->
         rewriteSubqueries expr
+
+and private rewriteAggregates registry ctxFor rows expr =
+    let context () = ctxFor (rows |> List.tryHead |> Option.defaultValue [||])
+    rewriteAggregateValues registry context (evalAggregate registry ctxFor rows) expr
 
 /// GROUP BY resolves source columns before projection aliases.
 and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr) : Expr =
