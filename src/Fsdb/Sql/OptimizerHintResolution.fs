@@ -59,12 +59,17 @@ type private Target =
     | IndexTarget of name: string * table: string * index: string
     | JoinTargets of kind: OptimizerHints.JoinOrderKind * targets: (string * string option) list
 
+type private ConflictTarget =
+    | WholeBlock
+    | Table of string
+    | Index of table: string * index: string
+
 type private Block =
     { Number: int
       Select: SelectStmt
       mutable Name: string option
       Targets: ResizeArray<Target>
-      Seen: HashSet<string * string option * string option>
+      Seen: HashSet<string * ConflictTarget>
       JoinOrders: HashSet<OptimizerHints.JoinOrderKind> }
 
 let private systemBlockName block = sprintf "select#%x" block.Number
@@ -103,6 +108,51 @@ let private joinConflict kind (seen: HashSet<OptimizerHints.JoinOrderKind>) =
     | OptimizerHints.JoinOrderKind.Fixed -> seen.Count > 0
     | OptimizerHints.JoinOrderKind.Relative -> seen.Contains OptimizerHints.JoinOrderKind.Fixed
     | _ -> seen.Contains OptimizerHints.JoinOrderKind.Fixed || seen.Contains kind
+
+let private targetWarnings indexesFor (block: Block) =
+    let warnings = ResizeArray<int * string>()
+    let sources = (Option.toList block.Select.From @ (block.Select.Joins |> List.map _.Table)) |> List.collect FromItem.leaves
+    let sourceFor table = sources |> List.tryFind (fun source -> FromItem.tryQualifier source |> Option.exists (sameName table))
+    let unresolved name label = warnings.Add(3128, sprintf "Unresolved name %s for %s hint" label name)
+    let indexExists source index =
+        match source with
+        | Some(FromTable table) -> indexesFor table |> Option.defaultValue [] |> List.exists (sameName index)
+        | _ -> false
+    let tableLabel table = quote table + "@" + quote (blockName block)
+    // Native warnings visit each table's hint families before its index children.
+    let tableTargets =
+        block.Targets |> Seq.choose (function
+            | (TableTarget(_, table, _) | IndexTarget(_, table, _)) as target -> Some(table, target)
+            | JoinTargets _ -> None)
+        |> List.ofSeq
+        |> List.groupBy (fun (table, _) -> table.ToLowerInvariant())
+    for _, targets in tableTargets do
+        let table = targets |> List.head |> fst
+        let source = sourceFor table
+        let tableHints = targets |> List.choose (function _, TableTarget(name, _, _) -> Some name | _ -> None)
+        if source.IsNone then
+            for name in tableHints |> List.sortBy hintOrder do unresolved name (tableLabel table)
+        let indexes =
+            targets |> List.collect (function
+                | _, TableTarget(name, _, indexes) -> indexes |> List.map (fun index -> index, name)
+                | _, IndexTarget(name, _, index) -> [ index, name ]
+                | _ -> [])
+            |> List.groupBy (fun (index, _) -> index.ToLowerInvariant())
+        for _, hints in indexes do
+            let index = hints |> List.head |> fst
+            if not (indexExists source index) then
+                for _, name in hints |> List.distinctBy (snd >> family) |> List.sortBy (snd >> hintOrder) do
+                    unresolved name (tableLabel table + " " + quote index)
+    for target in block.Targets do
+        match target with
+        | JoinTargets(kind, targets) ->
+            targets |> List.tryFind (fun (table, requested) ->
+                let sameBlock = requested |> Option.forall (fun name -> sameName name (blockName block) || sameName name (systemBlockName block))
+                not sameBlock || (sourceFor table).IsNone)
+            |> Option.iter (fun (table, requested) ->
+                unresolved (OptimizerHints.joinOrderName kind) (quote table + blockSuffix requested))
+        | _ -> ()
+    List.ofSeq warnings
 
 let resolve options sql (hints: OptimizerHints.Hint list) (indexesFor: TableRef -> string list option) =
     let multipleOwners =
@@ -170,8 +220,9 @@ let resolve options sql (hints: OptimizerHints.Hint list) (indexesFor: TableRef 
                             | Ok block -> apply block
                         let tableTarget (name: string) (table: string option) requested printedBlock (indexes: string list) =
                             inBlock name requested (fun block ->
-                                let key = family name, table |> Option.map _.ToLowerInvariant(), None
-                                let inherited = table.IsSome && block.Seen.Contains(family name, None, None)
+                                let target = table |> Option.map (fun name -> Table(name.ToLowerInvariant())) |> Option.defaultValue WholeBlock
+                                let key = family name, target
+                                let inherited = table.IsSome && block.Seen.Contains(family name, WholeBlock)
                                 if inherited || not (block.Seen.Add key) then duplicate hint.Offset (renderTableHint name table printedBlock indexes)
                                 else table |> Option.iter (fun table -> block.Targets.Add(TableTarget(name, table, indexes))))
                         match hint.Value with
@@ -190,10 +241,10 @@ let resolve options sql (hints: OptimizerHints.Hint list) (indexesFor: TableRef 
                                 warn hint.Offset 3614 ("Invalid number of arguments for hint " + renderTableHint name (Some table) requested indexes))
                         | OptimizerHints.IndexHint(name, table, requested, indexes) when perIndexFamily name && not indexes.IsEmpty ->
                             inBlock name requested (fun block ->
-                                let tableKey = Some(table.ToLowerInvariant())
+                                let tableKey = table.ToLowerInvariant()
                                 for index in indexes |> List.distinctBy _.ToLowerInvariant() do
-                                    if block.Seen.Contains(family name, tableKey, None)
-                                       || not (block.Seen.Add(family name, tableKey, Some(index.ToLowerInvariant()))) then
+                                    if block.Seen.Contains(family name, Table tableKey)
+                                       || not (block.Seen.Add(family name, Index(tableKey, index.ToLowerInvariant()))) then
                                         duplicate hint.Offset (renderIndexHint name table requested index)
                                     else block.Targets.Add(IndexTarget(name, table, index)))
                         | OptimizerHints.IndexHint(name, table, requested, indexes) -> tableTarget name (Some table) requested requested indexes
@@ -205,52 +256,10 @@ let resolve options sql (hints: OptimizerHints.Hint list) (indexesFor: TableRef 
                                     block.Targets.Add(JoinTargets(kind, targets)))
                         | OptimizerHints.QueryBlockHint(name, requested, strategies) ->
                             inBlock name requested (fun block ->
-                                if not (block.Seen.Add("SUBQUERY", None, None)) then
+                                if not (block.Seen.Add("SUBQUERY", WholeBlock)) then
                                     let arguments = if strategies.IsEmpty then "" else " " + (orderedStrategies strategies |> String.concat ", ")
                                     duplicate hint.Offset (sprintf "%s(%s %s)" name (blockSuffix requested) arguments))
                         | _ -> ()
-                let resolution = ResizeArray<int * string>()
-                for position, _ in ordered do
-                    let block = blocks.[position]
-                    let sources = (Option.toList block.Select.From @ (block.Select.Joins |> List.map _.Table)) |> List.collect FromItem.leaves
-                    let sourceFor table = sources |> List.tryFind (fun source -> FromItem.tryQualifier source |> Option.exists (sameName table))
-                    let unresolved name label = resolution.Add(3128, sprintf "Unresolved name %s for %s hint" label name)
-                    let indexExists source index =
-                        match source with
-                        | Some(FromTable table) -> indexesFor table |> Option.defaultValue [] |> List.exists (sameName index)
-                        | _ -> false
-                    let tableLabel table = quote table + "@" + quote (blockName block)
-                    // Native warnings visit each table's hint families before its index children.
-                    let tableTargets =
-                        block.Targets |> Seq.choose (function
-                            | (TableTarget(_, table, _) | IndexTarget(_, table, _)) as target -> Some(table, target)
-                            | JoinTargets _ -> None)
-                        |> List.ofSeq
-                        |> List.groupBy (fun (table, _) -> table.ToLowerInvariant())
-                    for _, targets in tableTargets do
-                        let table = targets |> List.head |> fst
-                        let source = sourceFor table
-                        let tableHints = targets |> List.choose (function _, TableTarget(name, _, _) -> Some name | _ -> None)
-                        if source.IsNone then
-                            for name in tableHints |> List.sortBy hintOrder do unresolved name (tableLabel table)
-                        let indexes =
-                            targets |> List.collect (function
-                                | _, TableTarget(name, _, indexes) -> indexes |> List.map (fun index -> index, name)
-                                | _, IndexTarget(name, _, index) -> [ index, name ]
-                                | _ -> [])
-                            |> List.groupBy (fun (index, _) -> index.ToLowerInvariant())
-                        for _, hints in indexes do
-                            let index = hints |> List.head |> fst
-                            if not (indexExists source index) then
-                                for _, name in hints |> List.distinctBy (snd >> family) |> List.sortBy (snd >> hintOrder) do
-                                    unresolved name (tableLabel table + " " + quote index)
-                    for target in block.Targets do
-                        match target with
-                        | JoinTargets(kind, targets) ->
-                            targets |> List.tryFind (fun (table, requested) ->
-                                let sameBlock = requested |> Option.forall (fun name -> sameName name (blockName block) || sameName name (systemBlockName block))
-                                not sameBlock || (sourceFor table).IsNone)
-                            |> Option.iter (fun (table, requested) ->
-                                unresolved (OptimizerHints.joinOrderName kind) (quote table + blockSuffix requested))
-                        | _ -> ()
-                { Context = List.ofSeq context; ContextOrder = contextOrder; Resolution = List.ofSeq resolution }
+                let resolution =
+                    ordered |> List.collect (fun (position, _) -> targetWarnings indexesFor blocks.[position])
+                { Context = List.ofSeq context; ContextOrder = contextOrder; Resolution = resolution }
