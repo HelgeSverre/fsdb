@@ -461,6 +461,56 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS contract_aggregate_owner" |]
           Coverage = [| "statement:select", [| "aggregation"; "subqueries"; "text-differential"; "prepared-differential" |] |] }
 
+    let private aggregateOrdering =
+        let queries =
+            [| "SELECT v FROM contract_aggregate_ordering ORDER BY (SELECT SUM(i.v) FROM contract_aggregate_ordering i)", OracleSuccess
+               "SELECT v FROM contract_aggregate_ordering ORDER BY missing,SUM(v)", OracleError(1054, "42S22")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY SUM(v),missing", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY ABS(missing),SUM(v)", OracleError(1054, "42S22")
+               "SELECT (SELECT missing) FROM contract_aggregate_ordering ORDER BY SUM(v)", OracleError(1054, "42S22")
+               "SELECT v FROM contract_aggregate_ordering HAVING missing ORDER BY SUM(v)", OracleError(1054, "42S22")
+               "SELECT v AS a FROM contract_aggregate_ordering ORDER BY a,SUM(v)", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY (SELECT SUM(1))", OracleSuccess
+               "SELECT v FROM contract_aggregate_ordering ORDER BY (SELECT SUM(v+1))", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY (SELECT SUM(i.v+contract_aggregate_ordering.v) FROM contract_aggregate_ordering i)", OracleSuccess
+               "SELECT v FROM contract_aggregate_ordering ORDER BY (SELECT SUM(contract_aggregate_ordering.v) FROM contract_aggregate_ordering i LIMIT 1)", OracleError(3029, "HY000")
+               "SELECT SUM(v) AS s FROM contract_aggregate_ordering ORDER BY (SELECT SUM(v))", OracleSuccess
+               "SELECT v FROM contract_aggregate_ordering ORDER BY (SELECT SUM((SELECT v)))", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY SUM(v)", OracleError(3029, "HY000")
+               "SELECT v AS a FROM contract_aggregate_ordering ORDER BY SUM(a)", OracleError(3029, "HY000")
+               "SELECT 1 FROM contract_aggregate_ordering ORDER BY SUM(v)", OracleError(3029, "HY000")
+               "SELECT 1 ORDER BY SUM(1)", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY v,SUM(v)", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY SUM(missing)", OracleError(1054, "42S22")
+               "SELECT missing FROM contract_aggregate_ordering ORDER BY SUM(v)", OracleError(1054, "42S22")
+               "SELECT v FROM contract_aggregate_ordering WHERE missing ORDER BY SUM(v)", OracleError(1054, "42S22")
+               "SELECT v FROM contract_aggregate_ordering WHERE FALSE ORDER BY SUM(v)", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY SUM(v) LIMIT 0", OracleError(3029, "HY000")
+               "SELECT SUM(v) FROM contract_aggregate_ordering ORDER BY SUM(v)", OracleSuccess
+               "SELECT v FROM contract_aggregate_ordering GROUP BY v ORDER BY SUM(v)", OracleSuccess
+               "SELECT v FROM contract_aggregate_ordering HAVING COUNT(*)>0 ORDER BY SUM(v)", OracleError(1140, "42000")
+               "SELECT 1 FROM contract_aggregate_ordering HAVING COUNT(*)>0 ORDER BY SUM(v)", OracleSuccess
+               "SELECT v FROM contract_aggregate_ordering HAVING TRUE ORDER BY SUM(v)", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY SUM(SUM(v))", OracleError(1111, "HY000")
+               "SELECT SUM(v) AS a FROM contract_aggregate_ordering ORDER BY SUM(a)", OracleError(1111, "HY000")
+               "SELECT ROW_NUMBER() OVER (ORDER BY v) FROM contract_aggregate_ordering ORDER BY SUM(v)", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY (SELECT SUM(v))", OracleError(3029, "HY000")
+               "SELECT v FROM contract_aggregate_ordering ORDER BY ABS(SUM(v))", OracleError(3029, "HY000")
+               "SELECT DISTINCT v FROM contract_aggregate_ordering ORDER BY SUM(v)", OracleError(3029, "HY000")
+               "SELECT v,(SELECT SUM(v)) AS total FROM contract_aggregate_ordering GROUP BY v ORDER BY v", OracleSuccess
+               "SELECT v,(SELECT SUM(v)) AS total,ROW_NUMBER() OVER (ORDER BY v) AS rn FROM contract_aggregate_ordering GROUP BY v ORDER BY v", OracleSuccess |]
+        { Name = "aggregate-ordering-classification"
+          Setup =
+            [| "DROP TABLE IF EXISTS contract_aggregate_ordering"
+               "CREATE TABLE contract_aggregate_ordering(v INT)"
+               "INSERT INTO contract_aggregate_ordering VALUES(2),(1)" |]
+          Steps =
+            [| for sql, expectation in queries do
+                   yield { Contract.query sql sql with Expectation = expectation }
+                   yield { Contract.preparedQuery ("prepared: " + sql) sql [||] with Expectation = expectation } |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_aggregate_ordering" |]
+          Coverage = [| "statement:select", [| "aggregation"; "ordering"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3334,6 +3384,7 @@ module ContractCatalog =
            duplicateOrderAliases
            correlatedOrderAliases
            aggregateOwnership
+           aggregateOrdering
            exactErrors
            noDirInCreate
            semanticErrors

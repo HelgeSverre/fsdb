@@ -87,8 +87,7 @@ compares alias and source-expression sorting on the same build.
   aggregate explicitly in the ordering expression also differs from referring
   to its alias: MySQL's projection is `2,4`, while fsdb's is `1,3`; both finish
   at `@n=4`. These observations are fixture-specific evaluation contracts.
-- A non-aggregated SELECT ordered by `SUM(a)` has native error 3029; fsdb reports
-  1140. A window specification referencing the projection alias has native
+- A window specification referencing the projection alias has native
   1054 in `window order by`; fsdb uses `order clause` wording.
 
 The native-only oracle includes these open boundaries. They are not enrolled as
@@ -219,9 +218,10 @@ records a repeatable 4.2% allocation reduction for the correlated corpus, with
 variable timing and the remaining general subquery execution cost retained.
 
 
-The remaining aggregate-ordering diagnostic is part of a broader
-[aggregate ownership gap](2026-10-08-order-aggregate-scopes.md): an aggregate
+Aggregate-ordering validation depends on
+[aggregate ownership](2026-10-08-order-aggregate-scopes.md): an aggregate
 written in a scalar subquery can belong to its outer query. Native contracts
 cover the wrong-row result and ordering rejection. Enclosing aggregate totals
-are fixed for the documented expression-subquery shapes; ORDER BY-only query
-classification and error 3029 remain open.
+are fixed for the documented expression-subquery shapes. ORDER BY-only query
+classification now returns error 3029 with native term ordering and binding-error
+precedence; the linked finding records the verified coverage and its limits.

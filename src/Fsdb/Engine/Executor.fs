@@ -3249,6 +3249,25 @@ let private bindNestedAggregates store registry dbName columnIndex qualifiers ex
         { Aggregates = aggregates
           UngroupedColumns = ungrouped 0 [ 0, root ] expression }
 
+let private hasOwnedAggregate store registry dbName columnIndex qualifiers expression =
+    not (collectAggregateCalls registry expression).IsEmpty
+    || not (bindNestedAggregates store registry dbName columnIndex qualifiers expression).Aggregates.IsEmpty
+
+let private orderAggregateValidator store registry dbName columnIndex qualifiers (select: SelectStmt) =
+    let ownsAggregate = hasOwnedAggregate store registry dbName columnIndex qualifiers
+    let grouped =
+        not select.GroupBy.IsEmpty
+        || select.Projections |> List.exists (_.Expression >> ownsAggregate)
+        || select.Having |> Option.exists ownsAggregate
+    fun (index, expression) ->
+        let nestedAggregate =
+            collectAggregateCalls registry expression
+            |> List.exists (Expression.children >> List.exists (containsAggregate registry))
+        if nestedAggregate then Error(1111, "Invalid use of group function")
+        elif not grouped && ownsAggregate expression then
+            Error(3029, sprintf "Expression #%d of ORDER BY contains aggregate function and applies to the result of a non-aggregated query" (index + 1))
+        else Ok()
+
 let private outputColumnSources store dbName qualifiers select =
     outputColumnSourcesInScope store dbName qualifiers [] select
 
@@ -6862,11 +6881,12 @@ and private resolveTableRef
 
 /// Derives query columns from schema and expression metadata without reading
 /// rows or invoking extension functions.
-and private describeQueryColumnsChecked
+and private describeQueryColumnsInScope
     (store: Store)
     (registry: Registry)
     (schema: string)
     (source: ColumnDescriptionSource)
+    (outer: EvalContext option)
     : Result<ColumnDef list, ColumnDescriptionError> =
     let requireDescription = function
         | Some value -> Ok value
@@ -7249,11 +7269,12 @@ and private describeQueryColumnsChecked
             let qualifiedClauseReferences =
                 (select.GroupBy |> List.map (fun expression -> expression, "group statement", [ scope ]))
                 @ (select.Having |> Option.toList |> List.map (fun expression -> expression, "having clause", [ scope; projectionAliases ]))
-                @ (select.OrderBy |> List.map (fun (expression, _) -> expression, "order clause", [ scope; orderingAliases ]))
                 |> traverse (fun (expression, clause, scopes) ->
                     validateExpression seen dbName cteMap (scopes @ outerScopes)
                         (function
                         | Some _, _ as reference -> resolveReference (scope :: outerScopes) clause reference
+                        | None, _ as reference when clause = "having clause" ->
+                            resolveReference (scopes @ outerScopes) clause reference
                         | None, _ -> Ok()) expression)
 
             references
@@ -7262,15 +7283,39 @@ and private describeQueryColumnsChecked
                 rewritten |> Result.mapError InvalidDescription
                 |> Result.bind (fun rewritten ->
                     let projections = expandOrderProjections columns qualifiers rewritten.Projections
-                    validateOrderAliases columnIndex qualifiers projections rewritten.OrderBy
+                    let validateAggregate = orderAggregateValidator store registry dbName columnIndex qualifiers rewritten
+                    let resolveOrderingReference expression reference =
+                        let source () = resolveReference (scope :: outerScopes) "order clause" reference
+                        match reference with
+                        | Some _, _ -> source ()
+                        | None, name ->
+                            let aliasFirst =
+                                match expression with
+                                | Col _ -> true
+                                | _ -> not (Map.containsKey (name.ToLowerInvariant()) columnIndex)
+                            if not aliasFirst then source ()
+                            else
+                                resolveOrderProjection columnIndex qualifiers projections name
+                                |> Result.mapError (Err >> InvalidDescription)
+                                |> Result.bind (function Some _ -> Ok() | None -> source ())
+                    rewritten.OrderBy
+                    |> List.mapi (fun index (expression, _) -> index, expression)
+                    |> traverse (fun (index, expression) ->
+                        validateExpression seen dbName cteMap ([ scope; orderingAliases ] @ outerScopes)
+                            (resolveOrderingReference expression) expression
+                        |> Result.bind (fun () ->
+                            validateAggregate (index, bindOrderExpression columnIndex qualifiers projections expression)
+                            |> Result.mapError (Err >> InvalidDescription)))
+                    |> Result.map ignore
                     |> Result.bind (fun () ->
                         let nestedGrouping =
                             (rewritten.Projections |> List.map _.Expression) @ Option.toList rewritten.Having
                             |> List.exists (fun expression ->
                                 not (bindNestedAggregates store registry dbName columnIndex qualifiers expression).Aggregates.IsEmpty)
-                        if nestedGrouping then validateOnlyFullGroupBy store registry dbName columns qualifiers rewritten
+                        if nestedGrouping then
+                            validateOnlyFullGroupBy store registry dbName columns qualifiers rewritten
+                            |> Result.mapError (Err >> InvalidDescription)
                         else Ok())
-                    |> Result.mapError (Err >> InvalidDescription)
                     |> Result.map (fun () -> rewritten)))
             |> Result.map (fun select ->
                 let descriptors = sources |> List.collect snd
@@ -7412,10 +7457,26 @@ and private describeQueryColumnsChecked
                         |> Option.defaultValue []
                     | _ -> [ columnForExpression (projectionLabel projection) expression ])))
 
+    let rec enclosingScopes (outer: EvalContext option) =
+        match outer with
+        | None -> []
+        | Some context ->
+            let scope =
+                { emptyScope with
+                    Sources = context.Qualifiers |> Map.toList |> List.map (fun (name, (columns, _)) -> name, List.map describeColumn columns)
+                    LogicalColumns =
+                        context.ColumnIndex |> Map.toList |> List.collect (fun (name, positions) ->
+                            positions |> List.map (fun _ -> FromItem.SourceColumn(name, Col name)))
+                    ProjectionAliases = context.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map fst) }
+            scope :: enclosingScopes context.Outer
+
     (match source with
      | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = [] })
-     | QueryBody body -> describeBody Set.empty schema Map.empty [] body)
+     | QueryBody body -> describeBody Set.empty schema Map.empty (enclosingScopes outer) body)
     |> Result.map (List.map _.Column)
+
+and private describeQueryColumnsChecked store registry schema source =
+    describeQueryColumnsInScope store registry schema source None
 
 and private describeQueryColumns store registry schema source =
     describeQueryColumnsChecked store registry schema source |> Result.toOption
@@ -16849,19 +16910,24 @@ and private runSelect
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, Option.map rowCount select.Limit, Option.map rowCount select.Offset
 
-    let hasOwnedAggregate expression =
-        containsAggregate registry expression
-        || not (bindNestedAggregates store registry dbName columnIndex qualifiers expression).Aggregates.IsEmpty
+    let hasOwnedAggregate = hasOwnedAggregate store registry dbName columnIndex qualifiers
+    let aggregateOrdering =
+        orderBy |> List.map fst |> List.indexed
+        |> traverse (orderAggregateValidator store registry dbName columnIndex qualifiers select)
+        |> Result.map ignore
+    let orderingValidation =
+        aggregateOrdering
+        |> Result.mapError (fun error ->
+            match describeQueryColumnsInScope store registry dbName (QueryBody(PlainSelect select)) outer with
+            | Error(InvalidDescription(Err(code, message))) -> code, message
+            | _ -> error)
 
-    let hasNestedOrderAggregate =
-        orderBy
-        |> List.collect (fst >> collectAggregateCalls registry)
-        |> List.exists (Expression.children >> List.exists (containsAggregate registry))
+    match orderingValidation with
+    | Error(code, message) -> Err(code, message), [], []
+    | Ok() ->
 
-    if hasNestedOrderAggregate then
-        Err(1111, "Invalid use of group function"), [], []
     // A source-free SELECT has no columns to expand into a result header.
-    elif select.From.IsNone && projections |> List.exists (_.Expression >> function Star _ -> true | _ -> false) then
+    if select.From.IsNone && projections |> List.exists (_.Expression >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), [], []
     elif
         [ select.Having; select.Where ]
@@ -16896,7 +16962,6 @@ and private runSelect
             || (select.Having |> Option.exists hasOwnedAggregate)
             || projections |> List.exists (_.Expression >> hasOwnedAggregate)
             || orderBy |> List.exists (fst >> hasOwnedAggregate)
-            || projections |> List.exists (_.Expression >> collectAggregateCalls registry >> List.isEmpty >> not)
 
         if grouping then
             runGroupedWindowSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrder select outer

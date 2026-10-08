@@ -78,6 +78,29 @@ with zero differences at `20261008T012642104-6253/contracts`, using disposable
 The [allocation probe](../../benchmarks/results/d2fed802-aggregate-scope-binding.md)
 records the cost of the scope checks.
 
-ORDER BY-only aggregate classification and error precedence remain open; this
-fix does not implement error 3029. Broader derived/CTE aggregate-scope combinations
-are not established by these expression-subquery fixtures.
+## Ordering classification coverage
+
+ORDER BY-only aggregates return 3029 / HY000 during execution and preparation,
+with the one-based offending term in the message. Existing GROUP BY, projection
+aggregates, and aggregate HAVING preserve grouped execution. The rule also covers
+outer-owned aggregates written in ordering subqueries, DISTINCT, windows, empty
+inputs, LIMIT 0, and disabled ONLY_FULL_GROUP_BY.
+
+Ordering terms bind and validate from left to right. `missing,SUM(v)` returns
+1054, while `SUM(v),missing` returns 3029. A missing aggregate argument returns
+1054; nested aggregate calls retain 1111. Invalid projection and HAVING references
+are checked before ordering. Execution reuses the schema-only binding validator
+with its enclosing scopes when aggregate ordering is rejected; this avoids
+reimplementing reference diagnostics or evaluating expressions for validation.
+
+The maintained native oracle passes, including SQL preparation. `just check`
+passes 3,041 tests with no build warnings/errors and a 4 GiB GC heap cap.
+Native wire contracts pass 54 cases / 5,421 steps with zero differences at
+`20261008T014513638-16044/contracts`, with the same disposable MySQL 8.4.11
+64 MiB buffer and redo limits. No known-gap signatures were enrolled.
+The [ordering validation probe](../../benchmarks/results/25f4770e-order-classification.md)
+records allocation and timing.
+
+The recorded wrong-row and ordering-rejection gaps are resolved. Broader
+derived/CTE aggregate-scope combinations are not established by these fixtures;
+this is a coverage limit rather than evidence of an additional divergence.

@@ -53,6 +53,12 @@ cases = [
     ('SELECT (SELECT ANY_VALUE(v)) AS value,(SELECT SUM(v)) AS total FROM aggregate_order', 'value\ttotal\n2\t3\n'),
     ('SELECT (SELECT SUM(v)) AS total,ROW_NUMBER() OVER () AS rn FROM aggregate_order', 'total\trn\n3\t1\n'),
     ('SELECT v,(SELECT SUM(v)) AS total,ROW_NUMBER() OVER (ORDER BY v) AS rn FROM aggregate_order GROUP BY v ORDER BY v', 'v\ttotal\trn\n1\t1\t1\n2\t2\t2\n'),
+    ('SELECT v FROM aggregate_order ORDER BY missing,SUM(v)', (1054, '42S22')),
+    ('SELECT v FROM aggregate_order ORDER BY SUM(v),missing', (3029, 'HY000')),
+    ('SELECT v FROM aggregate_order ORDER BY ABS(missing),SUM(v)', (1054, '42S22')),
+    ('SELECT (SELECT missing) FROM aggregate_order ORDER BY SUM(v)', (1054, '42S22')),
+    ('SELECT v FROM aggregate_order HAVING missing ORDER BY SUM(v)', (1054, '42S22')),
+    ('SELECT v AS a FROM aggregate_order ORDER BY a,SUM(v)', (3029, 'HY000')),
 ]
 
 prepared_cases = [

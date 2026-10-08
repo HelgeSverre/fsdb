@@ -14,7 +14,49 @@ let private newStore () = create ()
 let tests =
     testList
         "correlated subqueries"
-        [ testCase "aggregate arguments bind a scalar subquery total to the outer source"
+        [ testCase "ordering aggregates cannot introduce an implicit group"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE aggregate_order(v INT)" |> ignore
+              runDefault store "INSERT INTO aggregate_order VALUES(2),(1)" |> ignore
+              let session = Fsdb.Session.create 1 store
+              for sql, ordinal in
+                  [ "SELECT v FROM aggregate_order ORDER BY SUM(v)", 1
+                    "SELECT v AS a FROM aggregate_order ORDER BY SUM(a)", 1
+                    "SELECT 1 ORDER BY SUM(1)", 1
+                    "SELECT v FROM aggregate_order ORDER BY v,SUM(v)", 2
+                    "SELECT v FROM aggregate_order WHERE FALSE ORDER BY SUM(v)", 1
+                    "SELECT v FROM aggregate_order ORDER BY SUM(v) LIMIT 0", 1
+                    "SELECT v FROM aggregate_order HAVING TRUE ORDER BY SUM(v)", 1
+                    "SELECT ROW_NUMBER() OVER (ORDER BY v) FROM aggregate_order ORDER BY SUM(v)", 1
+                    "SELECT v FROM aggregate_order ORDER BY (SELECT SUM(v))", 1
+                    "SELECT v FROM aggregate_order ORDER BY (SELECT SUM((SELECT v)))", 1
+                    "SELECT DISTINCT v FROM aggregate_order ORDER BY ABS(SUM(v))", 1 ] do
+                  let message = sprintf "Expression #%d of ORDER BY contains aggregate function and applies to the result of a non-aggregated query" ordinal
+                  Expect.equal (runDefault store sql) (Err(3029, message)) sql
+                  match Fsdb.QueryHandler.prepareStatementForSession session sql with
+                  | Error(code, actual) -> Expect.equal (code, actual) (3029, message) sql
+                  | result -> failtestf "Expected preparation error 3029, got %A" result
+
+              for sql, expected in
+                  [ "SELECT v FROM aggregate_order ORDER BY missing,SUM(v)", 1054
+                    "SELECT v FROM aggregate_order ORDER BY SUM(v),missing", 3029
+                    "SELECT v FROM aggregate_order ORDER BY ABS(missing),SUM(v)", 1054
+                    "SELECT (SELECT missing) FROM aggregate_order ORDER BY SUM(v)", 1054
+                    "SELECT v FROM aggregate_order HAVING missing ORDER BY SUM(v)", 1054
+                    "SELECT v AS a FROM aggregate_order ORDER BY a,SUM(v)", 3029 ] do
+                  match runDefault store sql with
+                  | Err(code, _) -> Expect.equal code expected sql
+                  | result -> failtestf "Expected error %d, got %A" expected result
+                  match Fsdb.QueryHandler.prepareStatementForSession session sql with
+                  | Error(code, _) -> Expect.equal code expected sql
+                  | result -> failtestf "Expected preparation error %d, got %A" expected result
+              Fsdb.Storage.setOnlyFullGroupBy store false
+              match runDefault store "SELECT v FROM aggregate_order ORDER BY SUM(v)" with
+              | Err(code, _) -> Expect.equal code 3029 "Query classification does not depend on ONLY_FULL_GROUP_BY"
+              | result -> failtestf "Expected error 3029, got %A" result
+
+          testCase "aggregate arguments bind a scalar subquery total to the outer source"
           <| fun _ ->
               let store = newStore ()
               runDefault store "CREATE TABLE aggregate_order(v INT)" |> ignore
