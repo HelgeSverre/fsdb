@@ -17651,10 +17651,11 @@ let private queryJoinPlanning store registry schema originalWhere (select: Selec
         | _ -> not (Set.contains (Some true) (possibleConditionTruths context expression))
     let conditionEliminates = Option.exists (boundPlanningExpression >> impossible)
     let zeroLimit = not select.CalculateFoundRows && (select.Limit |> Option.exists (fun limit -> rowCount limit = 0))
-    if conditionEliminates select.Where && not (originalWhere |> Option.exists impossible) then
+    let whereEliminates = conditionEliminates select.Where
+    if whereEliminates && not (originalWhere |> Option.exists impossible) then
         // A WHERE condition eliminated only after binding skips materialized source planning too.
         EliminateNestedPlanning
-    elif zeroLimit || conditionEliminates select.Where || conditionEliminates select.Having then EliminateJoinPlanning
+    elif zeroLimit || whereEliminates || conditionEliminates select.Having then EliminateJoinPlanning
     else RetainJoinPlanning
 
 let private sourceCanMerge registry (source: OptimizerHintScopes.SourceReference) =
@@ -17671,6 +17672,23 @@ let private sourceCanMerge registry (source: OptimizerHintScopes.SourceReference
         && not (expressions |> List.exists preventsMerge)
     | _ -> false
 
+let private blockSourceMaterializes registry (pending: OptimizerHintResolution.ExecutionDiagnostics) (block: OptimizerHintScopes.Block) =
+    block.Source |> Option.exists (fun source ->
+        let strategy = block.ParentBlock |> Option.bind (fun parent ->
+            Map.tryFind (parent, Some(source.Alias.ToLowerInvariant())) pending.SourceStrategies
+            |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.SourceStrategies))
+        strategy = Some OptimizerHintResolution.MaterializeSource || not (sourceCanMerge registry source))
+
+let private blockJoinPlanning store registry schema (pending: OptimizerHintResolution.ExecutionDiagnostics) (block: OptimizerHintScopes.Block) =
+    match block.Query with
+    | None -> RetainJoinPlanning
+    | Some query ->
+        let originalWhere = Map.tryFind block.Number pending.ParameterizedWhere |> Option.orElse query.Where
+        try Diagnostics.suppress (fun () -> queryJoinPlanning store registry schema originalWhere query)
+        with
+        | Value.UnsignedOutOfRange | Value.SignedOutOfRange
+        | :? System.OverflowException | Functions.SqlError _ -> RetainJoinPlanning
+
 let private emitJoinHintDiagnostics store registry schema statement =
     let pending = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
     if not pending.Warnings.IsEmpty then
@@ -17681,23 +17699,11 @@ let private emitJoinHintDiagnostics store registry schema statement =
         let merged = HashSet<int>()
         let skipped = HashSet<int>()
         for block in scopes.Numbered do
-            let materialized =
-                block.Source |> Option.exists (fun source ->
-                    let strategy = block.ParentBlock |> Option.bind (fun parent ->
-                        Map.tryFind (parent, Some(source.Alias.ToLowerInvariant())) pending.SourceStrategies
-                        |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.SourceStrategies))
-                    strategy = Some OptimizerHintResolution.MaterializeSource || not (sourceCanMerge registry source))
+            let materialized = blockSourceMaterializes registry pending block
             if block.Source.IsSome && not materialized then merged.Add block.Number |> ignore
             let parentSkipped = block.ParentBlock |> Option.exists skipped.Contains
             let parentEliminated = not materialized && (block.ParentBlock |> Option.exists eliminated.Contains)
-            let planning =
-                block.Query |> Option.map (fun query ->
-                    let originalWhere = Map.tryFind block.Number pending.ParameterizedWhere |> Option.orElse query.Where
-                    try Diagnostics.suppress (fun () -> queryJoinPlanning store registry schema originalWhere query)
-                    with
-                    | Value.UnsignedOutOfRange | Value.SignedOutOfRange
-                    | :? System.OverflowException | Functions.SqlError _ -> RetainJoinPlanning)
-                |> Option.defaultValue RetainJoinPlanning
+            let planning = blockJoinPlanning store registry schema pending block
             if parentSkipped || planning = EliminateNestedPlanning then skipped.Add block.Number |> ignore
             if parentSkipped || parentEliminated || planning <> RetainJoinPlanning then eliminated.Add block.Number |> ignore
         let warnings = Map.ofList pending.Warnings
