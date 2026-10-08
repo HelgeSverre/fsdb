@@ -1595,6 +1595,43 @@ module ContractCatalog =
                    let sql = "SELECT HEX(REVERSE(" + literal + ")) AS h,CHAR_LENGTH(" + literal + ") AS n"
                    let step = Contract.query (sprintf "euc-boundaries-%d" index) sql
                    yield if rejected then step |> Contract.fails 1300 "HY000" else step
+               for index, (sql, rejected) in
+                   [ "SELECT HEX(REVERSE(_gb18030 X'41814042')) AS h,CHAR_LENGTH(_gb18030 X'41814042') AS n,HEX(LEFT(_gb18030 X'41814042',2)) AS l,HEX(SUBSTRING(_gb18030 X'41814042',2,1)) AS s", false
+                     "SELECT HEX(REVERSE(_gb18030 X'41817F42')) AS h,CHAR_LENGTH(_gb18030 X'41817F42') AS n,HEX(LEFT(_gb18030 X'41817F42',2)) AS l,HEX(SUBSTRING(_gb18030 X'41817F42',2,1)) AS s", true
+                     "SELECT HEX(REVERSE(_gb18030 X'41818042')) AS h,CHAR_LENGTH(_gb18030 X'41818042') AS n,HEX(LEFT(_gb18030 X'41818042',2)) AS l,HEX(SUBSTRING(_gb18030 X'41818042',2,1)) AS s", false
+                     "SELECT HEX(REVERSE(_gb18030 X'4181FE42')) AS h,CHAR_LENGTH(_gb18030 X'4181FE42') AS n,HEX(LEFT(_gb18030 X'4181FE42',2)) AS l,HEX(SUBSTRING(_gb18030 X'4181FE42',2,1)) AS s", false
+                     "SELECT HEX(REVERSE(_gb18030 X'4181FF42')) AS h,CHAR_LENGTH(_gb18030 X'4181FF42') AS n,HEX(LEFT(_gb18030 X'4181FF42',2)) AS l,HEX(SUBSTRING(_gb18030 X'4181FF42',2,1)) AS s", true
+                     "SELECT HEX(REVERSE(_gb18030 X'418130813042')) AS h,CHAR_LENGTH(_gb18030 X'418130813042') AS n,HEX(LEFT(_gb18030 X'418130813042',2)) AS l,HEX(SUBSTRING(_gb18030 X'418130813042',2,1)) AS s", false
+                     "SELECT HEX(REVERSE(_gb18030 X'418130813942')) AS h,CHAR_LENGTH(_gb18030 X'418130813942') AS n,HEX(LEFT(_gb18030 X'418130813942',2)) AS l,HEX(SUBSTRING(_gb18030 X'418130813942',2,1)) AS s", false
+                     "SELECT HEX(REVERSE(_gb18030 X'418130813A42')) AS h,CHAR_LENGTH(_gb18030 X'418130813A42') AS n,HEX(LEFT(_gb18030 X'418130813A42',2)) AS l,HEX(SUBSTRING(_gb18030 X'418130813A42',2,1)) AS s", true
+                     "SELECT HEX(REVERSE(_gb18030 X'418130803042')) AS h,CHAR_LENGTH(_gb18030 X'418130803042') AS n,HEX(LEFT(_gb18030 X'418130803042',2)) AS l,HEX(SUBSTRING(_gb18030 X'418130803042',2,1)) AS s", true
+                     "SELECT HEX(REVERSE(_gb18030 X'418130FE3942')) AS h,CHAR_LENGTH(_gb18030 X'418130FE3942') AS n,HEX(LEFT(_gb18030 X'418130FE3942',2)) AS l,HEX(SUBSTRING(_gb18030 X'418130FE3942',2,1)) AS s", false
+                     "SELECT HEX(REVERSE(_gb18030 X'418130FF3042')) AS h,CHAR_LENGTH(_gb18030 X'418130FF3042') AS n,HEX(LEFT(_gb18030 X'418130FF3042',2)) AS l,HEX(SUBSTRING(_gb18030 X'418130FF3042',2,1)) AS s", true
+                     "SELECT HEX(REVERSE(_gb18030 X'419030813042')) AS h,CHAR_LENGTH(_gb18030 X'419030813042') AS n,HEX(LEFT(_gb18030 X'419030813042',2)) AS l,HEX(SUBSTRING(_gb18030 X'419030813042',2,1)) AS s", false
+                     "SELECT HEX(REVERSE(_gb18030 X'41FE39FE3942')) AS h,CHAR_LENGTH(_gb18030 X'41FE39FE3942') AS n,HEX(LEFT(_gb18030 X'41FE39FE3942',2)) AS l,HEX(SUBSTRING(_gb18030 X'41FE39FE3942',2,1)) AS s", false
+                     "SELECT HEX(REVERSE(_gb18030 X'41FF30813042')) AS h,CHAR_LENGTH(_gb18030 X'41FF30813042') AS n,HEX(LEFT(_gb18030 X'41FF30813042',2)) AS l,HEX(SUBSTRING(_gb18030 X'41FF30813042',2,1)) AS s", true
+                     "SELECT HEX(REVERSE(_gb18030 X'418042')) AS h,CHAR_LENGTH(_gb18030 X'418042') AS n,HEX(LEFT(_gb18030 X'418042',2)) AS l,HEX(SUBSTRING(_gb18030 X'418042',2,1)) AS s", true
+                     "SELECT HEX(REVERSE(_gb18030 X'4181308142')) AS h,CHAR_LENGTH(_gb18030 X'4181308142') AS n,HEX(LEFT(_gb18030 X'4181308142',2)) AS l,HEX(SUBSTRING(_gb18030 X'4181308142',2,1)) AS s", true
+                     "SELECT HEX(LEFT(_gb18030 X'419030813042',2)) AS h", false
+                     "SELECT HEX(RIGHT(_gb18030 X'419030813042',2)) AS h", false
+                     "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',2,1)) AS h", false
+                     "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',-2,1)) AS h", false
+                     "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',2)) AS h", false
+                     "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',0,2)) AS h", false
+                     "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',-4,1)) AS h", false
+                     "SELECT HEX(LEFT(_gb18030 X'419030813042',0)) AS h", false
+                     "SELECT HEX(RIGHT(_gb18030 X'419030813042',-1)) AS h", false
+                     "SELECT HEX(LEFT(_utf8mb4 X'41F090808042',2)) AS h", false
+                     "SELECT HEX(RIGHT(_utf8mb4 X'41F090808042',2)) AS h", false
+                     "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',2,1)) AS h", false
+                     "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',-2,1)) AS h", false
+                     "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',2)) AS h", false
+                     "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',0,2)) AS h", false
+                     "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',-4,1)) AS h", false
+                     "SELECT HEX(LEFT(_utf8mb4 X'41F090808042',0)) AS h", false
+                     "SELECT HEX(RIGHT(_utf8mb4 X'41F090808042',-1)) AS h", false ] |> List.indexed do
+                   let step = Contract.query (sprintf "gb18030-slicing-%d" index) sql
+                   yield if rejected then step |> Contract.fails 1300 "HY000" else step
                yield Contract.execute "encoded-storage-mode" "SET sql_mode=DEFAULT" |]
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential"; "error-contract" |] |] }

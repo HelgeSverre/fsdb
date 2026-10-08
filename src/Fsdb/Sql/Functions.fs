@@ -3256,6 +3256,43 @@ let private resolveStart (len: int) (pos: int) : int option =
         if len + pos < 0 then None else Some(len + pos)
     else None
 
+let private utf16OffsetAfterRunes (text: string) (startOffset: int) (runes: int64) =
+    let mutable offset = startOffset
+    let mutable remaining = runes
+
+    while offset < text.Length && remaining > 0L do
+        let rune = Rune.GetRuneAt(text, offset)
+        offset <- offset + rune.Utf16SequenceLength
+        remaining <- remaining - 1L
+
+    offset, remaining = 0L
+
+let private utf16OffsetBeforeRunes (text: string) (runes: int64) =
+    let mutable offset = text.Length
+    let mutable remaining = runes
+    while offset > 0 && remaining > 0L do
+        offset <- offset - 1
+        if offset > 0 && Char.IsLowSurrogate text.[offset] && Char.IsHighSurrogate text.[offset - 1] then
+            offset <- offset - 1
+        remaining <- remaining - 1L
+    offset, remaining = 0L
+
+let private sliceText (text: string) position length =
+    let start =
+        if position > 0 then utf16OffsetAfterRunes text 0 (int64 position - 1L) |> fst |> Some
+        elif position < 0 then
+            let offset, exists = utf16OffsetBeforeRunes text (-int64 position)
+            if exists then Some offset else None
+        else None
+    match start with
+    | None -> VString ""
+    | Some start ->
+        let finish =
+            match length with
+            | None -> text.Length
+            | Some count -> utf16OffsetAfterRunes text start (int64 (max 0 count)) |> fst
+        VString(text.Substring(start, finish - start))
+
 let private sliceEncoded charset bytes selectRange =
     let offsets = Charset.characterByteOffsets charset bytes
     let count = offsets.Length - 1
@@ -3284,11 +3321,7 @@ let private substringFn: Scalar =
             | None -> VBytes [||]
             | Some start -> VBytes(bytes.[start..])
         | None ->
-            let text = req value
-
-            match resolveStart text.Length (int (toDouble posV)) with
-            | None -> VString ""
-            | Some start -> VString(text.Substring start)
+            sliceText (req value) (int (toDouble posV)) None
     | [ value; posV; lenV ] when not (anyNull [ value; posV; lenV ]) ->
         let takeLen = int (toDouble lenV)
 
@@ -3299,12 +3332,7 @@ let private substringFn: Scalar =
             | Some start when takeLen <= 0 || start = bytes.Length -> VBytes [||]
             | Some start -> VBytes(bytes.[start .. start + min takeLen (bytes.Length - start) - 1])
         | None ->
-            let text = req value
-
-            match resolveStart text.Length (int (toDouble posV)) with
-            | None -> VString ""
-            | Some _ when takeLen <= 0 -> VString ""
-            | Some start -> VString(text.Substring(start, min takeLen (text.Length - start)))
+            sliceText (req value) (int (toDouble posV)) (Some takeLen)
     | _ -> VNull
 
 let private integerArgument value =
@@ -3314,17 +3342,6 @@ let private integerArgument value =
     elif number >= float System.Int64.MaxValue then System.Int64.MaxValue
     elif number <= float System.Int64.MinValue then System.Int64.MinValue
     else int64 number
-
-let private utf16OffsetAfterRunes (text: string) (startOffset: int) (runes: int64) =
-    let mutable offset = startOffset
-    let mutable remaining = runes
-
-    while offset < text.Length && remaining > 0L do
-        let rune = Rune.GetRuneAt(text, offset)
-        offset <- offset + rune.Utf16SequenceLength
-        remaining <- remaining - 1L
-
-    offset, remaining = 0L
 
 let private emptyNeedleOffset (collation: Collation.Collation) (str: string) (utf16Offset: int) =
     let charset =
@@ -3492,8 +3509,7 @@ let private leftFn: Scalar =
         match tryRawBytes value with
         | Some bytes -> VBytes(Array.truncate (max 0 (int (toDouble n))) bytes)
         | None ->
-            let text = req value
-            VString(text.Substring(0, max 0 (min text.Length (int (toDouble n)))))
+            sliceText (req value) 1 (Some(int (toDouble n)))
     | _ -> VNull
 
 let private rightFn: Scalar =
@@ -3509,8 +3525,8 @@ let private rightFn: Scalar =
             VBytes(bytes.[bytes.Length - k ..])
         | None ->
             let text = req value
-            let k = max 0 (min text.Length (int (toDouble n)))
-            VString(text.Substring(text.Length - k))
+            let start = utf16OffsetBeforeRunes text (int64 (max 0 (int (toDouble n)))) |> fst
+            VString(text.Substring start)
     | _ -> VNull
 
 let private repeatFn: Scalar =

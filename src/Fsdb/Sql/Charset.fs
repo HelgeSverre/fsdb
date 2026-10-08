@@ -443,13 +443,17 @@ let private unicodeScalarWidth charset (bytes: byte[]) offset =
     | _ -> None
 
 let private hasLegacyByteRules = function
-    | "sjis" | "cp932" | "big5" | "gbk" | "gb2312" | "euckr" | "ujis" -> true
+    | "sjis" | "cp932" | "big5" | "gbk" | "gb2312" | "euckr" | "ujis" | "gb18030" -> true
     | _ -> false
 
 let private legacyCharacterWidth charset (bytes: byte[]) offset =
     let lead = bytes.[offset]
     let shiftJis = charset = "sjis" || charset = "cp932"
     if lead <= 0x7Fuy || (shiftJis && lead >= 0xA1uy && lead <= 0xDFuy) then Some 1
+    elif charset = "gb18030" && lead >= 0x81uy && lead <= 0xFEuy && offset + 3 < bytes.Length
+         && bytes.[offset + 1] >= 0x30uy && bytes.[offset + 1] <= 0x39uy
+         && bytes.[offset + 2] >= 0x81uy && bytes.[offset + 2] <= 0xFEuy
+         && bytes.[offset + 3] >= 0x30uy && bytes.[offset + 3] <= 0x39uy then Some 4
     elif charset = "ujis" && lead = 0x8Fuy && offset + 2 < bytes.Length
          && bytes.[offset + 1] >= 0xA1uy && bytes.[offset + 1] <= 0xFEuy
          && bytes.[offset + 2] >= 0xA1uy && bytes.[offset + 2] <= 0xFEuy then Some 3
@@ -470,7 +474,7 @@ let private legacyCharacterWidth charset (bytes: byte[]) offset =
             | "ujis" ->
                 (lead >= 0xA1uy && lead <= 0xFEuy && trail >= 0xA1uy && trail <= 0xFEuy)
                 || (lead = 0x8Euy && trail >= 0xA1uy && trail <= 0xDFuy)
-            | "gbk" ->
+            | "gbk" | "gb18030" ->
                 lead >= 0x81uy && lead <= 0xFEuy
                 && trail >= 0x40uy && trail <= 0xFEuy && trail <> 0x7Fuy
             | _ -> false

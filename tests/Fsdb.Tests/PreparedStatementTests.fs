@@ -631,6 +631,40 @@ let tests =
                   Expect.equal (handle session ("SELECT HEX(CONCAT(" + literal + "," + literal + ")) AS h") |> snd)
                       (ResultSet([ "h" ], [ [ Some expected ] ])) literal
 
+          testCase "text slicing counts supplementary characters once"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expected in
+                  [ "SELECT HEX(LEFT(_gb18030 X'419030813042',2)) AS h", "4190308130"
+                    "SELECT HEX(RIGHT(_gb18030 X'419030813042',2)) AS h", "9030813042"
+                    "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',2,1)) AS h", "90308130"
+                    "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',-2,1)) AS h", "90308130"
+                    "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',2)) AS h", "9030813042"
+                    "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',0,2)) AS h", ""
+                    "SELECT HEX(SUBSTRING(_gb18030 X'419030813042',-4,1)) AS h", ""
+                    "SELECT HEX(LEFT(_gb18030 X'419030813042',0)) AS h", ""
+                    "SELECT HEX(RIGHT(_gb18030 X'419030813042',-1)) AS h", ""
+                    "SELECT HEX(LEFT(_utf8mb4 X'41F090808042',2)) AS h", "41F0908080"
+                    "SELECT HEX(RIGHT(_utf8mb4 X'41F090808042',2)) AS h", "F090808042"
+                    "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',2,1)) AS h", "F0908080"
+                    "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',-2,1)) AS h", "F0908080"
+                    "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',2)) AS h", "F090808042"
+                    "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',0,2)) AS h", ""
+                    "SELECT HEX(SUBSTRING(_utf8mb4 X'41F090808042',-4,1)) AS h", ""
+                    "SELECT HEX(LEFT(_utf8mb4 X'41F090808042',0)) AS h", ""
+                    "SELECT HEX(RIGHT(_utf8mb4 X'41F090808042',-1)) AS h", "" ] do
+                  Expect.equal (handle session sql |> snd)
+                      (ResultSet([ "h" ], [ [ Some expected ] ])) sql
+
+          testCase "GB18030 validates byte structure independently of Unicode mappings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for bytes, fragment in [ "41817F42", "817F42"; "418130813A42", "813081" ] do
+                  Expect.equal (handle session ("SELECT _gb18030 X'" + bytes + "'") |> snd)
+                      (Err(1300, "Invalid gb18030 character string: '" + fragment + "'")) bytes
+              Expect.equal (handle session "SELECT HEX(REVERSE(_gb18030 X'41FE39FE3942')) AS h,CHAR_LENGTH(_gb18030 X'41FE39FE3942') AS n" |> snd)
+                  (ResultSet([ "h"; "n" ], [ [ Some "42FE39FE3941"; Some "3" ] ])) "unmapped four-byte character"
+
           testCase "EUC and GB2312 literal and character boundaries follow native rules"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

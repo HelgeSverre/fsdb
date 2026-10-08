@@ -280,7 +280,7 @@ All 274 native probes match rows and exact errors. The full wire suite passed
 without build warnings or errors. Broader conversion, output mapping, and
 mixed-sequence behavior remain outside this audited boundary matrix.
 
-### GB18030 validation and supplementary slicing remain open
+### GB18030 validation and supplementary slicing
 
 Six additional mixed UJIS sequences combine `8E A0`, three-byte characters,
 and ordinary pairs in both orders. All match native reversal, character
@@ -294,3 +294,19 @@ cannot map it; reversal and slicing must retain it as one character.
 count already match, but LEFT and SUBSTRING cut the UTF-16 surrogate pair,
 producing `3F` instead of its four original bytes. This latter issue belongs
 to decoded text slicing as well as encoded GB18030 handling.
+
+GB18030 now uses native two/four-byte structural validation and character
+boundaries, including accepted unmapped sequences. Decoded LEFT, RIGHT, and
+SUBSTRING count Unicode scalars rather than UTF-16 code units. Positive
+positions scan forward to the requested boundary; negative positions and
+RIGHT scan backward, preserving surrogate pairs without scanning unused
+input first. Binary slicing retains its byte semantics.
+
+The expanded GB18030 oracle includes supplementary UTF8MB4 controls,
+negative/zero positions, and empty slices. All native fixtures and the full
+wire suite pass: 62 cases and 8,285 steps without differences. The root gate
+passed 3,082 tests without build warnings or errors. The focused
+[text-slicing benchmark](../../benchmarks/results/9b5109b6-text-slicing-worktree.md)
+records the measured full-scan regression in the first correct implementation
+and its bounded-scan fix. Broader charset conversion and output mapping
+remain open; this closes the audited GB18030 and scalar-slicing cases.
