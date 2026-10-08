@@ -86,9 +86,19 @@ HAVING, LIMIT/OFFSET, ROLLUP, and SQL_CALC_FOUND_ROWS. The
 [grouped evaluation evidence](2026-10-08-grouped-evaluation.md) records the
 phase-specific contracts and differential validation.
 
-A window specification referencing a projection alias still has native error
-1054 in `window order by`, while fsdb uses `order clause` wording. This native-only
-boundary is not enrolled as an accepted differential failure.
+Window keys now bind in their own source scope and report `window order by`
+or `window partition by`. SELECT aliases remain unavailable; unused named
+windows, inherited keys, empty results, and LIMIT 0 are validated. Projection
+and WHERE reference errors precede window-key errors. Source-free qualified
+references retain 1109 / 42S02; references against a source use 1054 / 42S22.
+
+`torture/scripts/window-clause-oracle.py` verifies 15 cases directly and through
+SQL PREPARE against disposable native MySQL 8.4.11 (64 MiB buffer pool and redo).
+The `window-binding-diagnostics` contract checks the same cases through direct
+SQL, SQL PREPARE, and binary preparation. All 45 recorded error messages match
+exactly. The full gate passes 3,051 tests under a 4 GiB heap cap; the differential
+run `20261008T033546408-11565/contracts` passes 60 cases and 6,892 steps without
+differences.
 
 ## Duplicate selection order and preparation
 

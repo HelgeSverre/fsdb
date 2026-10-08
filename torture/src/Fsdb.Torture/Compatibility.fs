@@ -759,6 +759,34 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS replay_input"; "SET @n=NULL,@m=NULL" |]
           Coverage = [| "statement:select", [| "aggregation"; "evaluation-order"; "text-differential"; "prepared-differential" |] |] }
 
+    let private windowBindings =
+        let cases =
+            [
+                "SELECT v AS a FROM window_clause ORDER BY ROW_NUMBER() OVER (ORDER BY a)", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM window_clause", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER (PARTITION BY missing) FROM window_clause", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER w FROM window_clause WINDOW w AS (ORDER BY missing)", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM window_clause WHERE FALSE", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM window_clause LIMIT 0", 1054, "42S22"
+                "SELECT SUM(v) OVER (ORDER BY missing RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM window_clause", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER (ORDER BY absent.v) FROM window_clause", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER (PARTITION BY absent.v) FROM window_clause", 1054, "42S22"
+                "SELECT 1 FROM window_clause WINDOW w AS (ORDER BY missing)", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER (ORDER BY absent.v)", 1109, "42S02"
+                "SELECT ROW_NUMBER() OVER (PARTITION BY absent.v)", 1109, "42S02"
+                "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM window_clause WHERE absent=1", 1054, "42S22"
+                "SELECT v AS a,ROW_NUMBER() OVER (PARTITION BY a) FROM window_clause", 1054, "42S22"
+                "SELECT ROW_NUMBER() OVER child FROM window_clause WINDOW parent AS (ORDER BY missing),child AS (parent)", 1054, "42S22" ]
+        { Name = "window-binding-diagnostics"
+          Setup = [| "CREATE TABLE window_clause(v INT)"; "INSERT INTO window_clause VALUES(2),(1)" |]
+          Steps =
+            [| for index, (sql, code, state) in List.indexed cases do
+                   yield Contract.query (sprintf "direct-%d" index) sql |> Contract.fails code state
+                   yield Contract.execute (sprintf "sql-prepare-%d" index) ("PREPARE window_binding FROM '" + sql.Replace("'", "''") + "'") |> Contract.fails code state
+                   yield Contract.prepare (sprintf "binary-prepare-%d" index) (sprintf "window-%d" index) Query sql [||] |> Contract.fails code state |]
+          Cleanup = [| "DROP TABLE IF EXISTS window_clause" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3638,6 +3666,7 @@ module ContractCatalog =
            groupConcatOrdering
            rollupEvaluation
            groupedProjectionReplay
+           windowBindings
            exactErrors
            noDirInCreate
            semanticErrors

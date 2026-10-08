@@ -1727,16 +1727,14 @@ let private columnIndexOf (columns: ColumnDef list) : Map<string, int list> =
     |> List.map (fun (name, xs) -> name, xs |> List.map snd)
     |> Map.ofList
 
-/// Which clause a bare `Col` is being resolved from — the only thing that
-/// varies between an ambiguous-column 1052 in a field list, a `WHERE`, a
-/// JOIN `ON`, an `ORDER BY`, or a `GROUP BY`/`HAVING` is the four words
-/// MySQL puts in the error message, so `resolveCol` takes one of these
-/// instead of five near-identical copies of itself.
+/// Name-resolution diagnostics identify the clause that owns the reference.
 type private Clause =
     | FieldList
     | WhereClause
     | OnClause
     | OrderClause
+    | WindowOrderClause
+    | WindowPartitionClause
     | GroupStatement
     | HavingClause
     | TableFunctionArgument
@@ -1747,6 +1745,8 @@ let private clauseLabel =
     | WhereClause -> "where clause"
     | OnClause -> "on clause"
     | OrderClause -> "order clause"
+    | WindowOrderClause -> "window order by"
+    | WindowPartitionClause -> "window partition by"
     | GroupStatement -> "group statement"
     | HavingClause -> "having clause"
     | TableFunctionArgument -> "a table function argument"
@@ -1782,7 +1782,17 @@ let private aliasNodeDiagnostic resolveAlias expression =
     Expression.tryLiteralNodeDiagnostic resolved
 
 let rec private validateExpressionBindings resolve validateSubquery nodeDiagnostic diagnosticError expression =
-    Expression.children expression
+    let children =
+        match expression with
+        | WindowOver(fn, over) ->
+            // Window keys bind separately in their own clauses, without SELECT aliases.
+            let frameExpressions =
+                match over with
+                | OverSpec spec -> Expression.overExpressions (OverSpec { spec with PartitionBy = []; OrderBy = [] })
+                | _ -> []
+            Expression.windowExpressions fn @ frameExpressions
+        | _ -> Expression.children expression
+    children
     |> traverse (validateExpressionBindings resolve validateSubquery nodeDiagnostic diagnosticError)
     |> Result.bind (fun _ ->
         match expression with
@@ -1851,6 +1861,16 @@ let private collectWindowFuncs (expr: Expr) : Expr list =
         []
         expr
     |> List.rev
+
+let private windowKeyBindings (select: SelectStmt) =
+    let inlineSpecs =
+        (select.Projections |> List.map _.Expression) @ (select.OrderBy |> List.map fst)
+        |> List.collect collectWindowFuncs
+        |> List.choose (function WindowOver(_, OverSpec spec) -> Some spec | _ -> None)
+    inlineSpecs @ (select.Windows |> List.map snd)
+    |> List.collect (fun spec ->
+        (spec.PartitionBy |> List.map (fun expression -> WindowPartitionClause, expression))
+        @ (spec.OrderBy |> List.map (fun (expression, _) -> WindowOrderClause, expression)))
 
 /// Every topmost aggregate call inside `expr` (an aggregate nested in
 /// another aggregate's arguments is never reached — MySQL rejects that
@@ -7294,8 +7314,15 @@ and private describeQueryColumnsInScope
                             resolveReference (scopes @ outerScopes) clause reference
                         | None, _ -> Ok()) expression)
 
+            let windowReferences =
+                windowKeyBindings select
+                |> traverse (fun (clause, expression) ->
+                    validateExpression seen dbName cteMap (scope :: outerScopes)
+                        (resolveReference (scope :: outerScopes) (clauseLabel clause)) expression)
+
             references
             |> Result.bind (fun _ -> qualifiedClauseReferences)
+            |> Result.bind (fun _ -> windowReferences)
             |> Result.bind (fun _ ->
                 rewritten |> Result.mapError InvalidDescription
                 |> Result.bind (fun rewritten ->
@@ -15559,7 +15586,7 @@ and private runWindowedSelect
                             | _ -> badRangeOrderType ()))
 
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
-                exprs |> traverse (evalExpr (ctxFor row))
+                exprs |> traverse (evalExpr { ctxFor row with Clause = WindowPartitionClause })
 
             let effectiveOrderBy =
                 if hasRangeOffset && constantSource.Value then
@@ -15583,7 +15610,7 @@ and private runWindowedSelect
                     tryDirectColumnForExpr context expression)
 
             let orderKeyOf (row: Value[]) : Result<(Value * Collation.Collation option) list, EvalError> =
-                let context = { ctxFor row with Clause = OrderClause }
+                let context = { ctxFor row with Clause = WindowOrderClause }
 
                 orderTerms
                 |> traverse (fun (expression, column, collation, directColumn) ->
@@ -17135,7 +17162,29 @@ and private runSelect
             | Error(InvalidDescription(Err(code, message))) -> code, message
             | _ -> error)
 
-    match orderingValidation with
+    let windowBindings =
+        match windowKeyBindings select with
+        | [] -> Ok()
+        | keys ->
+            let context = contextFactory store registry dbName columnIndex qualifiers outer (probeRow columns)
+            let preceding =
+                (select.Projections |> List.map (fun projection -> FieldList, projection.Expression))
+                @ (select.Where |> Option.toList |> List.map (fun expression -> WhereClause, expression))
+            preceding @ keys
+            |> traverse (fun (clause, expression) ->
+                let context = { context with Clause = clause }
+                validateExpressionBindings
+                    (function
+                    | None, name -> resolveCol context name |> Result.map ignore
+                    | Some qualifier, name -> resolveQualifiedCol context qualifier name |> Result.map ignore)
+                    (fun nested ->
+                        match describeQueryColumnsInScope store registry dbName (QueryBody(PlainSelect nested)) (Some context) with
+                        | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
+                        | _ -> Ok())
+                    Expression.tryLiteralNodeDiagnostic id expression)
+            |> Result.map ignore
+
+    match orderingValidation |> Result.bind (fun () -> windowBindings) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok() ->
 

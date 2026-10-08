@@ -176,6 +176,44 @@ let tests =
                   | result -> failtestf "Expected grouped projection rows, got %A" result
                   Expect.equal (execute "SELECT @n,@m") (ResultSet([ "@n"; "@m" ], [ variables ])) sql
 
+          testCase "window key bindings report their own clauses before execution"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              let execute sql = connection.Query sql
+              execute "CREATE TABLE window_clause(v INT)" |> ignore
+              execute "INSERT INTO window_clause VALUES(2),(1)" |> ignore
+              for sql, message in
+                  [ "SELECT v AS a FROM window_clause ORDER BY ROW_NUMBER() OVER (ORDER BY a)", "Unknown column 'a' in 'window order by'"
+                    "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM window_clause", "Unknown column 'missing' in 'window order by'"
+                    "SELECT ROW_NUMBER() OVER (PARTITION BY missing) FROM window_clause", "Unknown column 'missing' in 'window partition by'"
+                    "SELECT ROW_NUMBER() OVER w FROM window_clause WINDOW w AS (ORDER BY missing)", "Unknown column 'missing' in 'window order by'"
+                    "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM window_clause WHERE FALSE", "Unknown column 'missing' in 'window order by'"
+                    "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM window_clause LIMIT 0", "Unknown column 'missing' in 'window order by'"
+                    "SELECT SUM(v) OVER (ORDER BY missing RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM window_clause", "Unknown column 'missing' in 'window order by'"
+                    "SELECT ROW_NUMBER() OVER (ORDER BY absent.v) FROM window_clause", "Unknown column 'absent.v' in 'window order by'"
+                    "SELECT ROW_NUMBER() OVER (PARTITION BY absent.v) FROM window_clause", "Unknown column 'absent.v' in 'window partition by'" ] do
+                  Expect.equal (execute sql) (Err(1054, message)) sql
+                  let prepared = "PREPARE window_binding FROM '" + sql.Replace("'", "''") + "'"
+                  Expect.equal (execute prepared) (Err(1054, message)) prepared
+
+          testCase "window binding validates unused declarations and respects where precedence"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              let execute sql = connection.Query sql
+              execute "CREATE TABLE window_clause(v INT)" |> ignore
+              execute "INSERT INTO window_clause VALUES(2),(1)" |> ignore
+              for sql, (code, message) in
+                  [
+                    "SELECT 1 FROM window_clause WINDOW w AS (ORDER BY missing)", (1054, "Unknown column 'missing' in 'window order by'")
+                    "SELECT ROW_NUMBER() OVER (ORDER BY absent.v)", (1109, "Unknown table 'absent' in window order by")
+                    "SELECT ROW_NUMBER() OVER (PARTITION BY absent.v)", (1109, "Unknown table 'absent' in window partition by")
+                    "SELECT ROW_NUMBER() OVER (ORDER BY missing) FROM window_clause WHERE absent=1", (1054, "Unknown column 'absent' in 'where clause'")
+                    "SELECT v AS a,ROW_NUMBER() OVER (PARTITION BY a) FROM window_clause", (1054, "Unknown column 'a' in 'window partition by'")
+                    "SELECT ROW_NUMBER() OVER child FROM window_clause WINDOW parent AS (ORDER BY missing),child AS (parent)", (1054, "Unknown column 'missing' in 'window order by'") ] do
+                  Expect.equal (execute sql) (Err(code, message)) sql
+                  let prepared = "PREPARE window_binding FROM '" + sql.Replace("'", "''") + "'"
+                  Expect.equal (execute prepared) (Err(code, message)) prepared
+
           testCase "ordering aggregates cannot introduce an implicit group"
           <| fun _ ->
               let store = newStore ()
