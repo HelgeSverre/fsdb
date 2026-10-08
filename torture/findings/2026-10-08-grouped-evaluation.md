@@ -120,3 +120,42 @@ orders equal keys differently in this fixture. ROLLUP exposes separate volatile
 argument evaluations across subtotal levels. Materializing one value per source
 row does not establish those contracts. The returned-projection assignment and
 LIMIT differences above also remain open.
+
+## Aggregate-family grouping strategy
+
+The [grouping-plan oracle](../scripts/grouped-input-order-oracle.py) combines
+`SUM(@n:=@n+1)` with a second aggregate over this interleaved fixture:
+
+```sql
+CREATE TABLE group_plan(id INT PRIMARY KEY,g INT,v INT);
+INSERT INTO group_plan VALUES(1,2,10),(2,1,20),(3,2,30);
+SET @n=0;
+SELECT g,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other
+FROM group_plan GROUP BY g ORDER BY g;
+```
+
+Native MySQL 8.4.11 returns SUM totals 1 and 5 for groups 1 and 2, and leaves
+`@n=3`. Without the DISTINCT count, it returns 2 and 4. The change applies to
+SUM's input evaluation even though SUM itself is unchanged.
+
+| Additional aggregate | SUM totals for groups 1, 2 | Native plan |
+| --- | --- | --- |
+| None; MIN(v); MAX(v); BIT_AND(v) | 2, 4 | Aggregate using temporary table |
+| MIN(DISTINCT v); MAX(DISTINCT v) | 2, 4 | Aggregate using temporary table |
+| COUNT(DISTINCT v); SUM(DISTINCT v); AVG(DISTINCT v) | 1, 5 | Group aggregate over sorted group keys |
+| COUNT(DISTINCT 1); SUM(DISTINCT 1); AVG(DISTINCT 1) | 1, 5 | Group aggregate over sorted group keys |
+| GROUP_CONCAT(v); GROUP_CONCAT(DISTINCT v) | 1, 5 | Group aggregate over sorted group keys |
+| JSON_ARRAYAGG(v); JSON_OBJECTAGG(id,v) | 1, 5 | Group aggregate over sorted group keys |
+
+The oracle checks exact rows and final variable state through direct execution
+and SQL PREPARE/EXECUTE, and checks the distinguishing EXPLAIN TREE operators.
+It passes on a disposable native MySQL 8.4.11 instance with 64 MiB buffer and
+redo limits. Plan costs are deliberately not asserted.
+
+At `e8fe63ee`, aggregate arguments are materialized in source arrival order for
+all these families. The evaluator needs a query-wide grouping input strategy;
+sorting only the JSON or DISTINCT aggregate's arguments would leave the adjacent
+SUM wrong. MIN/MAX DISTINCT must not trigger that change. These fixtures do
+not establish index-selected input order, multi-key collation ordering, or
+ROLLUP's separate per-level evaluation. GROUP_CONCAT equal-key ordering also
+remains a separate boundary.
