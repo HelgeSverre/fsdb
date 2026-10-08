@@ -285,7 +285,7 @@ that all optimizer-hint behavior is implemented.
 
 ## Mixed optimizer-hint parsing
 
-Status: reproduced; ordered hint parsing remains open.
+Status: ordered syntax parsing implemented; table/query-block hint resolution remains open.
 
 `mixed-optimizer-hints-oracle.py` passes against native MySQL 8.4.11. Unknown
 names, bare numbers, and commas between hints produce syntax warning 1064 and
@@ -294,12 +294,12 @@ active. Adjacent hints without separating whitespace are accepted. Overflowing
 MAX_EXECUTION_TIME produces its unsupported-value warning but permits a later
 syntax warning; malformed numeric syntax stops the remainder instead.
 
-This affects SET_VAR as well as timeouts. On the committed fsdb runtime,
-`BOGUS SET_VAR(max_points_in_geometry=3)` incorrectly changes the visible limit
+This affects SET_VAR as well as timeouts. Before the ordered parser, fsdb
+`BOGUS SET_VAR(max_points_in_geometry=3)` incorrectly changed the visible limit
 to 3 without a warning; native MySQL keeps 65,536 and warns. A valid SET_VAR
 before BOGUS stays active on native MySQL, with the unknown-token warning.
-Comma-separated timeout hints incorrectly produce fsdb's duplicate warning,
-and an unknown token after a valid timeout currently produces no warning.
+Comma-separated timeout hints produced fsdb's duplicate warning,
+and an unknown token after a valid timeout produced no warning.
 
 Valid interleaved BKA(), QB_NAME(q), JOIN_FIXED_ORDER(), and SET_VAR controls
 prevent treating every non-timeout name as a syntax error. BKA(t) and NO_INDEX(t)
@@ -311,5 +311,19 @@ An exploratory RESOURCE_GROUP case reported platform-unsupported warning 3658
 on the native macOS server. It is excluded from the portable parsing fixture
 because that warning depends on the server platform.
 
-Validation: the maintained native fixture passes; no runtime changes or
-known-gap allowlist additions accompany this evidence.
+The shared parser returns accepted hints and syntax diagnostics separately.
+Timeout and geometry interpreters consume that accepted prefix, so unknown
+syntax cannot silently enable a later SET_VAR. Syntax diagnostics precede
+execution diagnostics, including duplicate timeout and geometry-clamp warnings.
+The executor no longer scans or validates hint argument syntax independently.
+
+Table and query-block hint arguments are parsed but their name-resolution
+warnings and optimizer effects remain incomplete. In particular, the maintained
+BKA(t) and NO_INDEX(t) unresolved-name cases are still open; the complete native
+fixture must not be described as fsdb parity.
+
+Validation: all 3,096 root tests pass. The existing native wire suite passes
+68 cases / 8,496 steps with zero differences:
+`torture/artifacts/runs/20261008T101635784-59333/contracts`.
+The focused regression covers prefix retention, rejected suffixes, warning
+order, and accepted interleaved hint syntax. No known-gap allowlist was changed.

@@ -280,6 +280,26 @@ let tests =
               | Err(1305, _) -> ()
               | other -> failtestf "expected missing routine: %A" other
 
+          testCase "mixed optimizer hints preserve only the valid prefix"
+          <| fun _ ->
+              let run = queryFixture []
+              let header = ["Level"; "Code"; "Message"]
+              let check body expectedValue expectedCodes =
+                  let sql = "SELECT /*+ " + body + " */ @@max_points_in_geometry AS n"
+                  Expect.equal (run sql) (ResultSet(["n"], [[Some expectedValue]])) "only preceding valid hints apply"
+                  match run "SHOW WARNINGS" with
+                  | ResultSet(columns, rows) ->
+                      Expect.equal columns header "diagnostic columns"
+                      Expect.equal (rows |> List.map (fun row -> row.[1])) (expectedCodes |> List.map Some) "warning order"
+                  | other -> failtestf "unexpected warnings: %A" other
+              check "BOGUS SET_VAR(max_points_in_geometry=3)" "65536" ["1064"]
+              check "SET_VAR(max_points_in_geometry=3) BOGUS" "3" ["1064"]
+              check "MAX_EXECUTION_TIME(10000), SET_VAR(max_points_in_geometry=3)" "65536" ["1064"]
+              check "MAX_EXECUTION_TIME(10000) MAX_EXECUTION_TIME(2) BOGUS" "65536" ["1064"; "3126"]
+              check "SET_VAR(max_points_in_geometry=2) BOGUS" "3" ["1064"; "1292"]
+              check "QB_NAME(q) BKA() JOIN_FIXED_ORDER() MAX_EXECUTION_TIME(10000) SET_VAR(max_points_in_geometry=3)" "3" []
+              check "QB_NAME() SET_VAR(max_points_in_geometry=3)" "65536" ["1064"]
+
           testCase "nested derived sources retain enclosing query correlation"
           <| fun _ ->
               let run = queryFixture

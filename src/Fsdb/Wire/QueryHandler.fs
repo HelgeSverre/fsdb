@@ -1242,217 +1242,94 @@ let private normalizeGeometryPointLimit =
     | VUInt value -> bounded (int64 value)
     | _ -> Error(Err(1232, "Incorrect argument type to variable 'max_points_in_geometry'"))
 
-let private setVarHint = Regex(@"(?:^|[\s,])SET_VAR\b", RegexOptions.IgnoreCase)
-
-let private isTopLevelHintToken (hint: string) stop =
-    let mutable index = 0
-    let mutable depth = 0
-    let mutable quote = None
-
-    while index < stop do
-        match quote with
-        | Some delimiter when hint.[index] = '\\' && index + 1 < stop -> index <- index + 2
-        | Some delimiter when hint.[index] = delimiter && index + 1 < stop && hint.[index + 1] = delimiter ->
-            index <- index + 2
-        | Some delimiter when hint.[index] = delimiter ->
-            quote <- None
-            index <- index + 1
-        | Some _ -> index <- index + 1
-        | None when hint.[index] = '\'' || hint.[index] = '"' || hint.[index] = '`' ->
-            quote <- Some hint.[index]
-            index <- index + 1
-        | None when hint.[index] = '(' ->
-            depth <- depth + 1
-            index <- index + 1
-        | None when hint.[index] = ')' ->
-            depth <- max 0 (depth - 1)
-            index <- index + 1
-        | None -> index <- index + 1
-
-    quote.IsNone && depth = 0
-
-let private tryHintArgument (hint: string) afterName =
-    let mutable openAt = afterName
-
-    while openAt < hint.Length && Char.IsWhiteSpace hint.[openAt] do
-        openAt <- openAt + 1
-
-    if openAt = hint.Length || hint.[openAt] <> '(' then
-        None
-    else
-        let mutable index = openAt + 1
-        let mutable depth = 1
-        let mutable quote = None
-
-        while index < hint.Length && depth > 0 do
-            match quote with
-            | Some delimiter when hint.[index] = '\\' && index + 1 < hint.Length -> index <- index + 2
-            | Some delimiter when hint.[index] = delimiter && index + 1 < hint.Length && hint.[index + 1] = delimiter ->
-                index <- index + 2
-            | Some delimiter when hint.[index] = delimiter ->
-                quote <- None
-                index <- index + 1
-            | Some _ -> index <- index + 1
-            | None when hint.[index] = '\'' || hint.[index] = '"' || hint.[index] = '`' ->
-                quote <- Some hint.[index]
-                index <- index + 1
-            | None when hint.[index] = '(' ->
-                depth <- depth + 1
-                index <- index + 1
-            | None when hint.[index] = ')' ->
-                depth <- depth - 1
-                index <- index + 1
-            | None -> index <- index + 1
-
-        if depth = 0 then
-            Some(hint.Substring(openAt + 1, index - openAt - 2))
-        else
-            None
-
-let private statementGeometryPointLimit (hints: Parser.OptimizerHintLocation list) =
+let private statementGeometryPointLimit (hints: OptimizerHints.Hint list) =
     let mutable pointLimit = None
 
-    let syntaxWarning () =
-        Diagnostics.warning 1064 "Optimizer hint syntax error near SET_VAR"
+    let applyAssignment (rawName: string) (value: string) =
+        let name = rawName.ToLowerInvariant()
+        if name <> "max_points_in_geometry" then
+            Diagnostics.warning 3128 (sprintf "Unresolved name '%s' for SET_VAR hint" name)
+        elif pointLimit.IsSome then
+            Diagnostics.warning
+                3126
+                (sprintf "Hint SET_VAR(max_points_in_geometry=%s) is ignored as conflicting/duplicated" value)
+        elif value.Length > 0 && (value |> Seq.forall (fun character -> character >= '0' && character <= '9')) then
+            let mutable significant = 0
 
-    let applyAssignment (assignment: string) =
-        let equalsAt = assignment.IndexOf '='
+            while significant < value.Length && value.[significant] = '0' do
+                significant <- significant + 1
 
-        if equalsAt <= 0 then
-            syntaxWarning ()
-        else
-            let rawName = assignment.Substring(0, equalsAt)
-            let rawValue = assignment.Substring(equalsAt + 1)
-            let name = rawName.Trim().ToLowerInvariant()
-            let value = rawValue.Trim()
+            let digitCount = value.Length - significant
 
-            if rawName.Contains ',' || not (Regex.IsMatch(name, @"^[a-z_][a-z0-9_]*$", RegexOptions.IgnoreCase)) then
-                syntaxWarning ()
-            elif name <> "max_points_in_geometry" then
-                Diagnostics.warning 3128 (sprintf "Unresolved name '%s' for SET_VAR hint" name)
-            elif
-                value
-                |> Seq.mapi (fun index character -> index, character)
-                |> Seq.exists (fun (index, character) -> character = ',' && isTopLevelHintToken value index)
-            then
-                syntaxWarning ()
-            elif pointLimit.IsSome then
-                Diagnostics.warning
-                    3126
-                    (sprintf "Hint SET_VAR(max_points_in_geometry=%s) is ignored as conflicting/duplicated" value)
-            elif value.Length > 0 && (value |> Seq.forall Char.IsDigit) then
-                let mutable significant = 0
-
-                while significant < value.Length && value.[significant] = '0' do
-                    significant <- significant + 1
-
-                let digitCount = value.Length - significant
-
-                let parsed =
-                    if digitCount = 0 then
-                        0
-                    elif digitCount > 7 then
-                        Limits.maxPointsInGeometryLimit + 1
-                    else
-                        Int32.Parse(value.Substring significant, Globalization.CultureInfo.InvariantCulture)
-
-                let bounded =
-                    parsed
-                    |> max Limits.minPointsInGeometry
-                    |> min Limits.maxPointsInGeometryLimit
-
-                if bounded <> parsed then
-                    Diagnostics.warning
-                        1292
-                        (sprintf "Truncated incorrect max_points_in_geometry value: '%s'" value)
-
-                pointLimit <- Some bounded
-            else
-                if value.StartsWith("-", StringComparison.Ordinal) then
-                    syntaxWarning ()
+            let parsed =
+                if digitCount = 0 then
+                    0
+                elif digitCount > 7 then
+                    Limits.maxPointsInGeometryLimit + 1
                 else
-                    Diagnostics.warning 1232 "Incorrect argument type to variable 'max_points_in_geometry'"
+                    Int32.Parse(value.Substring significant, Globalization.CultureInfo.InvariantCulture)
 
-    for location in hints do
-        let hint = location.Body
-        let matches = setVarHint.Matches hint
+            let bounded =
+                parsed
+                |> max Limits.minPointsInGeometry
+                |> min Limits.maxPointsInGeometryLimit
 
-        for matched in matches |> Seq.cast<Match> |> Seq.filter (fun found -> isTopLevelHintToken hint found.Index) do
-            match tryHintArgument hint (matched.Index + matched.Length) with
-            | Some assignment -> applyAssignment assignment
-            | None -> syntaxWarning ()
+            if bounded <> parsed then
+                Diagnostics.warning
+                    1292
+                    (sprintf "Truncated incorrect max_points_in_geometry value: '%s'" value)
+
+            pointLimit <- Some bounded
+        else
+            Diagnostics.warning 1232 "Incorrect argument type to variable 'max_points_in_geometry'"
+
+    for hint in hints do
+        match hint.Value with
+        | OptimizerHints.SetVariable(name, value) -> applyAssignment name value
+        | _ -> ()
 
     pointLimit
 
-let private timeoutHintName = Regex(@"\bMAX_EXECUTION_TIME\b", RegexOptions.IgnoreCase)
-
-type private TimeoutHintError =
-    | InvalidTimeoutSyntax of offset: int
-    | UnsupportedTimeout of offset: int
-
-let private parseTimeoutHintArgument (body: string) afterName =
-    let skipWhitespace offset =
-        let mutable index = offset
-        while index < body.Length && Char.IsWhiteSpace body.[index] do
-            index <- index + 1
-        index
-
-    let openAt = skipWhitespace afterName
-    if openAt >= body.Length || body.[openAt] <> '(' then
-        Error(InvalidTimeoutSyntax openAt)
-    else
-        let start = skipWhitespace (openAt + 1)
-        let mutable finish = start
-        while finish < body.Length && body.[finish] >= '0' && body.[finish] <= '9' do
-            finish <- finish + 1
-        let closeAt = skipWhitespace finish
-        if finish = start then
-            Error(InvalidTimeoutSyntax start)
-        elif closeAt >= body.Length || body.[closeAt] <> ')' then
-            let offset = if closeAt < body.Length && body.[closeAt] = '.' then start else closeAt
-            Error(InvalidTimeoutSyntax offset)
-        else
-            match UInt64.TryParse(body.Substring(start, finish - start)) with
-            | true, value when value <= uint64 UInt32.MaxValue -> Ok value
-            | _ -> Error(UnsupportedTimeout closeAt)
+let private parsedStatementHints emitWarnings options (sql: string) =
+    let parsed =
+        Parser.optimizerHintLocationsWithOptions options sql
+        |> List.map (OptimizerHints.parse options)
+    if emitWarnings then
+        for _, diagnostics in parsed do
+            for diagnostic in diagnostics do
+                let position = diagnostic.Offset
+                let suffix = sql.Substring(position, min 80 (sql.Length - position))
+                let line = 1 + (sql.Substring(0, position) |> Seq.filter ((=) '\n') |> Seq.length)
+                Diagnostics.warning 1064 (sprintf "%s near '%s' at line %d" diagnostic.Prefix suffix line)
+    parsed |> List.collect fst
 
 type private TimeoutHintScope = StandaloneStatement | StoredRoutine
 
-let private statementTimeoutHint scope emitWarnings options (sql: string) (hints: Parser.OptimizerHintLocation list) =
+let private statementTimeoutHint scope emitWarnings options sql (hints: OptimizerHints.Hint list) =
     let mutable timeout = None
     let warn code message =
         if emitWarnings then Diagnostics.warning code message
-    let near prefix position =
-        let suffix = sql.Substring(position, min 80 (sql.Length - position))
-        let line = 1 + (sql.Substring(0, position) |> Seq.filter ((=) '\n') |> Seq.length)
-        warn 1064 (sprintf "%s near '%s' at line %d" prefix suffix line)
-
-    for hint in hints do
-        let viewDefinition =
-            lazy (match Parser.parseWithOptions options sql with Ok(CreateView _) -> true | _ -> false)
-        let mutable validSyntax = true
-        for token in timeoutHintName.Matches hint.Body |> Seq.cast<Match> do
-            if validSyntax && isTopLevelHintToken hint.Body token.Index then
-                match parseTimeoutHintArgument hint.Body (token.Index + token.Length) with
-                | Error(InvalidTimeoutSyntax offset) ->
-                    validSyntax <- false
-                    near "Optimizer hint syntax error" (hint.BodyOffset + offset)
-                | Error(UnsupportedTimeout offset) ->
-                    near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + offset)
-                | Ok _ when scope = StoredRoutine ->
-                    warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
-                | Ok value ->
-                    match hint.StatementKeyword with
-                    | "CREATE" | "ALTER" when viewDefinition.Value -> ()
-                    | "SELECT" | "WITH" | "EXPLAIN" when hint.IsLeadingSelect ->
-                        match timeout with
-                        | Some _ -> warn 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
-                        | None -> timeout <- Some value
-                    | _ -> warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
+    let viewDefinition =
+        lazy (match Parser.parseWithOptions options sql with Ok(CreateView _) -> true | _ -> false)
+    for parsed in hints do
+        match parsed.Value with
+        | OptimizerHints.Timeout value ->
+            let hint = parsed.Location
+            if scope = StoredRoutine then
+                warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
+            else
+                match hint.StatementKeyword with
+                | "CREATE" | "ALTER" when viewDefinition.Value -> ()
+                | "SELECT" | "WITH" | "EXPLAIN" when hint.IsLeadingSelect ->
+                    match timeout with
+                    | Some _ -> warn 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
+                    | None -> timeout <- Some value
+                | _ -> warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
+        | _ -> ()
     timeout
 
 let private withStatementHintsCore scope emitTimeoutWarnings options sql body =
-    let hints = Parser.optimizerHintLocationsWithOptions options sql
+    let hints = parsedStatementHints emitTimeoutWarnings options sql
     let timeout = statementTimeoutHint scope emitTimeoutWarnings options sql hints
     DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
         match statementGeometryPointLimit hints with
@@ -1464,7 +1341,7 @@ let private withPreparedStatementHints options sql body =
 
 let private emitRoutineHintDiagnostics (session: Session) kind schema name options (definition: string) =
     if definition.Contains("/*+", StringComparison.Ordinal) && session.RoutineDiagnostics.FirstLoad(session.Store, kind, schema, name) then
-        Parser.optimizerHintLocationsWithOptions options definition
+        parsedStatementHints true options definition
         |> statementTimeoutHint StoredRoutine true options definition
         |> ignore
 
@@ -5283,7 +5160,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
     prepareStatementWithOptions (parserOptionsForSession session) sql
     |> Result.bind (fun (statement, count) ->
         let options = parserOptionsForSession session
-        Parser.optimizerHintLocationsWithOptions options sql
+        parsedStatementHints true options sql
         |> statementTimeoutHint StandaloneStatement true options sql
         |> ignore
         match statement with
