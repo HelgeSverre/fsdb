@@ -199,3 +199,24 @@ the root gate passed 3,076 tests with no build warnings or errors.
 These checks close the audited expression cases. Other legacy multibyte
 charsets, wider mixed-charset combinations, and additional string functions
 still need native probes before claiming general encoded-expression parity.
+
+### Shift-JIS structural character boundaries
+
+MySQL accepts Shift-JIS byte pairs even when the platform codec cannot map
+them to a Unicode character. For `_sjis X'4182A08242'`, REVERSE returns
+`824282A041`, LEFT with length two returns `4182A0`, RIGHT with length two
+returns `82A08242`, and SUBSTRING at position two returns `82A0`. Decoding
+or treating the unmapped pair as independent bytes loses these boundaries.
+
+The encoded-character helper now recognizes SJIS/CP932 lead and trail byte
+ranges directly. A native matrix spans lead/trail range endpoints and the
+excluded 7F trail byte for both charsets. All 58 accepted cases match reversal
+and character length; they also pass in the native wire suite. The full run
+passed 62 cases and 7,751 steps without differences, and the root gate passed
+3,077 tests without build warnings or errors.
+
+`legacy-expression-oracle.py` also pins rejected inputs. Native MySQL rejects
+malformed Big5 `41A440FF42` and GBK `41D6D0FF42` introduced hex literals with
+1300/HY000; fsdb currently accepts both. Strict structural validation of
+legacy introduced literals remains open. The SJIS/CP932 matrix includes
+82 native rejection cases for that follow-up, alongside the accepted cases.

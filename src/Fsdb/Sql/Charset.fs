@@ -451,6 +451,11 @@ let characterByteOffsets name (bytes: byte[]) =
         offsets.Add offset
         let width =
             if charset = "ucs2" then min 2 (bytes.Length - offset)
+            elif (charset = "sjis" || charset = "cp932") && offset + 1 < bytes.Length then
+                let lead, trail = bytes.[offset], bytes.[offset + 1]
+                let isLead = (lead >= 0x81uy && lead <= 0x9Fuy) || (lead >= 0xE0uy && lead <= 0xFCuy)
+                let isTrail = (trail >= 0x40uy && trail <= 0x7Euy) || (trail >= 0x80uy && trail <= 0xFCuy)
+                if isLead && isTrail then 2 else 1
             else unicodeScalarWidth charset bytes offset |> Option.defaultValue 1
         offset <- offset + width
     offsets.Add bytes.Length

@@ -631,6 +631,17 @@ let tests =
                   Expect.equal (handle session ("SELECT HEX(CONCAT(" + literal + "," + literal + ")) AS h") |> snd)
                       (ResultSet([ "h" ], [ [ Some expected ] ])) literal
 
+          testCase "Shift-JIS byte boundaries survive unmapped characters"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, expected in
+                  [ "REVERSE(_sjis X'4182A08242')", "824282A041"
+                    "LEFT(_sjis X'4182A08242',2)", "4182A0"
+                    "RIGHT(_sjis X'4182A08242',2)", "82A08242"
+                    "SUBSTRING(_sjis X'4182A08242',2,1)", "82A0" ] do
+                  Expect.equal (handle session ("SELECT HEX(" + expression + ") AS h") |> snd)
+                      (ResultSet([ "h" ], [ [ Some expected ] ])) expression
+
           testCase "string slices preserve encoded character bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
