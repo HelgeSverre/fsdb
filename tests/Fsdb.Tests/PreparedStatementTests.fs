@@ -33,7 +33,45 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "ORDER BY duplicate aliases select by expression and source identity"
+        [ testCase "ORDER BY subqueries resolve outer projection aliases in scope"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "CREATE TABLE ordering_scope(v INT,w INT)"; "INSERT INTO ordering_scope VALUES(2,10),(1,20)" ] do
+                  let next, _ = handle session sql
+                  session <- next
+              for sql, names, rows in
+                  [ "SELECT -v AS a FROM ordering_scope ORDER BY -(SELECT a)", [ "a" ], [ [ "-1" ]; [ "-2" ] ]
+                    "SELECT -v AS a FROM ordering_scope ORDER BY ABS((SELECT a)+3)", [ "a" ], [ [ "-2" ]; [ "-1" ] ]
+                    "SELECT -v AS a FROM ordering_scope ORDER BY (SELECT a)", [ "a" ], [ [ "-2" ]; [ "-1" ] ]
+                    "SELECT -v AS v FROM ordering_scope ORDER BY (SELECT v)", [ "v" ], [ [ "-1" ]; [ "-2" ] ]
+                    "SELECT -v AS a FROM ordering_scope ORDER BY (SELECT (SELECT a))", [ "a" ], [ [ "-2" ]; [ "-1" ] ]
+                    "SELECT -v AS a FROM ordering_scope ORDER BY (SELECT a FROM (SELECT 3 AS x) t)", [ "a" ], [ [ "-2" ]; [ "-1" ] ]
+                    "SELECT v AS a,-v AS a FROM ordering_scope ORDER BY (SELECT a)", [ "a"; "a" ], [ [ "2"; "-2" ]; [ "1"; "-1" ] ]
+                    "SELECT -v AS a FROM ordering_scope WHERE FALSE ORDER BY (SELECT a)", [ "a" ], [] ] do
+                  let expected = ResultSet(names, rows |> List.map (List.map Some))
+                  Expect.equal (handle session sql |> snd) expected sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%s: %A" sql error)
+                  let statement = createPreparedStatement session sql ast count
+                  Expect.equal (executePrepared session statement [] |> snd) expected ("prepared: " + sql)
+              for sql, expected in
+                  [ "SELECT _latin1'a' AS a FROM ordering_scope ORDER BY (SELECT a COLLATE utf8mb4_bin)", 1253
+                    "SELECT v AS a,w AS a FROM ordering_scope ORDER BY (SELECT a)", 1052
+                    "SELECT SUM(-v) AS a FROM ordering_scope GROUP BY v ORDER BY (SELECT a)", 1247
+                    "SELECT ROW_NUMBER() OVER (ORDER BY v DESC) AS a FROM ordering_scope ORDER BY (SELECT a)", 3594 ] do
+                  match handle session sql |> snd with
+                  | Err(code, _) -> Expect.equal code expected sql
+                  | result -> failtestf "Expected error %d for %s: %A" expected sql result
+                  match prepareStatementForSession session sql with
+                  | Error(code, _) -> Expect.equal code expected ("prepared: " + sql)
+                  | result -> failtestf "Expected preparation error %d for %s: %A" expected sql result
+              for expression in [ "(SELECT a)"; "(SELECT a+0)" ] do
+                  session <- handle session "SET @n=0" |> fst
+                  let next, result = handle session ("SELECT (@n:=@n+1) AS a FROM ordering_scope ORDER BY " + expression)
+                  session <- next
+                  Expect.equal result (ResultSet([ "a" ], [ [ Some "1" ]; [ Some "2" ] ])) expression
+                  Expect.equal (handle session "SELECT @n" |> snd) (ResultSet([ "@n" ], [ [ Some "2" ] ])) "Alias reads reuse projected assignments"
+
+          testCase "ORDER BY duplicate aliases select by expression and source identity"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               for sql in

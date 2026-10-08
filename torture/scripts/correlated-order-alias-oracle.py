@@ -6,6 +6,9 @@ import runpy
 arguments = runpy.run_path(str(pathlib.Path(__file__).with_name("name-const-oracle.py")))
 cases = [
     ('CREATE TABLE ordering_scope(v INT,w INT);INSERT INTO ordering_scope VALUES(2,10),(1,20)', ''),
+    ("SELECT _latin1'a' AS a FROM ordering_scope ORDER BY (SELECT a COLLATE utf8mb4_bin)", (1253, '42000')),
+    ('SELECT -v AS a FROM ordering_scope ORDER BY -(SELECT a)', 'a\n-1\n-2\n'),
+    ('SELECT -v AS a FROM ordering_scope ORDER BY ABS((SELECT a)+3)', 'a\n-2\n-1\n'),
     ('SELECT -v AS a FROM ordering_scope ORDER BY (SELECT a)', 'a\n-2\n-1\n'),
     ('SELECT -v AS v FROM ordering_scope ORDER BY (SELECT v)', 'v\n-1\n-2\n'),
     ('SELECT -v AS a FROM ordering_scope ORDER BY (SELECT a+0)', 'a\n-2\n-1\n'),

@@ -21,7 +21,8 @@ for batch in [ 10000 .. -1 .. 1 ] |> List.chunkBySize 250 do
 
 let cases =
     [ "source", "SELECT v AS a FROM ordering_values ORDER BY ABS(v) LIMIT 100"
-      "alias", "SELECT v AS a FROM ordering_values ORDER BY ABS(a) LIMIT 100" ]
+      "alias", "SELECT v AS a FROM ordering_values ORDER BY ABS(a) LIMIT 100"
+      "correlated-alias", "SELECT v AS a FROM ordering_values ORDER BY ABS((SELECT a)) LIMIT 100" ]
 let expected = Executor.ResultSet([ "a" ], [ for value in 1 .. 100 -> [ Some(string value) ] ])
 let verify sql =
     let actual = run sql

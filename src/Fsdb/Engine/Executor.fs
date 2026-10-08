@@ -767,7 +767,8 @@ type private ViewColumnDescriptor =
 
 type private DescribedJoinScope =
     { Sources: (string * ViewColumnDescriptor list) list
-      LogicalColumns: FromItem.LogicalColumn list }
+      LogicalColumns: FromItem.LogicalColumn list
+      ProjectionAliases: Map<string, Result<Expr, EvalError>> }
 
 type private ColumnDescriptionError =
     | DescriptionUnavailable
@@ -1771,9 +1772,17 @@ let private validateReferencesWith resolve expression =
     |> traverse resolve
     |> Result.map ignore
 
-let rec private validateExpressionBindings resolve validateSubquery diagnosticError expression =
+let private aliasNodeDiagnostic resolveAlias expression =
+    let resolved =
+        match expression with
+        | Collate(Col name, collation) ->
+            resolveAlias name |> Option.map (fun source -> Collate(source, collation)) |> Option.defaultValue expression
+        | _ -> expression
+    Expression.tryLiteralNodeDiagnostic resolved
+
+let rec private validateExpressionBindings resolve validateSubquery nodeDiagnostic diagnosticError expression =
     Expression.children expression
-    |> traverse (validateExpressionBindings resolve validateSubquery diagnosticError)
+    |> traverse (validateExpressionBindings resolve validateSubquery nodeDiagnostic diagnosticError)
     |> Result.bind (fun _ ->
         match expression with
         | Col name -> resolve (None, name)
@@ -1782,7 +1791,7 @@ let rec private validateExpressionBindings resolve validateSubquery diagnosticEr
     |> Result.bind (fun () ->
         Expression.subqueries expression |> traverse validateSubquery |> Result.map ignore)
     |> Result.bind (fun () ->
-        match Expression.tryLiteralNodeDiagnostic expression with
+        match nodeDiagnostic expression with
         | Some error -> Error(diagnosticError error)
         | None -> Ok())
 
@@ -2136,7 +2145,7 @@ let private orderColumnIdentity (columnIndex: Map<string, int list>) (qualifiers
     let qualified (qualifier: string) (name: string) = QualifiedOrderColumn(qualifier.ToLowerInvariant(), name.ToLowerInvariant())
     match projection.BindingOrigin, projection.Expression with
     | Some(ColumnProjection(qualifier, name)), _ -> Some(qualified qualifier name)
-    | Some ComputedProjection, _ -> None
+    | Some(ComputedProjection _), _ -> None
     | None, QualifiedCol(qualifier, name) -> Some(qualified qualifier name)
     | None, Col name ->
         let owner =
@@ -2163,6 +2172,28 @@ let private resolveOrderProjection columnIndex qualifiers (projections: Projecti
                 choose (position + 1) candidate rest
             | _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
     choose 0 None projections
+
+let private correlatedOrderBindings registry columnIndex qualifiers projections =
+    projections
+    |> List.map projectionLabel
+    |> List.distinctBy (fun name -> name.ToLowerInvariant())
+    |> List.map (fun name ->
+        let binding =
+            resolveOrderProjection columnIndex qualifiers projections name
+            |> Result.bind (function
+                | None -> Error(1054, sprintf "Unknown column '%s' in 'field list'" name)
+                | Some(position, projection) ->
+                    let expression =
+                        match projection.BindingOrigin with
+                        | Some(ComputedProjection original) -> original
+                        | _ -> projection.Expression
+                    if not (collectWindowFuncs expression).IsEmpty then
+                        Error(3594, sprintf "You cannot use the alias '%s' of an expression containing a window function in this context.'" name)
+                    elif containsAggregate registry expression then
+                        Error(1247, sprintf "Reference '%s' not supported (reference to group function)" name)
+                    else Ok(position, projection))
+        name.ToLowerInvariant(), binding)
+    |> Map.ofList
 
 let private tryOrderProjectionNamed columnIndex qualifiers projections name =
     resolveOrderProjection columnIndex qualifiers projections name
@@ -2358,6 +2389,8 @@ type private EvalContext =
       Row: Value[]
       /// Materialized expressions retain their syntax for type and collation inference.
       EvaluatedExpressions: (Expr * Value) list
+      /// Only ordering subqueries may fall back to already-projected aliases.
+      ProjectionAliases: Map<string, Result<Expr * Value, EvalError>>
       Store: Store
       DbName: string
       /// The enclosing query's own context, if this one belongs to a
@@ -2438,6 +2471,7 @@ let private contextFactory
           Qualifiers = qualifiers
           Row = row
           EvaluatedExpressions = []
+          ProjectionAliases = Map.empty
           Store = store
           DbName = dbName
           Outer = outer
@@ -2489,9 +2523,16 @@ let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, Eva
             |> Ok
         | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause))
         | Some [] | None ->
-            match ctx.Outer with
-            | Some parent -> resolveCol { parent with Clause = ctx.Clause } name
-            | None -> Error(unknownColumnIn ctx.Clause name)
+            match Map.tryFind (name.ToLowerInvariant()) ctx.ProjectionAliases with
+            | Some binding ->
+                binding |> Result.map snd
+                |> Result.mapError (fun (code, message) ->
+                    if code = 1052 then code, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause)
+                    else code, message)
+            | None ->
+                match ctx.Outer with
+                | Some parent -> resolveCol { parent with Clause = ctx.Clause } name
+                | None -> Error(unknownColumnIn ctx.Clause name)
 
 /// The `QualifiedCol` counterpart of `resolveCol` — same outer-context
 /// fallback, checked against `ctx.Qualifiers` instead of `ctx.ColumnIndex`.
@@ -2541,6 +2582,18 @@ let private tryDirectColumnForExpr (ctx: EvalContext) (expr: Expr) : (int * Colu
             |> Option.map (fun index -> offset + index, columns.[index]))
     | _ -> None
 
+let rec private tryProjectionAlias (ctx: EvalContext) (name: string) =
+    if Map.containsKey (name.ToLowerInvariant()) ctx.ColumnIndex || (tryRoutineVariable name |> Option.isSome) then None
+    else
+        match Map.tryFind (name.ToLowerInvariant()) ctx.ProjectionAliases with
+        | Some(Ok(expression, _)) -> Some(ctx, expression)
+        | Some(Error _) -> None
+        | None -> ctx.Outer |> Option.bind (fun outer -> tryProjectionAlias outer name)
+
+let private (|ProjectionAlias|_|) ctx = function
+    | Col name -> tryProjectionAlias ctx name
+    | _ -> None
+
 /// Recovers the declared column behind a bare/qualified expression without
 /// changing expression evaluation itself. This type context is needed only
 /// by ORDER BY: ENUM values are stored as their labels for display and
@@ -2555,7 +2608,11 @@ let rec private tryColumnDefForExpr (ctx: EvalContext) (expr: Expr) : ColumnDef 
             | Some [ index ] -> tryColumnDefAt ctx index
             | Some(_ :: _ :: _)
             | Some [] -> None
-            | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
+            | None ->
+                match Map.tryFind (name.ToLowerInvariant()) ctx.ProjectionAliases with
+                | Some(Ok(expression, _)) -> tryColumnDefForExpr ctx expression
+                | Some(Error _) -> None
+                | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
     | QualifiedCol(table, col) ->
         match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
         | Some(columns, _) ->
@@ -3300,6 +3357,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | Lit(VBytes _)
     | Lit(VBit _) ->
         named "binary" 4
+    | ProjectionAlias ctx (definingContext, source) -> expressionCollation definingContext source
     | Col _
     | QualifiedCol _ ->
         match tryColumnDefForExpr ctx expression with
@@ -4554,7 +4612,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     (function
                     | None, name -> resolveCol ctx name |> Result.map ignore
                     | Some qualifier, name -> resolveQualifiedCol ctx qualifier name |> Result.map ignore)
-                    (fun _ -> Ok()) id expr
+                    (fun _ -> Ok()) Expression.tryLiteralNodeDiagnostic id expr
                 |> Result.bind (fun () -> evalExprCore ctx expr)
         with
         | Value.UnsignedOutOfRange ->
@@ -5180,7 +5238,11 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Diagnostics.EvaluationError(code, message) -> Error(code, message)))
     // `expr COLLATE name` evaluates as its inner expression — the tag
     // only steers which collation comparisons resolve under.
-    | BinaryCast e | Collate(e, _) -> eval e
+    | Collate(e, _) ->
+        match aliasNodeDiagnostic (fun name -> tryProjectionAlias ctx name |> Option.map snd) expr with
+        | Some error -> Error error
+        | None -> eval e
+    | BinaryCast e -> eval e
     | Cast(e, ((TChar _ | TVarchar _ | TBinary _ | TVarBinary _) as ty))
         when (tryColumnDefForExpr ctx e |> Option.bind _.NumericDisplay |> Option.exists _.ZeroFill)
              || (let format = outputFormatOfExpr ctx e
@@ -6884,11 +6946,12 @@ and private describeQueryColumnsChecked
             |> List.fold (fun merged branch -> List.map2 (fun left right -> unionColumn [ left; right ]) merged branch) first
             |> Ok
 
-    let emptyScope: DescribedJoinScope = { Sources = []; LogicalColumns = [] }
+    let emptyScope: DescribedJoinScope = { Sources = []; LogicalColumns = []; ProjectionAliases = Map.empty }
 
     let appendScopes (left: DescribedJoinScope) (right: DescribedJoinScope) =
         { Sources = left.Sources @ right.Sources
-          LogicalColumns = left.LogicalColumns @ right.LogicalColumns }
+          LogicalColumns = left.LogicalColumns @ right.LogicalColumns
+          ProjectionAliases = Map.empty }
 
     let resolveReference (scopes: DescribedJoinScope list) clause (qualifier, name) =
         let label = qualifier |> Option.map (fun qualifier -> qualifier + "." + name) |> Option.defaultValue name
@@ -6912,7 +6975,13 @@ and private describeQueryColumnsChecked
                         |> List.filter (fun descriptor -> equalsIgnoreCase name descriptor.Column.Name)
                         |> List.length
                 match matches with
-                | 0 -> resolve outer
+                | 0 ->
+                    match qualifier, Map.tryFind (name.ToLowerInvariant()) scope.ProjectionAliases with
+                    | None, Some binding ->
+                        binding |> Result.map ignore |> Result.mapError (fun (code, message) ->
+                            let message = if code = 1052 then sprintf "Column '%s' in %s is ambiguous" name clause else message
+                            InvalidDescription(Err(code, message)))
+                    | _ -> resolve outer
                 | 1 -> Ok()
                 | _ -> Error(InvalidDescription(Err(1052, sprintf "Column '%s' in %s is ambiguous" label clause)))
         resolve scopes
@@ -6981,7 +7050,8 @@ and private describeQueryColumnsChecked
             sourceColumns seen dbName ctes outerScopes preceding item
             |> Result.map (fun columns ->
                 { Sources = [ qualifier, columns ]
-                  LogicalColumns = columns |> List.map (fun column -> FromItem.SourceColumn(column.Column.Name, QualifiedCol(qualifier, column.Column.Name))) })
+                  LogicalColumns = columns |> List.map (fun column -> FromItem.SourceColumn(column.Column.Name, QualifiedCol(qualifier, column.Column.Name)))
+                  ProjectionAliases = Map.empty })
 
     and describeJoinChain seen dbName ctes outerScopes preceding source joins : Result<DescribedJoinScope, ColumnDescriptionError> =
         describeJoinSource seen dbName ctes outerScopes preceding source
@@ -7008,11 +7078,19 @@ and private describeQueryColumnsChecked
                 (Ok initial))
 
     and validateExpression seen dbName ctes scopes resolve expression =
+        let rec aliasSource name = function
+            | [] -> None
+            | scope :: rest when scope.LogicalColumns |> List.exists (fun column -> equalsIgnoreCase column.Name name) -> None
+            | scope :: rest ->
+                match Map.tryFind (name.ToLowerInvariant()) scope.ProjectionAliases with
+                | Some binding -> Result.toOption binding
+                | None -> aliasSource name rest
         validateExpressionBindings resolve
             (fun nested ->
                 match describeSelect seen dbName ctes scopes nested with
                 | Error(InvalidDescription error) -> Error(InvalidDescription error)
                 | _ -> Ok())
+            (aliasNodeDiagnostic (fun name -> aliasSource name scopes))
             (Err >> InvalidDescription) expression
 
     and describeSelect seen dbName inheritedCtes outerScopes (select: SelectStmt) =
@@ -7082,10 +7160,18 @@ and private describeQueryColumnsChecked
                     validateExpression seen dbName cteMap (scopes @ outerScopes)
                         (resolveReference (scope :: outerScopes) clause) expression)
 
+            let orderingAliases =
+                { emptyScope with
+                    Sources = scope.Sources
+                    ProjectionAliases =
+                        expandOrderProjections columns qualifiers select.Projections
+                        |> correlatedOrderBindings registry columnIndex qualifiers
+                        |> Map.map (fun _ binding -> binding |> Result.map (snd >> _.Expression)) }
+
             let qualifiedClauseReferences =
                 (select.GroupBy |> List.map (fun expression -> expression, "group statement", [ scope ]))
                 @ (select.Having |> Option.toList |> List.map (fun expression -> expression, "having clause", [ scope; projectionAliases ]))
-                @ (select.OrderBy |> List.map (fun (expression, _) -> expression, "order clause", [ scope; projectionAliases ]))
+                @ (select.OrderBy |> List.map (fun (expression, _) -> expression, "order clause", [ scope; orderingAliases ]))
                 |> traverse (fun (expression, clause, scopes) ->
                     validateExpression seen dbName cteMap (scopes @ outerScopes)
                         (function
@@ -7106,7 +7192,8 @@ and private describeQueryColumnsChecked
                 let contextOfScope (scope: DescribedJoinScope) outer =
                     let sources = scope.Sources |> List.map (fun (qualifier, descriptors) -> qualifier, descriptors |> List.map _.Column)
                     let columns = sources |> List.collect snd
-                    contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sources) outer (probeRow columns)
+                    let context = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sources) outer (probeRow columns)
+                    { context with ProjectionAliases = scope.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map (fun expression -> expression, VNull)) }
                 let outer = List.foldBack (fun scope outer -> Some(contextOfScope scope outer)) outerScopes None
                 let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers outer (probeRow columns)
 
@@ -12522,6 +12609,16 @@ and private resolveOrderAliasValue columnIndex qualifiers projections name outpu
             | Some(_, value) -> Ok(Some(projection.Expression, value))
             | None -> Error(1105, "ORDER BY projection position is outside the output row"))
 
+and private withOrderProjectionAliases (ctx: EvalContext) projections outputColumns =
+    let aliases =
+        correlatedOrderBindings ctx.Registry ctx.ColumnIndex ctx.Qualifiers projections
+        |> Map.map (fun _ binding ->
+            binding |> Result.bind (fun (position, projection) ->
+                match List.tryItem position outputColumns with
+                | Some(_, value) -> Ok(projection.Expression, value)
+                | None -> Error(1105, "ORDER BY projection position is outside the output row")))
+    { ctx with ProjectionAliases = aliases }
+
 and private transformUsesStoredSemantics (registry: Registry) expression = function
     | None -> true
     | Some(Expression storedExpression) ->
@@ -13702,8 +13799,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | QualifiedCol _
     | Star _
     | WindowOver _
-    // A subquery is its own scope — nothing inside it can be *this*
-    // query's projection alias.
+    // Subqueries bind their own scopes, including any permitted outer aliases.
     | Exists _
     | Subquery _
     | InSubquery _ -> Ok expr
@@ -13722,7 +13818,11 @@ and private resolveOrderKey
         | Some(sourceExpr, value) ->
             Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr value)
         | None -> evalOrderKey ctx (Col name))
-    | e -> evalOrderKey ctx e
+    | e ->
+        let context =
+            if (Expression.collectSubqueries e).IsEmpty then ctx
+            else withOrderProjectionAliases ctx projections outputCols
+        evalOrderKey context e
 
 and private groupByIndexTerms (registry: Registry) (table: Table) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let resolved =
@@ -14381,7 +14481,11 @@ and private runGroupedSelect
                 |> Result.toOption |> Option.flatten
                 |> Option.filter (fst >> containsAggregate registry)
                 |> Option.map (fun (expression, value) -> name, (RuntimeExpression expression, value)))
-        let cachedContext = { ctx with EvaluatedExpressions = aliases |> List.map snd }
+        let cachedContext =
+            let context = { ctx with EvaluatedExpressions = aliases |> List.map snd }
+            if select.OrderBy |> List.exists (fst >> Expression.collectSubqueries >> List.isEmpty >> not) then
+                withOrderProjectionAliases context orderProjections outputCols
+            else context
         let bindCachedAlias =
             bindOrderExpressionWith columnIndex (fun name ->
                 aliases
@@ -18458,7 +18562,7 @@ let validatePreparedBindings store registry schema statement =
 
     let validateExpressions expressions =
         expressions
-        |> traverse (validateExpressionBindings (fun _ -> Ok()) (PlainSelect >> validateBody) id)
+        |> traverse (validateExpressionBindings (fun _ -> Ok()) (PlainSelect >> validateBody) Expression.tryLiteralNodeDiagnostic id)
         |> Result.map ignore
 
     let rec validate = function

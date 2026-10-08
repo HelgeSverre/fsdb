@@ -387,6 +387,48 @@ module ContractCatalog =
                "DROP TABLE IF EXISTS contract_duplicate_values" |]
           Coverage = [| "statement:select", [| "ordering"; "aliases"; "name-binding"; "text-differential"; "prepared-differential" |] |] }
 
+    let private correlatedOrderAliases =
+        let queries =
+            [| "SELECT -v AS a FROM contract_ordering_scope ORDER BY -(SELECT a)", OracleSuccess
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY ABS((SELECT a)+3)", OracleSuccess
+               "SELECT _latin1'a' AS a FROM contract_ordering_scope ORDER BY (SELECT a COLLATE utf8mb4_bin)", OracleError(1253, "42000")
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY (SELECT a)", OracleSuccess
+               "SELECT -v AS v FROM contract_ordering_scope ORDER BY (SELECT v)", OracleSuccess
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY (SELECT a+0)", OracleSuccess
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY (SELECT (SELECT a))", OracleSuccess
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY (SELECT a FROM (SELECT 3 AS a) t)", OracleSuccess
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY (SELECT a FROM (SELECT 3 AS x) t)", OracleSuccess
+               "SELECT v AS a,w AS a FROM contract_ordering_scope ORDER BY (SELECT a)", OracleError(1052, "23000")
+               "SELECT v AS a,-v AS a FROM contract_ordering_scope ORDER BY (SELECT a)", OracleSuccess
+               "SELECT SUM(-v) AS a FROM contract_ordering_scope GROUP BY v ORDER BY (SELECT a)", OracleError(1247, "42S22")
+               "SELECT ROW_NUMBER() OVER (ORDER BY v DESC) AS a FROM contract_ordering_scope ORDER BY (SELECT a)", OracleError(3594, "HY000")
+               "SELECT -v AS a FROM contract_ordering_scope WHERE FALSE ORDER BY (SELECT a)", OracleSuccess
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY EXISTS(SELECT a)", OracleSuccess
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY (SELECT 1 WHERE a=-1)", OracleSuccess
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY (SELECT contract_ordering_scope.a)", OracleError(1054, "42S22")
+               "SELECT -v AS a FROM contract_ordering_scope ORDER BY (SELECT a FROM contract_ordering_scope inner_scope LIMIT 1)", OracleSuccess |]
+        { Name = "correlated-ordering-aliases"
+          Setup =
+            [| "DROP TABLE IF EXISTS contract_ordering_scope"
+               "CREATE TABLE contract_ordering_scope(v INT,w INT)"
+               "INSERT INTO contract_ordering_scope VALUES(2,10),(1,20)" |]
+          Steps =
+            [| for sql, expectation in queries do
+                   yield { Contract.query sql sql with Expectation = expectation }
+                   yield { Contract.preparedQuery ("prepared: " + sql) sql [||] with Expectation = expectation }
+               for expression in [ "(SELECT a)"; "(SELECT a+0)" ] do
+                   let sql = "SELECT (@n := @n + 1) AS a FROM contract_ordering_scope ORDER BY " + expression
+                   yield Contract.query "reset assignment" "SET @n=0"
+                   yield Contract.query sql sql
+                   yield Contract.query "assignment count" "SELECT @n"
+                   yield Contract.query "reset prepared assignment" "SET @n=0"
+                   yield Contract.execute "prepare assignment" ("PREPARE correlated_assignment FROM '" + sql.Replace("'", "''") + "'")
+                   yield Contract.query ("prepared: " + sql) "EXECUTE correlated_assignment"
+                   yield Contract.query "prepared assignment count" "SELECT @n"
+                   yield Contract.execute "deallocate assignment" "DEALLOCATE PREPARE correlated_assignment" |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_ordering_scope" |]
+          Coverage = [| "statement:select", [| "ordering"; "aliases"; "subqueries"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3258,6 +3300,7 @@ module ContractCatalog =
         [| comments
            orderAliases
            duplicateOrderAliases
+           correlatedOrderAliases
            exactErrors
            noDirInCreate
            semanticErrors

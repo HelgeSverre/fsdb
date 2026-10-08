@@ -80,7 +80,6 @@ compares alias and source-expression sorting on the same build.
 
 ## Remaining boundaries
 
-- Correlated references such as `ORDER BY (SELECT a)` still fail with 1054.
 - Grouped volatile expressions still expose evaluation-order differences. With
   `@n=0`, `SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM ordering_values
   GROUP BY v ORDER BY IF(a=b,v,-v)` returns the same rows `(1,2,2),(5,6,1)` but
@@ -190,5 +189,24 @@ to this query's projection alias is too broad for ordering scopes.
 
 Native verification uses a disposable server with 64 MiB buffer and redo limits.
 The current-engine comparison uses the embedded Debug assembly, eight logical
-processors, and a 4 GiB GC heap cap. This is an open finding, not implemented
-parity or an accepted differential failure.
+processors, and a 4 GiB GC heap cap. The table records the pre-fix behavior.
+
+The implementation based on `afc79003` provides a separate projection-alias
+fallback in ordering contexts. Bare and qualified source lookup retain their
+existing precedence. Alias values come from the already-projected row, while
+source expressions retain collation metadata. Original computed expressions
+survive window lowering so forbidden aggregate/window references remain errors.
+Preparation uses the same selection rule, and error 1247 carries SQLSTATE 42S22.
+
+The maintained native oracle also covers wrapped subqueries and rejects applying
+`utf8mb4_bin` to a correlated `_latin1` alias with 1253 / 42000. The full gate
+passes 3,039 tests under the 4 GiB cap. Differential contracts pass 52 cases /
+5,313 steps with zero differences at
+`torture/artifacts/runs/20261008T005024900-62019/contracts`. Assignment cases use
+SQL PREPARE/EXECUTE, matching the existing user-variable contract pattern:
+MySqlConnector rewrites those user-variable tokens during binary preparation.
+Other cases exercise text and binary prepared protocols.
+
+The [performance sample](../../benchmarks/results/afc79003-correlated-order-aliases.md)
+shows a remaining per-row subquery cost. General scalar-subquery execution is
+correct for these fixtures but substantially more expensive than direct ordering.

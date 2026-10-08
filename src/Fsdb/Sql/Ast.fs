@@ -440,7 +440,7 @@ and CheckConstraintDef =
 
 and ProjectionOrigin =
     | ColumnProjection of qualifier: string * name: string
-    | ComputedProjection
+    | ComputedProjection of Expr
 
 /// A `SELECT` projection: the expression and its optional `AS alias`.
 and Projection =
@@ -677,7 +677,7 @@ module Projection =
             match projection.BindingOrigin, projection.Expression with
             | Some origin, _ -> Some origin
             | None, (Col _ | QualifiedCol _ | Star _) -> None
-            | None, _ -> Some ComputedProjection
+            | None, _ -> Some(ComputedProjection projection.Expression)
         { projection with Expression = expression; BindingOrigin = origin }
 
     let name fallback (projection: Projection) =
