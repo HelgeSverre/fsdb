@@ -145,8 +145,23 @@ cases: 66 cases / 8,436 steps / zero differences, at
 The EXPLAIN regression checks removal of the incorrect 3125 warning; it does not
 claim parity for MySQL's rewritten-query note 1003.
 
-The context fixture also preserves remaining differences: CREATE VIEW silently
-discards its timeout hint; procedure declarations and executions warn with 3125;
+The context fixture also preserves remaining differences: procedure declarations
+and first executions warn with 3125;
 an unknown hint before MAX_EXECUTION_TIME stops hint parsing, whereas a valid
 timeout before that unknown token still applies. These grammar/lifetime cases
 remain open along with extreme-duration behavior.
+
+## View definitions
+
+CREATE VIEW, ALTER VIEW, and CREATE OR REPLACE VIEW silently discard valid
+MAX_EXECUTION_TIME hints, including duplicates. Malformed syntax still emits
+1064. The parsed statement identifies view definitions without duplicating the
+DDL grammar in a text matcher.
+
+The extended native context fixture passes on MySQL 8.4.11. All 3,092 tests pass;
+wire validation passes 66 cases / 8,445 steps with zero differences:
+`torture/artifacts/runs/20261008T085734595-33719/contracts`.
+
+An additional native routine probe shows that a second CALL on the same
+connection does not repeat the timeout-hint warning. Routine diagnostic lifetime
+and mixed-hint grammar remain open.

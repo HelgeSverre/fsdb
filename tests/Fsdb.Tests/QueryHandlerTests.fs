@@ -179,6 +179,21 @@ let tests =
                   Expect.isFalse (rows |> List.exists (fun row -> row |> List.contains (Some "3125"))) "EXPLAIN accepts the SELECT hint"
               | other -> failtestf "expected diagnostics, got %A" other
 
+          testCase "view definitions discard valid timeout hints but retain syntax warnings"
+          <| fun _ ->
+              let run = queryFixture [ "CREATE TABLE hinted_view_source(n INT)"; "INSERT INTO hinted_view_source VALUES(1)" ]
+              for ddl in
+                  [ "CREATE VIEW hinted_view AS SELECT /*+ MAX_EXECUTION_TIME(1) */ n FROM hinted_view_source"
+                    "ALTER VIEW hinted_view AS SELECT /*+ MAX_EXECUTION_TIME(1) */ n FROM hinted_view_source"
+                    "CREATE OR REPLACE VIEW hinted_view AS SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ n FROM hinted_view_source" ] do
+                  Expect.equal (run ddl) (Affected 0UL) ddl
+                  Expect.equal (run "SHOW WARNINGS") (ResultSet([ "Level"; "Code"; "Message" ], [])) "valid hints are silently discarded"
+              Expect.equal (run "SELECT n FROM hinted_view") (ResultSet([ "n" ], [ [ Some "1" ] ])) "view remains readable"
+              run "CREATE OR REPLACE VIEW hinted_view AS SELECT /*+ MAX_EXECUTION_TIME(-1) */ n FROM hinted_view_source" |> ignore
+              Expect.equal (run "SHOW WARNINGS")
+                  (ResultSet([ "Level"; "Code"; "Message" ],
+                      [ [ Some "Warning"; Some "1064"; Some "Optimizer hint syntax error near '-1) */ n FROM hinted_view_source' at line 1" ] ])) "malformed hint syntax still warns"
+
           testCase "nested derived sources retain enclosing query correlation"
           <| fun _ ->
               let run = queryFixture

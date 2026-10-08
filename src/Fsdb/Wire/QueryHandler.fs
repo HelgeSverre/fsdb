@@ -1395,6 +1395,8 @@ let private statementTimeoutHint emitWarnings options (sql: string) =
         warn 1064 (sprintf "%s near '%s' at line %d" prefix suffix line)
 
     for hint in Parser.optimizerHintLocationsWithOptions options sql do
+        let viewDefinition =
+            lazy (match Parser.parseWithOptions options sql with Ok(CreateView _) -> true | _ -> false)
         let mutable validSyntax = true
         let skipWhitespace offset =
             let mutable index = offset
@@ -1426,7 +1428,9 @@ let private statementTimeoutHint emitWarnings options (sql: string) =
                         | true, value when value > uint64 UInt32.MaxValue ->
                             near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + closeAt)
                         | true, value ->
-                            if not hint.IsLeadingSelect
+                            if (hint.StatementKeyword = "CREATE" || hint.StatementKeyword = "ALTER") && viewDefinition.Value then
+                                ()
+                            elif not hint.IsLeadingSelect
                                || (hint.StatementKeyword <> "SELECT" && hint.StatementKeyword <> "WITH" && hint.StatementKeyword <> "EXPLAIN") then
                                 warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
                             elif timeout.IsSome then

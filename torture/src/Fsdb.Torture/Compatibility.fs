@@ -4622,6 +4622,14 @@ module ContractCatalog =
                    ] |> List.indexed do
                    Contract.query (sprintf "query-%d" index) sql
                    Contract.query (sprintf "warnings-%d" index) "SHOW WARNINGS"
+               for index, sql in
+                   [ "CREATE VIEW hint_view AS SELECT /*+ MAX_EXECUTION_TIME(1) */ n FROM hint_t"
+                     "ALTER VIEW hint_view AS SELECT /*+ MAX_EXECUTION_TIME(1) */ n FROM hint_t"
+                     "CREATE OR REPLACE VIEW hint_view AS SELECT /*+ MAX_EXECUTION_TIME(1) MAX_EXECUTION_TIME(2) */ n FROM hint_t"
+                     "CREATE OR REPLACE VIEW hint_view AS SELECT /*+ MAX_EXECUTION_TIME(-1) */ n FROM hint_t" ] |> List.indexed do
+                   Contract.execute (sprintf "view-%d" index) sql
+                   Contract.query (sprintf "view-warnings-%d" index) "SHOW WARNINGS"
+               Contract.query "view-rows" "SELECT n FROM hint_view ORDER BY n"
                Contract.execute "update-hint" "UPDATE /*+ MAX_EXECUTION_TIME(1) */ hint_t SET n=n"
                Contract.query "update-warning" "SHOW WARNINGS"
                Contract.prepare "prepare-hints" "hint-query" Query
@@ -4637,7 +4645,7 @@ module ContractCatalog =
                Contract.execute "session-deadline" "SET max_execution_time=1"
                Contract.query "override-deadline" "SELECT /*+ MAX_EXECUTION_TIME(10000) */ n,SLEEP(0.01) AS slept FROM hint_t ORDER BY n"
                Contract.query "fallback-deadline" "SELECT /*+ MAX_EXECUTION_TIME(0) */ n,SLEEP(0.1) FROM hint_t" |> Contract.fails 3024 "HY000" |]
-          Cleanup = [| "SET max_execution_time=0"; "DROP TABLE hint_t" |]
+          Cleanup = [| "SET max_execution_time=0"; "DROP VIEW hint_view"; "DROP TABLE hint_t" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
     let all =
