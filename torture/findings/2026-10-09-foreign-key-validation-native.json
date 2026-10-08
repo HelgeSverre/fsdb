@@ -1,0 +1,777 @@
+{
+  "mysql_version": "8.4.11",
+  "innodb_buffer_pool_size": "64M",
+  "innodb_redo_log_capacity": "64M",
+  "cases": [
+    {
+      "name": "insert",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "INSERT INTO child VALUES(2,2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "UPDATE child SET n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "ignore-insert",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "INSERT IGNORE INTO child VALUES(2,2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "ignore-update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "UPDATE IGNORE child SET n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "replace",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "REPLACE INTO child VALUES(1,2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "upsert",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "INSERT INTO child VALUES(1,2) ON DUPLICATE KEY UPDATE n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "insert-select",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "INSERT INTO child SELECT 2,2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "parent-delete",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "DELETE FROM parent",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1451 (23000) at line 1: Cannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1451,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "parent-update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "UPDATE parent SET n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1451 (23000) at line 1: Cannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1451,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "action-RESTRICT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n) ON DELETE RESTRICT ON UPDATE RESTRICT)",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE RESTRICT ON UPDATE RESTRICT)\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE RESTRICT ON UPDATE RESTRICT)\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "action-NO ACTION",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n) ON DELETE NO ACTION ON UPDATE NO ACTION)",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "action-CASCADE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n) ON DELETE CASCADE ON UPDATE CASCADE)",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE CASCADE ON UPDATE CASCADE)\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE CASCADE ON UPDATE CASCADE)\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "action-SET NULL",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n) ON DELETE SET NULL ON UPDATE SET NULL)",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE SET NULL ON UPDATE SET NULL)\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE SET NULL ON UPDATE SET NULL)\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "composite",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(a INT,b INT,PRIMARY KEY(a,b))",
+        "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a,b) REFERENCES parent(a,b))",
+        "INSERT INTO child VALUES(1,2)",
+        "SHOW WARNINGS",
+        "INSERT INTO child VALUES(1,NULL)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`a`, `b`) REFERENCES `parent` (`a`, `b`))\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`a`, `b`) REFERENCES `parent` (`a`, `b`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "quoted",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE `Odd.Parent`(`Odd``.Column` INT PRIMARY KEY)",
+        "CREATE TABLE `Odd.Child`(n INT,CONSTRAINT `Odd``.Fk` FOREIGN KEY(n) REFERENCES `Odd.Parent`(`Odd``.Column`))",
+        "INSERT INTO `Odd.Child` VALUES(2)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`odd.child`, CONSTRAINT `Odd``.Fk` FOREIGN KEY (`n`) REFERENCES `odd.parent` (`Odd``.Column`))\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`odd.child`, CONSTRAINT `Odd``.Fk` FOREIGN KEY (`n`) REFERENCES `odd.parent` (`Odd``.Column`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-parent",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "INSERT INTO child VALUES(2,2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-parent-null",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "INSERT INTO child VALUES(2,NULL)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "id\tn\n1\t1\n2\tNULL\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "missing-parent-update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-parent-unchanged",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET id=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "cross-schema",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE DATABASE IF NOT EXISTS fk_other",
+        "DROP TABLE IF EXISTS fk_other.parent",
+        "CREATE TABLE fk_other.parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES fk_other.parent(n))",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `fk_other`.`parent` (`n`))\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `fk_other`.`parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "self",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT INTO child VALUES(1,2)",
+        "SHOW WARNINGS",
+        "INSERT INTO child VALUES(1,1)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "missing-parent-ignore",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "INSERT IGNORE INTO child VALUES(2,2),(3,NULL)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n3\tNULL\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "missing-parent-nonkey",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "ALTER TABLE child ADD payload INT",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET payload=7",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "id\tn\tpayload\n1\t1\t7\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "orphan-nonkey",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "ALTER TABLE child ADD payload INT",
+        "SET foreign_key_checks=0",
+        "DELETE FROM parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET payload=7",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ],
+      "stdout": "id\tn\tpayload\n1\t1\t7\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "missing-column",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "SET foreign_key_checks=0",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(absent))",
+        "SET foreign_key_checks=1",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1146\tTable 'probe.child' doesn't exist\n",
+      "stderr": "ERROR 3734 (HY000) at line 1: Failed to add the foreign key constraint. Missing column 'absent' for constraint 'fk' in the referenced table 'parent'\nERROR 1146 (42S02) at line 1: Table 'probe.child' doesn't exist\n",
+      "errors": [
+        [
+          3734,
+          "HY000"
+        ],
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "unnamed",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `child_ibfk_1` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `child_ibfk_1` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "quoted-parent",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE `Odd.Parent`(n INT PRIMARY KEY)",
+        "CREATE TABLE `Odd.Child`(n INT,CONSTRAINT `Odd``.Fk` FOREIGN KEY(n) REFERENCES `Odd.Parent`(n))",
+        "INSERT INTO `Odd.Parent` VALUES(1)",
+        "INSERT INTO `Odd.Child` VALUES(1)",
+        "DELETE FROM `Odd.Parent`",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`odd.child`, CONSTRAINT `Odd``.Fk` FOREIGN KEY (`n`) REFERENCES `odd.parent` (`n`))\n",
+      "stderr": "ERROR 1451 (23000) at line 1: Cannot delete or update a parent row: a foreign key constraint fails (`probe`.`odd.child`, CONSTRAINT `Odd``.Fk` FOREIGN KEY (`n`) REFERENCES `odd.parent` (`n`))\n",
+      "errors": [
+        [
+          1451,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "orphan-covering-False",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,payload INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1,0)",
+        "SET foreign_key_checks=0",
+        "DELETE FROM parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET payload=7",
+        "SHOW WARNINGS",
+        "SELECT * FROM child"
+      ],
+      "stdout": "id\tn\tpayload\n1\t1\t7\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "orphan-covering-True",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,payload INT,KEY cover(n,payload),CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1,0)",
+        "SET foreign_key_checks=0",
+        "DELETE FROM parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET payload=7",
+        "SHOW WARNINGS",
+        "SELECT * FROM child"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\tpayload\n1\t1\t0\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        [
+          1452,
+          "23000"
+        ]
+      ]
+    },
+    {
+      "name": "orphan-noop",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DELETE FROM parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET n=n",
+        "SHOW WARNINGS",
+        "SELECT * FROM child"
+      ],
+      "stdout": "id\tn\n1\t1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "self-multi",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,3)",
+        "SELECT * FROM child ORDER BY n"
+      ],
+      "stdout": "n\tp\n1\t1\n2\t1\n3\t3\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "self-ignore",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT IGNORE INTO child VALUES(1,2),(2,1),(3,3)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY n"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\nn\tp\n3\t3\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "self-replace",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "REPLACE INTO child VALUES(1,1)",
+        "SELECT * FROM child"
+      ],
+      "stdout": "n\tp\n1\t1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "self-upsert",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT INTO child VALUES(1,1) ON DUPLICATE KEY UPDATE p=VALUES(p)",
+        "SELECT * FROM child"
+      ],
+      "stdout": "n\tp\n1\t1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "self-update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT INTO child VALUES(1,NULL)",
+        "UPDATE child SET n=2,p=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child"
+      ],
+      "stdout": "n\tp\n2\t2\n",
+      "stderr": "",
+      "errors": []
+    }
+  ]
+}

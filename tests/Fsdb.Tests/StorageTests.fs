@@ -2541,7 +2541,7 @@ let tests =
                     let store = withCrossDatabaseForeignKey (Some "CASCADE") (Some "CASCADE")
 
                     match insertRows store "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] with
-                    | Error(ForeignKeyParentMissing "fk_cross_parent") -> ()
+                    | Error(ForeignKeyParentMissing(_, _, { Name = "fk_cross_parent" })) -> ()
                     | other -> failtestf "expected missing cross-database parent, got %A" other
 
                     insertRows store "parent_db" "parents" None [ [ VInt 1L ] ] |> ignore
@@ -2655,7 +2655,7 @@ let tests =
                     | Error error -> failtestf "expected ALTER TABLE to succeed, got %A" error
 
                     match insertRows store "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] with
-                    | Error(ForeignKeyParentMissing "fk_cross_parent") -> ()
+                    | Error(ForeignKeyParentMissing(_, _, { Name = "fk_cross_parent" })) -> ()
                     | other -> failtestf "expected the altered constraint to be enforced, got %A" other
 
                 testCase "ALTER TABLE rejects existing rows without a qualified parent"
@@ -2677,7 +2677,7 @@ let tests =
                           OnUpdate = None }
 
                     match alterTable store "child_db" "children" [ AddForeignKey foreignKey ] with
-                    | Error(ForeignKeyParentMissing "fk_cross_parent") -> ()
+                    | Error(ForeignKeyParentMissing(_, _, { Name = "fk_cross_parent" })) -> ()
                     | other -> failtestf "expected the existing orphan to reject ALTER TABLE, got %A" other
 
                     Expect.isEmpty store.Catalog.["child_db"].["children"].ForeignKeys "failed constraint stays private"
@@ -2914,8 +2914,8 @@ let tests =
                     let store = withDeptEmployees None
 
                     match insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 999L; VString "alice" ] ] with
-                    | Error(ForeignKeyParentMissing "fk_dept") ->
-                        let code, _ = toMySqlError (ForeignKeyParentMissing "fk_dept")
+                    | Error(ForeignKeyParentMissing(_, _, { Name = "fk_dept" }) as error) ->
+                        let code, _ = toMySqlError error
                         Expect.equal code 1452 "MySQL error code"
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
@@ -2944,7 +2944,7 @@ let tests =
                     let updater (row: Value[]) = Ok [| row.[0]; VInt 999L; row.[2] |]
 
                     match updateRows store defaultDatabase "employees" None (fun _ -> Ok true) updater with
-                    | Error(ForeignKeyParentMissing "fk_dept") -> ()
+                    | Error(ForeignKeyParentMissing(_, _, { Name = "fk_dept" })) -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
                 testCase "upsertRows' insert branch (no collision) checks foreign keys"
@@ -2953,7 +2953,7 @@ let tests =
                     let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
 
                     match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 999L; VString "alice" ] ] prepareRow applyUpdate false with
-                    | Error(ForeignKeyParentMissing "fk_dept") -> ()
+                    | Error(ForeignKeyParentMissing(_, _, { Name = "fk_dept" })) -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
                 testCase "upsertRows' update branch (ON DUPLICATE KEY UPDATE) checks foreign keys"
@@ -2970,7 +2970,7 @@ let tests =
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok [| existing.[0]; VInt 999L; existing.[2] |]
 
                     match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ] prepareRow applyUpdate false with
-                    | Error(ForeignKeyParentMissing "fk_dept") -> ()
+                    | Error(ForeignKeyParentMissing(_, _, { Name = "fk_dept" })) -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
                 testCase "DELETE of a parent row with children and no ON DELETE clause returns error 1451 (RESTRICT default)"

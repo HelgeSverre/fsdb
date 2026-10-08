@@ -1,0 +1,820 @@
+{
+  "mysql_version": "8.4.11",
+  "innodb_buffer_pool_size": "64M",
+  "innodb_redo_log_capacity": "64M",
+  "fsdb_base_revision": "85bf01cd",
+  "fsdb_dirty": true,
+  "comparison": "Statement errors, SQLSTATE, diagnostic rows, and selected table contents; affected-row metadata is covered separately by the wire contract.",
+  "cases": [
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "insert",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "INSERT INTO child VALUES(2,2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "UPDATE child SET n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "ignore-insert",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "INSERT IGNORE INTO child VALUES(2,2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": false,
+      "name": "ignore-update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "UPDATE IGNORE child SET n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "replace",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "REPLACE INTO child VALUES(1,2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "upsert",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "INSERT INTO child VALUES(1,2) ON DUPLICATE KEY UPDATE n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "insert-select",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "INSERT INTO child SELECT 2,2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1451,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "parent-delete",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "DELETE FROM parent",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1451,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "parent-update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "UPDATE parent SET n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE RESTRICT ON UPDATE RESTRICT)\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE RESTRICT ON UPDATE RESTRICT)\n",
+      "matches": true,
+      "name": "action-RESTRICT",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n) ON DELETE RESTRICT ON UPDATE RESTRICT)",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "matches": true,
+      "name": "action-NO ACTION",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n) ON DELETE NO ACTION ON UPDATE NO ACTION)",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE CASCADE ON UPDATE CASCADE)\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE CASCADE ON UPDATE CASCADE)\n",
+      "matches": true,
+      "name": "action-CASCADE",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n) ON DELETE CASCADE ON UPDATE CASCADE)",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE SET NULL ON UPDATE SET NULL)\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON DELETE SET NULL ON UPDATE SET NULL)\n",
+      "matches": true,
+      "name": "action-SET NULL",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n) ON DELETE SET NULL ON UPDATE SET NULL)",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`a`, `b`) REFERENCES `parent` (`a`, `b`))\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`a`, `b`) REFERENCES `parent` (`a`, `b`))\n",
+      "matches": true,
+      "name": "composite",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(a INT,b INT,PRIMARY KEY(a,b))",
+        "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a,b) REFERENCES parent(a,b))",
+        "INSERT INTO child VALUES(1,2)",
+        "SHOW WARNINGS",
+        "INSERT INTO child VALUES(1,NULL)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`odd.child`, CONSTRAINT `Odd``.Fk` FOREIGN KEY (`n`) REFERENCES `odd.parent` (`Odd``.Column`))\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`odd.child`, CONSTRAINT `Odd``.Fk` FOREIGN KEY (`n`) REFERENCES `odd.parent` (`Odd``.Column`))\n",
+      "matches": true,
+      "name": "quoted",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE `Odd.Parent`(`Odd``.Column` INT PRIMARY KEY)",
+        "CREATE TABLE `Odd.Child`(n INT,CONSTRAINT `Odd``.Fk` FOREIGN KEY(n) REFERENCES `Odd.Parent`(`Odd``.Column`))",
+        "INSERT INTO `Odd.Child` VALUES(2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "missing-parent",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "INSERT INTO child VALUES(2,2)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "id\tn\n1\t1\n2\tNULL\n",
+      "errors": [],
+      "expected": "id\tn\n1\t1\n2\tNULL\n",
+      "matches": true,
+      "name": "missing-parent-null",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "INSERT INTO child VALUES(2,NULL)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "missing-parent-update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET n=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n",
+      "matches": true,
+      "name": "missing-parent-unchanged",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET id=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `fk_other`.`parent` (`n`))\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `fk_other`.`parent` (`n`))\n",
+      "matches": true,
+      "name": "cross-schema",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE DATABASE IF NOT EXISTS fk_other",
+        "DROP TABLE IF EXISTS fk_other.parent",
+        "CREATE TABLE fk_other.parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES fk_other.parent(n))",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\n",
+      "matches": true,
+      "name": "self",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT INTO child VALUES(1,2)",
+        "SHOW WARNINGS",
+        "INSERT INTO child VALUES(1,1)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n3\tNULL\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n3\tNULL\n",
+      "matches": true,
+      "name": "missing-parent-ignore",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "INSERT IGNORE INTO child VALUES(2,2),(3,NULL)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "id\tn\tpayload\n1\t1\t7\n",
+      "errors": [],
+      "expected": "id\tn\tpayload\n1\t1\t7\n",
+      "matches": true,
+      "name": "missing-parent-nonkey",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "ALTER TABLE child ADD payload INT",
+        "SET foreign_key_checks=0",
+        "DROP TABLE parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET payload=7",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "id\tn\tpayload\n1\t1\t7\n",
+      "errors": [],
+      "expected": "id\tn\tpayload\n1\t1\t7\n",
+      "matches": true,
+      "name": "orphan-nonkey",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "ALTER TABLE child ADD payload INT",
+        "SET foreign_key_checks=0",
+        "DELETE FROM parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET payload=7",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'probe.child' doesn't exist\n",
+      "errors": [
+        {
+          "Item1": 3734,
+          "Item2": "HY000"
+        },
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.child' doesn't exist\n",
+      "matches": true,
+      "name": "missing-column",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "SET foreign_key_checks=0",
+        "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(absent))",
+        "SET foreign_key_checks=1",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `parent_n_foreign` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `child_ibfk_1` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n",
+      "matches": false,
+      "name": "unnamed",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(n INT,FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO child VALUES(2)",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`odd.child`, CONSTRAINT `Odd``.Fk` FOREIGN KEY (`n`) REFERENCES `odd.parent` (`n`))\n",
+      "errors": [
+        {
+          "Item1": 1451,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`odd.child`, CONSTRAINT `Odd``.Fk` FOREIGN KEY (`n`) REFERENCES `odd.parent` (`n`))\n",
+      "matches": true,
+      "name": "quoted-parent",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE `Odd.Parent`(n INT PRIMARY KEY)",
+        "CREATE TABLE `Odd.Child`(n INT,CONSTRAINT `Odd``.Fk` FOREIGN KEY(n) REFERENCES `Odd.Parent`(n))",
+        "INSERT INTO `Odd.Parent` VALUES(1)",
+        "INSERT INTO `Odd.Child` VALUES(1)",
+        "DELETE FROM `Odd.Parent`",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "id\tn\tpayload\n1\t1\t7\n",
+      "errors": [],
+      "expected": "id\tn\tpayload\n1\t1\t7\n",
+      "matches": true,
+      "name": "orphan-covering-False",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,payload INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1,0)",
+        "SET foreign_key_checks=0",
+        "DELETE FROM parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET payload=7",
+        "SHOW WARNINGS",
+        "SELECT * FROM child"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\tpayload\n1\t1\t0\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\tpayload\n1\t1\t0\n",
+      "matches": true,
+      "name": "orphan-covering-True",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,payload INT,KEY cover(n,payload),CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1,0)",
+        "SET foreign_key_checks=0",
+        "DELETE FROM parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET payload=7",
+        "SHOW WARNINGS",
+        "SELECT * FROM child"
+      ]
+    },
+    {
+      "actual": "id\tn\n1\t1\n",
+      "errors": [],
+      "expected": "id\tn\n1\t1\n",
+      "matches": true,
+      "name": "orphan-noop",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1)",
+        "INSERT INTO child VALUES(1,1)",
+        "SET foreign_key_checks=0",
+        "DELETE FROM parent",
+        "SET foreign_key_checks=1",
+        "UPDATE child SET n=n",
+        "SHOW WARNINGS",
+        "SELECT * FROM child"
+      ]
+    },
+    {
+      "actual": "n\tp\n1\t1\n2\t1\n3\t3\n",
+      "errors": [],
+      "expected": "n\tp\n1\t1\n2\t1\n3\t3\n",
+      "matches": true,
+      "name": "self-multi",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,3)",
+        "SELECT * FROM child ORDER BY n"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\nn\tp\n3\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`p`) REFERENCES `child` (`n`))\nn\tp\n3\t3\n",
+      "matches": true,
+      "name": "self-ignore",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT IGNORE INTO child VALUES(1,2),(2,1),(3,3)",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY n"
+      ]
+    },
+    {
+      "actual": "n\tp\n1\t1\n",
+      "errors": [],
+      "expected": "n\tp\n1\t1\n",
+      "matches": true,
+      "name": "self-replace",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "REPLACE INTO child VALUES(1,1)",
+        "SELECT * FROM child"
+      ]
+    },
+    {
+      "actual": "n\tp\n1\t1\n",
+      "errors": [],
+      "expected": "n\tp\n1\t1\n",
+      "matches": true,
+      "name": "self-upsert",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT INTO child VALUES(1,1) ON DUPLICATE KEY UPDATE p=VALUES(p)",
+        "SELECT * FROM child"
+      ]
+    },
+    {
+      "actual": "n\tp\n2\t2\n",
+      "errors": [],
+      "expected": "n\tp\n2\t2\n",
+      "matches": true,
+      "name": "self-update",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))",
+        "INSERT INTO child VALUES(1,NULL)",
+        "UPDATE child SET n=2,p=2",
+        "SHOW WARNINGS",
+        "SELECT * FROM child"
+      ]
+    }
+  ]
+}

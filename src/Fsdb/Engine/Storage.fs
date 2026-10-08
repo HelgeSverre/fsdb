@@ -76,7 +76,7 @@ type StorageError =
     | ForeignKeyRestrict of database: string * table: string * foreignKey: ForeignKeyDef
     /// `INSERT`/`UPDATE` of a child row whose foreign key columns don't
     /// match any row in the referenced table.
-    | ForeignKeyParentMissing of fkName: string
+    | ForeignKeyParentMissing of database: string * table: string * foreignKey: ForeignKeyDef
     /// A temporal column declared a fractional-seconds precision above 6
     /// (`DATETIME(7)`) — MySQL's 1426, which names the offending column.
     | PrecisionTooBig of column: string * precision: int
@@ -96,6 +96,23 @@ type StorageError =
     /// Guarded at the storage layer (like `SystemSchemaAccess`) so every
     /// executor path — DML, DROP, TRUNCATE, ALTER — is covered at once.
     | VirtualTableReadOnly of name: string
+
+let private foreignKeyFailureDetails (database: string) (table: string) (foreignKey: ForeignKeyDef) =
+    let quote (name: string) = "`" + name.Replace("`", "``") + "`"
+    let objectName (name: string) = quote (name.ToLowerInvariant())
+    let columns = List.map quote >> String.concat ", "
+    let parent =
+        match foreignKey.RefDatabase with
+        | Some parentDatabase when not (parentDatabase.Equals(database, StringComparison.OrdinalIgnoreCase)) ->
+            objectName parentDatabase + "." + objectName foreignKey.RefTable
+        | _ -> objectName foreignKey.RefTable
+    let action clause =
+        Option.filter (fun (action: string) -> not (action.Equals("NO ACTION", StringComparison.OrdinalIgnoreCase)))
+        >> Option.map (fun action -> " " + clause + " " + action)
+        >> Option.defaultValue ""
+    sprintf "(%s.%s, CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s%s)"
+        (objectName database) (objectName table) (quote foreignKey.Name) (columns foreignKey.Columns)
+        parent (columns foreignKey.RefColumns) (action "ON DELETE" foreignKey.OnDelete) (action "ON UPDATE" foreignKey.OnUpdate)
 
 /// MySQL error code + message for a `StorageError`, ready for the wire
 /// protocol's ERR packet.
@@ -121,20 +138,9 @@ let toMySqlError (err: StorageError) : int * string =
     | DuplicateKey(table, keyName, value) ->
         1062, sprintf "Duplicate entry '%s' for key '%s.%s'" value (table.ToLowerInvariant()) keyName
     | ForeignKeyRestrict(database, table, foreignKey) ->
-        let quote (name: string) = "`" + name.Replace("`", "``") + "`"
-        let columns = List.map quote >> String.concat ", "
-        let parent =
-            match foreignKey.RefDatabase with
-            | Some parentDatabase when not (parentDatabase.Equals(database, StringComparison.OrdinalIgnoreCase)) ->
-                quote parentDatabase + "." + quote foreignKey.RefTable
-            | _ -> quote foreignKey.RefTable
-        let action clause = Option.map (fun action -> " " + clause + " " + action) >> Option.defaultValue ""
-        1451,
-        sprintf "Cannot delete or update a parent row: a foreign key constraint fails (%s.%s, CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s%s)"
-            (quote database) (quote table) (quote foreignKey.Name) (columns foreignKey.Columns)
-            parent (columns foreignKey.RefColumns) (action "ON DELETE" foreignKey.OnDelete) (action "ON UPDATE" foreignKey.OnUpdate)
-    | ForeignKeyParentMissing fkName ->
-        1452, sprintf "Cannot add or update a child row: a foreign key constraint fails (`%s`)" fkName
+        1451, "Cannot delete or update a parent row: a foreign key constraint fails " + foreignKeyFailureDetails database table foreignKey
+    | ForeignKeyParentMissing(database, table, foreignKey) ->
+        1452, "Cannot add or update a child row: a foreign key constraint fails " + foreignKeyFailureDetails database table foreignKey
     | PrecisionTooBig(column, precision) ->
         1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 6." precision column
     | GeneratedColumnAssignment(column, table) ->
@@ -5776,15 +5782,6 @@ let tryEqualityLookup
     tableAt store dbName tableName
     |> Option.bind (fun table -> tryEqualityLookupInTable store table columnName literal)
 
-/// Verifies every foreign key `fks` (a child table's own `ForeignKeys`) has
-/// a matching parent row for `row`'s values, per MySQL's MATCH SIMPLE
-/// semantics: a foreign key with any `NULL` column doesn't need a parent at
-/// all. Malformed FK metadata (a column name that no longer resolves, e.g.
-/// after a `DROP COLUMN` that didn't also drop the FK) or a since-dropped
-/// referenced table/column is treated as "not enforceable" rather than
-/// blocking every write — `information_schema` can still show the stale FK,
-/// same as MySQL leaves a dangling constraint visible after `DROP TABLE ...
-/// FOREIGN_KEY_CHECKS=0`.
 let private foreignKeyDatabase childDatabase (foreignKey: ForeignKeyDef) =
     foreignKey.RefDatabase |> Option.defaultValue childDatabase
 
@@ -5873,24 +5870,22 @@ let private retargetForeignKeys
                                 foreignKey) }))
 
 let private tryForeignKeyParent (catalog: Catalog) (childDatabase: string) (childDb: Database) (foreignKey: ForeignKeyDef) =
-    let parentDatabase = foreignKeyDatabase childDatabase foreignKey
+    let parent = referencedTableAddress childDatabase foreignKey
 
-    if String.Equals(parentDatabase, childDatabase, StringComparison.OrdinalIgnoreCase) then
-        Map.tryFind (normalizeTableName foreignKey.RefTable) childDb
+    if String.Equals(parent.Database, childDatabase, StringComparison.OrdinalIgnoreCase) then
+        Map.tryFind parent.Table childDb
     else
-        catalog
-        |> tryCatalogDatabase parentDatabase
-        |> Option.bind (Map.tryFind (normalizeTableName foreignKey.RefTable))
+        tryCatalogTable parent catalog
 
 let private checkFkParent
     (catalog: Catalog)
     (childDatabase: string)
     (childDb: Database)
-    (childColumns: ColumnDef list)
+    (child: Table)
     (row: Value[])
     (fk: ForeignKeyDef)
     : Result<unit, StorageError> =
-    match fk.Columns |> traverse (resolveColumn childColumns) with
+    match fk.Columns |> traverse (resolveColumn child.Columns) with
     | Error _ -> Ok()
     | Ok idxs ->
         let values = idxs |> List.map (fun i -> row.[i])
@@ -5899,39 +5894,62 @@ let private checkFkParent
             Ok()
         else
             match tryForeignKeyParent catalog childDatabase childDb fk with
-            | None -> Ok()
+            | None -> Error(ForeignKeyParentMissing(childDatabase, child.OriginalName, fk))
             | Some parent ->
                 match fk.RefColumns |> traverse (resolveColumn parent.Columns) with
                 | Error _ -> Ok()
                 | Ok refIdxs ->
-                    // The hash-index fast path when the parent's referenced
-                    // key is itself PK/UNIQUE (always true for a real FK).
-                    // `parentUniqueIndex` is keyed by `encodeConstraintKey`
-                    // over full parent rows at the columns' *absolute*
-                    // positions, so the compact `values` have to sit at
-                    // `refIdxs` of a full-width probe row — encoding a bare
-                    // `[| values |]` throws for any referenced key column past
-                    // position 0. Falls back to the full scan only for
-                    // stale/malformed FK metadata.
+                    // Key encoding uses absolute column positions, so the probe
+                    // must have the parent's full row width.
+                    let probeRow = Array.create parent.Columns.Length VNull
+                    List.iter2 (fun i value -> probeRow.[i] <- value) refIdxs values
+                    let parentKey = encodeConstraintKey parent.Columns refIdxs probeRow
+                    let referencesCandidate =
+                        referencedTableAddress childDatabase fk = tableAddress childDatabase child.OriginalName
+                        && parentKey = encodeConstraintKey parent.Columns refIdxs row
                     let found =
-                        match parentUniqueIndex parent refIdxs with
-                        | Some index ->
-                            let probeRow = Array.create (List.length parent.Columns) VNull
-                            List.iter2 (fun i v -> probeRow.[i] <- v) refIdxs values
-                            encodeConstraintKey parent.Columns refIdxs probeRow |> Option.map index.ContainsKey |> Option.defaultValue false
-                        | None -> parent.RowsArray |> Seq.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
+                        referencesCandidate
+                        || match parentUniqueIndex parent refIdxs with
+                           | Some index -> parentKey |> Option.exists index.ContainsKey
+                           | None -> parent.RowsArray |> Seq.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
 
-                    if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
+                    if found then Ok() else Error(ForeignKeyParentMissing(childDatabase, child.OriginalName, fk))
+
+let private foreignKeyIndexColumns (table: Table) (foreignKey: ForeignKeyDef) =
+    let supportsForeignKey (index: IndexDef) =
+        let prefix = index.KeyColumns |> List.truncate foreignKey.Columns.Length
+        index.Kind = BTree
+        && sameLength prefix foreignKey.Columns
+        && List.forall2 (fun (key: IndexColumn) name ->
+            key.PrefixLength.IsNone && key.Transform.IsNone
+            && String.Equals(key.Name, name, StringComparison.OrdinalIgnoreCase)) prefix foreignKey.Columns
+    table.Indexes
+    |> List.tryFind supportsForeignKey
+    |> Option.map _.Columns
+    |> Option.defaultValue foreignKey.Columns
 
 let private checkFkParents
     (catalog: Catalog)
     (childDatabase: string)
     (childDb: Database)
-    (childColumns: ColumnDef list)
-    (fks: ForeignKeyDef list)
+    (child: Table)
+    (previous: Value[] option)
     (row: Value[])
     : Result<unit, StorageError> =
-    fks |> traverse (checkFkParent catalog childDatabase childDb childColumns row) |> Result.map ignore
+    let requiresCheck foreignKey =
+        match previous with
+        | None -> true
+        | Some before ->
+            // InnoDB rechecks a reference when its index record changes.
+            primaryKeyColumns child @ foreignKeyIndexColumns child foreignKey
+            |> List.exists (fun name ->
+                match resolveColumn child.Columns name with
+                | Ok index -> before.[index] <> row.[index]
+                | Error _ -> false)
+    child.ForeignKeys
+    |> List.filter requiresCheck
+    |> traverse (checkFkParent catalog childDatabase childDb child row)
+    |> Result.map ignore
 
 /// As `withDatabase`, one level deeper: look up `tableName` within the
 /// database too, and re-key the updated table back under its normalized
@@ -7492,7 +7510,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 let addedForeignKeys = actions |> List.choose (function AddForeignKey foreignKey -> Some foreignKey | _ -> None)
                 let checkAddedForeignKeys (candidate: Table) row =
                     if store.ForeignKeyChecks then
-                        addedForeignKeys |> traverse (checkFkParent catalog dbName db candidate.Columns row) |> Result.map ignore
+                        addedForeignKeys |> traverse (checkFkParent catalog dbName db candidate row) |> Result.map ignore
                     else Ok()
 
                 let step acc action =
@@ -7505,7 +7523,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                                 |> Result.bind (fun () ->
                                     if store.ForeignKeyChecks then
                                         tbl.RowsArray
-                                        |> Seq.map (fun row -> checkFkParent catalog dbName db tbl.Columns row foreignKey)
+                                        |> Seq.map (fun row -> checkFkParent catalog dbName db tbl row foreignKey)
                                         |> Seq.tryPick (function
                                             | Error error -> Some error
                                             | Ok() -> None)
@@ -8009,17 +8027,11 @@ let private insertCore
     let firstReserved, reservedAutoNext =
         reserveAutoIncrementRange store dbName table.OriginalName table.NextAutoId reservationCount
 
-    // Parent keys are immutable for the duration of this INSERT (except a
-    // self-FK, see below). Build one compact lookup per ordinary FK instead
-    // of rescanning its parent table for every child candidate. A
-    // non-self FK whose target columns are a full PK/UNIQUE group reuses
-    // that group's already-maintained `UniqueIndex` (`parentUniqueIndex`) —
-    // O(log n) per probe, no per-statement scan of the parent at all.
-    // A self-FK still needs `constraintLookup`'s mutable `HashSet`: its
-    // parent IS this table, and a multi-row INSERT must see rows accepted
-    // earlier in the same statement, which only the mutable path extends
-    // as it goes (the `Add` loop below). The same HashSet fallback covers
-    // an FK whose target columns aren't a full PK/UNIQUE group.
+    let childAddress = tableAddress dbName tableKey
+    let isSelfReference foreignKey = referencedTableAddress dbName foreignKey = childAddress
+
+    // Self-references need a mutable lookup to see earlier accepted rows.
+    // Other references reuse the parent's maintained unique index when available.
     let foreignKeyLookups =
         if not checkFks then
             Map.empty
@@ -8033,9 +8045,7 @@ let private insertCore
                 | Ok childIndices, Some parent ->
                     match foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
                     | Ok parentIndices ->
-                        let isSelf =
-                            String.Equals(foreignKeyDatabase dbName foreignKey, dbName, StringComparison.OrdinalIgnoreCase)
-                            && normalizeTableName foreignKey.RefTable = tableKey
+                        let isSelf = isSelfReference foreignKey
                         let selfParentIndices = if isSelf then Some parentIndices else None
 
                         let source =
@@ -8054,8 +8064,7 @@ let private insertCore
     let hasUnacceleratedSelfForeignKey =
         table.ForeignKeys
         |> List.exists (fun foreignKey ->
-            String.Equals(foreignKeyDatabase dbName foreignKey, dbName, StringComparison.OrdinalIgnoreCase)
-            && normalizeTableName foreignKey.RefTable = tableKey
+            isSelfReference foreignKey
             && not (foreignKeyLookups |> Map.containsKey foreignKey.Name))
 
     let rows = table.RowsArray.ToBuilder()
@@ -8113,12 +8122,16 @@ let private insertCore
 
                                         let checkOneForeignKey (foreignKey: ForeignKeyDef) =
                                             match Map.tryFind foreignKey.Name foreignKeyLookups with
-                                            | Some(childIndices, _, parentKeys) ->
+                                            | Some(childIndices, selfParentIndices, parentKeys) ->
                                                 match encodeConstraintKey table.Columns childIndices candidate with
                                                 | None -> Ok()
-                                                | Some key when parentKeySourceContains key parentKeys -> Ok()
-                                                | Some _ -> Error(ForeignKeyParentMissing foreignKey.Name)
-                                            | None -> checkFkParent catalog dbName dbView table.Columns candidate foreignKey
+                                                | Some key when
+                                                    parentKeySourceContains key parentKeys
+                                                    || (selfParentIndices
+                                                        |> Option.bind (fun indices -> encodeConstraintKey table.Columns indices candidate)
+                                                        |> Option.contains key) -> Ok()
+                                                | Some _ -> Error(ForeignKeyParentMissing(dbName, table.OriginalName, foreignKey))
+                                            | None -> checkFkParent catalog dbName dbView table candidate foreignKey
 
                                         table.ForeignKeys
                                         |> traverse checkOneForeignKey
@@ -8344,7 +8357,7 @@ let internal insertPreparedCandidate
 
                     let candidateDatabase = Map.add tableKey candidateTable db
 
-                    checkFkParents catalog dbName candidateDatabase table.Columns table.ForeignKeys prepared.Values
+                    checkFkParents catalog dbName candidateDatabase table None prepared.Values
                     |> Result.map (fun () ->
                         let updated = publishRows table candidateTable
                         setCatalogDatabase dbName (Map.add tableKey updated db) catalog, prepared.Values)))
@@ -8853,7 +8866,7 @@ and private upsertRowsInTable
                                                     (if checkFks then
                                                          let currentDatabase = tryCatalogDatabase dbName state.Catalog |> Option.get
 
-                                                         checkFkParents state.Catalog dbName currentDatabase table.Columns table.ForeignKeys applied
+                                                         checkFkParents state.Catalog dbName currentDatabase table (Some existing) applied
                                                          |> Result.bind (fun () ->
                                                              cascadeUpdateVisited
                                                                  true
@@ -8909,7 +8922,7 @@ and private upsertRowsInTable
                                             | candidate, None ->
                                                 (if checkFks then
                                                      let currentDatabase = tryCatalogDatabase dbName state.Catalog |> Option.get
-                                                     checkFkParents state.Catalog dbName currentDatabase table.Columns table.ForeignKeys candidate
+                                                     checkFkParents state.Catalog dbName currentDatabase table None candidate
                                                  else
                                                      Ok())
                                                 |> Result.map (fun () ->
@@ -9337,7 +9350,7 @@ let private replaceRowsCore
 
                                                 (if store.ForeignKeyChecks then
                                                      let currentDatabase = tryCatalogDatabase address.Database updatedCatalog |> Option.get
-                                                     checkFkParents updatedCatalog dbName currentDatabase target.Columns target.ForeignKeys candidate
+                                                     checkFkParents updatedCatalog dbName currentDatabase target None candidate
                                                  else
                                                      Ok())
                                                 |> Result.map (fun () ->
@@ -10127,7 +10140,7 @@ let updateRows
                                                 (if checkFks then
                                                      let currentDatabase = tryCatalogDatabase address.Database cascadeCatalog |> Option.get
 
-                                                     checkFkParents cascadeCatalog dbName currentDatabase table.Columns table.ForeignKeys newRow
+                                                     checkFkParents cascadeCatalog dbName currentDatabase table (Some row) newRow
                                                      |> Result.bind (fun () ->
                                                          cascadeUpdateVisited true cascadeCatalog visited cascaded address table.Columns row newRow)
                                                  else

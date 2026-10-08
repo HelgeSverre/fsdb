@@ -6152,6 +6152,150 @@ module ContractCatalog =
                        | _ -> operation
                    yield step |> Contract.on name |]
 
+    let private foreignKeyRowValidation =
+        let cases =
+            [
+              "insert", Some(7, 1452, "23000"),
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1)"
+                    "INSERT INTO child VALUES(1,1)"
+                    "INSERT INTO child VALUES(2,2)"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id" ]
+              "missing-parent", Some(10, 1452, "23000"),
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1)"
+                    "INSERT INTO child VALUES(1,1)"
+                    "SET foreign_key_checks=0"
+                    "DROP TABLE parent"
+                    "SET foreign_key_checks=1"
+                    "INSERT INTO child VALUES(2,2)"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id" ]
+              "missing-parent-null", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1)"
+                    "INSERT INTO child VALUES(1,1)"
+                    "SET foreign_key_checks=0"
+                    "DROP TABLE parent"
+                    "SET foreign_key_checks=1"
+                    "INSERT INTO child VALUES(2,NULL)"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id" ]
+              "missing-parent-nonkey", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1)"
+                    "INSERT INTO child VALUES(1,1)"
+                    "ALTER TABLE child ADD payload INT"
+                    "SET foreign_key_checks=0"
+                    "DROP TABLE parent"
+                    "SET foreign_key_checks=1"
+                    "UPDATE child SET payload=7"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id" ]
+              "orphan-covering-False", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,payload INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1)"
+                    "INSERT INTO child VALUES(1,1,0)"
+                    "SET foreign_key_checks=0"
+                    "DELETE FROM parent"
+                    "SET foreign_key_checks=1"
+                    "UPDATE child SET payload=7"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child" ]
+              "orphan-covering-True", Some(10, 1452, "23000"),
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,payload INT,KEY cover(n,payload),CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1)"
+                    "INSERT INTO child VALUES(1,1,0)"
+                    "SET foreign_key_checks=0"
+                    "DELETE FROM parent"
+                    "SET foreign_key_checks=1"
+                    "UPDATE child SET payload=7"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child" ]
+              "orphan-noop", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1)"
+                    "INSERT INTO child VALUES(1,1)"
+                    "SET foreign_key_checks=0"
+                    "DELETE FROM parent"
+                    "SET foreign_key_checks=1"
+                    "UPDATE child SET n=n"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child" ]
+              "self-multi", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,3)"
+                    "SELECT * FROM child ORDER BY n" ]
+              "self-ignore", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))"
+                    "INSERT IGNORE INTO child VALUES(1,2),(2,1),(3,3)"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY n" ]
+              "self-replace", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))"
+                    "REPLACE INTO child VALUES(1,1)"
+                    "SELECT * FROM child" ]
+              "self-upsert", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))"
+                    "INSERT INTO child VALUES(1,1) ON DUPLICATE KEY UPDATE p=VALUES(p)"
+                    "SELECT * FROM child" ]
+              "self-update", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,`Odd.Child`,`Odd.Parent`"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))"
+                    "INSERT INTO child VALUES(1,NULL)"
+                    "UPDATE child SET n=2,p=2"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child" ]
+            ]
+        { Name = "foreign-key-row-validation"
+          Setup = [||]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [| "SET foreign_key_checks=0"; "DROP TABLE IF EXISTS child,parent"; "SET foreign_key_checks=1" |]
+          Coverage = [| "statement:insert", [| "text-differential" |]; "statement:update", [| "text-differential" |]; "statement:replace", [| "text-differential" |] |] }
+
     let private alterDefaultBinlogSafety =
         let expressionCases =
             [
@@ -7507,6 +7651,7 @@ module ContractCatalog =
            hexExpressionConversion
            expressionAssignmentWarnings
            quotedTableNames
+           foreignKeyRowValidation
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings

@@ -25,7 +25,98 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "Quoted table targets retain dots and escaped backticks"
+        [ testCase "Self-referencing writes can use their own candidate as parent"
+          <| fun _ ->
+              for sql, expected in
+                  [ "INSERT INTO child VALUES(1,1),(2,1),(3,3)", [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "3" ] ]
+                    "REPLACE INTO child VALUES(1,1)", [ [ Some "1"; Some "1" ] ]
+                    "INSERT INTO child VALUES(1,1) ON DUPLICATE KEY UPDATE p=VALUES(p)", [ [ Some "1"; Some "1" ] ] ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))"
+                  let session, result = handle session sql
+                  Expect.isNone (errorInfo result) sql
+                  let _, result = handle session "SELECT * FROM child ORDER BY n"
+                  Expect.equal result (ResultSet([ "n"; "p" ], expected)) "accepted self references"
+
+          testCase "Ignored self-referencing rows cannot supply parent keys"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))"
+              let session, result = handle session "INSERT IGNORE INTO child VALUES(1,2),(2,1),(3,3)"
+              Expect.equal result (Affected 1UL) "only the valid self-reference survives"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1452; 1452 ] "both orphan rows warn"
+              let _, result = handle session "SELECT * FROM child"
+              Expect.equal result (ResultSet([ "n"; "p" ], [ [ Some "3"; Some "3" ] ])) "failed candidates do not enter the lookup"
+
+          testCase "Self-referencing updates can introduce their own parent key"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE child(n INT PRIMARY KEY,p INT,CONSTRAINT fk FOREIGN KEY(p) REFERENCES child(n))"
+              let session, _ = handle session "INSERT INTO child VALUES(1,NULL)"
+              let session, result = handle session "UPDATE child SET n=2,p=2"
+              Expect.equal result (Affected 1UL) "candidate satisfies its own reference"
+              let _, result = handle session "SELECT * FROM child"
+              Expect.equal result (ResultSet([ "n"; "p" ], [ [ Some "2"; Some "2" ] ])) "updated row"
+
+          testCase "Child foreign key diagnostics retain the complete constraint"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE parent(n INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TABLE child(n INT,CONSTRAINT Fk_Child FOREIGN KEY(n) REFERENCES parent(n) ON DELETE NO ACTION ON UPDATE CASCADE)"
+              let session, result = handle session "INSERT INTO child VALUES(2)"
+              let message = "Cannot add or update a child row: a foreign key constraint fails (`fsdb`.`child`, CONSTRAINT `Fk_Child` FOREIGN KEY (`n`) REFERENCES `parent` (`n`) ON UPDATE CASCADE)"
+              Expect.equal (errorInfo result |> Option.map (fun error -> error.Code, error.State, error.Message))
+                  (Some(1452, "23000", message)) "full child-side error"
+              Expect.equal (session.Diagnostics |> List.map _.Message) [ message ] "SHOW WARNINGS uses the same error"
+
+          testCase "Missing foreign key parents reject new references after checks are enabled"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,payload INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1)"
+                    "INSERT INTO child VALUES(1,1,0)"
+                    "SET foreign_key_checks=0"
+                    "DROP TABLE parent"
+                    "SET foreign_key_checks=1" ] do
+                  Expect.isNone (run sql |> errorInfo) sql
+              Expect.equal (run "INSERT INTO child VALUES(2,2,0)" |> errorInfo |> Option.map _.Code) (Some 1452) "new reference rejected"
+              Expect.equal (run "UPDATE child SET id=2" |> errorInfo |> Option.map _.Code) (Some 1452) "primary-key change rechecks the reference"
+              Expect.equal (run "UPDATE child SET payload=7") (Affected 1UL) "unrelated payload can change"
+              Expect.equal (run "INSERT IGNORE INTO child VALUES(2,2,0),(3,NULL,0)") (Affected 1UL) "ignored orphan does not block the NULL reference"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1452 ] "ignored orphan warning"
+              Expect.equal (run "SELECT id FROM child ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ] ])) "rejected rows are not published"
+
+          testCase "Foreign key revalidation follows changes to its supporting index"
+          <| fun _ ->
+              for indexed in [ false; true ] do
+                  let mutable session = create 1 (Fsdb.Storage.create ())
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  let index = if indexed then ",KEY cover(n,payload)" else ""
+                  for sql in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                        "CREATE TABLE child(id INT PRIMARY KEY,n INT,payload INT" + index + ",CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                        "INSERT INTO parent VALUES(1)"
+                        "INSERT INTO child VALUES(1,1,0)"
+                        "SET foreign_key_checks=0"
+                        "DELETE FROM parent"
+                        "SET foreign_key_checks=1" ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  let result = run "UPDATE child SET payload=7"
+                  if indexed then Expect.equal (errorInfo result |> Option.map _.Code) (Some 1452) "supporting index changed"
+                  else Expect.equal result (Affected 1UL) "foreign key index unchanged"
+                  Expect.equal (run "UPDATE child SET n=n") (Affected 0UL) "no-op does not revalidate an existing orphan"
+
+          testCase "Quoted table targets retain dots and escaped backticks"
           <| fun _ ->
               for name in [ "Odd.Table"; "Odd`.Table" ] do
                   let quoted = "`" + name.Replace("`", "``") + "`"
