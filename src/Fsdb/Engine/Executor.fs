@@ -20768,17 +20768,18 @@ let rec executeAs
                             let updateDiagnostics generated result =
                                 let conditions =
                                     match errorInfo result with
-                                    | Some error -> generated @ [ Diagnostics.fromError error ]
+                                    | Some error ->
+                                        let level = if StoredProgram.isWarning error then Diagnostics.Warning else Diagnostics.Error
+                                        generated @ [ Diagnostics.fromErrorWithLevel level error ]
                                     | None -> generated
 
                                 currentDiagnostics.Value <-
                                     { Conditions = conditions
                                       RowCount =
                                         match result with
+                                        | Failure error when StoredProgram.isWarning error -> 0L
                                         | Affected count -> int64 count
                                         | _ -> -1L }
-
-                                generated |> List.iter Diagnostics.record
 
                             let runSessionStatement statement =
                                 match triggerSessionExecutor.Value, currentVariableContext () with
@@ -21007,7 +21008,15 @@ let rec executeAs
                                 | Ok information ->
                                     match StoredProgram.signalError scope.Conditions original condition information with
                                     | Error(code, message) -> complete (Err(code, message))
-                                    | Ok error -> handleCondition scope [] error
+                                    | Ok error ->
+                                        // An explicit RESIGNAL condition adds to the original condition;
+                                        // a bare RESIGNAL or SET-only form replaces it.
+                                        match original, condition with
+                                        | Some original, Some _ ->
+                                            let level = if StoredProgram.isWarning original then Diagnostics.Warning else Diagnostics.Error
+                                            Diagnostics.record (Diagnostics.fromErrorWithLevel level original)
+                                        | _ -> ()
+                                        complete (ErrInfo error)
 
                             and runDiagnostics scope diagnostics =
                                 let snapshot =
@@ -21074,10 +21083,13 @@ let rec executeAs
                                     StoredProgram.diagnosticsForError currentDiagnostics.Value error
 
                                 match StoredProgram.tryHandler scope.Conditions scope.Statements error with
-                                | None when StoredProgram.isWarning error ->
-                                    Diagnostics.record (Diagnostics.fromWarning error)
-                                    runStatements scope rest
-                                | None -> complete (ErrInfo error)
+                                | None when StoredProgram.isWarning error -> runStatements scope rest
+                                | None ->
+                                    // The terminal error travels in QueryResult; only its preceding
+                                    // statement conditions need to be exported separately.
+                                    let conditions = currentDiagnostics.Value.Conditions
+                                    conditions |> List.truncate (conditions.Length - 1) |> List.iter Diagnostics.record
+                                    complete (ErrInfo error)
                                 | Some(action, body) ->
                                     let handlerScope =
                                         { scope with
@@ -21085,7 +21097,7 @@ let rec executeAs
                                             ActiveError = Some error
                                             StackedDiagnostics = Some currentDiagnostics.Value }
 
-                                    match runStatement handlerScope body with
+                                    match runStatements handlerScope [ body ] with
                                     | (Err _ as result), _ -> complete result
                                     | result, StoredProgram.Flow.Complete ->
                                         match action with
@@ -21118,8 +21130,11 @@ let rec executeAs
                                         trigger.CollationConnection
 
                                 Storage.withExecutionSettings runStore settings (fun () ->
-                                    match runBody oldRow newRow (statements, account) with
-                                    | Err _ as e -> Some e
+                                    let result, conditions = Diagnostics.capture (fun () -> runBody oldRow newRow (statements, account))
+                                    match result with
+                                    | Err _ ->
+                                        conditions |> List.iter Diagnostics.record
+                                        Some result
                                     | _ -> None))))
 
     let triggerResult = function
@@ -21151,14 +21166,16 @@ let rec executeAs
                     triggerResult (fireTriggers runStore db table After TriggerDelete after deleted)
                     |> Result.map (fun () -> count))
         candidates
-        |> traverse (fun (rowId, _) ->
+        |> traverse (fun (rowId, selectedRow) ->
             tableSnapshot runStore db table
             |> Result.mapError storageErr
             |> Result.bind (fun current ->
                 match current.RowsArray.TryFind rowId with
                 | None -> Ok 0
                 | Some row ->
-                    predicate row |> Result.mapError storageErr |> Result.bind (fun selected ->
+                    let selected =
+                        if obj.ReferenceEquals(row, selectedRow) then Ok true else predicate row
+                    selected |> Result.mapError storageErr |> Result.bind (fun selected ->
                         if selected then deleteRow rowId row else Ok 0)))
         |> Result.map List.sum
 

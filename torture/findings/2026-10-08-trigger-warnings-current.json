@@ -1,0 +1,1021 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "e15d5eec",
+  "fsdb_dirty": true,
+  "comparison": "rendered result rows; SQLSTATEs are separately asserted by unit and wire contracts",
+  "cases": [
+    {
+      "actual": "id\n2\n3\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "before-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "before-warning-ignore",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "DELETE IGNORE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "after-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent AFTER DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\n1\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\n1\n",
+      "matches": true,
+      "name": "warning-then-set",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; SET @seen=1; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nn\n0\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\nn\n0\nseen\nNULL\n",
+      "matches": true,
+      "name": "conversion-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(CAST('x' AS SIGNED))",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "warning-then-fatal",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "conversion-then-fatal",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN INSERT INTO audit VALUES(CAST('x' AS SIGNED)); SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1146\tTable 'absent' doesn't exist\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1146,
+          "Item2": "42S02"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1146\tTable 'probe.absent' doesn't exist\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": false,
+      "name": "warning-then-missing-table",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; INSERT INTO absent VALUES(1); END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "warning-prior-row",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN IF OLD.id=1 THEN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; ELSE SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END IF; END",
+        "DELETE IGNORE FROM parent ORDER BY id",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\n1642\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\n1642\n",
+      "matches": true,
+      "name": "warning-get-diagnostics",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; GET DIAGNOSTICS CONDITION 1 @seen=MYSQL_ERRNO; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\n1\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\n1\n",
+      "matches": true,
+      "name": "handled-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE CONTINUE HANDLER FOR SQLWARNING SET @seen=1; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nid\n2\n3\nseen\nNULL\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nid\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "outer-conversion-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "DELETE IGNORE FROM parent WHERE id=1 AND '1x'",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n2\nseen\nNULL\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n2\nseen\nNULL\n",
+      "matches": true,
+      "name": "outer-fk-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "DELETE IGNORE FROM parent ORDER BY id",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "prior-trigger-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER first_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "procedure-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE PROCEDURE warned_proc() SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW CALL warned_proc()",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1054\tUnknown column 'missing' in 'field list'\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1054,
+          "Item2": "42S22"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1054\tUnknown column 'missing' in 'field list'\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "conversion-and-error",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(CAST('x' AS SIGNED)),(missing)",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '1' for key 'PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1062,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nError\t1062\tDuplicate entry '1' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
+      "matches": false,
+      "name": "warning-in-failed-insert",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "ALTER TABLE audit ADD PRIMARY KEY(n)",
+        "INSERT INTO audit VALUES(1)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(CAST('x' AS SIGNED)),(1)",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1062\tDuplicate entry '0' for key 'PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1062,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nError\t1062\tDuplicate entry '0' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
+      "matches": false,
+      "name": "warning-in-failed-update",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "ALTER TABLE audit ADD PRIMARY KEY(n)",
+        "INSERT INTO audit VALUES(1),(2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW UPDATE audit SET n=CAST('x' AS SIGNED)",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1642\tnoticed\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1642\tnoticed\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "warning-resignal-error",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING RESIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '1' for key 'PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1062,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '1' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\nseen\nNULL\n",
+      "matches": false,
+      "name": "boolean-warning-in-failed-insert",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "ALTER TABLE audit ADD PRIMARY KEY(n)",
+        "INSERT INTO audit VALUES(1)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(IF('1x',0,0)),(1)",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '0' for key 'PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1062,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\nError\t1062\tDuplicate entry '0' for key 'audit.PRIMARY'\nid\n1\n2\n3\nn\n1\n2\nseen\nNULL\n",
+      "matches": false,
+      "name": "boolean-warning-in-failed-update",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "ALTER TABLE audit ADD PRIMARY KEY(n)",
+        "INSERT INTO audit VALUES(1),(2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW UPDATE audit SET n=IF('1x',0,0)",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "warning-resignal-unchanged",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING RESIGNAL; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "warning-resignal-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING RESIGNAL SQLSTATE '01001' SET MESSAGE_TEXT='changed'; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tfatal\nError\t1644\tchanged\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45002"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1644\tfatal\nError\t1644\tchanged\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "error-resignal-error",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL SQLSTATE '45002' SET MESSAGE_TEXT='changed'; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "error-resignal-unchanged",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tchanged\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1644\tchanged\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "error-resignal-message",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL SET MESSAGE_TEXT='changed'; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tfatal\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1644\tfatal\nError\t1644\tfatal\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "error-resignal-same-state",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL SQLSTATE '45001'; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t60001\toriginal\nError\t1644\toriginal\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45002"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t60001\toriginal\nError\t1644\toriginal\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "resignal-keeps-custom-information",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL SQLSTATE '45002'; SIGNAL SQLSTATE '45001' SET MYSQL_ERRNO=60001,MESSAGE_TEXT='original'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1642\tnoticed\nError\t1644\tnoticed\nid\n1\n2\n3\nseen\nNULL\n",
+      "errors": [
+        {
+          "Item1": 1644,
+          "Item2": "45001"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1642\tnoticed\nError\t1644\tnoticed\nid\n1\n2\n3\nseen\nNULL\n",
+      "matches": true,
+      "name": "warning-resignal-default-message",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING RESIGNAL SQLSTATE '45001'; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n1\n2\n3\n4\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n1\n2\n3\n4\nseen\nNULL\n",
+      "matches": true,
+      "name": "insert-before-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE INSERT ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "INSERT INTO parent VALUES(4)",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n1\n2\n3\n4\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n1\n2\n3\n4\nseen\nNULL\n",
+      "matches": true,
+      "name": "insert-after-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent AFTER INSERT ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "INSERT INTO parent VALUES(4)",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\n4\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\n4\nseen\nNULL\n",
+      "matches": true,
+      "name": "update-before-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE UPDATE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "UPDATE parent SET id=4 WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\n4\nseen\nNULL\n",
+      "errors": [],
+      "expected": "id\n2\n3\n4\nseen\nNULL\n",
+      "matches": true,
+      "name": "update-after-warning",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent AFTER UPDATE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'",
+        "UPDATE parent SET id=4 WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    },
+    {
+      "actual": "id\n2\n3\nseen\n0\n",
+      "errors": [],
+      "expected": "id\n2\n3\nseen\n0\n",
+      "matches": true,
+      "name": "warning-get-row-count",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS child",
+        "DROP TABLE IF EXISTS parent",
+        "DROP TABLE IF EXISTS audit",
+        "DROP PROCEDURE IF EXISTS warned_proc",
+        "SET sql_mode=''",
+        "SET @seen=NULL",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))",
+        "CREATE TABLE audit(n INT)",
+        "INSERT INTO parent VALUES(1),(2),(3)",
+        "INSERT INTO child VALUES(1,2)",
+        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; GET DIAGNOSTICS @seen=ROW_COUNT; END",
+        "DELETE FROM parent WHERE id=1",
+        "SHOW WARNINGS",
+        "SELECT id FROM parent ORDER BY id",
+        "SELECT n FROM audit ORDER BY n",
+        "SELECT @seen AS seen"
+      ]
+    }
+  ]
+}

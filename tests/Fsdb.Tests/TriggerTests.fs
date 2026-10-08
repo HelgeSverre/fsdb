@@ -148,6 +148,75 @@ let tests =
               Expect.equal (handle next "SELECT id FROM parent ORDER BY id" |> snd)
                   (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ])) "trigger failure preserves parents"
 
+          testCase "Trigger warnings stay local while outer deletion warnings survive" <| fun _ ->
+              for sql, expected in
+                  [ "DELETE FROM parent WHERE id=1", []
+                    "DELETE IGNORE FROM parent WHERE id=1 AND '1x'", [ 1292 ]
+                    "DELETE IGNORE FROM parent ORDER BY id", [ 1451 ] ] do
+                  let session = deleteIgnoreSession () |> fun session ->
+                      step session "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                  let next, result = handle session sql
+                  expectOk result sql
+                  Expect.equal (next.Diagnostics |> List.map _.Code) expected "only outer-statement warnings survive"
+
+          testCase "A fatal trigger exposes only its failing statement conditions" <| fun _ ->
+              for body in
+                  [ "SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "INSERT INTO audit VALUES(CAST('x' AS SIGNED))" ] do
+                  let session =
+                      [ "SET sql_mode=''"; "CREATE TABLE audit(n INT)"
+                        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN " + body + "; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END" ]
+                      |> List.fold step (deleteIgnoreSession ())
+                  let next, result = handle session "DELETE FROM parent WHERE id=1"
+                  match result with
+                  | Err(1644, "fatal") -> ()
+                  | other -> failtestf "Expected fatal trigger, got %A" other
+                  Expect.equal (next.Diagnostics |> List.map (fun condition -> condition.Code, condition.State))
+                      [ 1644, "45001" ] "earlier trigger statements do not leak warnings"
+
+          testCase "Trigger warnings remain available to local GET DIAGNOSTICS" <| fun _ ->
+              for request, expected in [ "CONDITION 1 @seen=MYSQL_ERRNO", "1642"; "@seen=ROW_COUNT", "0" ] do
+                  let session = deleteIgnoreSession () |> fun session ->
+                      step session ("CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; GET DIAGNOSTICS " + request + "; END")
+                  let next, result = handle session "DELETE FROM parent WHERE id=1"
+                  expectOk result "successful warned trigger"
+                  Expect.isEmpty next.Diagnostics "trigger warning is local"
+                  Expect.equal (handle next "SELECT @seen AS seen" |> snd)
+                      (ResultSet([ "seen" ], [ [ Some expected ] ])) "local diagnostics retain warning information"
+
+          testCase "Warnings from a failing trigger statement accompany its error" <| fun _ ->
+              let session =
+                  [ "SET sql_mode=''"; "CREATE TABLE audit(n INT PRIMARY KEY)"; "INSERT INTO audit VALUES(1)"
+                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(IF('1x',0,0)),(1)" ]
+                  |> List.fold step (deleteIgnoreSession ())
+              let next, result = handle session "DELETE FROM parent WHERE id=1"
+              match result with
+              | Err(1062, _) -> ()
+              | other -> failtestf "Expected duplicate-key failure, got %A" other
+              Expect.equal (next.Diagnostics |> List.map _.Code) [ 1292; 1062 ] "the failing statement retains its conversion warning"
+
+          testCase "Warning RESIGNAL stays nonfatal and local to the trigger" <| fun _ ->
+              for resignal in [ "RESIGNAL"; "RESIGNAL SQLSTATE '01001' SET MESSAGE_TEXT='changed'" ] do
+                  let session = deleteIgnoreSession () |> fun session ->
+                      step session ("CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING " + resignal + "; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END")
+                  let next, result = handle session "DELETE FROM parent WHERE id=1"
+                  Expect.equal result (Affected 1UL) "warning remains nonfatal"
+                  Expect.isEmpty next.Diagnostics "successful trigger restores outer diagnostics"
+
+          testCase "Explicit RESIGNAL appends a condition while SET-only replaces it" <| fun _ ->
+              for resignal, expected in
+                  [ "RESIGNAL SQLSTATE '45002'", [ "45001", "original"; "45002", "original" ]
+                    "RESIGNAL SQLSTATE '45001'", [ "45001", "original"; "45001", "original" ]
+                    "RESIGNAL SET MESSAGE_TEXT='changed'", [ "45001", "changed" ] ] do
+                  let session = deleteIgnoreSession () |> fun session ->
+                      step session ("CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION " + resignal + "; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='original'; END")
+                  let next, result = handle session "DELETE FROM parent WHERE id=1"
+                  match result with
+                  | Err(1644, _) -> ()
+                  | other -> failtestf "Expected signaled error, got %A" other
+                  Expect.equal (next.Diagnostics |> List.map (fun condition -> condition.State, condition.Message))
+                      expected "native condition order and retained message"
+
           testCase "BEFORE INSERT can assign NEW values"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

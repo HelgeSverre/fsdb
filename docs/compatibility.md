@@ -560,8 +560,16 @@ effects survive an ignored blocker; AFTER runs only for successful deletions.
 Fatal trigger errors preserve their SQLSTATE and roll back earlier deletions and
 trigger writes. These behaviors cover ordered single-table and single-target
 joined forms; explicit rollback and ON DELETE CASCADE are also tested.
-Warning-class SIGNAL lifetime and broader ignored-error combinations remain
-bounded by the [delete evidence](../torture/findings/2026-10-08-delete-ignore.md).
+The [delete evidence](../torture/findings/2026-10-08-delete-ignore.md) bounds broader
+ignored-error combinations.
+
+Successful triggers keep their warnings local while preserving outer-statement
+warnings. Local GET DIAGNOSTICS can inspect those conditions, including the zero
+ROW_COUNT of a warning SIGNAL. Unhandled failures export conditions from the
+failing statement. Explicit RESIGNAL SQLSTATE adds a condition and retains the
+original message unless overridden; bare and SET-only RESIGNAL replace the
+active condition. See the [native trigger diagnostics evidence](../torture/findings/2026-10-08-trigger-warnings.md)
+for coverage and remaining conversion/error-text differences.
 
 ## Server settings
 

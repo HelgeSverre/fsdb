@@ -1,7 +1,7 @@
 # DELETE IGNORE foreign-key and trigger behavior
 
-Status: audited foreign-key row skipping, detailed 1451 diagnostics, and fatal
-trigger handling implemented. Warning-class trigger lifetime remains open.
+Status: all maintained cases match, including foreign-key row skipping, detailed
+1451 diagnostics, fatal trigger handling, and local warning lifetimes.
 
 ## Evidence
 
@@ -11,8 +11,10 @@ The disposable native server uses a 64 MiB InnoDB buffer pool and redo capacity.
 The client continues after errors so diagnostics and final table state remain
 observable; the fixture separately checks error code and SQLSTATE.
 
-The current fsdb replay matches 13 scripts. Exact outputs are in
-`2026-10-08-delete-ignore-row-skipping.json`. Historical baselines remain in
+The current fsdb replay matches all 14 scripts. Exact outputs are in
+`2026-10-08-delete-ignore-warning-lifetimes.json`. The row-skipping implementation's
+13 matching scripts remain in `2026-10-08-delete-ignore-row-skipping.json`.
+Historical baselines remain in
 `2026-10-08-delete-ignore-baseline.json` and
 `2026-10-08-delete-ignore-trigger-current.json`; the latter records nine
 differences before row skipping was implemented.
@@ -56,10 +58,12 @@ message, including the referenced columns and declared actions.
 
 ## Remaining boundaries
 
-A warning-class SIGNAL remains visible after the trigger returns in fsdb,
-whereas MySQL clears it. This is the sole difference in the maintained 14-case
-replay. Other ignored-error classes and multi-target joined combinations need
-further native coverage; these results do not establish complete IGNORE parity.
+Successful triggers keep warning-class SIGNAL conditions local, preserving the
+outer statement's warnings. Local GET DIAGNOSTICS remains able to inspect the
+warning. [Expanded trigger diagnostics probes](2026-10-08-trigger-warnings.md)
+cover failing statements, handlers, RESIGNAL, and INSERT/UPDATE controls.
+Other ignored-error classes and multi-target joined combinations need further
+native coverage; these results do not establish complete IGNORE parity.
 
 The wire fixture also exposed an independent
 [ALTER ADD FOREIGN KEY affected-row count](2026-10-08-alter-foreign-key-count.md)
@@ -68,9 +72,9 @@ No failure is enrolled in the known-gap allowlist.
 
 ## Validation
 
-- `just check`: 3,118 tests passed, no build warnings or errors.
+- `just check`: 3,124 tests passed, no build warnings or errors.
 - The maintained native oracle passes all 14 scripts.
-- Full wire suite: 81 cases, 10,600 steps, zero differences. The ignored-delete
+- Full wire suite: 82 cases, 11,095 steps, zero differences. The ignored-delete
   contract covers affected counts, exact warning text, LIMIT, both joined forms,
   cascades, trigger ordering, explicit rollback, and a late fatal AFTER trigger.
-  Artifact: `torture/artifacts/runs/20261008T193223390-68910/contracts`.
+  Artifact: `torture/artifacts/runs/20261008T195250417-70218/contracts`.

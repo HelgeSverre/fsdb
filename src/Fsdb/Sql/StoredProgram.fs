@@ -336,7 +336,12 @@ let signalError
         | None, None -> Error(1645, "RESIGNAL when handler not active")
         | Some condition, _ ->
             match resolveCondition definitions condition with
-            | Some(SqlState state) -> Ok(defaultSignal state)
+            | Some(SqlState state) ->
+                let defaults = defaultSignal state
+                original
+                |> Option.map (fun original -> { original with State = state; Code = defaults.Code })
+                |> Option.defaultValue defaults
+                |> Ok
             | Some _ -> Error(1646, "SIGNAL/RESIGNAL can only use a CONDITION defined with SQLSTATE")
             | None ->
                 match condition with

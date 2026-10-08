@@ -6090,6 +6090,130 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS predicate_base"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:update", [| "text-differential" |]; "statement:delete", [| "text-differential" |] |] }
 
+    let private triggerWarningLifetimes =
+        let setup =
+            [ "DROP TABLE IF EXISTS child"
+              "DROP TABLE IF EXISTS parent"
+              "DROP TABLE IF EXISTS audit"
+              "DROP PROCEDURE IF EXISTS warned_proc"
+              "SET sql_mode=''"
+              "SET @seen=NULL"
+              "CREATE TABLE parent(id INT PRIMARY KEY)"
+              "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))"
+              "CREATE TABLE audit(n INT)"
+              "INSERT INTO parent VALUES(1),(2),(3)"
+              "INSERT INTO child VALUES(1,2)" ]
+        let observations =
+            [ "SHOW WARNINGS"; "SELECT id FROM parent ORDER BY id"
+              "SELECT n FROM audit ORDER BY n"; "SELECT @seen AS seen" ]
+        let cases =
+            [
+              "before-warning", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "DELETE FROM parent WHERE id=1" ]
+              "before-warning-ignore", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "DELETE IGNORE FROM parent WHERE id=1" ]
+              "after-warning", None,
+                  [ "CREATE TRIGGER guard_parent AFTER DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "DELETE FROM parent WHERE id=1" ]
+              "warning-then-set", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; SET @seen=1; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "conversion-warning", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(CAST('x' AS SIGNED))"
+                    "DELETE FROM parent WHERE id=1" ]
+              "warning-then-fatal", Some(1644, "45001"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "conversion-then-fatal", Some(1644, "45001"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN INSERT INTO audit VALUES(CAST('x' AS SIGNED)); SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "warning-prior-row", Some(1644, "45001"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN IF OLD.id=1 THEN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; ELSE SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END IF; END"
+                    "DELETE IGNORE FROM parent ORDER BY id" ]
+              "warning-get-diagnostics", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; GET DIAGNOSTICS CONDITION 1 @seen=MYSQL_ERRNO; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "handled-warning", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE CONTINUE HANDLER FOR SQLWARNING SET @seen=1; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "outer-conversion-warning", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "DELETE IGNORE FROM parent WHERE id=1 AND '1x'" ]
+              "outer-fk-warning", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "DELETE IGNORE FROM parent ORDER BY id" ]
+              "prior-trigger-warning", Some(1644, "45001"),
+                  [ "CREATE TRIGGER first_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'"
+                    "DELETE FROM parent WHERE id=1" ]
+              "procedure-warning", None,
+                  [ "CREATE PROCEDURE warned_proc() SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW CALL warned_proc()"
+                    "DELETE FROM parent WHERE id=1" ]
+              "conversion-and-error", Some(1054, "42S22"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(CAST('x' AS SIGNED)),(missing)"
+                    "DELETE FROM parent WHERE id=1" ]
+              "warning-resignal-error", Some(1644, "45001"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING RESIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "warning-resignal-unchanged", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING RESIGNAL; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "warning-resignal-warning", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING RESIGNAL SQLSTATE '01001' SET MESSAGE_TEXT='changed'; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "error-resignal-error", Some(1644, "45002"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL SQLSTATE '45002' SET MESSAGE_TEXT='changed'; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "error-resignal-unchanged", Some(1644, "45001"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "error-resignal-message", Some(1644, "45001"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL SET MESSAGE_TEXT='changed'; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "error-resignal-same-state", Some(1644, "45001"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL SQLSTATE '45001'; SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT='fatal'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "resignal-keeps-custom-information", Some(1644, "45002"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION RESIGNAL SQLSTATE '45002'; SIGNAL SQLSTATE '45001' SET MYSQL_ERRNO=60001,MESSAGE_TEXT='original'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "warning-resignal-default-message", Some(1644, "45001"),
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN DECLARE EXIT HANDLER FOR SQLWARNING RESIGNAL SQLSTATE '45001'; SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; END"
+                    "DELETE FROM parent WHERE id=1" ]
+              "insert-before-warning", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE INSERT ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "INSERT INTO parent VALUES(4)" ]
+              "insert-after-warning", None,
+                  [ "CREATE TRIGGER guard_parent AFTER INSERT ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "INSERT INTO parent VALUES(4)" ]
+              "update-before-warning", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE UPDATE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "UPDATE parent SET id=4 WHERE id=1" ]
+              "update-after-warning", None,
+                  [ "CREATE TRIGGER guard_parent AFTER UPDATE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'"
+                    "UPDATE parent SET id=4 WHERE id=1" ]
+              "warning-get-row-count", None,
+                  [ "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW BEGIN SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed'; GET DIAGNOSTICS @seen=ROW_COUNT; END"
+                    "DELETE FROM parent WHERE id=1" ]
+            ]
+        { Name = "trigger-warning-lifetimes"
+          Setup = [||]
+          Steps =
+            [| for name, error, statements in cases do
+                   for index, statement in List.indexed (setup @ statements @ observations) do
+                       let stepName = sprintf "%s-%d" name index
+                       if statement.StartsWith("SHOW", StringComparison.Ordinal) || statement.StartsWith("SELECT", StringComparison.Ordinal) then
+                           Contract.query stepName statement
+                       else
+                           let step = Contract.execute stepName statement
+                           match error with
+                           | Some(code, state) when statement.StartsWith("DELETE", StringComparison.Ordinal) -> step |> Contract.fails code state
+                           | _ -> step |]
+          Cleanup = [| "DROP TABLE IF EXISTS child"; "DROP TABLE IF EXISTS parent"; "DROP TABLE IF EXISTS audit"; "DROP PROCEDURE IF EXISTS warned_proc"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:delete", [| "text-differential" |]; "statement:insert", [| "text-differential" |]; "statement:update", [| "text-differential" |] |] }
+
     let private deleteIgnoreForeignKeys =
         let setup foreignKeyAction =
             [ "DROP TABLE IF EXISTS audit"; "DROP TABLE IF EXISTS child"; "DROP TABLE IF EXISTS parent"
@@ -6153,7 +6277,8 @@ module ContractCatalog =
           Coverage = [| "statement:delete", [| "text-differential" |] |] }
 
     let all =
-        [| deleteIgnoreForeignKeys
+        [| triggerWarningLifetimes
+           deleteIgnoreForeignKeys
            bareTriggerConditions
            mutationConversion
            predicateConversion
