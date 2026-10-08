@@ -5746,8 +5746,31 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE s"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
+    let private joinHintLifecycle =
+        { Name = "join-hint-lifecycle"
+          Setup = [| "CREATE TABLE t(n INT)"; "INSERT INTO t VALUES(1)" |]
+          Steps =
+            [| Contract.query "source-free" "SELECT /*+ JOIN_ORDER(x) JOIN_SUFFIX(y) */ 1 AS n"
+               Contract.query "source-free-warnings" "SHOW WARNINGS"
+               Contract.query "dual" "SELECT /*+ JOIN_PREFIX(x) JOIN_PREFIX(y) */ 1 AS n FROM DUAL"
+               Contract.query "dual-warnings" "SHOW WARNINGS"
+               Contract.prepare "prepare" "join-hint" Query
+                   "SELECT /*+ JOIN_ORDER(x) BKA(y) */ n FROM t" [||]
+               Contract.query "prepare-warnings" "SHOW WARNINGS"
+               Contract.invoke "execute" "join-hint" OracleSuccess
+               Contract.query "execute-warnings" "SHOW WARNINGS"
+               Contract.invoke "execute-again" "join-hint" OracleSuccess
+               Contract.query "execute-again-warnings" "SHOW WARNINGS"
+               Contract.close "close" "join-hint"
+               Contract.execute "empty-table" "DELETE FROM t"
+               Contract.query "empty-query" "SELECT /*+ JOIN_ORDER(x) */ n FROM t"
+               Contract.query "empty-query-warnings" "SHOW WARNINGS" |]
+          Cleanup = [| "DROP TABLE IF EXISTS t" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
+
     let all =
-        [| cteHintSyntax
+        [| joinHintLifecycle
+           cteHintSyntax
            cteHintInstances
            mutationHintContext
            settingHintContext

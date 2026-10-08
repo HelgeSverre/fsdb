@@ -303,6 +303,31 @@ let tests =
               | Err(1305, _) -> ()
               | other -> failtestf "expected missing routine: %A" other
 
+          testCase "Join hint targets warn during execution rather than preparation" <| fun _ ->
+              [ "SELECT /*+ JOIN_ORDER(x) */ 1 AS n;SHOW WARNINGS", "n\n1\n"
+                "SELECT /*+ JOIN_PREFIX(x) JOIN_SUFFIX(y) */ 1 AS n;SHOW WARNINGS", "n\n1\n"
+                "SELECT /*+ JOIN_PREFIX(x) JOIN_PREFIX(y) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_PREFIX( `y`) is ignored as conflicting/duplicated\n"
+                "SELECT /*+ JOIN_FIXED_ORDER() JOIN_ORDER(x) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_ORDER( `x`) is ignored as conflicting/duplicated\n"
+                "SELECT /*+ JOIN_ORDER(@missing x) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3127\tQuery block name `missing` is not found for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x@missing) */ 1 AS n;SHOW WARNINGS", "n\n1\n"
+                "SELECT /*+ BKA(x) NO_INDEX(x i) JOIN_ORDER(y) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `x`@`select#1` for NO_INDEX hint\nWarning\t3128\tUnresolved name `x`@`select#1` `i` for NO_INDEX hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM DUAL;SHOW WARNINGS", "n\n1\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM (SELECT 1 AS n) d;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ (SELECT n FROM t) AS n;SHOW WARNINGS", "n\n1\n"
+                "SELECT (SELECT /*+ JOIN_ORDER(x) */ 1) AS n FROM t;SHOW WARNINGS", "n\n1\n"
+                "WITH c AS (SELECT /*+ JOIN_ORDER(x) */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1;SHOW WARNINGS", "n\n1\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n UNION ALL SELECT 2;SHOW WARNINGS", "n\n1\n2\n"
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ 1 AS n';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS", "n\n1\n"
+                "SELECT /*+ QB_NAME(q) JOIN_PREFIX(@q x) JOIN_SUFFIX(x@q) */ 1 AS n;SHOW WARNINGS", "n\n1\n"
+                "SET sql_mode='ANSI_QUOTES';SELECT /*+ JOIN_PREFIX(x) JOIN_PREFIX(y) JOIN_ORDER(@missing x) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_PREFIX( \"y\") is ignored as conflicting/duplicated\nWarning\t3127\tQuery block name \"missing\" is not found for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE n<0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 1=1;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t';SHOW WARNINGS;SELECT 'after_prepare' AS phase;EXECUTE s;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nphase\nafter_prepare\nn\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ n FROM t';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS;EXECUTE s;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\nn\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "DELETE FROM t;SELECT /*+ JOIN_ORDER(x) */ n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n" ]
+              |> verifyHintCasesWith [ "CREATE TEMPORARY TABLE t(n INT)"; "INSERT INTO t VALUES(1)" ]
+
           testCase "Hint diagnostics quote identifiers using the session SQL mode" <| fun _ ->
               [ "SET sql_mode='';SELECT /*+ QB_NAME(q) QB_NAME(r) BKA(t) NO_BKA(t) NO_INDEX(t i) BKA(@missing t) */ 1;SHOW WARNINGS", "1\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\nWarning\t3126\tHint NO_BKA(`t` ) is ignored as conflicting/duplicated\nWarning\t3127\tQuery block name `missing` is not found for BKA hint\nWarning\t3128\tUnresolved name `t`@`q` for BKA hint\nWarning\t3128\tUnresolved name `t`@`q` for NO_INDEX hint\nWarning\t3128\tUnresolved name `t`@`q` `i` for NO_INDEX hint\n"
                 "SET sql_mode='ANSI_QUOTES';SELECT /*+ QB_NAME(q) QB_NAME(r) BKA(t) NO_BKA(t) NO_INDEX(t i) BKA(@missing t) */ 1;SHOW WARNINGS", "1\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(\"r\") is ignored as conflicting/duplicated\nWarning\t3126\tHint NO_BKA(\"t\" ) is ignored as conflicting/duplicated\nWarning\t3127\tQuery block name \"missing\" is not found for BKA hint\nWarning\t3128\tUnresolved name \"t\"@\"q\" for BKA hint\nWarning\t3128\tUnresolved name \"t\"@\"q\" for NO_INDEX hint\nWarning\t3128\tUnresolved name \"t\"@\"q\" \"i\" for NO_INDEX hint\n" ]

@@ -9,9 +9,10 @@ open Fsdb.Sql
 type Diagnostics =
     { Context: (int * int * string) list
       Hints: OptimizerHints.Hint list option
-      Resolution: (int * string) list }
+      Resolution: (int * string) list
+      Execution: (int * string) list }
 
-let empty = { Context = []; Hints = None; Resolution = [] }
+let empty = { Context = []; Hints = None; Resolution = []; Execution = [] }
 let private sameName left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
 let private quoteIdentifier ansiQuotes (name: string) =
     let delimiter = if ansiQuotes then "\"" else "`"
@@ -108,16 +109,27 @@ let private targetWarnings quote indexesFor (block: Block) =
             if not (indexExists source index) then
                 for _, name in hints |> List.distinctBy (snd >> family) |> List.sortBy (snd >> hintOrder) do
                     unresolved name (tableLabel table + " " + quote index)
-    for target in block.Targets do
-        match target with
-        | JoinTargets(kind, targets) ->
-            targets |> List.tryFind (fun (table, requested) ->
-                let sameBlock = requested |> Option.forall (fun name -> sameName name (blockName block) || sameName name (systemBlockName block))
-                not sameBlock || (sourceFor table).IsNone)
-            |> Option.iter (fun (table, requested) ->
-                unresolved (OptimizerHints.joinOrderName kind) (quote table + blockSuffix quote requested))
-        | _ -> ()
     List.ofSeq warnings
+
+let private joinTargetWarnings quote (block: Block) =
+    let sources =
+        block.Sources |> List.collect FromItem.leaves
+        |> List.filter (function
+            | FromTable table when table.Database.IsNone && sameName table.Table "dual" -> false
+            | _ -> true)
+    // MySQL skips join-order target resolution when the query block has no table sources.
+    if sources.IsEmpty then []
+    else
+        block.Targets |> Seq.choose (function
+            | JoinTargets(kind, targets) ->
+                targets |> List.tryFind (fun (table, requested) ->
+                    let sameBlock = requested |> Option.forall (fun name -> sameName name (blockName block) || sameName name (systemBlockName block))
+                    let found = sources |> List.exists (fun source -> FromItem.tryQualifier source |> Option.exists (sameName table))
+                    not sameBlock || not found)
+                |> Option.map (fun (table, requested) ->
+                    3128, sprintf "Unresolved name %s for %s hint" (quote table + blockSuffix quote requested) (OptimizerHints.joinOrderName kind))
+            | _ -> None)
+        |> List.ofSeq
 
 let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: OptimizerHints.Hint list) (indexesFor: TableRef -> string list option) =
     let quote = quoteIdentifier options.AnsiQuotes
@@ -238,4 +250,7 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                     | _ -> ()
                 let resolution =
                     scopes.Resolution |> List.collect (fun scope -> targetWarnings quote indexesFor blocks.[scope.Number])
-                { Context = List.ofSeq context; Hints = Some(contextHints |> List.map snd); Resolution = resolution }
+                let execution =
+                    scopes.Resolution |> List.collect (fun scope -> joinTargetWarnings quote blocks.[scope.Number])
+                { Context = List.ofSeq context; Hints = Some(contextHints |> List.map snd)
+                  Resolution = resolution; Execution = execution }
