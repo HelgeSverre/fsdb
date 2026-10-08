@@ -6917,6 +6917,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
     | Ok(), Ok() ->
 
     match action with
+    | AddColumn(column, _) when resolveColumn table.Columns column.Name |> Result.isOk ->
+        Error(ExpressionError(1060, sprintf "Duplicate column name '%s'" column.Name))
     | AddColumn(col, position) ->
         // Only actually needed to fill a row when there's at least one —
         // MySQL never evaluates (and so never errors on) a `NOT NULL`

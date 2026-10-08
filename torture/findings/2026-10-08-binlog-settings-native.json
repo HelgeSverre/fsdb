@@ -1,0 +1,288 @@
+{
+  "mysql_version": "8.4.11",
+  "buffer_pool_mib": 64,
+  "redo_mib": 64,
+  "cases": [
+    {
+      "name": "binlog_format-'ROW'",
+      "statements": [
+        "SET binlog_format='ROW'",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "binlog_format-'STATEMENT'",
+      "statements": [
+        "SET binlog_format='STATEMENT'",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nSTATEMENT\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "binlog_format-'MIXED'",
+      "statements": [
+        "SET binlog_format='MIXED'",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nMIXED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "binlog_format-0",
+      "statements": [
+        "SET binlog_format=0",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nMIXED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "binlog_format-1",
+      "statements": [
+        "SET binlog_format=1",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nSTATEMENT\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "binlog_format-2",
+      "statements": [
+        "SET binlog_format=2",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "binlog_format-3",
+      "statements": [
+        "SET binlog_format=3",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1231\tVariable 'binlog_format' can't be set to the value of '3'\nvalue\nROW\n",
+      "stderr": "ERROR 1231 (42000) at line 1: Variable 'binlog_format' can't be set to the value of '3'\n",
+      "errors": [
+        [
+          1231,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "binlog_format-NULL",
+      "statements": [
+        "SET binlog_format=NULL",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1231\tVariable 'binlog_format' can't be set to the value of 'NULL'\nvalue\nROW\n",
+      "stderr": "ERROR 1231 (42000) at line 1: Variable 'binlog_format' can't be set to the value of 'NULL'\n",
+      "errors": [
+        [
+          1231,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "binlog_format-DEFAULT",
+      "statements": [
+        "SET binlog_format=DEFAULT",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "sql_log_bin-0",
+      "statements": [
+        "SET sql_log_bin=0",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "value\n0\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "sql_log_bin-1",
+      "statements": [
+        "SET sql_log_bin=1",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "value\n1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "sql_log_bin-OFF",
+      "statements": [
+        "SET sql_log_bin=OFF",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "value\n0\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "sql_log_bin-ON",
+      "statements": [
+        "SET sql_log_bin=ON",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "value\n1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "sql_log_bin-TRUE",
+      "statements": [
+        "SET sql_log_bin=TRUE",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "value\n1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "sql_log_bin-FALSE",
+      "statements": [
+        "SET sql_log_bin=FALSE",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "value\n0\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "sql_log_bin-2",
+      "statements": [
+        "SET sql_log_bin=2",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of '2'\nvalue\n1\n",
+      "stderr": "ERROR 1231 (42000) at line 1: Variable 'sql_log_bin' can't be set to the value of '2'\n",
+      "errors": [
+        [
+          1231,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "sql_log_bin--1",
+      "statements": [
+        "SET sql_log_bin=-1",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of '-1'\nvalue\n1\n",
+      "stderr": "ERROR 1231 (42000) at line 1: Variable 'sql_log_bin' can't be set to the value of '-1'\n",
+      "errors": [
+        [
+          1231,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "sql_log_bin-NULL",
+      "statements": [
+        "SET sql_log_bin=NULL",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of 'NULL'\nvalue\n1\n",
+      "stderr": "ERROR 1231 (42000) at line 1: Variable 'sql_log_bin' can't be set to the value of 'NULL'\n",
+      "errors": [
+        [
+          1231,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "sql_log_bin-DEFAULT",
+      "statements": [
+        "SET sql_log_bin=DEFAULT",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ],
+      "stdout": "value\n1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "global-log",
+      "statements": [
+        "SET GLOBAL sql_log_bin=0",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1228\tVariable 'sql_log_bin' is a SESSION variable and can't be used with SET GLOBAL\n",
+      "stderr": "ERROR 1228 (HY000) at line 1: Variable 'sql_log_bin' is a SESSION variable and can't be used with SET GLOBAL\n",
+      "errors": [
+        [
+          1228,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "transaction-log",
+      "statements": [
+        "START TRANSACTION",
+        "SET sql_log_bin=0",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1694\tCannot modify @@session.sql_log_bin inside a transaction\n",
+      "stderr": "ERROR 1694 (HY000) at line 1: Cannot modify @@session.sql_log_bin inside a transaction\n",
+      "errors": [
+        [
+          1694,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "transaction-format",
+      "statements": [
+        "START TRANSACTION",
+        "SET binlog_format='STATEMENT'",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1679\tCannot modify @@session.binlog_format inside a transaction\n",
+      "stderr": "ERROR 1679 (HY000) at line 1: Cannot modify @@session.binlog_format inside a transaction\n",
+      "errors": [
+        [
+          1679,
+          "HY000"
+        ]
+      ]
+    }
+  ]
+}

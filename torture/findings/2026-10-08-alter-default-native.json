@@ -1,0 +1,1009 @@
+{
+  "mysql_version": "8.4.11",
+  "buffer_pool_mib": 64,
+  "redo_mib": 64,
+  "cases": [
+    {
+      "name": "rand-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "rand-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "seeded-rand-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND(1))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "seeded-rand-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND(1))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "uuid-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (UUID())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "uuid-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (UUID())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "uuid-short-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added BIGINT UNSIGNED DEFAULT (UUID_SHORT())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "uuid-short-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added BIGINT UNSIGNED DEFAULT (UUID_SHORT())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "now-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added DATETIME DEFAULT (NOW())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tdatetime\tYES\t\tnow()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "now-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DATETIME DEFAULT (NOW())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tdatetime\tYES\t\tnow()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "sysdate-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added DATETIME DEFAULT (SYSDATE())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "sysdate-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DATETIME DEFAULT (SYSDATE())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "unix-time-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added BIGINT DEFAULT (UNIX_TIMESTAMP())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tbigint\tYES\t\tunix_timestamp()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "unix-time-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added BIGINT DEFAULT (UNIX_TIMESTAMP())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tbigint\tYES\t\tunix_timestamp()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "connection-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added BIGINT DEFAULT (CONNECTION_ID())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tbigint\tYES\t\tconnection_id()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "connection-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added BIGINT DEFAULT (CONNECTION_ID())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tbigint\tYES\t\tconnection_id()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "user-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (USER())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "user-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (USER())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "database-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (DATABASE())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tvarchar(64)\tYES\t\tdatabase()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "database-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (DATABASE())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tvarchar(64)\tYES\t\tdatabase()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "absolute-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (ABS(-1))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tdouble\tYES\t\tabs(-(1))\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "absolute-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (ABS(-1))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tdouble\tYES\t\tabs(-(1))\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "unreached-rand-False",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (IF(0,RAND(),1))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "unreached-rand-True",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (IF(0,RAND(),1))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "binlog-off",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "SET sql_log_bin=0",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tdouble\tYES\t\trand()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "binlog-row",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "SET binlog_format='ROW'",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "binlog-statement",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "SET binlog_format='STATEMENT'",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\nadded\tdouble\tYES\t\trand()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "copy",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=COPY",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "inplace",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=INPLACE",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "instant",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=INSTANT",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "lock-none",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), LOCK=NONE",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "modify",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target MODIFY v DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\trand()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "set-default",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ALTER COLUMN v SET DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\trand()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "set-default-copy",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ALTER COLUMN v SET DEFAULT (RAND()), ALGORITHM=COPY",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\trand()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "create",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "CREATE TABLE created(id INT PRIMARY KEY,v DOUBLE DEFAULT (RAND()))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "existing-rand-copy",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ALTER COLUMN v SET DEFAULT (RAND())",
+        "ALTER TABLE target ADD COLUMN added INT, ALGORITHM=COPY",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Field\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\trand()\tDEFAULT_GENERATED\nadded\tint\tYES\t\tNULL\t\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "missing-table",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE missing ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "duplicate-column",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN v DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "invalid-default",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS created",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1),(2,2)",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (SLEEP(0)+RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t3770\tDefault value expression of column 'added' contains a disallowed function: sleep.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 3770 (HY000) at line 1: Default value expression of column 'added' contains a disallowed function: sleep.\n",
+      "errors": [
+        [
+          3770,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "random-bytes",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (HEX(RANDOM_BYTES(4)))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "version",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (VERSION())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t3770\tDefault value expression of column 'added' contains a disallowed function: version().\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 3770 (HY000) at line 1: Default value expression of column 'added' contains a disallowed function: version().\n",
+      "errors": [
+        [
+          3770,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "current-user",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (CURRENT_USER())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "session-user",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (SESSION_USER())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "system-user",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (SYSTEM_USER())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "found-rows",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (FOUND_ROWS())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1287\tFOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead.\nError\t3770\tDefault value expression of column 'added' contains a disallowed function: found_rows.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 3770 (HY000) at line 1: Default value expression of column 'added' contains a disallowed function: found_rows.\n",
+      "errors": [
+        [
+          3770,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "row-count",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (ROW_COUNT())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t3770\tDefault value expression of column 'added' contains a disallowed function: row_count.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 3770 (HY000) at line 1: Default value expression of column 'added' contains a disallowed function: row_count.\n",
+      "errors": [
+        [
+          3770,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "last-id",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (LAST_INSERT_ID())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t3770\tDefault value expression of column 'added' contains a disallowed function: last_insert_id.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 3770 (HY000) at line 1: Default value expression of column 'added' contains a disallowed function: last_insert_id.\n",
+      "errors": [
+        [
+          3770,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "mixed",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "SET binlog_format='MIXED'",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "statement-duplicate",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "SET binlog_format='STATEMENT'",
+        "ALTER TABLE target ADD COLUMN v DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nError\t1060\tDuplicate column name 'v'\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1060 (42S21) at line 1: Duplicate column name 'v'\n",
+      "errors": [
+        [
+          1060,
+          "42S21"
+        ]
+      ]
+    },
+    {
+      "name": "statement-missing",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "SET binlog_format='STATEMENT'",
+        "ALTER TABLE missing ADD COLUMN added DOUBLE DEFAULT (RAND())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nError\t1146\tTable 'probe.missing' doesn't exist\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1146 (42S02) at line 1: Table 'probe.missing' doesn't exist\n",
+      "errors": [
+        [
+          1146,
+          "42S02"
+        ]
+      ]
+    },
+    {
+      "name": "statement-inplace",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "SET binlog_format='STATEMENT'",
+        "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=INPLACE",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nError\t1845\tALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1845 (0A000) at line 1: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.\n",
+      "errors": [
+        [
+          1845,
+          "0A000"
+        ]
+      ]
+    },
+    {
+      "name": "multi-unsafe",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN a DOUBLE DEFAULT (RAND()), ADD COLUMN b VARCHAR(64) DEFAULT (UUID())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 1674 (HY000) at line 1: Statement is unsafe because it uses a system function that may return a different value on the replica.\n",
+      "errors": [
+        [
+          1674,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "invalid-later",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "ALTER TABLE target ADD COLUMN a DOUBLE DEFAULT (RAND()), ADD COLUMN b DOUBLE DEFAULT (SLEEP(0))",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t3770\tDefault value expression of column 'b' contains a disallowed function: sleep.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\n",
+      "stderr": "ERROR 3770 (HY000) at line 1: Default value expression of column 'b' contains a disallowed function: sleep.\n",
+      "errors": [
+        [
+          3770,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "statement-multi",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)",
+        "INSERT INTO target VALUES(1,1)",
+        "SET binlog_format='STATEMENT'",
+        "ALTER TABLE target ADD COLUMN a DOUBLE DEFAULT (RAND()), ADD COLUMN b VARCHAR(64) DEFAULT (UUID())",
+        "SHOW WARNINGS",
+        "SHOW COLUMNS FROM target"
+      ],
+      "stdout": "Level\tCode\tMessage\nWarning\t1674\tStatement is unsafe because it uses a system function that may return a different value on the replica.\nField\tType\tNull\tKey\tDefault\tExtra\nid\tint\tNO\tPRI\tNULL\t\nv\tdouble\tYES\t\tNULL\t\na\tdouble\tYES\t\trand()\tDEFAULT_GENERATED\nb\tvarchar(64)\tYES\t\tuuid()\tDEFAULT_GENERATED\n",
+      "stderr": "",
+      "errors": []
+    }
+  ]
+}

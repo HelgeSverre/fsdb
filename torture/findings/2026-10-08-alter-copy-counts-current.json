@@ -1,8 +1,8 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "7aea1124",
+  "fsdb_base_revision": "6b838d4b",
   "fsdb_dirty": true,
-  "comparison": "ROW_COUNT result rows, numeric error codes, and SQLSTATEs",
+  "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
   "cases": [
     {
       "actual": "affected\n0\n",
@@ -255,10 +255,15 @@
       ]
     },
     {
-      "actual": "affected\n3\n",
-      "errors": [],
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1674,
+          "Item2": "HY000"
+        }
+      ],
       "expected": "affected\n-1\n",
-      "matches": false,
+      "matches": true,
       "name": "add-expression-default",
       "statements": [
         "USE probe",
@@ -275,10 +280,15 @@
       ]
     },
     {
-      "actual": "affected\n3\n",
-      "errors": [],
+      "actual": "affected\n-1\n",
+      "errors": [
+        {
+          "Item1": 1674,
+          "Item2": "HY000"
+        }
+      ],
       "expected": "affected\n-1\n",
-      "matches": false,
+      "matches": true,
       "name": "add-expression-COPY",
       "statements": [
         "USE probe",
@@ -298,12 +308,12 @@
       "actual": "affected\n-1\n",
       "errors": [
         {
-          "Item1": 1845,
-          "Item2": "0A000"
+          "Item1": 1674,
+          "Item2": "HY000"
         }
       ],
       "expected": "affected\n-1\n",
-      "matches": false,
+      "matches": true,
       "name": "add-expression-INPLACE",
       "statements": [
         "USE probe",
@@ -323,12 +333,12 @@
       "actual": "affected\n-1\n",
       "errors": [
         {
-          "Item1": 1845,
-          "Item2": "0A000"
+          "Item1": 1674,
+          "Item2": "HY000"
         }
       ],
       "expected": "affected\n-1\n",
-      "matches": false,
+      "matches": true,
       "name": "add-expression-INSTANT",
       "statements": [
         "USE probe",

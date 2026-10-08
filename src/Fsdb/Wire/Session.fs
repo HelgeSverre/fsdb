@@ -52,6 +52,8 @@ let defaultVariables: Map<string, string option> =
           "version_comment", "fsdb"
           "version_compile_os", "osx"
           "sql_mode", SqlMode.defaultText
+          "binlog_format", "ROW"
+          "sql_log_bin", "1"
           "character_set_client", "utf8mb4"
           "character_set_connection", "utf8mb4"
           "character_set_results", "utf8mb4"

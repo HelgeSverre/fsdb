@@ -457,7 +457,14 @@ report zero. The count comes from the published candidate table, excluding
 deleted rows. VARCHAR widening respects its charset-dependent one-/two-byte
 length prefix, and same-charset conversion can remain INPLACE. See the
 [native ALTER count evidence](../torture/findings/2026-10-08-alter-copy-counts.md)
-for coverage and the remaining RAND default-expression counterexample.
+for the audited coverage.
+
+Adding an unsafe expression default such as RAND follows the session binlog
+settings: ROW/MIXED rejects it with 1674, STATEMENT permits it with one warning,
+and disabled session logging permits it without that warning. Invalid default
+expressions take precedence. These settings model compatibility diagnostics;
+fsdb does not produce a MySQL binary log. See the
+[native default-expression evidence](../torture/findings/2026-10-08-alter-defaults.md).
 
 The in-memory engine publishes every accepted schema change as one immutable
 database-root replacement, so InnoDB's physical COPY/INPLACE/INSTANT lock

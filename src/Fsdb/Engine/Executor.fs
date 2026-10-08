@@ -19497,14 +19497,68 @@ let private rejectUnsafePartitionExpression (registry: Registry) (partitioning: 
         else
             None)
 
-let private rejectUnsafeFunctionalDefaults (registry: Registry) (columns: ColumnDef list) =
+let private disallowedDefaultFunctions =
+    Set.union effectfulDdlFunctions (set [ "VERSION"; "FOUND_ROWS"; "ROW_COUNT"; "LAST_INSERT_ID" ])
+
+let private invalidFunctionalDefault (registry: Registry) column expression =
+    if containsSessionVariable expression then
+        Some(Err(3772, sprintf "Default value expression of column '%s' cannot refer user or system variables." column))
+    elif containsSubqueryExpr expression || Expression.exists (function WindowOver _ | Placeholder _ | Star _ | MatchAgainst _ -> true | _ -> false) expression then
+        Some(Err(3769, sprintf "Default value expression of column '%s' contains a disallowed function." column))
+    elif containsAggregate registry expression then
+        Some(Err(1111, "Invalid use of group function"))
+    else
+        Expression.tryPick
+            (function
+            | FuncCall(name, _) ->
+                let key = name.ToUpperInvariant()
+                let disallowed =
+                    disallowedDefaultFunctions.Contains key
+                    || (registry.Extensions |> Map.tryFind key |> Option.exists _.DirectOnly)
+                if disallowed then
+                    let rendered = if key = "VERSION" then "version()" else name.ToLowerInvariant()
+                    Some(Err(3770, sprintf "Default value expression of column '%s' contains a disallowed function: %s." column rendered))
+                else None
+            | _ -> None)
+            expression
+
+let private rejectUnsafeFunctionalDefaults registry (columns: ColumnDef list) =
     columns
     |> List.tryPick (fun column ->
-        column.Default
-        |> Option.bind (function
-            | DExpression expression when unsafeStoredExpression registry expression ->
-                Some(Err(3769, sprintf "Default value expression of column '%s' contains a disallowed function." column.Name))
-            | _ -> None))
+        match column.Default with
+        | Some(DExpression expression) -> invalidFunctionalDefault registry column.Name expression
+        | _ -> None)
+
+let private binlogUnsafeDefaultFunctions =
+    set [ "RAND"; "RANDOM_BYTES"; "UUID"; "UUID_SHORT"; "SYSDATE"; "USER"; "CURRENT_USER"; "SESSION_USER"; "SYSTEM_USER" ]
+
+let private checkAddedDefaultBinlogSafety actions =
+    let setting name fallback =
+        currentVariableContext ()
+        |> Option.bind (fun variables ->
+            match variables.ReadSystemVariable "SESSION" name with
+            | Ok(Some value) -> toText value
+            | _ -> None)
+        |> Option.defaultValue fallback
+        |> fun value -> value.ToUpperInvariant()
+
+    let hasUnsafeDefault =
+        actions
+        |> List.exists (function
+            | AddColumn({ Default = Some(DExpression expression) }, _) ->
+                Expression.exists (function FuncCall(name, _) -> binlogUnsafeDefaultFunctions.Contains(name.ToUpperInvariant()) | _ -> false) expression
+            | _ -> false)
+
+    if not hasUnsafeDefault then None
+    else
+        match setting "sql_log_bin" "1" with
+        | "0" | "OFF" -> None
+        | _ ->
+            let message = "Statement is unsafe because it uses a system function that may return a different value on the replica."
+            if setting "binlog_format" "ROW" = "STATEMENT" then
+                Diagnostics.warning 1674 message
+                None
+            else Some(Err(1674, message))
 
 let private validationErrorOption mapError =
     function
@@ -19652,42 +19706,22 @@ let private validateFunctionalDefaults (registry: Registry) (columns: ColumnDef 
             | DConst _
             | DCurrentTimestamp -> None
             | DExpression expression ->
-                if containsSessionVariable expression then
-                    Some(Err(3772, sprintf "Default value expression of column '%s' cannot refer user or system variables." column.Name))
-                elif containsSubqueryExpr expression || Expression.exists (function WindowOver _ | Placeholder _ | Star _ | MatchAgainst _ -> true | _ -> false) expression then
-                    Some(Err(3769, sprintf "Default value expression of column '%s' contains a disallowed function." column.Name))
-                elif containsAggregate registry expression then
-                    Some(Err(1111, "Invalid use of group function"))
-                else
-                    let disallowed =
-                        Expression.collect
-                            (function
-                            | FuncCall(name, _) when effectfulDdlFunctions.Contains(name.ToUpperInvariant()) -> Some name
-                            | FuncCall(name, _) ->
-                                registry.Extensions
-                                |> Map.tryFind (name.ToUpperInvariant())
-                                |> Option.filter _.DirectOnly
-                                |> Option.map (fun _ -> name)
-                            | _ -> None)
-                            expression
-                        |> List.tryHead
-
-                    match disallowed with
-                    | Some name -> Some(Err(3770, sprintf "Default value expression of column '%s' contains a disallowed function: %s." column.Name (name.ToLowerInvariant())))
-                    | None ->
-                        checkColumnReferences expression
-                        |> List.tryPick (fun (qualifier, name) ->
-                            match qualifier, resolveColumn columns name with
-                            | Some qualifier, _ -> Some(Err(1054, sprintf "Unknown column '%s.%s' in 'DEFAULT'" qualifier name))
-                            | None, Error _ -> Some(Err(1054, sprintf "Unknown column '%s' in 'DEFAULT'" name))
-                            | None, Ok referencedIndex when columns.[referencedIndex].AutoIncrement ->
-                                Some(Err(3768, sprintf "Default value expression of column '%s' cannot refer to an auto-increment column." column.Name))
-                            | None, Ok referencedIndex
-                                when referencedIndex >= columnIndex
-                                     && (columns.[referencedIndex].Generated.IsSome
-                                         || (match columns.[referencedIndex].Default with Some(DExpression _) -> true | _ -> false)) ->
-                                Some(Err(3767, sprintf "Default value expression of column '%s' cannot refer to a column defined after it if that column is a generated column or has an expression as default value." column.Name))
-                            | _ -> None)))
+                match invalidFunctionalDefault registry column.Name expression with
+                | Some error -> Some error
+                | None ->
+                    checkColumnReferences expression
+                    |> List.tryPick (fun (qualifier, name) ->
+                        match qualifier, resolveColumn columns name with
+                        | Some qualifier, _ -> Some(Err(1054, sprintf "Unknown column '%s.%s' in 'DEFAULT'" qualifier name))
+                        | None, Error _ -> Some(Err(1054, sprintf "Unknown column '%s' in 'DEFAULT'" name))
+                        | None, Ok referencedIndex when columns.[referencedIndex].AutoIncrement ->
+                            Some(Err(3768, sprintf "Default value expression of column '%s' cannot refer to an auto-increment column." column.Name))
+                        | None, Ok referencedIndex
+                            when referencedIndex >= columnIndex
+                                 && (columns.[referencedIndex].Generated.IsSome
+                                     || (match columns.[referencedIndex].Default with Some(DExpression _) -> true | _ -> false)) ->
+                            Some(Err(3767, sprintf "Default value expression of column '%s' cannot refer to a column defined after it if that column is a generated column or has an expression as default value." column.Name))
+                        | _ -> None)))
     |> function
         | None -> Ok()
         | Some error -> Error error
@@ -22157,12 +22191,16 @@ let rec executeAs
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
+        let defaultError = rejectUnsafeFunctionalDefaults registry addedColumns
+        let binlogError = if defaultError.IsNone then checkAddedDefaultBinlogSafety actions else None
+
         let error =
-            [ partitionEngineError
+            [ defaultError
+              binlogError
+              partitionEngineError
               executionOptionError
               engineError
-              rejectUnsafeGeneratedExpressions registry addedColumns
-              rejectUnsafeFunctionalDefaults registry addedColumns ]
+              rejectUnsafeGeneratedExpressions registry addedColumns ]
             |> List.tryPick id
 
         match error, executionPlan with

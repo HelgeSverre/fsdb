@@ -6139,11 +6139,392 @@ module ContractCatalog =
           Cleanup = [| "DROP VIEW IF EXISTS absent_view"; "DROP TABLE IF EXISTS copied" |]
           Coverage = [| "statement:select", [| "text-differential" |]; "statement:drop-table", [| "text-differential" |]; "statement:create-view", [| "text-differential" |] |] }
 
+    let private isolatedScriptSteps (cases: (string * (int * int * string) option * string list) list) =
+        [| for name, error, statements in cases do
+               for index, sql in List.indexed statements do
+                   let label = sprintf "%s-%d" name index
+                   let operation =
+                       if sql.StartsWith("SHOW", StringComparison.Ordinal) || sql.StartsWith("SELECT", StringComparison.Ordinal) then Contract.query label sql
+                       else Contract.execute label sql
+                   let step =
+                       match error with
+                       | Some(failingIndex, code, state) when index = failingIndex -> operation |> Contract.fails code state
+                       | _ -> operation
+                   yield step |> Contract.on name |]
+
+    let private alterDefaultBinlogSafety =
+        let expressionCases =
+            [
+              "rand", "DOUBLE DEFAULT (RAND())", Some(1674, "HY000")
+              "seeded-rand", "DOUBLE DEFAULT (RAND(1))", Some(1674, "HY000")
+              "uuid", "VARCHAR(64) DEFAULT (UUID())", Some(1674, "HY000")
+              "uuid-short", "BIGINT UNSIGNED DEFAULT (UUID_SHORT())", Some(1674, "HY000")
+              "now", "DATETIME DEFAULT (NOW())", None
+              "sysdate", "DATETIME DEFAULT (SYSDATE())", Some(1674, "HY000")
+              "unix-time", "BIGINT DEFAULT (UNIX_TIMESTAMP())", None
+              "connection", "BIGINT DEFAULT (CONNECTION_ID())", None
+              "user", "VARCHAR(64) DEFAULT (USER())", Some(1674, "HY000")
+              "database", "VARCHAR(64) DEFAULT (DATABASE())", None
+              "absolute", "DOUBLE DEFAULT (ABS(-1))", None
+              "unreached-rand", "DOUBLE DEFAULT (IF(0,RAND(),1))", Some(1674, "HY000")
+            ]
+        let cases =
+            [
+              for name, definition, error in expressionCases do
+                  for populated in [ false; true ] do
+                      let setup =
+                          [ "DROP TABLE IF EXISTS target"
+                            "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                            if populated then "INSERT INTO target VALUES(1,1),(2,2)" ]
+                      let expectedError = error |> Option.map (fun (code, state) -> List.length setup, code, state)
+                      yield sprintf "%s-%O" name populated, expectedError,
+                          setup @ [ "ALTER TABLE target ADD COLUMN added " + definition
+                                    "SHOW WARNINGS"
+                                    "SHOW COLUMNS FROM target" ]
+              yield "binlog-off", None,
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "SET sql_log_bin=0"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "binlog-row", Some(5, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "SET binlog_format='ROW'"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "binlog-statement", None,
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "SET binlog_format='STATEMENT'"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "copy", Some(4, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=COPY"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "inplace", Some(4, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=INPLACE"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "instant", Some(4, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=INSTANT"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "lock-none", Some(4, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), LOCK=NONE"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "modify", None,
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target MODIFY v DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "set-default", None,
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ALTER COLUMN v SET DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "set-default-copy", None,
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ALTER COLUMN v SET DEFAULT (RAND()), ALGORITHM=COPY"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "create", None,
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "CREATE TABLE created(id INT PRIMARY KEY,v DOUBLE DEFAULT (RAND()))"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "existing-rand-copy", None,
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ALTER COLUMN v SET DEFAULT (RAND())"
+                    "ALTER TABLE target ADD COLUMN added INT, ALGORITHM=COPY"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "missing-table", Some(4, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE missing ADD COLUMN added DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "duplicate-column", Some(4, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ADD COLUMN v DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "invalid-default", Some(4, 3770, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "DROP TABLE IF EXISTS created"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1),(2,2)"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (SLEEP(0)+RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "random-bytes", Some(3, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (HEX(RANDOM_BYTES(4)))"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "version", Some(3, 3770, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (VERSION())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "current-user", Some(3, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (CURRENT_USER())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "session-user", Some(3, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (SESSION_USER())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "system-user", Some(3, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (SYSTEM_USER())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "found-rows", Some(3, 3770, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (FOUND_ROWS())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "row-count", Some(3, 3770, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (ROW_COUNT())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "last-id", Some(3, 3770, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN added VARCHAR(64) DEFAULT (LAST_INSERT_ID())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "mixed", Some(4, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "SET binlog_format='MIXED'"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "statement-duplicate", Some(4, 1060, "42S21"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "SET binlog_format='STATEMENT'"
+                    "ALTER TABLE target ADD COLUMN v DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "statement-missing", Some(4, 1146, "42S02"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "SET binlog_format='STATEMENT'"
+                    "ALTER TABLE missing ADD COLUMN added DOUBLE DEFAULT (RAND())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "statement-inplace", Some(4, 1845, "0A000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "SET binlog_format='STATEMENT'"
+                    "ALTER TABLE target ADD COLUMN added DOUBLE DEFAULT (RAND()), ALGORITHM=INPLACE"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "multi-unsafe", Some(3, 1674, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN a DOUBLE DEFAULT (RAND()), ADD COLUMN b VARCHAR(64) DEFAULT (UUID())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "invalid-later", Some(3, 3770, "HY000"),
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "ALTER TABLE target ADD COLUMN a DOUBLE DEFAULT (RAND()), ADD COLUMN b DOUBLE DEFAULT (SLEEP(0))"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+              yield "statement-multi", None,
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DOUBLE)"
+                    "INSERT INTO target VALUES(1,1)"
+                    "SET binlog_format='STATEMENT'"
+                    "ALTER TABLE target ADD COLUMN a DOUBLE DEFAULT (RAND()), ADD COLUMN b VARCHAR(64) DEFAULT (UUID())"
+                    "SHOW WARNINGS"
+                    "SHOW COLUMNS FROM target" ]
+            ]
+        { Name = "alter-default-binlog-safety"
+          Setup = [||]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [| "DROP TABLE IF EXISTS target"; "DROP TABLE IF EXISTS created" |]
+          Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
+
+    let private binlogSettings =
+        let cases =
+            [
+              "binlog_format-'ROW'", None,
+                  [ "SET binlog_format='ROW'"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "binlog_format-'STATEMENT'", None,
+                  [ "SET binlog_format='STATEMENT'"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "binlog_format-'MIXED'", None,
+                  [ "SET binlog_format='MIXED'"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "binlog_format-0", None,
+                  [ "SET binlog_format=0"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "binlog_format-1", None,
+                  [ "SET binlog_format=1"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "binlog_format-2", None,
+                  [ "SET binlog_format=2"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "binlog_format-3", Some(0, 1231, "42000"),
+                  [ "SET binlog_format=3"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "binlog_format-NULL", Some(0, 1231, "42000"),
+                  [ "SET binlog_format=NULL"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "binlog_format-DEFAULT", None,
+                  [ "SET binlog_format=DEFAULT"
+                    "SHOW WARNINGS"
+                    "SELECT @@binlog_format AS value" ]
+              "sql_log_bin-0", None,
+                  [ "SET sql_log_bin=0"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin-1", None,
+                  [ "SET sql_log_bin=1"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin-OFF", None,
+                  [ "SET sql_log_bin=OFF"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin-ON", None,
+                  [ "SET sql_log_bin=ON"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin-TRUE", None,
+                  [ "SET sql_log_bin=TRUE"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin-FALSE", None,
+                  [ "SET sql_log_bin=FALSE"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin-2", Some(0, 1231, "42000"),
+                  [ "SET sql_log_bin=2"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin--1", Some(0, 1231, "42000"),
+                  [ "SET sql_log_bin=-1"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin-NULL", Some(0, 1231, "42000"),
+                  [ "SET sql_log_bin=NULL"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "sql_log_bin-DEFAULT", None,
+                  [ "SET sql_log_bin=DEFAULT"
+                    "SHOW WARNINGS"
+                    "SELECT @@sql_log_bin AS value" ]
+              "global-log", Some(0, 1228, "HY000"),
+                  [ "SET GLOBAL sql_log_bin=0"
+                    "SHOW WARNINGS" ]
+              "transaction-log", Some(1, 1694, "HY000"),
+                  [ "START TRANSACTION"
+                    "SET sql_log_bin=0"
+                    "SHOW WARNINGS" ]
+              "transaction-format", Some(1, 1679, "HY000"),
+                  [ "START TRANSACTION"
+                    "SET binlog_format='STATEMENT'"
+                    "SHOW WARNINGS" ]
+            ]
+        { Name = "binlog-settings"
+          Setup = [||]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [||]
+          Coverage = [| "statement:set", [| "text-differential" |] |] }
+
     let private alterCopyCounts =
         let operations =
             [
               "add-column", "ADD COLUMN added INT", [ None; None; None; None ]
               "drop-column", "DROP COLUMN v", [ None; None; None; None ]
+              "add-expression", "ADD COLUMN added DOUBLE DEFAULT (RAND())", [ Some 1674; Some 1674; Some 1674; Some 1674 ]
               "add-stored", "ADD COLUMN added INT GENERATED ALWAYS AS(n+1) STORED", [ None; None; Some 1845; Some 1845 ]
               "add-check", "ADD CONSTRAINT ck CHECK(n>0)", [ None; None; Some 1845; Some 1845 ]
               "add-index", "ADD INDEX ix(n)", [ None; None; None; Some 1845 ]
@@ -6222,7 +6603,11 @@ module ContractCatalog =
                    for index, sql in List.indexed initialize do
                        yield Contract.execute (sprintf "%s-setup-%d" name index) sql
                    let operation = Contract.execute name statement
-                   yield match error with Some code -> operation |> Contract.fails code "0A000" | None -> operation
+                   yield
+                       match error with
+                       | Some 1674 -> operation |> Contract.fails 1674 "HY000"
+                       | Some code -> operation |> Contract.fails code "0A000"
+                       | None -> operation
                    yield Contract.query (name + "-row-count") "SELECT ROW_COUNT() AS affected"
                    let table = if error.IsNone && statement.Contains("RENAME TO renamed", StringComparison.Ordinal) then "renamed" else "target"
                    yield Contract.query (name + "-rows") ("SELECT id,n FROM " + table + " ORDER BY id") |]
@@ -6744,6 +7129,8 @@ module ContractCatalog =
            qualifiedDuplicateKeys
            alterCoercion
            alterCopyCounts
+           alterDefaultBinlogSafety
+           binlogSettings
            integerCastConditions
            triggerWarningLifetimes
            deleteIgnoreForeignKeys

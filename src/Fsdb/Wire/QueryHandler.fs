@@ -384,6 +384,7 @@ let private numericSystemVariables =
           "performance_schema"
           "query_cache_size"
           "sql_notes"
+          "sql_log_bin"
           "tmp_table_size"
           "transaction_read_only"
           "tx_read_only"
@@ -1489,6 +1490,8 @@ let private systemSetAction
     (usesDefault: bool)
     (resolved: Result<Value * Map<string, Value>, QueryResult>)
     : Result<SetAction * Map<string, Value>, QueryResult> =
+    if name = "binlog_format" then
+        Diagnostics.warning 1287 "'@@binlog_format' is deprecated and will be removed in a future release."
     let isGlobal = isGlobalScope scope
     let sqlModeAction value sideEffects =
         match SqlMode.tryNormalize value with
@@ -1532,6 +1535,17 @@ let private systemSetAction
                 Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
 
         Ok(SetVarAction(name, value, isGlobal), sideEffects)
+    | Ok(_, sideEffects) when usesDefault && (name = "binlog_format" || name = "sql_log_bin") ->
+        let value =
+            if isGlobal || name = "sql_log_bin" then Session.defaultVariables.[name]
+            else Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
+        Ok(SetVarAction(name, value, isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "binlog_format" ->
+        normalizeEnumVariable name [ "MIXED"; "STATEMENT"; "ROW" ] value
+        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "sql_log_bin" ->
+        normalizeOnOff name value
+        |> Result.map (fun value -> SetVarAction(name, Some(if value = "ON" then "1" else "0"), isGlobal), sideEffects)
     | Ok(_, sideEffects) when usesDefault && name = "sql_mode" ->
         let value =
             if isGlobal then
@@ -1666,7 +1680,7 @@ let private parseSetFragment
                     let resolved =
                         if typedSetVariables.Contains name && not usesDefault then
                             resolveUserSetRhs session userVariables sql rhs
-                        elif name = "max_points_in_geometry" && not usesDefault then
+                        elif (name = "max_points_in_geometry" || name = "sql_log_bin") && not usesDefault then
                             match rhs.Trim().ToUpperInvariant() with
                             | "TRUE" -> Ok(VInt 1L, userVariables)
                             | "FALSE" -> Ok(VInt 0L, userVariables)
@@ -1769,6 +1783,12 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
     | SetTransactionIsolationAction(NextTransactionIsolation, _) when session.Tx.IsSome ->
         Error(Err(1568, "Transaction characteristics can't be changed while a transaction is in progress"))
     | SetTransactionIsolationAction(_, (ReadUncommitted | ReadCommitted | RepeatableRead | Serializable)) -> Ok()
+    | SetVarAction("sql_log_bin", _, true) ->
+        Error(Err(1228, "Variable 'sql_log_bin' is a SESSION variable and can't be used with SET GLOBAL"))
+    | SetVarAction("sql_log_bin", _, false) when session.Tx.IsSome ->
+        Error(Err(1694, "Cannot modify @@session.sql_log_bin inside a transaction"))
+    | SetVarAction("binlog_format", _, false) when session.Tx.IsSome ->
+        Error(Err(1679, "Cannot modify @@session.binlog_format inside a transaction"))
     | SetVarAction(_, _, true) when not (hasSessionGlobalPrivilege session "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetBoundedIntegerAction(_, _, true, _) when not (hasSessionGlobalPrivilege session "SUPER") ->

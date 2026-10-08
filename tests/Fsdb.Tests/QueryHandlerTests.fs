@@ -2193,6 +2193,62 @@ let tests =
               Expect.equal updated (Affected 2UL) "IGNORE applies to an upsert update"
               Expect.contains (session.Diagnostics |> List.map _.Code) 3751 "upsert update warning"
 
+          testCase "ALTER added random defaults reject before algorithm and table validation"
+          <| fun _ ->
+              let message = "Statement is unsafe because it uses a system function that may return a different value on the replica."
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE random_default_guard(id INT PRIMARY KEY)"
+              for sql in
+                  [ "ALTER TABLE random_default_guard ADD COLUMN v DOUBLE DEFAULT (RAND())"
+                    "ALTER TABLE random_default_guard ADD COLUMN v DOUBLE DEFAULT (IF(0,RAND(),1)), ALGORITHM=INSTANT"
+                    "ALTER TABLE missing ADD COLUMN v DOUBLE DEFAULT (RAND())" ] do
+                  let _, result = handle session sql
+                  Expect.equal result (Err(1674, message)) sql
+              let _, result = handle session "ALTER TABLE random_default_guard ADD COLUMN a DOUBLE DEFAULT (RAND()), ADD COLUMN b DOUBLE DEFAULT (SLEEP(0))"
+              Expect.equal result (Err(3770, "Default value expression of column 'b' contains a disallowed function: sleep.")) "invalid defaults precede binlog safety"
+
+          testCase "ALTER random defaults honor binlog format and session logging"
+          <| fun _ ->
+              for setting, expectedWarning in [ "SET binlog_format='STATEMENT'", true; "SET sql_log_bin=0", false ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE random_default_modes(id INT PRIMARY KEY)"
+                  let session, _ = handle session "INSERT INTO random_default_modes VALUES(1),(2)"
+                  let session, configured = handle session setting
+                  Expect.equal configured (Affected 0UL) setting
+                  let session, altered = handle session "ALTER TABLE random_default_modes ADD COLUMN a DOUBLE DEFAULT (RAND()), ADD COLUMN b VARCHAR(64) DEFAULT (UUID())"
+                  Expect.equal altered (Affected 2UL) "default expressions backfill both rows"
+                  Expect.equal (session.Diagnostics |> List.map _.Code) (if expectedWarning then [ 1674 ] else []) "one statement-wide warning"
+                  let _, definition = handle session "SHOW COLUMNS FROM random_default_modes LIKE 'a'"
+                  match definition with
+                  | ResultSet(_, [ [ _; _; _; _; defaultValue; _ ] ]) -> Expect.equal defaultValue (Some "rand()") "metadata excludes the DDL wrapper"
+                  | result -> failtestf "expected the added column definition, got %A" result
+
+          testCase "ALTER statement logging retains its warning before duplicate-column failure"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE random_duplicate(v DOUBLE)"
+              let session, _ = handle session "SET binlog_format='STATEMENT'"
+              let session, result = handle session "ALTER TABLE random_duplicate ADD COLUMN v DOUBLE DEFAULT (RAND())"
+              Expect.equal result (Err(1060, "Duplicate column name 'v'")) "duplicate column is rejected"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1674; 1060 ] "warning precedes failure"
+              let _, columns = handle session "SHOW COLUMNS FROM random_duplicate"
+              match columns with
+              | ResultSet(_, rows) -> Expect.equal rows.Length 1 "failed ALTER preserves the schema"
+              | result -> failtestf "expected the original column, got %A" result
+
+          testCase "binlog settings normalize values and reject changes inside a transaction"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "SET binlog_format=1"
+              Expect.equal result (Affected 0UL) "ordinal selects STATEMENT"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1287 ] "setting is deprecated"
+              let session, value = handle session "SELECT @@binlog_format"
+              Expect.equal value (ResultSet([ "@@binlog_format" ], [ [ Some "STATEMENT" ] ])) "canonical value"
+              let session, _ = handle session "START TRANSACTION"
+              for sql, code in [ "SET sql_log_bin=0", 1694; "SET binlog_format='ROW'", 1679 ] do
+                  let _, result = handle session sql
+                  Expect.equal (errorInfo result |> Option.map _.Code) (Some code) sql
+
           testCase "SHOW COLUMNS key metadata distinguishes persistent and temporary tables"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

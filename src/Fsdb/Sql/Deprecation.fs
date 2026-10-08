@@ -42,6 +42,12 @@ let reportLiteralSyntax statement =
             | _ -> ()
         | _ -> ())
 
+let private reportFoundRows statement =
+    repeatWarning
+        (countFunctionCalls "FOUND_ROWS" statement)
+        1287
+        "FOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead."
+
 let reportQuery statement =
     let reportCalculateFoundRows (select: SelectStmt) =
         if select.CalculateFoundRows then
@@ -56,10 +62,7 @@ let reportQuery statement =
         rest |> List.iter (snd >> reportCalculateFoundRows)
     | _ -> ()
 
-    repeatWarning
-        (countFunctionCalls "FOUND_ROWS" statement)
-        1287
-        "FOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead."
+    reportFoundRows statement
 
     reportCharsetConversions statement
 
@@ -125,6 +128,14 @@ let reportStatement statement =
         reportCharsetConversions (CreateTable table)
     | AlterTable(_, actions) as statement ->
         reportSyntax (alterTableDeprecations actions)
+        actions
+        |> List.choose (function
+            | AddColumn(column, _) | ModifyColumn(column, _) | ChangeColumn(_, column, _) ->
+                match column.Default with Some(DExpression expression) -> Some expression | _ -> None
+            | SetDefault(_, Some(DExpression expression)) -> Some expression
+            | _ -> None)
+        |> Do
+        |> reportFoundRows
         reportCharsetConversions statement
     | (Insert(_, _, _, assignments, _)
       | InsertSelect(_, _, _, assignments, _)) as statement ->

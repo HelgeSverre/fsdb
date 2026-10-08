@@ -1,0 +1,311 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "6b838d4b",
+  "fsdb_dirty": true,
+  "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
+  "cases": [
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "matches": true,
+      "name": "binlog_format-'ROW'",
+      "statements": [
+        "SET binlog_format='ROW'",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nSTATEMENT\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nSTATEMENT\n",
+      "matches": true,
+      "name": "binlog_format-'STATEMENT'",
+      "statements": [
+        "SET binlog_format='STATEMENT'",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nMIXED\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nMIXED\n",
+      "matches": true,
+      "name": "binlog_format-'MIXED'",
+      "statements": [
+        "SET binlog_format='MIXED'",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nMIXED\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nMIXED\n",
+      "matches": true,
+      "name": "binlog_format-0",
+      "statements": [
+        "SET binlog_format=0",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nSTATEMENT\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nSTATEMENT\n",
+      "matches": true,
+      "name": "binlog_format-1",
+      "statements": [
+        "SET binlog_format=1",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "matches": true,
+      "name": "binlog_format-2",
+      "statements": [
+        "SET binlog_format=2",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1231\tVariable 'binlog_format' can't be set to the value of '3'\nvalue\nROW\n",
+      "errors": [
+        {
+          "Item1": 1231,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1231\tVariable 'binlog_format' can't be set to the value of '3'\nvalue\nROW\n",
+      "matches": true,
+      "name": "binlog_format-3",
+      "statements": [
+        "SET binlog_format=3",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1231\tVariable 'binlog_format' can't be set to the value of 'NULL'\nvalue\nROW\n",
+      "errors": [
+        {
+          "Item1": 1231,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1231\tVariable 'binlog_format' can't be set to the value of 'NULL'\nvalue\nROW\n",
+      "matches": true,
+      "name": "binlog_format-NULL",
+      "statements": [
+        "SET binlog_format=NULL",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nvalue\nROW\n",
+      "matches": true,
+      "name": "binlog_format-DEFAULT",
+      "statements": [
+        "SET binlog_format=DEFAULT",
+        "SHOW WARNINGS",
+        "SELECT @@binlog_format AS value"
+      ]
+    },
+    {
+      "actual": "value\n0\n",
+      "errors": [],
+      "expected": "value\n0\n",
+      "matches": true,
+      "name": "sql_log_bin-0",
+      "statements": [
+        "SET sql_log_bin=0",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "value\n1\n",
+      "errors": [],
+      "expected": "value\n1\n",
+      "matches": true,
+      "name": "sql_log_bin-1",
+      "statements": [
+        "SET sql_log_bin=1",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "value\n0\n",
+      "errors": [],
+      "expected": "value\n0\n",
+      "matches": true,
+      "name": "sql_log_bin-OFF",
+      "statements": [
+        "SET sql_log_bin=OFF",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "value\n1\n",
+      "errors": [],
+      "expected": "value\n1\n",
+      "matches": true,
+      "name": "sql_log_bin-ON",
+      "statements": [
+        "SET sql_log_bin=ON",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "value\n1\n",
+      "errors": [],
+      "expected": "value\n1\n",
+      "matches": true,
+      "name": "sql_log_bin-TRUE",
+      "statements": [
+        "SET sql_log_bin=TRUE",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "value\n0\n",
+      "errors": [],
+      "expected": "value\n0\n",
+      "matches": true,
+      "name": "sql_log_bin-FALSE",
+      "statements": [
+        "SET sql_log_bin=FALSE",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of '2'\nvalue\n1\n",
+      "errors": [
+        {
+          "Item1": 1231,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of '2'\nvalue\n1\n",
+      "matches": true,
+      "name": "sql_log_bin-2",
+      "statements": [
+        "SET sql_log_bin=2",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of '-1'\nvalue\n1\n",
+      "errors": [
+        {
+          "Item1": 1231,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of '-1'\nvalue\n1\n",
+      "matches": true,
+      "name": "sql_log_bin--1",
+      "statements": [
+        "SET sql_log_bin=-1",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of 'NULL'\nvalue\n1\n",
+      "errors": [
+        {
+          "Item1": 1231,
+          "Item2": "42000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1231\tVariable 'sql_log_bin' can't be set to the value of 'NULL'\nvalue\n1\n",
+      "matches": true,
+      "name": "sql_log_bin-NULL",
+      "statements": [
+        "SET sql_log_bin=NULL",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "value\n1\n",
+      "errors": [],
+      "expected": "value\n1\n",
+      "matches": true,
+      "name": "sql_log_bin-DEFAULT",
+      "statements": [
+        "SET sql_log_bin=DEFAULT",
+        "SHOW WARNINGS",
+        "SELECT @@sql_log_bin AS value"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1228\tVariable 'sql_log_bin' is a SESSION variable and can't be used with SET GLOBAL\n",
+      "errors": [
+        {
+          "Item1": 1228,
+          "Item2": "HY000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1228\tVariable 'sql_log_bin' is a SESSION variable and can't be used with SET GLOBAL\n",
+      "matches": true,
+      "name": "global-log",
+      "statements": [
+        "SET GLOBAL sql_log_bin=0",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1694\tCannot modify @@session.sql_log_bin inside a transaction\n",
+      "errors": [
+        {
+          "Item1": 1694,
+          "Item2": "HY000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1694\tCannot modify @@session.sql_log_bin inside a transaction\n",
+      "matches": true,
+      "name": "transaction-log",
+      "statements": [
+        "START TRANSACTION",
+        "SET sql_log_bin=0",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1679\tCannot modify @@session.binlog_format inside a transaction\n",
+      "errors": [
+        {
+          "Item1": 1679,
+          "Item2": "HY000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\t'@@binlog_format' is deprecated and will be removed in a future release.\nError\t1679\tCannot modify @@session.binlog_format inside a transaction\n",
+      "matches": true,
+      "name": "transaction-format",
+      "statements": [
+        "START TRANSACTION",
+        "SET binlog_format='STATEMENT'",
+        "SHOW WARNINGS"
+      ]
+    }
+  ]
+}
