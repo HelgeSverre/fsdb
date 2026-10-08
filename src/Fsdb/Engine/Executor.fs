@@ -3759,6 +3759,17 @@ let private splitJoinWhere (qualifiers: string list) (whereExpression: Expr opti
 
     pushed, remaining |> List.rev |> combineConjuncts
 
+let private tryQualifiedColumnPosition
+    (qualifiers: Map<string, ColumnDef list * int>)
+    (qualifier: string)
+    (column: string) =
+    qualifiers
+    |> Map.tryFind (qualifier.ToLowerInvariant())
+    |> Option.bind (fun (columns, offset) ->
+        columns
+        |> List.tryFindIndex (fun definition -> equalsIgnoreCase definition.Name column)
+        |> Option.map (fun index -> offset + index, columns.[index].Type))
+
 /// Splits a `JOIN ... ON` expression's `AND`-conjuncts into equi-join key
 /// pairs — a `QualifiedCol = QualifiedCol` conjunct with one side resolving
 /// into the columns already in scope and the other into the just-joined
@@ -4057,17 +4068,11 @@ let private hashPairs
             | None -> ()
     }
 
-/// `hashPairs`' output, narrowed to the candidates whose residual (leftover,
-/// non-equi-key) `ON` conjuncts actually hold — the tail every hash-join
-/// branch needs after building its candidate list, shared instead of each
-/// writing its own `traverse |> Result.mapError |> filter ok |> map`.
-/// `extract` picks the piece `residualHolds` evaluates against out of a
-/// candidate item that may carry more than just the combined row (see
-/// `applyMutationJoin`'s identity-tracking shape).
+/// Retains matching candidates and their row identities, stopping at the first error.
 let private keepMatches
     (residualHolds: 'c -> Result<bool, EvalError>)
     (extract: 'x -> 'c)
-    (candidates: (int * int * 'x) list)
+    (candidates: (int * int * 'x) seq)
     : Result<(int * int * 'x) list, QueryResult> =
     candidates
     |> traverseSeq (fun (li, ri, x) -> residualHolds (extract x) |> Result.map (fun ok -> if ok then Some(li, ri, x) else None))
@@ -8510,14 +8515,7 @@ and private innerJoinChainPreservesLeftOrder
                 let joinedSources = resolved @ [ right.Qualifier, right.Table.Columns ]
                 let ranges = qualifierRanges joinedSources
 
-                let resolveQualified (qualifier: string) (column: string) =
-                    ranges
-                    |> Map.tryFind (qualifier.ToLowerInvariant())
-                    |> Option.bind (fun (columns, offset) ->
-                        columns
-                        |> List.tryFindIndex (fun definition ->
-                            definition.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
-                        |> Option.map (fun index -> offset + index, columns.[index].Type))
+                let resolveQualified = tryQualifiedColumnPosition ranges
 
                 let equiKeys, residual = extractEquiKeys resolveQualified leftColumns.Length join.On
 
@@ -9349,13 +9347,7 @@ and private applyPreparedJoin
     // Cartesian product as a seq, allowing a whole chain of such joins
     // to reach runSelect's LIMIT without materializing an earlier link.
     let leftIndexed = lazy (rowsSoFar |> List.ofSeq |> List.indexed)
-    let resolveQualified (qualifier: string) (column: string) =
-        qualifiers
-        |> Map.tryFind (qualifier.ToLowerInvariant())
-        |> Option.bind (fun (columns, offset) ->
-            columns
-            |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
-            |> Option.map (fun index -> offset + index, columns.[index].Type))
+    let resolveQualified = tryQualifiedColumnPosition qualifiers
 
     let buildCombinedRows (rightIndexed: (int * Value[]) list) (matched: (int * int * Value[]) list) =
         let matchedCombined = matched |> List.map (fun (_, _, c) -> c)
@@ -9555,11 +9547,7 @@ and private applyPreparedJoin
                         for rightIndex, (_, right) in rightRowsFor left |> Seq.indexed do
                             yield leftIndex, rightIndex, Array.append left right
                 }
-                |> traverseSeq
-                    (fun ((_, _, combined) as candidate) ->
-                        candidateHolds combined
-                        |> Result.map (fun matches -> if matches then Some candidate else None))
-                |> Result.mapError Err
+                |> keepMatches candidateHolds id
                 |> Result.map (buildCombinedRows [] >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
             | (RightJoin | NaturalRightJoin), _, _ ->
                 let positionedRight =
@@ -9577,11 +9565,7 @@ and private applyPreparedJoin
                             | Some rightIndex -> yield leftIndex, rightIndex, Array.append left right
                             | None -> ()
                 }
-                |> traverseSeq
-                    (fun ((_, _, combined) as candidate) ->
-                        candidateHolds combined
-                        |> Result.map (fun matches -> if matches then Some candidate else None))
-                |> Result.mapError Err
+                |> keepMatches candidateHolds id
                 |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
             | _ -> failwith "indexed join kind"
         | _, None when hashEligible ->
@@ -9592,16 +9576,8 @@ and private applyPreparedJoin
 
             match join.Kind, residualConjuncts with
             | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), [] ->
-                // Nothing here needs to see every match up front: `INNER`/
-                // `CROSS`/`NATURAL` keep only matched pairs (no
-                // unmatched-side padding to compute, unlike `LEFT`/
-                // `RIGHT`), and an empty residual means every hash-bucket
-                // hit is already a real match (no `ON`-conjunct re-check
-                // that could itself fail past the point a caller stops
-                // pulling). So this is `hashPairs`' lazy `seq` straight
-                // through, `Array.append`-combined but not collected —
-                // `runSelect`'s `WHERE`/`LIMIT` streaming decides how
-                // much of it ever actually runs.
+                // With no residual or outer padding, each bucket hit is a match
+                // and LIMIT can stop consuming the join without collecting it.
                 let combined : Value[] seq =
                     if buildOnLeft then
                         hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed.Value (joinRows |> Seq.indexed)
@@ -9623,11 +9599,7 @@ and private applyPreparedJoin
                         |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
 
                 candidates
-                |> traverseSeq
-                    (fun ((_, _, combined) as candidate) ->
-                        residualHolds combined
-                        |> Result.map (fun matches -> if matches then Some candidate else None))
-                |> Result.mapError Err
+                |> keepMatches residualHolds id
                 |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
         | _, None ->
             let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
@@ -9800,13 +9772,7 @@ and private applyPreparedMutationJoin
     let rightIndexed = rightRows |> List.indexed
     let leftFlatRows = rowsSoFar |> List.map snd
 
-    let resolveQualified (qualifier: string) (column: string) =
-        qualifiers
-        |> Map.tryFind (qualifier.ToLowerInvariant())
-        |> Option.bind (fun (columns, offset) ->
-            columns
-            |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
-            |> Option.map (fun index -> offset + index, columns.[index].Type))
+    let resolveQualified = tryQualifiedColumnPosition qualifiers
 
     let buildCombinedRows (matched: (int * int * (Value[] option list * Value[])) list) =
         let matchedRows = matched |> List.map (fun (_, _, row) -> row)
@@ -18270,13 +18236,7 @@ let private indexedJoinExplainPlans
                             (leftSources |> List.map (fun (qualifier, columns, _) -> qualifier, columns))
                             @ [ rightQualifier, rightColumns ]
 
-                        let resolveQualified (qualifier: string) (column: string) =
-                            qualifierRanges qualifiers
-                            |> Map.tryFind (qualifier.ToLowerInvariant())
-                            |> Option.bind (fun (columns, offset) ->
-                                columns
-                                |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
-                                |> Option.map (fun columnIndex -> offset + columnIndex, columns.[columnIndex].Type))
+                        let resolveQualified = tryQualifiedColumnPosition (qualifierRanges qualifiers)
 
                         let coalesceNames =
                             match join.Kind with
