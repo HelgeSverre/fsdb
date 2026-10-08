@@ -549,6 +549,66 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS contract_grouped_inputs"; "SET @n=NULL" |]
           Coverage = [| "statement:select", [| "aggregation"; "evaluation-order"; "text-differential"; "prepared-differential" |] |] }
 
+    let private groupedAggregateFamilies =
+        let queries =
+            [| "SELECT g,SUM(@n:=@n+1) AS s, MIN(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, MAX(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, COUNT(DISTINCT 1) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, SUM(DISTINCT 1) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, AVG(DISTINCT 1) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, COUNT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, SUM(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, AVG(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, MIN(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, MAX(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, GROUP_CONCAT(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, GROUP_CONCAT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, JSON_ARRAYAGG(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, JSON_OBJECTAGG(id,v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, BIT_AND(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s, MIN(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, MAX(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, COUNT(DISTINCT 1) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, SUM(DISTINCT 1) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, AVG(DISTINCT 1) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, COUNT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, SUM(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, AVG(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, MIN(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, MAX(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, GROUP_CONCAT(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, GROUP_CONCAT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, JSON_ARRAYAGG(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, JSON_OBJECTAGG(id,v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s, BIT_AND(v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g,SUM(@n:=@n+1) AS s FROM contract_group_plan GROUP BY g HAVING COUNT(DISTINCT v)>0 ORDER BY g"
+               "SELECT g,SUM(@n:=@n+1) AS s FROM contract_group_plan GROUP BY g ORDER BY COUNT(DISTINCT v),g"
+               "SELECT g,JSON_ARRAYAGG(@n:=@n+1) AS s FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g,GROUP_CONCAT(@n:=@n+1) AS s FROM contract_group_plan GROUP BY g ORDER BY g"
+               "SELECT g AS x,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC"
+               "SELECT g AS x,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY 1 DESC"
+               "SELECT g AS x,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY x DESC"
+               "SELECT g AS x,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g+0 DESC"
+               "SELECT g AS x,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY g DESC,s"
+               "SELECT g AS x,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM contract_group_plan GROUP BY g ORDER BY s,g DESC" |]
+        { Name = "grouped-aggregate-families"
+          Setup = [| "CREATE TABLE contract_group_plan(id INT PRIMARY KEY,g INT,v INT)"
+                     "INSERT INTO contract_group_plan VALUES(1,2,10),(2,1,20),(3,2,30)" |]
+          Steps =
+            [| for sql in queries do
+                   yield Contract.execute "reset counter" "SET @n=0"
+                   yield Contract.query sql sql
+                   yield Contract.query "counter" "SELECT @n"
+                   yield Contract.execute "reset prepared counter" "SET @n=0"
+                   yield Contract.execute "prepare grouped family" ("PREPARE grouped_family FROM '" + sql.Replace("'", "''") + "'")
+                   yield Contract.query ("prepared: " + sql) "EXECUTE grouped_family"
+                   yield Contract.query "prepared counter" "SELECT @n"
+                   yield Contract.execute "deallocate grouped family" "DEALLOCATE PREPARE grouped_family" |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_group_plan"; "SET @n=NULL" |]
+          Coverage = [| "statement:select", [| "aggregation"; "evaluation-order"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3424,6 +3484,7 @@ module ContractCatalog =
            aggregateOwnership
            aggregateOrdering
            groupedAggregateInputs
+           groupedAggregateFamilies
            exactErrors
            noDirInCreate
            semanticErrors

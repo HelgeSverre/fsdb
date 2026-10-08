@@ -104,9 +104,9 @@ that fsdb matches every native-only fixture. No known-gap signatures were added.
 The [grouped-input benchmark](../../benchmarks/results/b81d7e4f-grouped-inputs.md)
 records the measured allocation tradeoff and unstable timing controls.
 
-## Remaining boundaries after materialization
+## Boundaries at source-order materialization
 
-For input `2,1,2`, the maintained family probes still differ:
+At `e8fe63ee`, input `2,1,2` exposes these family differences:
 
 | Shape | MySQL | fsdb with materialized inputs |
 |---|---|---|
@@ -159,3 +159,38 @@ SUM wrong. MIN/MAX DISTINCT must not trigger that change. These fixtures do
 not establish index-selected input order, multi-key collation ordering, or
 ROLLUP's separate per-level evaluation. GROUP_CONCAT equal-key ordering also
 remains a separate boundary.
+
+## Group-key input evaluation
+
+DISTINCT COUNT/SUM/AVG, GROUP_CONCAT, and JSON aggregates now select group-key
+input order for every aggregate in the grouped query. Ordinary numeric,
+MIN/MAX DISTINCT, and bitwise controls retain source arrival order. Scalar
+aggregation retains source order. Both strategies use the same materialization
+and aggregate evaluation functions; key sorting is shared with ROLLUP output.
+
+MySQL can reuse ORDER BY directions when the complete ordering is a prefix of
+GROUP BY. Aliases and ordinals resolve before matching; remaining group keys
+sort ascending. A computed ordering expression, an additional aggregate term,
+or reordered group keys instead leaves grouping input ascending and sorts the
+finished results separately. Native EXPLAIN TREE and exact direct/prepared
+results establish these boundaries, including multi-key prefixes.
+
+For example, adding `ORDER BY g DESC` to the DISTINCT-count fixture produces
+SUM totals 3 and 3, returned as groups 2 and 1. `ORDER BY g DESC,s` instead
+produces 5 and 1: its extra aggregate term prevents input-sort reuse.
+
+The final source gate passes 3,045 tests with no build warnings/errors under
+a 4 GiB GC heap cap. The expanded wire contracts pass 56 cases / 6,195 steps with zero differences
+at `20261008T023911056-667/contracts`. They include ascending and descending
+family mixtures, hidden HAVING/ORDER BY aggregates, alias and positional
+ordering, and volatile JSON_ARRAYAGG and unordered GROUP_CONCAT arguments.
+The maintained native oracle also passes its multi-key plan and result checks.
+No known-gap signatures are added.
+
+JSON_ARRAYAGG's input-order difference above is resolved for these fixtures.
+GROUP_CONCAT without internal ordering also matches; its internal equal-key
+ordering remains open. Volatile ROLLUP evaluations and returned projection
+assignment/LIMIT behavior remain open. Index-selected input plans and wider
+collation combinations need further evidence before claiming general plan
+parity. The [performance snapshot](../../benchmarks/results/a975585d-grouped-order.md)
+records the DISTINCT grouping path and ordinary controls.

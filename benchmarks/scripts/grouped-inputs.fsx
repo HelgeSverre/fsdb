@@ -21,6 +21,8 @@ let cases =
     [ "scalar-sum", "SELECT SUM(v) AS s FROM grouped_inputs", Executor.ResultSet([ "s" ], [ [ text 50005000 ] ])
       "grouped-sum", "SELECT g,SUM(v) AS s FROM grouped_inputs GROUP BY g ORDER BY g",
       Executor.ResultSet([ "g"; "s" ], groups |> List.map (fun (key, values) -> [ text key; text (List.sum values) ]))
+      "grouped-distinct", "SELECT g,SUM(v) AS s,COUNT(DISTINCT v) AS n FROM grouped_inputs GROUP BY g ORDER BY g",
+      Executor.ResultSet([ "g"; "s"; "n" ], groups |> List.map (fun (key, values) -> [ text key; text (List.sum values); text values.Length ]))
       "grouped-count", "SELECT g,COUNT(*) AS n FROM grouped_inputs GROUP BY g ORDER BY g",
       Executor.ResultSet([ "g"; "n" ], groups |> List.map (fun (key, values) -> [ text key; text values.Length ]))
       "grouped-multiple", "SELECT g,SUM(v) AS s,COUNT(v) AS n,MIN(v) AS lo,MAX(v) AS hi FROM grouped_inputs GROUP BY g ORDER BY g",

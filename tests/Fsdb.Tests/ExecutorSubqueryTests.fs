@@ -44,6 +44,49 @@ let tests =
                   Expect.equal (execute sql) (ResultSet(names, rows)) sql
                   Expect.equal (execute "SELECT @n") (ResultSet([ "@n" ], [ [ Some count ] ])) "Each aggregate occurrence retains its input values"
 
+          testCase "aggregate families select grouping input evaluation order"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              let execute sql = connection.Query sql
+              execute "CREATE TABLE group_plan(id INT PRIMARY KEY,g INT,v INT)" |> ignore
+              execute "INSERT INTO group_plan VALUES(1,2,10),(2,1,20),(3,2,30)" |> ignore
+              for sql, names, rows in
+                  [ "SELECT g,SUM(@n:=@n+1) AS s, MIN(DISTINCT v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "2"; Some "20" ]; [ Some "2"; Some "4"; Some "10" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, MAX(DISTINCT v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "2"; Some "20" ]; [ Some "2"; Some "4"; Some "30" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, COUNT(DISTINCT 1) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "1" ]; [ Some "2"; Some "5"; Some "1" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, SUM(DISTINCT 1) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "1" ]; [ Some "2"; Some "5"; Some "1" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, AVG(DISTINCT 1) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "1.0000" ]; [ Some "2"; Some "5"; Some "1.0000" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, COUNT(DISTINCT v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "1" ]; [ Some "2"; Some "5"; Some "2" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, SUM(DISTINCT v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "20" ]; [ Some "2"; Some "5"; Some "40" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, AVG(DISTINCT v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "20.0000" ]; [ Some "2"; Some "5"; Some "20.0000" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, MIN(v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "2"; Some "20" ]; [ Some "2"; Some "4"; Some "10" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, MAX(v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "2"; Some "20" ]; [ Some "2"; Some "4"; Some "30" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, GROUP_CONCAT(v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "20" ]; [ Some "2"; Some "5"; Some "10,30" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, GROUP_CONCAT(DISTINCT v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "20" ]; [ Some "2"; Some "5"; Some "10,30" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, JSON_ARRAYAGG(v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "[20]" ]; [ Some "2"; Some "5"; Some "[10, 30]" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, JSON_OBJECTAGG(id,v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "1"; Some "{\"2\": 20}" ]; [ Some "2"; Some "5"; Some "{\"1\": 10, \"3\": 30}" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s, BIT_AND(v) AS other FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s"; "other" ], [ [ Some "1"; Some "2"; Some "20" ]; [ Some "2"; Some "4"; Some "10" ] ]
+                    "SELECT g,SUM(@n:=@n+1) AS s FROM group_plan GROUP BY g ORDER BY g", [ "g"; "s" ], [ [ Some "1"; Some "2" ]; [ Some "2"; Some "4" ] ]
+                    "SELECT g AS x,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM group_plan GROUP BY g ORDER BY x DESC", [ "x"; "s"; "other" ], [ [ Some "2"; Some "3"; Some "2" ]; [ Some "1"; Some "3"; Some "1" ] ]
+                    "SELECT g AS x,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM group_plan GROUP BY g ORDER BY g DESC,s", [ "x"; "s"; "other" ], [ [ Some "2"; Some "5"; Some "2" ]; [ Some "1"; Some "1"; Some "1" ] ] ] do
+                  execute "SET @n=0" |> ignore
+                  Expect.equal (execute sql) (ResultSet(names, rows)) sql
+                  Expect.equal (execute "SELECT @n") (ResultSet([ "@n" ], [ [ Some "3" ] ])) "Each source row evaluates once"
+
+          testCase "grouping input reuses only matching order prefixes"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              let execute sql = connection.Query sql
+              execute "CREATE TABLE group_plan(id INT PRIMARY KEY,g INT,h INT,v INT)" |> ignore
+              execute "INSERT INTO group_plan VALUES(1,2,2,10),(2,1,1,20),(3,2,1,30),(4,1,2,40)" |> ignore
+              for sql, rows in
+                  [ "SELECT g,h,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM group_plan GROUP BY g,h ORDER BY g DESC,h ASC", [ [ Some "2"; Some "1"; Some "1"; Some "1" ]; [ Some "2"; Some "2"; Some "2"; Some "1" ]; [ Some "1"; Some "1"; Some "3"; Some "1" ]; [ Some "1"; Some "2"; Some "4"; Some "1" ] ]
+                    "SELECT g,h,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM group_plan GROUP BY g,h ORDER BY h DESC,g ASC", [ [ Some "1"; Some "2"; Some "2"; Some "1" ]; [ Some "2"; Some "2"; Some "4"; Some "1" ]; [ Some "1"; Some "1"; Some "1"; Some "1" ]; [ Some "2"; Some "1"; Some "3"; Some "1" ] ]
+                    "SELECT g,h,SUM(@n:=@n+1) AS s,COUNT(DISTINCT v) AS other FROM group_plan GROUP BY g,h ORDER BY g DESC,h DESC,s", [ [ Some "2"; Some "2"; Some "4"; Some "1" ]; [ Some "2"; Some "1"; Some "3"; Some "1" ]; [ Some "1"; Some "2"; Some "2"; Some "1" ]; [ Some "1"; Some "1"; Some "1"; Some "1" ] ] ] do
+                  execute "SET @n=0" |> ignore
+                  Expect.equal (execute sql) (ResultSet([ "g"; "h"; "s"; "other" ], rows)) sql
+                  Expect.equal (execute "SELECT @n") (ResultSet([ "@n" ], [ [ Some "4" ] ])) "Each source row evaluates once"
+
           testCase "ordering aggregates cannot introduce an implicit group"
           <| fun _ ->
               let store = newStore ()

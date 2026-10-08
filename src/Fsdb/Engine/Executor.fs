@@ -1896,6 +1896,10 @@ type private NumericAggregateAccumulator(kind: NumericAggregateKind, divisionPre
             let sum = total |> Option.defaultValue (VDecimal exactTotal)
             Value.divWithIntermediatePrecision divisionPrecision sum (VInt count)
 
+type private AggregateInputOrder =
+    | SourceRowOrder
+    | GroupKeyOrder
+
 type private GroupInputRow =
     { Values: Value[]
       AggregateInputs: (Expr * Value) list }
@@ -14629,17 +14633,30 @@ and private runGroupedSelect
                     if isAggregateCall registry node then Some(bindOrderExpression columnIndex qualifiers orderProjections node)
                     else None) expression
             bound, direction)
-    let aggregateArguments =
+    let aggregateCalls =
         let expressions =
             (orderExpressions |> List.choose (fun (expression, _) ->
                 if select.GroupBy.IsEmpty || (tryProjectedExpressionIndex expression |> Option.isSome) then None else Some expression))
             @ (havingExpression |> Option.bind Result.toOption |> Option.toList)
             @ (select.Projections |> List.map _.Expression)
-        let seen = HashSet<Expr>(HashIdentity.Reference)
         expressions
         |> List.collect (fun expression ->
             collectAggregateCalls registry expression
             @ (bindNestedAggregates store registry dbName columnIndex qualifiers expression).Aggregates)
+    let aggregateInputOrder =
+        let needsSortedGroups = function
+            | FuncCall(name, arguments) ->
+                match name.ToUpperInvariant(), arguments with
+                | ("GROUP_CONCAT" | "JSON_ARRAYAGG" | "JSON_OBJECTAGG"), _ -> true
+                | ("COUNT" | "SUM" | "AVG"), Distinct _ :: _ ->
+                    Functions.isUnmodifiedBuiltinAggregate name registry
+                | _ -> false
+            | _ -> false
+        if not select.GroupBy.IsEmpty && List.exists needsSortedGroups aggregateCalls then GroupKeyOrder
+        else SourceRowOrder
+    let aggregateArguments =
+        let seen = HashSet<Expr>(HashIdentity.Reference)
+        aggregateCalls
         |> List.collect (function
             | FuncCall(_, arguments) ->
                 arguments |> List.choose (function
@@ -14944,7 +14961,11 @@ and private runGroupedSelect
                     groupExprs
                     |> traverse (evalExpr (ctxFor row))
                     |> Result.bind (fun values ->
-                        materializeInputs row |> Result.map (fun input ->
+                        let input =
+                            match aggregateInputOrder with
+                            | SourceRowOrder -> materializeInputs row
+                            | GroupKeyOrder -> Ok { Values = row; AggregateInputs = [] }
+                        input |> Result.map (fun input ->
                             let key = Array.ofList values
                             match groupInputOrder with
                             | ContiguousGroupRows _ -> addOrdered key input
@@ -14954,6 +14975,29 @@ and private runGroupedSelect
         match rows |> traverseSeq collect with
         | Error(code, message) -> Err(code, message), [], []
         | Ok matched ->
+            let ascending = List.replicate groupExprs.Length Asc
+            let groupDirections =
+                let resolve expression =
+                    match resolveOrderPosition orderProjections expression with
+                    | Col name as column ->
+                        tryOrderProjectionNamed columnIndex qualifiers orderProjections name
+                        |> Option.map _.Expression |> Option.defaultValue column
+                    | resolved -> resolved
+                let sameKey left right =
+                    let identity expression = orderColumnIdentity columnIndex qualifiers (Projection.create expression None)
+                    left = right || (identity left |> Option.exists (fun source -> identity right = Some source))
+                let rec prefixDirections keys ordering =
+                    match keys, ordering with
+                    | remaining, [] -> Some(List.replicate (List.length remaining) Asc)
+                    | key :: keys, (expression, direction) :: ordering when sameKey key (resolve expression) ->
+                        prefixDirections keys ordering |> Option.map (fun directions -> direction :: directions)
+                    | _ -> None
+                if select.Rollup then ascending
+                else prefixDirections groupExprs select.OrderBy |> Option.defaultValue ascending
+            let sortGroupsByKey directions groups =
+                let tagged keys = List.map2 (orderValueForExpr probeContext) groupExprs keys
+                groups |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys directions (tagged ka) (tagged kb))
+
             let buildGroups () : Result<(Value list * GroupInputRow list) list, EvalError> =
                 if groupExprs.IsEmpty then
                     Ok [ [], matched ]
@@ -14961,16 +15005,19 @@ and private runGroupedSelect
                     groups
                     |> Seq.map (fun (key, rows) -> List.ofArray key, List.ofSeq rows)
                     |> List.ofSeq
-                    |> Ok
+                    |> fun groups ->
+                        match aggregateInputOrder with
+                        | SourceRowOrder -> Ok groups
+                        | GroupKeyOrder ->
+                            groups
+                            |> sortGroupsByKey groupDirections
+                            |> traverse (fun (key, rows) ->
+                                rows |> traverse (fun row -> materializeInputs row.Values)
+                                |> Result.map (fun inputs -> key, inputs))
 
             // MySQL emits each rollup subtotal after its key-ordered children.
             let expandRollup (groups: (Value list * GroupInputRow list) list) : (int * Value list * GroupInputRow list) list =
-                let probeCtx = ctxFor (probeRow columns)
-                let tagged keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
-                let ascending = List.replicate groupExprs.Length Asc
-
-                let sortedGroups =
-                    groups |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys ascending (tagged ka) (tagged kb))
+                let sortedGroups = sortGroupsByKey ascending groups
 
                 let total = List.length groupExprs
 
