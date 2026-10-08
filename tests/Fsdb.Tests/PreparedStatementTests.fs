@@ -335,6 +335,42 @@ let tests =
                   ] do
                   Expect.equal (handle session sql |> snd) (ResultSet(names, rows)) sql
 
+          testCase "source collation inference covers wildcard unions and numeric columns"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "SET NAMES latin1 COLLATE latin1_bin"; "CREATE TABLE identity_base(v VARCHAR(8) CHARACTER SET latin1 COLLATE latin1_bin)"; "INSERT INTO identity_base VALUES('a')"; "CREATE VIEW identity_literal AS SELECT 'a' AS v"; "CREATE TABLE identity_numbers(id INT)"; "INSERT INTO identity_numbers VALUES(1)"; "SET NAMES utf8mb4" ] do
+                  let next, result = handle session sql
+                  session <- next
+                  match result with
+                  | Err(code, message) -> failtestf "%s: %d %s" sql code message
+                  | _ -> ()
+              for sql, names, rows in
+                  [
+                    "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM (SELECT * FROM identity_base UNION ALL SELECT _latin1'b' COLLATE latin1_bin) d", [ "COERCIBILITY(v)"; "CHARSET(v)"; "COLLATION(v)" ], [ [ Some "0"; Some "latin1"; Some "latin1_bin" ]; [ Some "0"; Some "latin1"; Some "latin1_bin" ] ]
+                    "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM (SELECT v FROM identity_base UNION ALL SELECT _latin1'b' COLLATE latin1_bin) d", [ "COERCIBILITY(v)"; "CHARSET(v)"; "COLLATION(v)" ], [ [ Some "0"; Some "latin1"; Some "latin1_bin" ]; [ Some "0"; Some "latin1"; Some "latin1_bin" ] ]
+                    "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM (SELECT _latin1'b' COLLATE latin1_bin AS v UNION ALL SELECT * FROM identity_base) d", [ "COERCIBILITY(v)"; "CHARSET(v)"; "COLLATION(v)" ], [ [ Some "0"; Some "latin1"; Some "latin1_bin" ]; [ Some "0"; Some "latin1"; Some "latin1_bin" ] ]
+                    "SELECT COERCIBILITY(id),CHARSET(id),COLLATION(id) FROM identity_numbers", [ "COERCIBILITY(id)"; "CHARSET(id)"; "COLLATION(id)" ], [ [ Some "5"; Some "binary"; Some "binary" ] ]
+                    "SELECT COERCIBILITY(id),CHARSET(id),COLLATION(id) FROM (SELECT * FROM identity_numbers) d", [ "COERCIBILITY(id)"; "CHARSET(id)"; "COLLATION(id)" ], [ [ Some "5"; Some "binary"; Some "binary" ] ]
+                    "SELECT (SELECT COERCIBILITY(v)) FROM identity_literal", [ "(SELECT COERCIBILITY(v))" ], [ [ Some "4" ] ]
+                    "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM (SELECT * FROM identity_literal UNION ALL SELECT * FROM identity_literal) d", [ "COERCIBILITY(v)"; "CHARSET(v)"; "COLLATION(v)" ], [ [ Some "4"; Some "latin1"; Some "latin1_bin" ]; [ Some "4"; Some "latin1"; Some "latin1_bin" ] ]
+                  ] do
+                  Expect.equal (handle session sql |> snd) (ResultSet(names, rows)) sql
+
+          testCase "declared column collation identity is independent of null values"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for columnType, coercibility in
+                  [ "TINYINT", "5"; "SMALLINT", "5"; "MEDIUMINT", "5"; "INT", "5"; "BIGINT", "5"; "DECIMAL(8,2)", "5"; "FLOAT", "5"; "DOUBLE", "5"; "DATE", "5"; "DATETIME", "5"; "TIMESTAMP NULL", "5"; "TIME", "5"; "YEAR", "5"; "BIT(2)", "2"; "BINARY(2)", "2"; "JSON", "2"; "GEOMETRY", "2" ] do
+                  Expect.equal (execute ("CREATE TEMPORARY TABLE type_identity(v " + columnType + ")")) (Affected 0UL) columnType
+                  Expect.equal (execute "INSERT INTO type_identity VALUES(NULL)") (Affected 1UL) columnType
+                  Expect.equal (execute "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM type_identity")
+                      (ResultSet([ "COERCIBILITY(v)"; "CHARSET(v)"; "COLLATION(v)" ], [ [ Some coercibility; Some "binary"; Some "binary" ] ])) columnType
+                  Expect.equal (execute "DROP TEMPORARY TABLE type_identity") (Affected 0UL) columnType
+
           testCase "ordinary literal parser caches distinguish connection collations"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

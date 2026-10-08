@@ -3416,6 +3416,26 @@ let private operand collation coercibility =
       Coercibility = coercibility
       Charset = charsetOfCollation collation }
 
+let private namedCollationOperand name coercibility =
+    match Collation.tryFind name with
+    | Some collation -> Ok(operand collation coercibility)
+    | None -> Error(1273, sprintf "Unknown collation: '%s'" name)
+
+let private columnCollationOperand (ctx: EvalContext) (column: ColumnDef) =
+    match column.ExpressionCollation with
+    | Some(name, coercibility) -> namedCollationOperand name coercibility
+    | None ->
+        match column.Type with
+        | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _
+        | TDecimal _ | TFloat _ | TDouble _
+        | TDate | TDateTime _ | TTimestamp _ | TTime _ | TYear -> namedCollationOperand "binary" 5
+        | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob
+        | TBit _ | TJson | TGeometry _ -> namedCollationOperand "binary" 2
+        | _ ->
+            collationOfColumn ctx column
+            |> Option.defaultValue ctx.Store.ExecutionSettings.ConnectionCollation
+            |> fun collation -> Ok(operand collation 2)
+
 let private combineStringCollations operation left right =
     if left.Coercibility < right.Coercibility then
         Ok left
@@ -3465,10 +3485,7 @@ let private hasCombinedResultCollation ctx name =
 
 let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Result<CollationOperand, EvalError> =
     let connection coercibility = operand ctx.Store.ExecutionSettings.ConnectionCollation coercibility
-    let named name coercibility =
-        match Collation.tryFind name with
-        | Some collation -> Ok(operand collation coercibility)
-        | None -> Error(1273, sprintf "Unknown collation: '%s'" name)
+    let named = namedCollationOperand
 
     let combine operation expressions =
         expressions
@@ -3495,14 +3512,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | Col _
     | QualifiedCol _ ->
         match tryColumnDefForExpr ctx expression with
-        | Some { ExpressionCollation = Some(name, coercibility) } -> named name coercibility
-        | Some column ->
-            match collationOfColumn ctx column with
-            | Some collation -> Ok(operand collation 2)
-            | None ->
-                match column.Type with
-                | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob | TBit _ -> named "binary" 2
-                | _ -> Ok(connection 2)
+        | Some column -> columnCollationOperand ctx column
         | None -> Ok(connection 2)
     | Lit VNull -> named "binary" 6
     | ConnectionLiteral(_, collation) -> named collation 4
@@ -7079,18 +7089,14 @@ and private describeQueryColumnsInScope
                 | _ -> None
 
         let expressionCollation =
+            let context = contextFactory store registry schema Map.empty Map.empty None [||]
             definitions
-            |> List.map _.ExpressionCollation
-            |> tryAllSome
-            |> Option.bind (fun identities ->
-                identities
-                |> List.map (fun (name, coercibility) -> Collation.tryFind name |> Option.map (fun collation -> operand collation coercibility))
-                |> tryAllSome)
-            |> Option.bind (function
-                | [] -> None
+            |> traverse (columnCollationOperand context)
+            |> Result.bind (function
+                | [] -> Error(1105, "UNION column has no input definitions")
                 | first :: rest ->
-                    rest |> List.fold (fun combined next -> combined |> Result.bind (fun current -> combineStringCollations "UNION" current next)) (Ok first)
-                    |> Result.toOption)
+                    rest |> List.fold (fun combined next -> combined |> Result.bind (fun current -> combineStringCollations "UNION" current next)) (Ok first))
+            |> Result.toOption
             |> Option.map (fun identity -> identity.Collation.Name, identity.Coercibility)
         describeColumn { computedColumn first.Column.Name mergedType nullable clearedDefault collation with ExpressionCollation = expressionCollation }
 

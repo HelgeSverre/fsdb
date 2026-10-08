@@ -188,3 +188,27 @@ build warnings or errors under eight logical processors and a 4 GiB heap cap.
 The differential run `20261008T035011168-14167/contracts` passes 61 cases and
 7,002 steps with zero differences. Broader expression inference and stored
 program binding remain outside this verified matrix.
+
+
+### Declared column families and wildcard UNION
+
+A native follow-up checks nullable TINYINT, SMALLINT, MEDIUMINT, INT, BIGINT,
+DECIMAL, FLOAT, DOUBLE, DATE, DATETIME, TIMESTAMP, TIME, YEAR, BIT, BINARY, JSON,
+and GEOMETRY columns. Metadata depends on the declared type even when the row
+contains NULL. Numeric and temporal columns report binary charset/collation
+and coercibility 5. BIT, binary strings, JSON, and geometry report binary with
+coercibility 2. Direct column inference now shares this classification with
+UNION branch combination.
+
+An explicit latin1_bin literal combined with the latin1_bin source column in
+UNION ALL retains coercibility 0 in both branch orders. SELECT * and an explicit
+column projection agree. Literal-view wildcard UNION branches retain 4, as
+does a correlated COERCIBILITY reference to the literal view. These cases are
+now part of the maintained native oracle, Expecto regression, and wire contract.
+
+Validation: 3,057 tests pass with no build warnings or errors, eight logical
+processors, and a 4 GiB heap cap. The native oracle passes on disposable MySQL
+8.4.11 with 64 MiB buffer pool and redo capacity. Differential run
+`20261008T035707337-15088/contracts` passes 61 cases and 7,122 steps without
+differences. The type fixtures exercise direct and binary queries; the wildcard
+and correlated fixtures also cover SQL PREPARE/EXECUTE.

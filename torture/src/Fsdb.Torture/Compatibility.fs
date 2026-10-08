@@ -812,17 +812,31 @@ module ContractCatalog =
                 "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT CONCAT('a','b') AS v LIMIT 1) d"
                 "SELECT COERCIBILITY(v) AS n,(SELECT 1) AS s FROM identity_literal"
                 "SELECT COERCIBILITY(v) AS n FROM identity_literal JOIN (SELECT 1 AS x) t ON 1"
+                "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM (SELECT * FROM identity_base UNION ALL SELECT _latin1'b' COLLATE latin1_bin) d"
+                "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM (SELECT v FROM identity_base UNION ALL SELECT _latin1'b' COLLATE latin1_bin) d"
+                "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM (SELECT _latin1'b' COLLATE latin1_bin AS v UNION ALL SELECT * FROM identity_base) d"
+                "SELECT COERCIBILITY(id),CHARSET(id),COLLATION(id) FROM identity_numbers"
+                "SELECT COERCIBILITY(id),CHARSET(id),COLLATION(id) FROM (SELECT * FROM identity_numbers) d"
+                "SELECT (SELECT COERCIBILITY(v)) FROM identity_literal"
+                "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM (SELECT * FROM identity_literal UNION ALL SELECT * FROM identity_literal) d"
             ]
         { Name = "source-expression-collation"
-          Setup = [| "SET NAMES latin1 COLLATE latin1_bin"; "CREATE TABLE identity_base(v VARCHAR(8) CHARACTER SET latin1 COLLATE latin1_bin)"; "INSERT INTO identity_base VALUES('a')"; "CREATE VIEW identity_literal AS SELECT 'a' AS v"; "CREATE VIEW identity_expression AS SELECT CONCAT('a','b') AS v"; "CREATE VIEW identity_column AS SELECT v FROM identity_base"; "SET NAMES utf8mb4" |]
+          Setup = [| "SET NAMES latin1 COLLATE latin1_bin"; "CREATE TABLE identity_base(v VARCHAR(8) CHARACTER SET latin1 COLLATE latin1_bin)"; "INSERT INTO identity_base VALUES('a')"; "CREATE VIEW identity_literal AS SELECT 'a' AS v"; "CREATE VIEW identity_expression AS SELECT CONCAT('a','b') AS v"; "CREATE VIEW identity_column AS SELECT v FROM identity_base"; "CREATE TABLE identity_numbers(id INT)"; "INSERT INTO identity_numbers VALUES(1)"; "SET NAMES utf8mb4" |]
           Steps =
             [| for index, sql in List.indexed queries do
                    yield Contract.query (sprintf "direct-%d" index) sql
                    yield Contract.preparedQuery (sprintf "binary-%d" index) sql [||]
                    yield Contract.execute (sprintf "prepare-%d" index) ("PREPARE source_identity FROM '" + sql.Replace("'", "''") + "'")
                    yield Contract.query (sprintf "execute-%d" index) "EXECUTE source_identity"
-                   yield Contract.execute (sprintf "deallocate-%d" index) "DEALLOCATE PREPARE source_identity" |]
-          Cleanup = [| "DROP VIEW IF EXISTS identity_column,identity_expression,identity_literal"; "DROP TABLE IF EXISTS identity_base"; "SET NAMES utf8mb4" |]
+                   yield Contract.execute (sprintf "deallocate-%d" index) "DEALLOCATE PREPARE source_identity"
+               for columnType in [ "TINYINT"; "SMALLINT"; "MEDIUMINT"; "INT"; "BIGINT"; "DECIMAL(8,2)"; "FLOAT"; "DOUBLE"; "DATE"; "DATETIME"; "TIMESTAMP NULL"; "TIME"; "YEAR"; "BIT(2)"; "BINARY(2)"; "JSON"; "GEOMETRY" ] do
+                   yield Contract.execute ("create-" + columnType) ("CREATE TEMPORARY TABLE type_identity(v " + columnType + ")")
+                   yield Contract.execute ("insert-" + columnType) "INSERT INTO type_identity VALUES(NULL)"
+                   let sql = "SELECT COERCIBILITY(v),CHARSET(v),COLLATION(v) FROM type_identity"
+                   yield Contract.query ("type-direct-" + columnType) sql
+                   yield Contract.preparedQuery ("type-binary-" + columnType) sql [||]
+                   yield Contract.execute ("drop-" + columnType) "DROP TEMPORARY TABLE type_identity" |]
+          Cleanup = [| "DROP VIEW IF EXISTS identity_column,identity_expression,identity_literal"; "DROP TABLE IF EXISTS identity_base,identity_numbers"; "SET NAMES utf8mb4" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
     let private exactErrors =
