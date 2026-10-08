@@ -1,0 +1,247 @@
+{
+  "mysql_version": "8.4.11",
+  "innodb_buffer_pool_size": "64M",
+  "innodb_redo_log_capacity": "64M",
+  "cases": [
+    {
+      "name": "unnamed",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n),FOREIGN KEY(b) REFERENCES parent(n))",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "key-name",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,FOREIGN KEY key_label(a) REFERENCES parent(n))",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME",
+        "SHOW INDEX FROM child"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nTable\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tkey_label\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "explicit-sequence",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,b INT,CONSTRAINT child_ibfk_7 FOREIGN KEY(a) REFERENCES parent(n),FOREIGN KEY(b) REFERENCES parent(n))",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_7\tchild\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "explicit-later",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT child_ibfk_1 FOREIGN KEY(b) REFERENCES parent(n))",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "",
+      "stderr": "ERROR 1826 (HY000) at line 1: Duplicate foreign key constraint name 'child_ibfk_1'\n",
+      "errors": [
+        [
+          1826,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "alter",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n))",
+        "ALTER TABLE child ADD FOREIGN KEY(b) REFERENCES parent(n)",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME",
+        "ALTER TABLE child DROP FOREIGN KEY child_ibfk_2",
+        "ALTER TABLE child ADD FOREIGN KEY(b) REFERENCES parent(n)",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\nCONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_2\tchild\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "drop-all",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+        "ALTER TABLE child DROP FOREIGN KEY child_ibfk_1",
+        "ALTER TABLE child ADD FOREIGN KEY(a) REFERENCES parent(n)",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "schema-collision",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE other(a INT,CONSTRAINT child_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))",
+        "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tother\n",
+      "stderr": "ERROR 1826 (HY000) at line 1: Duplicate foreign key constraint name 'child_ibfk_1'\n",
+      "errors": [
+        [
+          1826,
+          "HY000"
+        ]
+      ]
+    },
+    {
+      "name": "rename",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+        "RENAME TABLE child TO renamed",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME",
+        "ALTER TABLE renamed ADD FOREIGN KEY(a) REFERENCES parent(n)",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nCONSTRAINT_NAME\tTABLE_NAME\nrenamed_ibfk_1\trenamed\nrenamed_ibfk_2\trenamed\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "alter-explicit-sequence",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,b INT,CONSTRAINT child_ibfk_7 FOREIGN KEY(a) REFERENCES parent(n))",
+        "ALTER TABLE child ADD FOREIGN KEY(b) REFERENCES parent(n)",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_7\tchild\nchild_ibfk_8\tchild\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "alter-explicit-batch",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,b INT)",
+        "ALTER TABLE child ADD CONSTRAINT child_ibfk_7 FOREIGN KEY(a) REFERENCES parent(n),ADD FOREIGN KEY(b) REFERENCES parent(n)",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_7\tchild\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "alter-drop-add",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+        "ALTER TABLE child DROP FOREIGN KEY child_ibfk_1,ADD FOREIGN KEY(a) REFERENCES parent(n)",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_2\tchild\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "duplicate-explicit",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,b INT,CONSTRAINT same FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT same FOREIGN KEY(b) REFERENCES parent(n))",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "",
+      "stderr": "ERROR 1061 (42000) at line 1: Duplicate key name 'same'\n",
+      "errors": [
+        [
+          1061,
+          "42000"
+        ]
+      ]
+    },
+    {
+      "name": "leading-zero",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(a INT,b INT,CONSTRAINT child_ibfk_07 FOREIGN KEY(a) REFERENCES parent(n))",
+        "ALTER TABLE child ADD FOREIGN KEY(b) REFERENCES parent(n)",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_07\tchild\nchild_ibfk_1\tchild\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "case-folding",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,other,renamed",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE Child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+        "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      ],
+      "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tChild\n",
+      "stderr": "",
+      "errors": []
+    }
+  ]
+}
