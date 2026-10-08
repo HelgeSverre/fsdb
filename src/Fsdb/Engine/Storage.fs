@@ -6816,6 +6816,31 @@ let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: IndexKeyGr
 
     rows |> List.ofSeq |> loop Set.empty
 
+let private coerceAlterValue (mode: TemporalCoercionMode) (newDef: ColumnDef) (value: Value) =
+    let row = Diagnostics.currentRowNumber ()
+    let truncated column = ExpressionError(1265, sprintf "Data truncated for column '%s' at row %d" column row)
+
+    coerceStoredValueWithMode mode newDef value
+    |> Result.mapError (fun error ->
+        match newDef.Type, error with
+        // ALTER reports 1265 for variable-width binary and character truncation.
+        | (TChar _ | TVarchar _ | TVarBinary _), DataTooLongForColumn(column, _)
+        | _, DataTruncatedForColumn column -> truncated column
+        | _, OutOfRangeForColumn column ->
+            ExpressionError(1264, sprintf "Out of range value for column '%s' at row %d" column row)
+        | _, error -> error)
+
+let private mapAlterRows (table: Table) transform =
+    let builder = table.RowsArray.ToBuilder()
+
+    table.RowsArray.Indexed
+    |> Seq.mapi (fun ordinal entry -> ordinal + 1, entry)
+    |> List.ofSeq
+    |> traverse (fun (ordinal, (rowId, row)) ->
+        Diagnostics.withRowNumber ordinal (fun () -> transform row)
+        |> Result.map (fun updated -> builder.[rowId] <- updated))
+    |> Result.map (fun _ -> builder.DrainToImmutable())
+
 /// Applies one `Ast.AlterAction` to `table`, returning its replacement and,
 /// for `RenameTo`, the new key it should be re-filed under in the database
 /// map (`None` means "same key").
@@ -6828,31 +6853,6 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | SetTableComment comment -> SetTableComment(normalizeBoundedUtf8mb3Text 2048 comment)
         | AddIndex index -> AddIndex(normalizeGeometryIndex table.Columns index)
         | action -> action
-
-    let recoerce (newDef: ColumnDef) (value: Value) =
-        let row = Diagnostics.currentRowNumber ()
-        let truncated column = ExpressionError(1265, sprintf "Data truncated for column '%s' at row %d" column row)
-
-        coerceStoredValueWithMode mode newDef value
-        |> Result.mapError (fun error ->
-            match newDef.Type, error with
-            // ALTER reports 1265 for variable-width binary and character truncation.
-            | (TChar _ | TVarchar _ | TVarBinary _), DataTooLongForColumn(column, _)
-            | _, DataTruncatedForColumn column -> truncated column
-            | _, OutOfRangeForColumn column ->
-                ExpressionError(1264, sprintf "Out of range value for column '%s' at row %d" column row)
-            | _, error -> error)
-
-    let mapRows transform =
-        let builder = table.RowsArray.ToBuilder()
-
-        table.RowsArray.Indexed
-        |> Seq.mapi (fun ordinal entry -> ordinal + 1, entry)
-        |> List.ofSeq
-        |> traverse (fun (ordinal, (rowId, row)) ->
-            Diagnostics.withRowNumber ordinal (fun () -> transform row)
-            |> Result.map (fun updated -> builder.[rowId] <- updated))
-        |> Result.map (fun _ -> builder.DrainToImmutable())
 
     // Reject a too-big fsp on any column this action introduces (1426),
     // before it can reach the table — the DDL-time counterpart to
@@ -7006,8 +7006,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                         | None -> Ok row
 
                 // Stop at the first conflicting row so later conversions emit no conditions.
-                mapRows (fun row ->
-                    recoerce newDef row.[oldIdx]
+                mapAlterRows table (fun row ->
+                    coerceAlterValue mode newDef row.[oldIdx]
                     |> Result.map (fun value -> row |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx value |> Array.ofList)
                     |> Result.bind checkUnique)
                 |> Result.map (fun rows -> { candidate with RowsArray = rows }, None)))
@@ -7193,12 +7193,12 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                 |> List.indexed
                 |> List.filter (snd >> isTextColumn)
 
-            mapRows (fun row ->
+            mapAlterRows table (fun row ->
                 let updated = Array.copy row
 
                 changedColumns
                 |> traverse (fun (index, column) ->
-                    recoerce column row.[index]
+                    coerceAlterValue mode column row.[index]
                     |> Result.map (fun value -> updated.[index] <- value))
                 |> Result.map (fun _ -> updated))
             |> Result.map (fun rows ->

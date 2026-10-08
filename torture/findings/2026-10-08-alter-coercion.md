@@ -49,7 +49,9 @@ all three commands and object kinds.
 - `multi`: converting two columns emits conditions in column order in fsdb.
   MySQL converts both columns of each row before advancing. Correct error and
   warning order requires a row-oriented ALTER conversion plan; sorting messages
-  after execution cannot reproduce early failures.
+  after execution cannot reproduce early failures. The expanded
+  [row-order audit](2026-10-09-alter-row-order.md) also covers final-column order,
+  multiple strict errors, and schema validation before conversion.
 Both decimal scripts now match, including HEX conversion and the stored values.
 The [numeric HEX audit](2026-10-08-hex-numeric.md) records the rounding rules
 and separate computed-DOUBLE overflow counterexamples.
