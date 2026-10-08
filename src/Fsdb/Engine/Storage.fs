@@ -7435,22 +7435,22 @@ let private alterColumnSources (table: Table) actions =
     let key (name: string) = name.ToLowerInvariant()
     let initial = table.Columns |> List.mapi (fun index column -> key column.Name, StoredColumn(index, false)) |> Map.ofList
     let step state action =
-        state |> Result.bind (fun (sources, modified) ->
+        state |> Result.bind (fun sources ->
             match action with
-            | AddColumn(column, _) -> Ok(Map.add (key column.Name) AddedColumn sources, modified)
-            | DropColumn name -> Ok(Map.remove (key name) sources, modified)
+            | AddColumn(column, _) -> Ok(Map.add (key column.Name) AddedColumn sources)
+            | DropColumn name -> Ok(Map.remove (key name) sources)
             | ModifyColumn(column, _) | ChangeColumn(_, column, _) ->
                 let name = match action with ChangeColumn(name, _, _) -> name | _ -> column.Name
                 match Map.tryFind (key name) sources with
-                | Some(StoredColumn(index, _)) when not (Set.contains index modified) ->
-                    Ok(sources |> Map.remove (key name) |> Map.add (key column.Name) (StoredColumn(index, true)), Set.add index modified)
+                | Some(StoredColumn(index, false)) ->
+                    Ok(sources |> Map.remove (key name) |> Map.add (key column.Name) (StoredColumn(index, true)))
                 | _ -> Error(unknownAlterColumn table.OriginalName name)
             | RenameColumnTo(oldName, newName) ->
                 match Map.tryFind (key oldName) sources with
-                | Some source -> Ok(sources |> Map.remove (key oldName) |> Map.add (key newName) source, modified)
+                | Some source -> Ok(sources |> Map.remove (key oldName) |> Map.add (key newName) source)
                 | None -> Error(unknownAlterColumn table.OriginalName oldName)
-            | _ -> Ok(sources, modified))
-    List.fold step (Ok(initial, Set.empty)) actions |> Result.map fst
+            | _ -> Ok sources)
+    List.fold step (Ok initial) actions
 
 let private convertAlterRows mode (original: Table) (candidate: Table) actions checkRow =
     alterColumnSources original actions

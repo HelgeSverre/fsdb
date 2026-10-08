@@ -5597,40 +5597,36 @@ and private evalCaseResult ctx caseExpression subject whens elseBranch evaluateR
         | Some e -> evaluateResult e
         | None -> Ok VNull
 
+    let rec chooseBranch matches = function
+        | [] -> fallback ()
+        | (condition, result) :: rest ->
+            matches condition
+            |> Result.bind (fun matched ->
+                if matched then evaluateResult result
+                else chooseBranch matches rest)
+
     let evaluate () =
         match subject with
-        | Some se ->
-            eval se
-            |> Result.bind (fun sv ->
-                let rec tryWhens =
-                    function
-                    | [] -> fallback ()
-                    | (whenExpr, resExpr) :: rest ->
-                        eval whenExpr
-                        |> Result.bind (fun wv ->
-                            comparisonResult
-                                ctx
-                                se
-                                (tryColumnDefForExpr ctx se)
-                                sv
-                                whenExpr
-                                (tryColumnDefForExpr ctx whenExpr)
-                                Eq
-                                wv
-                            |> Result.bind (function
-                                | VInt 1L -> evaluateResult resExpr
-                                | _ -> tryWhens rest))
-
-                tryWhens whens)
+        | Some subject ->
+            eval subject
+            |> Result.bind (fun subjectValue ->
+                let matches condition =
+                    eval condition
+                    |> Result.bind (fun conditionValue ->
+                        comparisonResult
+                            ctx
+                            subject
+                            (tryColumnDefForExpr ctx subject)
+                            subjectValue
+                            condition
+                            (tryColumnDefForExpr ctx condition)
+                            Eq
+                            conditionValue)
+                    |> Result.map (function VInt 1L -> true | _ -> false)
+                chooseBranch matches whens)
         | None ->
-            let rec tryWhens =
-                function
-                | [] -> fallback ()
-                | (condExpr, resExpr) :: rest ->
-                    eval condExpr
-                    |> Result.bind (fun cv -> if truthy cv = Some true then evaluateResult resExpr else tryWhens rest)
-
-            tryWhens whens
+            let matches condition = eval condition |> Result.map (fun value -> truthy value = Some true)
+            chooseBranch matches whens
 
     expressionCollation ctx caseExpression
     |> Result.bind (fun _ -> evaluate ())
