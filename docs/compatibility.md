@@ -621,10 +621,10 @@ table, and SELECT hints are considered before statement hints. Unused or
 shadowed CTEs do not apply setting overrides or semantic hint warnings in the
 audited cases. Each referenced CTE instance has its own hint context, including
 repeated warnings and conflicts where required. Audited CTE reparsing preserves syntax warning text, line numbers, and context
-ordering. Hint identifier diagnostics honor ANSI_QUOTES. Join-order hints on
-queries without table sources remain incomplete.
-Target-resolution warnings appear during SQL or binary preparation and do not
-repeat on execution. Recognizing a hint and resolving its targets does not
+ordering. Hint identifier diagnostics honor ANSI_QUOTES. Join-order target diagnostics still have
+incomplete execution-phase and query-elimination behavior.
+Audited table/index target-resolution warnings appear during SQL or binary
+preparation and do not repeat on execution. Recognizing a hint and resolving its targets does not
 imply that its physical optimizer strategy is implemented.
 
 An idle connection uses `wait_timeout`. Once the first packet byte arrives,
