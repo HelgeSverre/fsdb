@@ -3791,6 +3791,7 @@ let private sysCol (name: string) (ty: ColumnType) (nullable: bool) (dflt: Value
       Comment = ""
       Collation = None
       Charset = None
+      ExpressionCollation = None
       Srid = None }
 
 let private privCol (name: string) = sysCol name (TEnum [ "N"; "Y" ]) false (Some(VString "N"))

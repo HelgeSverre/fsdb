@@ -5573,6 +5573,7 @@ let private routineColumn name columnType =
       Comment = ""
       Collation = None
       Charset = None
+      ExpressionCollation = None
       Srid = None }
 
 let private parameterColumn (parameter: StoredProgram.Parameter) =

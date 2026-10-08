@@ -79,6 +79,17 @@ cases = [
     ('SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_column GROUP BY v WITH ROLLUP', 'v\tcs\tco\tc\na\tlatin1\tlatin1_bin\t2\nNULL\tlatin1\tlatin1_bin\t2\n'),
     ("SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM (SELECT _latin1'a' AS v) d", 'v\tcs\tco\tc\na\tlatin1\tlatin1_swedish_ci\t4\n'),
     ("SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM (SELECT _latin1'a' AS v) d GROUP BY v WITH ROLLUP", 'v\tcs\tco\tc\na\tlatin1\tlatin1_swedish_ci\t4\nNULL\tlatin1\tlatin1_swedish_ci\t4\n'),
+    ('SET NAMES utf8mb4', ''),
+    ("SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v LIMIT 1) d", 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\na\tlatin1\tlatin1_swedish_ci\t4\n'),
+    ("SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT DISTINCT _latin1'a' AS v) d", 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\na\tlatin1\tlatin1_swedish_ci\t4\n'),
+    ("SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT CONCAT(v,'x') AS v FROM identity_base) d", 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\nax\tlatin1\tlatin1_bin\t2\n'),
+    ('SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT SUM(1) AS v FROM identity_base) d', 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\n1\tbinary\tbinary\t5\n'),
+    ('SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT COUNT(*) AS v FROM identity_base) d', 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\n1\tbinary\tbinary\t5\n'),
+    ('SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT NULL AS v) d', 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\nNULL\tbinary\tbinary\t6\n'),
+    ('SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT 1 AS v) d', 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\n1\tbinary\tbinary\t5\n'),
+    ("SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v UNION ALL SELECT _latin1'b') d", 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\na\tlatin1\tlatin1_swedish_ci\t4\nb\tlatin1\tlatin1_swedish_ci\t4\n'),
+    ("SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v FROM identity_base GROUP BY v) d", 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\na\tlatin1\tlatin1_swedish_ci\t4\n'),
+    ("SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT CONCAT('a','b') AS v LIMIT 1) d", 'v\tCHARSET(v)\tCOLLATION(v)\tCOERCIBILITY(v)\nab\tutf8mb4\tutf8mb4_0900_ai_ci\t4\n'),
 ]
 
 

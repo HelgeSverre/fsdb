@@ -28,6 +28,7 @@ let private col (name: string) (ty: ColumnType) : ColumnDef =
       Collation = None
       Charset = None
       OnUpdateCurrentTimestamp = false
+      ExpressionCollation = None
       Srid = None }
 
 let private strCol name = col name (TVarchar 255)

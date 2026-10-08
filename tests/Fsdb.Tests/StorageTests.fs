@@ -23,6 +23,7 @@ let private col name ty nullable =
       Comment = ""
       Collation = None
       Charset = None
+      ExpressionCollation = None
       Srid = None
       OnUpdateCurrentTimestamp = false }
 

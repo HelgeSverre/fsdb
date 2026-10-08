@@ -372,7 +372,9 @@ and ColumnDef =
       /// An explicit spatial reference constraint for geometry columns.
       /// `None` permits mixed SRIDs and makes a spatial index ineligible
       /// for query planning, matching MySQL 8.4.
-      Srid: uint32 option }
+      Srid: uint32 option
+      /// Runtime source-expression identity; physical schema columns leave this absent.
+      ExpressionCollation: (string * int) option }
 
 and IndexKind =
     | BTree

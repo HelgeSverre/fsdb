@@ -787,6 +787,44 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS window_clause" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
+    let private sourceExpressionCollation =
+        let queries =
+            [
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_base"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_base GROUP BY v WITH ROLLUP"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_literal"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_literal GROUP BY v WITH ROLLUP"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_expression"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_expression GROUP BY v WITH ROLLUP"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_column"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_column GROUP BY v WITH ROLLUP"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM (SELECT _latin1'a' AS v) d"
+                "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM (SELECT _latin1'a' AS v) d GROUP BY v WITH ROLLUP"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v LIMIT 1) d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT DISTINCT _latin1'a' AS v) d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT CONCAT(v,'x') AS v FROM identity_base) d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT SUM(1) AS v FROM identity_base) d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT COUNT(*) AS v FROM identity_base) d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT NULL AS v) d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT 1 AS v) d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v UNION ALL SELECT _latin1'b') d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v FROM identity_base GROUP BY v) d"
+                "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT CONCAT('a','b') AS v LIMIT 1) d"
+                "SELECT COERCIBILITY(v) AS n,(SELECT 1) AS s FROM identity_literal"
+                "SELECT COERCIBILITY(v) AS n FROM identity_literal JOIN (SELECT 1 AS x) t ON 1"
+            ]
+        { Name = "source-expression-collation"
+          Setup = [| "SET NAMES latin1 COLLATE latin1_bin"; "CREATE TABLE identity_base(v VARCHAR(8) CHARACTER SET latin1 COLLATE latin1_bin)"; "INSERT INTO identity_base VALUES('a')"; "CREATE VIEW identity_literal AS SELECT 'a' AS v"; "CREATE VIEW identity_expression AS SELECT CONCAT('a','b') AS v"; "CREATE VIEW identity_column AS SELECT v FROM identity_base"; "SET NAMES utf8mb4" |]
+          Steps =
+            [| for index, sql in List.indexed queries do
+                   yield Contract.query (sprintf "direct-%d" index) sql
+                   yield Contract.preparedQuery (sprintf "binary-%d" index) sql [||]
+                   yield Contract.execute (sprintf "prepare-%d" index) ("PREPARE source_identity FROM '" + sql.Replace("'", "''") + "'")
+                   yield Contract.query (sprintf "execute-%d" index) "EXECUTE source_identity"
+                   yield Contract.execute (sprintf "deallocate-%d" index) "DEALLOCATE PREPARE source_identity" |]
+          Cleanup = [| "DROP VIEW IF EXISTS identity_column,identity_expression,identity_literal"; "DROP TABLE IF EXISTS identity_base"; "SET NAMES utf8mb4" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3667,6 +3705,7 @@ module ContractCatalog =
            rollupEvaluation
            groupedProjectionReplay
            windowBindings
+           sourceExpressionCollation
            exactErrors
            noDirInCreate
            semanticErrors

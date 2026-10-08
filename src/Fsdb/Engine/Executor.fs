@@ -1960,6 +1960,7 @@ let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : C
       Collation = None
       Charset = None
       OnUpdateCurrentTimestamp = false
+      ExpressionCollation = None
       Srid = None }
 
 let private approximateLiteralColumn name (spelling: string) =
@@ -2422,6 +2423,8 @@ type private EvalContext =
       Row: Value[]
       /// Materialized expressions retain their syntax for type and collation inference.
       EvaluatedExpressions: (Expr * Value) list
+      /// Subtotal keys evaluate to NULL while retaining their expression metadata.
+      RollupKeys: Expr list
       /// Only ordering subqueries may fall back to already-projected aliases.
       ProjectionAliases: Map<string, Result<Expr * Value, EvalError>>
       Store: Store
@@ -2504,6 +2507,7 @@ let private contextFactory
           Qualifiers = qualifiers
           Row = row
           EvaluatedExpressions = []
+          RollupKeys = []
           ProjectionAliases = Map.empty
           Store = store
           DbName = dbName
@@ -3491,6 +3495,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | Col _
     | QualifiedCol _ ->
         match tryColumnDefForExpr ctx expression with
+        | Some { ExpressionCollation = Some(name, coercibility) } -> named name coercibility
         | Some column ->
             match collationOfColumn ctx column with
             | Some collation -> Ok(operand collation 2)
@@ -4737,6 +4742,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
     match evaluated with
     | Some value -> Ok value
+    | None when ctx.RollupKeys |> List.contains expr -> Ok VNull
     | None ->
         try
             match Expression.tryLiteralDiagnostic expr with
@@ -5464,6 +5470,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   Collation = None
                   Charset = None
                   OnUpdateCurrentTimestamp = false
+                  ExpressionCollation = None
                   Srid = None }
 
             let v =
@@ -6989,6 +6996,7 @@ and private describeQueryColumnsInScope
           Collation = collation
           Charset = collation |> Option.map Collation.charsetOfCollation
           OnUpdateCurrentTimestamp = false
+          ExpressionCollation = None
           Srid = None }
 
     let isNullable (column: ColumnDef) = column.Nullable && not column.PrimaryKey
@@ -7070,7 +7078,21 @@ and private describeQueryColumnsInScope
                 | TLongText -> Some(DConst(VString ""))
                 | _ -> None
 
-        describeColumn (computedColumn first.Column.Name mergedType nullable clearedDefault collation)
+        let expressionCollation =
+            definitions
+            |> List.map _.ExpressionCollation
+            |> tryAllSome
+            |> Option.bind (fun identities ->
+                identities
+                |> List.map (fun (name, coercibility) -> Collation.tryFind name |> Option.map (fun collation -> operand collation coercibility))
+                |> tryAllSome)
+            |> Option.bind (function
+                | [] -> None
+                | first :: rest ->
+                    rest |> List.fold (fun combined next -> combined |> Result.bind (fun current -> combineStringCollations "UNION" current next)) (Ok first)
+                    |> Result.toOption)
+            |> Option.map (fun identity -> identity.Collation.Name, identity.Coercibility)
+        describeColumn { computedColumn first.Column.Name mergedType nullable clearedDefault collation with ExpressionCollation = expressionCollation }
 
     let unionColumns (branches: ViewColumnDescriptor list list) =
         match branches with
@@ -7499,7 +7521,13 @@ and private describeQueryColumnsInScope
                         |> Map.tryFind (qualifier.ToLowerInvariant())
                         |> Option.map (fst >> List.map describeColumn)
                         |> Option.defaultValue []
-                    | _ -> [ columnForExpression (projectionLabel projection) expression ])))
+                    | _ ->
+                        let descriptor = columnForExpression (projectionLabel projection) expression
+                        let collation =
+                            expressionCollation context expression
+                            |> Result.toOption
+                            |> Option.map (fun operand -> operand.Collation.Name, operand.Coercibility)
+                        [ { descriptor with Column = { descriptor.Column with ExpressionCollation = collation } } ])))
 
     let rec enclosingScopes (outer: EvalContext option) =
         match outer with
@@ -7675,6 +7703,7 @@ and private deriveColumns
               Collation = Some col.Name
               Charset = None
               OnUpdateCurrentTimestamp = false
+              ExpressionCollation = None
               Srid = None })
         names
         collations
@@ -7756,6 +7785,7 @@ and private jsonTableColumnDef name columnType =
       Collation = None
       Charset = None
       OnUpdateCurrentTimestamp = false
+      ExpressionCollation = None
       Srid = None }
 
 and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list =
@@ -8001,8 +8031,9 @@ and private resolveFromSubquery
         resolveRelationBody store registry dbName [] body enclosing
 
 and private resolveRelationBody store registry dbName columnNames body outer : Result<ColumnDef list * Value[] list, QueryResult> =
+    let describedColumns = describeQueryColumnsInScope store registry dbName (QueryBody body) outer |> Result.toOption
     let columnNamesAreValid =
-        match describeQueryColumns store registry dbName (QueryBody body) with
+        match describedColumns with
         | Some columns ->
             renameRelationColumns columnNames (fun (column: ColumnDef) -> column.Name) (fun name column -> { column with Name = name }) columns
             |> Result.map ignore
@@ -8063,6 +8094,12 @@ and private resolveRelationBody store registry dbName columnNames body outer : R
                 else
                     derivedColumns
 
+            let columns =
+                match describedColumns with
+                | Some descriptions when sameLength descriptions columns ->
+                    List.map2 (fun column description ->
+                        { column with ExpressionCollation = description.ExpressionCollation }) columns descriptions
+                | _ -> columns
             renameRelationColumns columnNames (fun (column: ColumnDef) -> column.Name) (fun name column -> { column with Name = name }) columns
             |> Result.map (fun columns -> columns, typedRows |> List.map (Array.map Value.materialize))
         | Err(code, message) -> Error(Err(code, message))
@@ -12008,6 +12045,7 @@ and private tryPhysicalProjectionUncached
             Generated = None
             Comment = ""
             OnUpdateCurrentTimestamp = false
+            ExpressionCollation = None
             Srid = None }
 
     match source with
@@ -13596,6 +13634,7 @@ and private runUnionStmtWithOuter
                       Collation = None
                       Charset = None
                       OnUpdateCurrentTimestamp = false
+                      ExpressionCollation = None
                       Srid = None })
 
             let ctxForOrder = contextFactory store registry dbName (columnIndexOf orderColumns) Map.empty None
@@ -14753,7 +14792,7 @@ and private runGroupedSelect
         rewriteAggregateValues registry context
             (evalAggregateUsing evaluate registry aggregateContext groupRows) expression
 
-    let projectGroup (rollup: Expr -> Expr) (groupRows: GroupInputRow list) : Result<(string * Value) list, EvalError> =
+    let projectGroup (rollup: Expr -> Expr, rolledKeys: Expr list) (groupRows: GroupInputRow list) : Result<(string * Value) list, EvalError> =
         let representative = representativeOf groupRows
 
         select.Projections
@@ -14763,11 +14802,11 @@ and private runGroupedSelect
             | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
             | _ ->
                 rewriteGroupAggregates groupRows (rollup expr)
-                |> Result.bind (evalExpr (ctxFor representative))
+                |> Result.bind (evalExpr { ctxFor representative with RollupKeys = rolledKeys })
                 |> Result.map (fun v -> [ projectionLabel projection, v ]))
         |> Result.map List.concat
 
-    let havingOk (rollup: Expr -> Expr) projected (groupRows: GroupInputRow list) : Result<bool, EvalError> =
+    let havingOk (rollup: Expr -> Expr, rolledKeys: Expr list) projected (groupRows: GroupInputRow list) : Result<bool, EvalError> =
         match havingExpression with
         | None -> Ok true
         | Some resolved ->
@@ -14783,12 +14822,12 @@ and private runGroupedSelect
             resolved
             |> Result.map (bindProjectedAliases >> rollup)
             |> Result.bind (rewriteGroupAggregates groupRows)
-            |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = HavingClause })
+            |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = HavingClause; RollupKeys = rolledKeys })
             |> Result.map (fun v -> truthy v = Some true)
 
-    let orderKeysOf (rollup: Expr -> Expr) (outputCols: (string * Value) list) (groupRows: GroupInputRow list) : Result<(Value * Collation.Collation option) list, EvalError> =
+    let orderKeysOf (rollup: Expr -> Expr, rolledKeys: Expr list) (outputCols: (string * Value) list) (groupRows: GroupInputRow list) : Result<(Value * Collation.Collation option) list, EvalError> =
         let representative = representativeOf groupRows
-        let ctx = ctxFor representative
+        let ctx = { ctxFor representative with RollupKeys = rolledKeys }
 
         let aliases =
             orderProjections
@@ -14874,10 +14913,10 @@ and private runGroupedSelect
         |> Result.map (List.fold (|||) 0L >> VInt)
 
     // Rolled-up keys read as NULL; GROUPING calls read as their bitmask.
-    let rollupRewrite (rolledCount: int) : Result<Expr -> Expr, EvalError> =
+    let rollupRewrite (rolledCount: int) : Result<(Expr -> Expr) * Expr list, EvalError> =
         if not select.Rollup then
             if groupingCalls.IsEmpty then
-                Ok id
+                Ok(id, [])
             else
                 Error(1111, "Invalid use of group function")
         else
@@ -14892,13 +14931,14 @@ and private runGroupedSelect
                     groupExprs
                     |> List.mapi (fun i key -> i, key)
                     |> List.filter (fun (i, _) -> i >= List.length groupExprs - rolledCount)
-                    |> List.map (fun (_, key) -> key, Lit VNull)
+                    |> List.map snd
 
-                let replacements = groupingPairs @ rolledKeys
-                Expression.rewrite (fun node ->
-                    replacements
-                    |> List.tryPick (fun (candidate, value) -> if candidate = node then Some value else None)
-                    |> Option.orElseWith (fun () -> if isAggregateCall registry node then Some node else None)))
+                let rewrite =
+                    Expression.rewrite (fun node ->
+                        groupingPairs
+                        |> List.tryPick (fun (candidate, value) -> if candidate = node then Some value else None)
+                        |> Option.orElseWith (fun () -> if isAggregateCall registry node then Some node else None))
+                rewrite, rolledKeys)
 
     match rollupRewrite 0 with
     | Error(code, message) -> Err(code, message), [], []
@@ -20491,6 +20531,7 @@ let rec executeAs
                           Collation = None
                           Charset = None
                           OnUpdateCurrentTimestamp = false
+                          ExpressionCollation = None
                           Srid = None }
 
                     let localContext () =

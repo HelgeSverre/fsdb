@@ -273,6 +273,68 @@ let tests =
                   | Err(actual, _) -> Expect.equal actual code sql
                   | result -> failtestf "%s: expected %d, got %A" sql code result
 
+          testCase "literal view collation identity survives scalar subquery projection"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+              Expect.equal (handle session "CREATE VIEW grouped_literal AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
+              let session = handle session "SET NAMES utf8mb4" |> fst
+              let sql = "SELECT COERCIBILITY(v) AS n,(SELECT 1) AS s FROM grouped_literal"
+              Expect.equal (handle session sql |> snd) (ResultSet([ "n"; "s" ], [ [ Some "4"; Some "1" ] ])) sql
+
+          testCase "literal view collation identity survives join source"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+              Expect.equal (handle session "CREATE VIEW grouped_literal AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
+              let session = handle session "SET NAMES utf8mb4" |> fst
+              let sql = "SELECT COERCIBILITY(v) AS n FROM grouped_literal JOIN (SELECT 1 AS x) t ON 1"
+              Expect.equal (handle session sql |> snd) (ResultSet([ "n" ], [ [ Some "4" ] ])) sql
+
+          testCase "literal view collation identity survives rollup levels"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
+              Expect.equal (handle session "CREATE VIEW grouped_literal AS SELECT 'a' AS v" |> snd) (Affected 0UL) "view"
+              let session = handle session "SET NAMES utf8mb4" |> fst
+              let sql = "SELECT v,COERCIBILITY(v) AS n FROM grouped_literal GROUP BY v WITH ROLLUP"
+              Expect.equal (handle session sql |> snd) (ResultSet([ "v"; "n" ], [ [ Some "a"; Some "4" ]; [ None; Some "4" ] ])) sql
+
+          testCase "source expression metadata survives materialization and subtotal nulls"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for sql in
+                  [ "SET NAMES latin1 COLLATE latin1_bin"; "CREATE TABLE identity_base(v VARCHAR(8) CHARACTER SET latin1 COLLATE latin1_bin)"; "INSERT INTO identity_base VALUES('a')"; "CREATE VIEW identity_literal AS SELECT 'a' AS v"; "CREATE VIEW identity_expression AS SELECT CONCAT('a','b') AS v"; "CREATE VIEW identity_column AS SELECT v FROM identity_base"; "SET NAMES utf8mb4" ] do
+                  let next, result = handle session sql
+                  session <- next
+                  match result with
+                  | Err(code, message) -> failtestf "%s: %d %s" sql code message
+                  | _ -> ()
+              for sql, names, rows in
+                  [
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_base", [ "v"; "cs"; "co"; "c" ], [ [ Some "a"; Some "latin1"; Some "latin1_bin"; Some "2" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_base GROUP BY v WITH ROLLUP", [ "v"; "cs"; "co"; "c" ], [ [ Some "a"; Some "latin1"; Some "latin1_bin"; Some "2" ]; [ None; Some "latin1"; Some "latin1_bin"; Some "2" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_literal", [ "v"; "cs"; "co"; "c" ], [ [ Some "a"; Some "latin1"; Some "latin1_bin"; Some "4" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_literal GROUP BY v WITH ROLLUP", [ "v"; "cs"; "co"; "c" ], [ [ Some "a"; Some "latin1"; Some "latin1_bin"; Some "4" ]; [ None; Some "latin1"; Some "latin1_bin"; Some "4" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_expression", [ "v"; "cs"; "co"; "c" ], [ [ Some "ab"; Some "latin1"; Some "latin1_bin"; Some "4" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_expression GROUP BY v WITH ROLLUP", [ "v"; "cs"; "co"; "c" ], [ [ Some "ab"; Some "latin1"; Some "latin1_bin"; Some "4" ]; [ None; Some "latin1"; Some "latin1_bin"; Some "4" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_column", [ "v"; "cs"; "co"; "c" ], [ [ Some "a"; Some "latin1"; Some "latin1_bin"; Some "2" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM identity_column GROUP BY v WITH ROLLUP", [ "v"; "cs"; "co"; "c" ], [ [ Some "a"; Some "latin1"; Some "latin1_bin"; Some "2" ]; [ None; Some "latin1"; Some "latin1_bin"; Some "2" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM (SELECT _latin1'a' AS v) d", [ "v"; "cs"; "co"; "c" ], [ [ Some "a"; Some "latin1"; Some "latin1_swedish_ci"; Some "4" ] ]
+                    "SELECT v,CHARSET(v) AS cs,COLLATION(v) AS co,COERCIBILITY(v) AS c FROM (SELECT _latin1'a' AS v) d GROUP BY v WITH ROLLUP", [ "v"; "cs"; "co"; "c" ], [ [ Some "a"; Some "latin1"; Some "latin1_swedish_ci"; Some "4" ]; [ None; Some "latin1"; Some "latin1_swedish_ci"; Some "4" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v LIMIT 1) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "a"; Some "latin1"; Some "latin1_swedish_ci"; Some "4" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT DISTINCT _latin1'a' AS v) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "a"; Some "latin1"; Some "latin1_swedish_ci"; Some "4" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT CONCAT(v,'x') AS v FROM identity_base) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "ax"; Some "latin1"; Some "latin1_bin"; Some "2" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT SUM(1) AS v FROM identity_base) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "1"; Some "binary"; Some "binary"; Some "5" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT COUNT(*) AS v FROM identity_base) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "1"; Some "binary"; Some "binary"; Some "5" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT NULL AS v) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ None; Some "binary"; Some "binary"; Some "6" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT 1 AS v) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "1"; Some "binary"; Some "binary"; Some "5" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v UNION ALL SELECT _latin1'b') d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "a"; Some "latin1"; Some "latin1_swedish_ci"; Some "4" ]; [ Some "b"; Some "latin1"; Some "latin1_swedish_ci"; Some "4" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT _latin1'a' AS v FROM identity_base GROUP BY v) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "a"; Some "latin1"; Some "latin1_swedish_ci"; Some "4" ] ]
+                    "SELECT v,CHARSET(v),COLLATION(v),COERCIBILITY(v) FROM (SELECT CONCAT('a','b') AS v LIMIT 1) d", [ "v"; "CHARSET(v)"; "COLLATION(v)"; "COERCIBILITY(v)" ], [ [ Some "ab"; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "4" ] ]
+                  ] do
+                  Expect.equal (handle session sql |> snd) (ResultSet(names, rows)) sql
+
           testCase "ordinary literal parser caches distinguish connection collations"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

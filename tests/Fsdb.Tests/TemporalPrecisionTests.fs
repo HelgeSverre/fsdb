@@ -26,6 +26,7 @@ let private col name ty : ColumnDef =
       Comment = ""
       Collation = None
       Charset = None
+      ExpressionCollation = None
       Srid = None
       OnUpdateCurrentTimestamp = false }
 

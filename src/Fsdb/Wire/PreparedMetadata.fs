@@ -555,6 +555,7 @@ let private parameterColumn columnType : ColumnDef =
       Comment = ""
       Collation = None
       Charset = None
+      ExpressionCollation = None
       Srid = None }
 
 type private ParameterFamily =

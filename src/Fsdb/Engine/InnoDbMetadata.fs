@@ -21,6 +21,7 @@ let private column name columnType nullable defaultValue charset collation =
       Comment = ""
       Charset = charset
       Collation = collation
+      ExpressionCollation = None
       Srid = None }
 
 let private blank name columnType nullable =

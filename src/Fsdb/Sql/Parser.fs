@@ -2528,6 +2528,7 @@ let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
               Comment = mods |> List.rev |> List.tryPick (function MComment text -> Some text | _ -> None) |> Option.defaultValue ""
               Collation = collation
               Charset = charset
+              ExpressionCollation = None
               Srid = mods |> List.rev |> List.tryPick (function MSrid value -> Some value | _ -> None) }
 
         let checks =

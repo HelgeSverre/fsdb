@@ -684,6 +684,7 @@ let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
       Charset = charset
       OnUpdateCurrentTimestamp = onUpdateCurrentTimestamp
       Comment = comment
+      ExpressionCollation = None
       Srid = srid }
 
 let private lowercaseIndexColumnPrefix = "\u0000L:"

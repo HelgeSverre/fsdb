@@ -88,6 +88,7 @@ module VirtualTable =
           Comment = ""
           Collation = None
           Charset = None
+          ExpressionCollation = None
           Srid = None }
 
     let text (name: string) : Ast.ColumnDef = col name Ast.TText

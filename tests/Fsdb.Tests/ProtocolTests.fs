@@ -695,6 +695,7 @@ let tests =
                     Comment = ""
                     Collation = None
                     Charset = None
+                    ExpressionCollation = None
                     Srid = None }
 
               let requiredMetadata = metadataOfColumn required

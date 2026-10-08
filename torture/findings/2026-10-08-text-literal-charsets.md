@@ -120,10 +120,11 @@ maintained native oracle passes. Differential contracts pass 49 cases and
 5,117 steps with no differences; the run artifact is
 `torture/artifacts/runs/20261007T233639319-67596/contracts`.
 
-## Remaining materialization and alias boundaries
+## Materialization and alias boundaries
 
 With `grouped_literal` defined as a latin1_bin literal `'a' AS v`, the native
-oracle and direct fsdb probes expose these remaining differences:
+oracle and initial fsdb probes exposed these differences, now covered by the
+source-expression metadata implementation below:
 
 | Query shape | MySQL | fsdb |
 |---|---|---|
@@ -132,9 +133,9 @@ oracle and direct fsdb probes expose these remaining differences:
 | COERCIBILITY(v) with GROUP BY v WITH ROLLUP | 4 for both detail and total | 2 for detail, 6 for total |
 
 The literal-view ordering alias case is covered by the [ordering alias implementation](2026-10-08-order-aliases.md).
-The remaining native cases are retained in the executable oracle. The fsdb boundary probe
-is `/tmp/fsdb-view-coercibility-boundary.log`. These are open differences, not
-accepted torture signatures. Stored-program binding combinations beyond the
+The native cases remain in the executable oracle and now have Expecto and wire
+contracts. The historical fsdb boundary probe is
+`/tmp/fsdb-view-coercibility-boundary.log`. Stored-program binding combinations beyond the
 tested function, invalid byte sequences, client encodings beyond the current
 UTF-8 input assumption, and broader expression collation inference also remain
 open. Introducer and national-literal definition rendering needs further
@@ -162,3 +163,28 @@ other fixtures retain latin1_bin from their definitions. Thus replacing a
 grouping expression with a bare NULL loses observable static metadata even
 without a view. A fix must preserve source-expression metadata independently
 of materialized row values and subtotal NULLs.
+
+
+### Source metadata implementation and validation
+
+Source column descriptions retain the expression's collation name and
+coercibility independently of its materialized value. View and derived-source
+resolution carry that descriptor through renaming and joins; UNION combines
+branch identities using the shared collation rules. Ordinary physical column
+constructors and snapshot decoding leave the runtime descriptor absent.
+CREATE TABLE AS derives physical columns without copying expression identity.
+
+ROLLUP retains the grouping expression and marks its subtotal value NULL in the
+evaluation context. Metadata inference still sees the original expression;
+aggregate inputs retain their ordinary row context. This preserves both NULL
+totals and the static metadata exposed by CHARSET, COLLATION, and COERCIBILITY.
+
+The maintained oracle additionally covers LIMIT, DISTINCT, derived numeric
+aggregates, derived NULL, and UNION literals. The source-expression-collation
+wire contract exercises 22 queries through direct SQL, binary preparation,
+and SQL PREPARE/EXECUTE. Native MySQL 8.4.11 uses a disposable server with a
+64 MiB buffer pool and redo capacity. The full gate passes 3,055 tests with no
+build warnings or errors under eight logical processors and a 4 GiB heap cap.
+The differential run `20261008T035011168-14167/contracts` passes 61 cases and
+7,002 steps with zero differences. Broader expression inference and stored
+program binding remain outside this verified matrix.
