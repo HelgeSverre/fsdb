@@ -1298,11 +1298,8 @@ let private parsedStatementHints emitWarnings options (sql: string) =
     if emitWarnings then
         for _, diagnostics in parsed do
             for diagnostic in diagnostics do
-                let position = diagnostic.Offset
-                let suffix = sql.Substring(position, min 80 (sql.Length - position))
-                let line = 1 + (sql.Substring(0, position) |> Seq.filter ((=) '\n') |> Seq.length)
-                Diagnostics.warning 1064 (sprintf "%s near '%s' at line %d" diagnostic.Prefix suffix line)
-    parsed |> List.collect fst
+                Diagnostics.warning 1064 (OptimizerHints.formatDiagnostic sql diagnostic)
+    parsed |> List.collect fst, parsed |> List.exists (snd >> List.isEmpty >> not)
 
 type private TimeoutHintScope = StandaloneStatement | StoredRoutine
 
@@ -1329,7 +1326,7 @@ let private statementTimeoutHint scope options sql (hints: OptimizerHints.Hint l
         | _ -> ()
     timeout, List.ofSeq diagnostics
 
-let private resolveStatementHints (session: Session) options sql hints =
+let private resolveStatementHints (session: Session) options sql hasSyntaxDiagnostics hints =
     let indexesFor (reference: TableRef) =
         let database = reference.Database |> Option.orElse session.Database |> Option.defaultValue defaultDatabase
         CatalogOverlay.tryTable session.TemporaryCatalog (database, reference.Table)
@@ -1337,7 +1334,7 @@ let private resolveStatementHints (session: Session) options sql hints =
         |> Option.map (fun table ->
             [ if table.Columns |> List.exists _.PrimaryKey then "PRIMARY"
               yield! table.Indexes |> List.map _.Name ])
-    OptimizerHintResolution.resolve options sql hints indexesFor
+    OptimizerHintResolution.resolve options sql hasSyntaxDiagnostics hints indexesFor
 
 let private emitHintDiagnostics diagnostics =
     for code, message in diagnostics do Diagnostics.warning code message
@@ -1348,9 +1345,9 @@ let private emitContextHintDiagnostics diagnostics =
     |> List.iter (fun (_, code, message) -> Diagnostics.warning code message)
 
 let private withStatementHintsCore session scope emitWarnings options sql body =
-    let hints = parsedStatementHints emitWarnings options sql
+    let hints, hasSyntaxDiagnostics = parsedStatementHints emitWarnings options sql
     let resolution =
-        if scope = StandaloneStatement then resolveStatementHints session options sql hints
+        if scope = StandaloneStatement then resolveStatementHints session options sql hasSyntaxDiagnostics hints
         else OptimizerHintResolution.empty
     let hints = resolution.Hints |> Option.defaultValue hints
     let timeout, timeoutDiagnostics = statementTimeoutHint scope options sql hints
@@ -1370,6 +1367,7 @@ let private withPreparedStatementHints session options sql body =
 let private emitRoutineHintDiagnostics (session: Session) kind schema name options (definition: string) =
     if definition.Contains("/*+", StringComparison.Ordinal) && session.RoutineDiagnostics.FirstLoad(session.Store, kind, schema, name) then
         parsedStatementHints true options definition
+        |> fst
         |> statementTimeoutHint StoredRoutine options definition
         |> snd
         |> emitContextHintDiagnostics
@@ -5189,8 +5187,8 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
     prepareStatementWithOptions (parserOptionsForSession session) sql
     |> Result.bind (fun (statement, count) ->
         let options = parserOptionsForSession session
-        let hints = parsedStatementHints true options sql
-        let resolution = resolveStatementHints session options sql hints
+        let hints, hasSyntaxDiagnostics = parsedStatementHints true options sql
+        let resolution = resolveStatementHints session options sql hasSyntaxDiagnostics hints
         let hints = resolution.Hints |> Option.defaultValue hints
         let _, timeoutDiagnostics = statementTimeoutHint StandaloneStatement options sql hints
         let assignment, variableDiagnostics = statementGeometryAssignment hints
@@ -6767,12 +6765,12 @@ let private withStoredFunctionRegistry executeText session execute =
 let private normalizeDispatchedSql parserOptions rawSql =
     (Parser.stripVersionCommentsWithOptions parserOptions rawSql).Trim().TrimEnd(';').Trim()
 
-let private withSessionStatementHints (session: Session) options (sql: string) body =
+let private withSessionStatementHints (session: Session) options (sql: string) (command: string) body =
     let scope, emitWarnings =
         if not (sql.Contains("/*+", StringComparison.Ordinal)) then StandaloneStatement, true
         elif not session.RoutineStack.IsEmpty then StoredRoutine, false
-        elif sql.TrimStart().StartsWith("CREATE", StringComparison.OrdinalIgnoreCase) then
-            match tryTextRoutineCommand sql with
+        elif command.StartsWith("CREATE", StringComparison.OrdinalIgnoreCase) then
+            match tryTextRoutineCommand command with
             | Some(CreateProcedure _ | CreateFunction _) -> StoredRoutine, true
             | _ -> StandaloneStatement, true
         else StandaloneStatement, true
@@ -6788,7 +6786,7 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
     let parserOptions = parserOptionsForSession session
     let sql = normalizeDispatchedSql parserOptions rawSql
 
-    withSessionStatementHints session parserOptions rawSql (fun () ->
+    withSessionStatementHints session parserOptions rawSql sql (fun () ->
         withTriggerSessionExecution session (fun () ->
             dispatchNormalized session rawSql parserOptions sql))
 
@@ -7826,7 +7824,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                 | Ok() ->
                     try
                         let executed, result =
-                            withSessionStatementHints session parserOptions rawSql (fun () ->
+                            withSessionStatementHints session parserOptions rawSql sql (fun () ->
                                 withTriggerSessionExecution session (fun () ->
                                     dispatchNormalized session rawSql parserOptions sql))
                         let executed =

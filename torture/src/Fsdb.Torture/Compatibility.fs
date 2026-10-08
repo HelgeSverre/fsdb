@@ -5686,8 +5686,69 @@ module ContractCatalog =
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |]
                         "statement:update", [| "text-differential" |] |] }
 
+    let private cteHintSyntax =
+        { Name = "cte-hint-syntax"
+          Setup = [||]
+          Steps =
+            [|
+               Contract.query "case-1-1" "WITH c AS (SELECT /*+ BOGUS */ 1 AS n) SELECT a.n,b.n FROM c a JOIN c b ON 1"
+               Contract.query "case-1-2" "SHOW WARNINGS"
+               Contract.query "case-2-1" "WITH c AS (SELECT /*+ BOGUS */ 1 AS n) SELECT n FROM c"
+               Contract.query "case-2-2" "SHOW WARNINGS"
+               Contract.query "case-3-1" "WITH c AS (SELECT /*+ BOGUS */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1 JOIN c d ON 1"
+               Contract.query "case-3-2" "SHOW WARNINGS"
+               Contract.query "case-4-1" "WITH c AS (\n SELECT /*+ BOGUS */ 1 AS n\n) SELECT a.n,b.n FROM c a JOIN c b ON 1"
+               Contract.query "case-4-2" "SHOW WARNINGS"
+               Contract.query "case-5-1" "WITH c AS (SELECT /*+ BOGUS */ 1 AS n   )   SELECT a.n,b.n FROM c a JOIN c b ON 1"
+               Contract.query "case-5-2" "SHOW WARNINGS"
+               Contract.query "case-6-1" "WITH c AS (SELECT /*+ BOGUS */ 1 AS n), d AS (SELECT /*+ OTHER */ n FROM c) SELECT a.n FROM d a JOIN d b ON 1"
+               Contract.query "case-6-2" "SHOW WARNINGS"
+               Contract.query "case-7-1" "WITH c AS (SELECT /*+ BOGUS */ 1 AS n) SELECT /*+ BKA(x) */ a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-7-2" "SHOW WARNINGS"
+               Contract.query "case-8-1" "WITH c AS (SELECT /*+ BOGUS */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-8-2" "SHOW WARNINGS"
+               Contract.query "case-8-3" "SELECT 1 AS n"
+               Contract.query "case-8-4" "SHOW WARNINGS"
+               Contract.query "case-9-1" "WITH RECURSIVE c AS (SELECT /*+ BOGUS */ 1 AS n UNION ALL SELECT n+1 FROM c WHERE n<2) SELECT n FROM c"
+               Contract.query "case-9-2" "SHOW WARNINGS"
+               Contract.query "case-10-1" "WITH RECURSIVE c AS (SELECT /*+ BOGUS */ 1 AS n UNION ALL SELECT n+1 FROM c WHERE n<2) SELECT a.n FROM c a JOIN c b ON a.n=b.n ORDER BY a.n"
+               Contract.query "case-10-2" "SHOW WARNINGS"
+               Contract.query "case-11-1" "WITH c AS (WITH u AS (SELECT /*+ BOGUS */ 1 AS n) SELECT 1 AS n) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-11-2" "SHOW WARNINGS"
+               Contract.execute "case-12-1" "PREPARE s FROM 'WITH c AS (SELECT /*+ BOGUS */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1'"
+               Contract.query "case-12-2" "SHOW WARNINGS"
+               Contract.query "case-12-3" "EXECUTE s"
+               Contract.query "case-12-4" "SHOW WARNINGS"
+               Contract.query "case-13-1" "WITH c AS (SELECT /*+ MAX_EXECUTION_TIME(18446744073709551616) */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-13-2" "SHOW WARNINGS"
+               Contract.query "case-14-1" "WITH c AS (SELECT /*+ QB_NAME(q) QB_NAME(r) BOGUS */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-14-2" "SHOW WARNINGS"
+               Contract.query "case-15-1" "WITH c AS (\n SELECT /*+ BOGUS */ 1 AS n\n) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-15-2" "SHOW WARNINGS"
+               Contract.query "case-16-1" "WITH c AS (WITH u AS (SELECT /*+ BOGUS */ 1 AS n) SELECT a.n FROM u a JOIN u b ON 1) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-16-2" "SHOW WARNINGS"
+               Contract.execute "case-17-1" "SET sql_mode='ANSI_QUOTES'"
+               Contract.query "case-17-2" "WITH c AS (SELECT /*+ BOGUS */ 1 AS \"n\") SELECT a.\"n\" FROM c a JOIN c b ON 1"
+               Contract.query "case-17-3" "SHOW WARNINGS"
+               Contract.query "case-18-1" "WITH c AS (SELECT /*+ BOGUS */ ')' AS n) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-18-2" "SHOW WARNINGS"
+               Contract.query "case-19-1" "WITH c AS (SELECT /*+ BOGUS */ /*!80000 1 */ AS n) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-19-2" "SHOW WARNINGS"
+               Contract.query "case-20-1" "/*!80000 */ WITH c AS (SELECT /*+ BOGUS */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1"
+               Contract.query "case-20-2" "SHOW WARNINGS"
+               Contract.prepare "binary-prepare" "cte-syntax" Query
+                   "WITH c AS (SELECT /*+ QB_NAME(q) QB_NAME(r) BOGUS */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1" [||]
+               Contract.query "binary-prepare-warnings" "SHOW WARNINGS"
+               Contract.invoke "binary-execute" "cte-syntax" OracleSuccess
+               Contract.query "binary-execute-warnings" "SHOW WARNINGS"
+               Contract.close "binary-close" "cte-syntax"
+            |]
+          Cleanup = [| "DEALLOCATE PREPARE s"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
+
     let all =
-        [| cteHintInstances
+        [| cteHintSyntax
+           cteHintInstances
            mutationHintContext
            settingHintContext
            hintFamilyConflicts

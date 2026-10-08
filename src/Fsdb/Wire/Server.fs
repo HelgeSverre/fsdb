@@ -1882,7 +1882,7 @@ let private handleConnection
                                         return! loop session
                                 else
                                     let statements =
-                                        match Parser.splitStatements sql with
+                                        match Parser.splitStatementsPreservingSource sql with
                                         | Result.Ok statements -> Result.Ok statements
                                         | Result.Error _ -> Result.Error(1064, "You have an error in your SQL syntax")
 

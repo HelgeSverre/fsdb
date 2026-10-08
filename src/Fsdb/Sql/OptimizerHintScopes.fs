@@ -11,14 +11,20 @@ type Block =
       SourceOffset: int option
       Sources: FromItem list }
 
+type ContextStep = BlockHints of Block | Reparse of CommonTableExpr
+
 type Walk =
     { Numbered: Block list
-      Context: Block list
+      Context: ContextStep list
       Resolution: Block list }
+
+type private CteBinding =
+    { Definition: CommonTableExpr
+      mutable Referenced: bool }
 
 type private Scope =
     { Parent: Scope option
-      Definitions: CommonTableExpr list }
+      Definitions: CteBinding list }
 
 let private empty = { Numbered = []; Context = []; Resolution = [] }
 let private combine walks =
@@ -29,14 +35,14 @@ let private combine walks =
 let private sources (select: SelectStmt) = Option.toList select.From @ (select.Joins |> List.map _.Table)
 
 let private extend scope definitions =
-    if List.isEmpty definitions then scope else { Parent = Some scope; Definitions = definitions }
+    if List.isEmpty definitions then scope else { Parent = Some scope; Definitions = definitions |> List.map (fun cte -> { Definition = cte; Referenced = false }) }
 
 let rec private lookup scope name =
-    match scope.Definitions |> List.tryFindIndex (fun cte -> cte.CteName.Equals(name, StringComparison.OrdinalIgnoreCase)) with
+    match scope.Definitions |> List.tryFindIndex (fun binding -> binding.Definition.CteName.Equals(name, StringComparison.OrdinalIgnoreCase)) with
     | Some index ->
-        let cte = scope.Definitions.[index]
-        let visible = scope.Definitions |> List.take (index + if cte.Recursive then 1 else 0)
-        Some(cte, { scope with Definitions = visible })
+        let binding = scope.Definitions.[index]
+        let visible = scope.Definitions |> List.take (index + if binding.Definition.Recursive then 1 else 0)
+        Some(binding, { scope with Definitions = visible })
     | None -> scope.Parent |> Option.bind (fun parent -> lookup parent name)
 
 let private mutationSource (name: string) =
@@ -64,12 +70,17 @@ let collect positionOf statement =
     and source scope active = function
         | FromTable table when table.Database.IsNone ->
             match lookup scope table.Table with
-            | Some(cte, definitionScope) ->
+            | Some(binding, definitionScope) ->
+                let cte = binding.Definition
                 if active |> List.exists (fun current -> Object.ReferenceEquals(current, cte)) then
                     // The recursive reference reserves a block but does not instantiate its hints again.
                     nextNumber <- nextNumber + 1
                     empty
-                else query definitionScope (cte :: active) cte.Body
+                else
+                    let repeated = binding.Referenced
+                    binding.Referenced <- true
+                    let body = query definitionScope (cte :: active) cte.Body
+                    if repeated then { body with Context = Reparse cte :: body.Context } else body
             | None -> empty
         | FromTable _ -> empty
         | FromJoinGroup(first, joins) -> combine [ source scope active first; joinBlocks scope active joins ]
@@ -90,7 +101,7 @@ let collect positionOf statement =
                  @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
                  @ (select.OrderBy |> List.map fst) @ Option.toList select.Limit @ Option.toList select.Offset)
         { Numbered = Option.toList block @ projections.Numbered @ from.Numbered @ remaining.Numbered
-          Context = projections.Context @ from.Context @ remaining.Context @ Option.toList block
+          Context = projections.Context @ from.Context @ remaining.Context @ (block |> Option.toList |> List.map BlockHints)
           Resolution = Option.toList block @ from.Resolution @ projections.Resolution @ remaining.Resolution }
     let scope = { Parent = None; Definitions = [] }
     let mutation ctes from (joins: Join list) values =
@@ -98,7 +109,7 @@ let collect positionOf statement =
         let block = allocate None (from :: (joins |> List.map _.Table))
         let children = combine [source scope [] from; joinBlocks scope [] joins; expressions scope [] values]
         { Numbered = block :: children.Numbered
-          Context = children.Context @ [block]
+          Context = children.Context @ [BlockHints block]
           Resolution = block :: children.Resolution }
     let insertSelect table select assignments =
         let body = selectBlock scope [] select
@@ -109,7 +120,7 @@ let collect positionOf statement =
                 let withTarget block =
                     if block.Number = first.Number then { block with Sources = mutationSource table :: block.Sources } else block
                 { Numbered = List.map withTarget body.Numbered
-                  Context = List.map withTarget body.Context
+                  Context = body.Context |> List.map (function BlockHints block -> BlockHints(withTarget block) | Reparse cte -> Reparse cte)
                   Resolution = List.map withTarget body.Resolution }
         combine [body; expressions scope [] assignments]
     let rec visit = function

@@ -3823,6 +3823,17 @@ let tests =
                       "only statement delimiters split the batch"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "batch diagnostics retain original executable comment text"
+          <| fun _ ->
+              let first = "WITH c AS (SELECT /*+ BOGUS */ /*!80000 1 */ AS n) SELECT n FROM c"
+              let routine = "/*!50003 CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END */"
+              Expect.equal (splitStatementsPreservingSource (first + "; SHOW WARNINGS"))
+                  (Ok [ first; "SHOW WARNINGS" ]) "hint suffix retains the executable comment"
+              Expect.equal (splitStatementsPreservingSource (routine + "; SELECT 3"))
+                  (Ok [ routine; "SELECT 3" ]) "expanded compound tokens identify the outer delimiter"
+              Expect.equal (splitStatementsPreservingSource "SELECT ';'; /* ; */ SELECT 2")
+                  (Ok [ "SELECT ';'"; "/* ; */ SELECT 2" ]) "original comments survive delimiter scanning"
+
           testCase "optimizer hint locations retain scope and source offsets"
           <| fun _ ->
               let sql = "SELECT /*+ MAX_EXECUTION_TIME(10) */ '(', (SELECT /*+ MAX_EXECUTION_TIME(2) */ 1) AS n /*+ ignored */; UPDATE /*+ MAX_EXECUTION_TIME(3) */ t SET n=1"

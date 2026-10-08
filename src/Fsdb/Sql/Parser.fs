@@ -183,12 +183,16 @@ let trySplitTopLevelKeywordWithOptions
     |> Option.map (fun index ->
         text.Substring(0, index).Trim(), text.Substring(index + keyword.Length).Trim())
 
+type private QueryBlockCapture =
+    { Selects: Dictionary<int, SelectStmt>
+      CteBodies: ResizeArray<CommonTableExpr * string> }
+
 type private ParserState =
     { Options: ParserOptions
       StoredProgramSyntax: bool
       SourceText: string
       SourceOffsets: (int * int) array
-      QueryBlocks: Dictionary<int, SelectStmt> option
+      QueryBlocks: QueryBlockCapture option
       mutable ExpressionDepth: int
       mutable PlaceholderCount: int }
 
@@ -293,7 +297,7 @@ type internal OptimizerHintLocation =
 /// `stripVersionComments` also removes ordinary comments for text probes;
 /// parser entry points preserve them because a comment is not interchangeable
 /// with whitespace between a built-in name and `(` under `IGNORE_SPACE`.
-let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options: ParserOptions) (sql: string) =
+let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (sourcePositions: ResizeArray<int * int> option) (options: ParserOptions) (sql: string) =
     let output = if rewrite then Text.StringBuilder(sql.Length) else null
     let optimizerHints = ResizeArray<OptimizerHintLocation>()
     let mutable i = 0
@@ -340,6 +344,8 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
     let mutable quoteChar: char option = None
 
     while i < sql.Length do
+        let sourceStart = i
+        let outputStart = if sourcePositions.IsSome then output.Length else 0
         match quoteChar with
         | Some q when not options.NoBackslashEscapes && sql.[i] = '\\' && q <> '`' && i + 1 < sql.Length ->
             // backslash-escapes only apply inside '...'/"...", not `...`
@@ -492,10 +498,16 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
             appendChar sql.[i]
             i <- i + 1
 
+        match sourcePositions with
+        | Some positions when i - sourceStart <> output.Length - outputStart ->
+            positions.Add(outputStart, sourceStart - outputStart)
+            positions.Add(output.Length, i - output.Length)
+        | _ -> ()
+
     (if isNull output then None else Some(output.ToString())), List.ofSeq optimizerHints
 
 let private rewriteVersionComments stripOrdinaryComments options sql =
-    scanComments true stripOrdinaryComments options sql |> fst |> Option.get
+    scanComments true stripOrdinaryComments None options sql |> fst |> Option.get
 
 let stripVersionCommentsWithOptions (options: ParserOptions) (sql: string) : string =
     rewriteVersionComments true options sql
@@ -510,7 +522,7 @@ let internal optimizerHintLocationsWithOptions (options: ParserOptions) (sql: st
     if sql.IndexOf("/*+", StringComparison.Ordinal) < 0 then
         []
     else
-        scanComments false false options sql |> snd
+        scanComments false false None options sql |> snd
 
 let internal optimizerHintsWithOptions options sql =
     optimizerHintLocationsWithOptions options sql |> List.map _.Body
@@ -3677,14 +3689,18 @@ let private projectionAlias: Parser<string option, unit> =
     let implicitName = identifier <|> stringName
     (attempt (keyword "AS" >>. explicitName) |>> Some) <|> (attempt implicitName |>> Some) <|> preturn None
 
-let private sourcePosition (state: ParserState) position =
+let private precedingBoundaryIndex (offsets: (int * int) array) position =
     let mutable low = 0
-    let mutable high = state.SourceOffsets.Length - 1
+    let mutable high = offsets.Length - 1
     while low <= high do
         let middle = low + (high - low) / 2
-        let boundary, _ = state.SourceOffsets.[middle]
+        let boundary, _ = offsets.[middle]
         if boundary <= position then low <- middle + 1 else high <- middle - 1
-    position + (if high < 0 then 0 else snd state.SourceOffsets.[high])
+    high
+
+let private sourcePosition (state: ParserState) position =
+    let index = precedingBoundaryIndex state.SourceOffsets position
+    position + (if index < 0 then 0 else snd state.SourceOffsets.[index])
 
 /// Interior comments belong to expression names; trailing trivia does not.
 let private projectionSourceBounds (state: ParserState) first finish =
@@ -3812,18 +3828,32 @@ let private tableRef: Parser<TableRef, unit> =
         | None -> { Database = None; Table = first; Alias = alias; Partitions = Option.defaultValue [] partitions }
 
 let private withClause: Parser<CommonTableExpr list, unit> =
+    let capturedBody =
+        pipe3 getPosition (sym "(" >>. selectQuery .>> pchar ')') getPosition (fun start body finish ->
+            let state = parserState ()
+            let first = sourcePosition state (int start.Index)
+            let last = sourcePosition state (int finish.Index)
+            body, Some(state.SourceText.Substring(first, last - first))) .>> ws
+    let ordinaryBody = between (sym "(") (sym ")") selectQuery |>> fun body -> body, None
+    let body stream =
+        if (parserState ()).QueryBlocks.IsSome then capturedBody stream else ordinaryBody stream
     keyword "WITH" >>. opt (keyword "RECURSIVE")
     >>= fun recursive ->
         sepBy1
             (identifier
              .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
              .>> keyword "AS"
-             .>>. between (sym "(") (sym ")") selectQuery
-             |>> fun ((name, cols), body) ->
-                 { CteName = name
-                   CteColumns = cols |> Option.defaultValue []
-                   Recursive = recursive.IsSome
-                   Body = body })
+             .>>. body
+             |>> fun ((name, cols), (body, source)) ->
+                 let cte =
+                     { CteName = name
+                       CteColumns = cols |> Option.defaultValue []
+                       Recursive = recursive.IsSome
+                       Body = body }
+                 match (parserState ()).QueryBlocks, source with
+                 | Some capture, Some text -> capture.CteBodies.Add(cte, text)
+                 | _ -> ()
+                 cte)
             (sym ",")
 
 /// `UNION`/`INTERSECT`/`EXCEPT`, each `[ALL|DISTINCT]`, between two
@@ -4338,7 +4368,7 @@ let private selectRecord =
 let private selectRecordWithPosition =
     pipe2 getPosition selectRecord (fun position select ->
         let state = parserState ()
-        state.QueryBlocks |> Option.iter (fun blocks -> blocks.[sourcePosition state (int position.Index)] <- select)
+        state.QueryBlocks |> Option.iter (fun blocks -> blocks.Selects.[sourcePosition state (int position.Index)] <- select)
         select)
 
 selectStmtRecordRef.Value <- fun stream ->
@@ -5300,12 +5330,12 @@ let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, 
     let full = ws >>. statement .>> opt (sym ";") .>> eof
     withStatementParserState options sql (runWithDepthLimit full)
 
-/// Source positions identify hint-owning SELECTs without changing the persisted AST.
+/// Optional source capture retains hint-owning SELECTs and CTE reparse text without changing the persisted AST.
 let internal parseQueryBlocksWithOptions options sql =
-    let blocks = Dictionary<int, SelectStmt>()
+    let capture = { Selects = Dictionary<int, SelectStmt>(); CteBodies = ResizeArray() }
     let full = ws >>. statement .>> opt (sym ";") .>> eof
-    withParserStateCore (Some blocks) false options sql (runWithDepthLimit full)
-    |> Result.map (fun statement -> statement, blocks |> Seq.map (fun pair -> pair.Key, pair.Value) |> Seq.sortBy fst |> List.ofSeq)
+    withParserStateCore (Some capture) false options sql (runWithDepthLimit full)
+    |> Result.map (fun statement -> statement, (capture.Selects |> Seq.map (fun pair -> pair.Key, pair.Value) |> Seq.sortBy fst |> List.ofSeq), List.ofSeq capture.CteBodies)
 
 let parseStoredStatementWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     let full = ws >>. statement .>> opt (sym ";") .>> eof
@@ -5585,9 +5615,8 @@ let parseHandler (sql: string) : Result<HandlerCommand, string> =
 /// Splits a COM_QUERY batch at statement delimiters outside literals,
 /// comments, and supported compound object bodies. The parser still validates each
 /// returned statement separately.
-let splitStatements (sql: string) : Result<string list, string> =
-    let sql = stripVersionComments sql
-    let statements = ResizeArray<string>()
+let private splitStatementRanges (sql: string) =
+    let statements = ResizeArray<int * int>()
     let mutable start = 0
     let mutable i = 0
     let mutable quote: char option = None
@@ -5627,7 +5656,7 @@ let splitStatements (sql: string) : Result<string list, string> =
             let statement = sql.[start .. stop - 1].Trim()
 
             if not (isBlank statement) then
-                statements.Add statement
+                statements.Add(start, stop)
 
     while i < sql.Length do
         match quote with
@@ -5731,6 +5760,29 @@ let splitStatements (sql: string) : Result<string list, string> =
     | None, false ->
         addStatement sql.Length
         Result.Ok(List.ofSeq statements)
+
+let splitStatements (sql: string) : Result<string list, string> =
+    let normalized = stripVersionComments sql
+    splitStatementRanges normalized
+    |> Result.map (List.map (fun (first, last) -> normalized.Substring(first, last - first).Trim()))
+
+/// Scan executable comments for delimiters while retaining original text for diagnostics.
+let internal splitStatementsPreservingSource (sql: string) =
+    let positions = ResizeArray<int * int>()
+    positions.Add(0, 0)
+    let normalized = scanComments true true (Some positions) defaultOptions sql |> fst |> Option.get
+    let offsets = positions.ToArray()
+    let originalPosition position =
+        let index = precedingBoundaryIndex offsets position
+        let boundary, delta = offsets.[index]
+        if position <> boundary && index + 1 < offsets.Length && snd offsets.[index + 1] <> delta then None
+        else Some(position + delta)
+    splitStatementRanges normalized
+    |> Result.map (List.map (fun (first, last) ->
+        match originalPosition first, originalPosition last with
+        | Some start, Some finish -> sql.Substring(start, finish - start).Trim()
+        // Delimiters inside an executable comment require its expanded statement text.
+        | _ -> normalized.Substring(first, last - first).Trim()))
 
 /// Parses one standalone expression for persisted schema objects such as
 /// CHECK constraints. It shares the statement parser's placeholder/depth

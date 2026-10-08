@@ -222,3 +222,14 @@ let parse options (location: Parser.OptimizerHintLocation) =
             value |> Option.iter (fun value -> hints.Add { Offset = location.BodyOffset + start; ContextOrder = None; Location = location; Value = value })
     with SyntaxAt offset -> warn "Optimizer hint syntax error" offset
     List.ofSeq hints, List.ofSeq diagnostics
+
+let formatDiagnostic (sql: string) (diagnostic: Diagnostic) =
+    let position = diagnostic.Offset
+    let suffix = sql.Substring(position, min 80 (sql.Length - position))
+    let line = 1 + (sql.Substring(0, position) |> Seq.filter ((=) '\n') |> Seq.length)
+    sprintf "%s near '%s' at line %d" diagnostic.Prefix suffix line
+
+let syntaxDiagnostics options sql =
+    Parser.optimizerHintLocationsWithOptions options sql
+    |> List.collect (parse options >> snd)
+    |> List.map (formatDiagnostic sql)
