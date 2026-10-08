@@ -631,6 +631,15 @@ let tests =
                   Expect.equal (handle session ("SELECT HEX(CONCAT(" + literal + "," + literal + ")) AS h") |> snd)
                       (ResultSet([ "h" ], [ [ Some expected ] ])) literal
 
+          testCase "quoted legacy literals warn without discarding source bytes"
+          <| fun _ ->
+              for charset, fragment in [ "big5", "F09F98"; "ujis", "F09F98"; "euckr", "9880"; "gb2312", "F09F98" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, result = handle session ("SELECT HEX(_" + charset + "'😀') AS h")
+                  Expect.equal result (ResultSet([ "h" ], [ [ Some "F09F9880" ] ])) "source bytes remain intact"
+                  Expect.equal (session.Diagnostics |> List.map (fun warning -> warning.Code, warning.Message))
+                      [ 1300, "Invalid " + charset + " character string: '" + fragment + "'" ] charset
+
           testCase "text slicing counts supplementary characters once"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

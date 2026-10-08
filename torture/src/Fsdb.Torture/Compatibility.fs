@@ -1632,6 +1632,26 @@ module ContractCatalog =
                      "SELECT HEX(RIGHT(_utf8mb4 X'41F090808042',-1)) AS h", false ] |> List.indexed do
                    let step = Contract.query (sprintf "gb18030-slicing-%d" index) sql
                    yield if rejected then step |> Contract.fails 1300 "HY000" else step
+               for index, sql in
+                   [ "SELECT HEX(_sjis'é') AS h,LENGTH(_sjis'é') AS b,CHAR_LENGTH(_sjis'é') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_sjis'😀') AS h,LENGTH(_sjis'😀') AS b,CHAR_LENGTH(_sjis'😀') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_cp932'é') AS h,LENGTH(_cp932'é') AS b,CHAR_LENGTH(_cp932'é') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_cp932'😀') AS h,LENGTH(_cp932'😀') AS b,CHAR_LENGTH(_cp932'😀') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_big5'é') AS h,LENGTH(_big5'é') AS b,CHAR_LENGTH(_big5'é') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_big5'😀') AS h,LENGTH(_big5'😀') AS b,CHAR_LENGTH(_big5'😀') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_gbk'é') AS h,LENGTH(_gbk'é') AS b,CHAR_LENGTH(_gbk'é') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_gbk'😀') AS h,LENGTH(_gbk'😀') AS b,CHAR_LENGTH(_gbk'😀') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_ujis'é') AS h,LENGTH(_ujis'é') AS b,CHAR_LENGTH(_ujis'é') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_ujis'😀') AS h,LENGTH(_ujis'😀') AS b,CHAR_LENGTH(_ujis'😀') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_euckr'é') AS h,LENGTH(_euckr'é') AS b,CHAR_LENGTH(_euckr'é') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_euckr'😀') AS h,LENGTH(_euckr'😀') AS b,CHAR_LENGTH(_euckr'😀') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_gb2312'é') AS h,LENGTH(_gb2312'é') AS b,CHAR_LENGTH(_gb2312'é') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_gb2312'😀') AS h,LENGTH(_gb2312'😀') AS b,CHAR_LENGTH(_gb2312'😀') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_gb18030'é') AS h,LENGTH(_gb18030'é') AS b,CHAR_LENGTH(_gb18030'é') AS n;SHOW WARNINGS"
+                     "SELECT HEX(_gb18030'😀') AS h,LENGTH(_gb18030'😀') AS b,CHAR_LENGTH(_gb18030'😀') AS n;SHOW WARNINGS" ] |> List.indexed do
+                   yield Contract.execute (sprintf "quoted-legacy-charset-%d" index) "SET NAMES utf8mb4"
+                   for step, fragment in sql.Split(';') |> Array.indexed do
+                       yield Contract.query (sprintf "quoted-legacy-%d-%d" index step) fragment
                yield Contract.execute "encoded-storage-mode" "SET sql_mode=DEFAULT" |]
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential"; "error-contract" |] |] }

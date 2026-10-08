@@ -310,3 +310,20 @@ passed 3,082 tests without build warnings or errors. The focused
 records the measured full-scan regression in the first correct implementation
 and its bounded-scan fix. Broader charset conversion and output mapping
 remain open; this closes the audited GB18030 and scalar-slicing cases.
+
+### Quoted legacy literal warnings
+
+Quoted introducers retain the UTF8 client bytes and warn rather than reject
+when those bytes are malformed in the introduced charset. The native matrix
+covers `é` and `😀` under SJIS, CP932, Big5, GBK, UJIS, EUC-KR, GB2312,
+and GB18030. All sixteen rows match byte length, character count, and HEX.
+Malformed Big5, UJIS, EUC-KR, and GB2312 cases now emit warning 1300 for each
+literal occurrence. The EUC-KR preview begins at `9880`, after the valid
+`F09F` pair; the other malformed cases preview `F09F98`.
+
+Literal warning collection reuses structural validation while retaining its
+submission/preparation lifetime. Storage conversion policy is unchanged.
+The maintained quoted oracle and full wire suite pass: 62 cases and 8,333
+steps without differences. The root gate passed 3,083 tests without build
+warnings or errors. Other quoted-string conversion and charset mapping
+boundaries remain open.
