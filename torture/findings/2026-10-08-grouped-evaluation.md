@@ -188,9 +188,43 @@ The maintained native oracle also passes its multi-key plan and result checks.
 No known-gap signatures are added.
 
 JSON_ARRAYAGG's input-order difference above is resolved for these fixtures.
-GROUP_CONCAT without internal ordering also matches; its internal equal-key
-ordering remains open. Volatile ROLLUP evaluations and returned projection
+GROUP_CONCAT without internal ordering also matches; the internal equal-key
+ordering difference is addressed by the GROUP_CONCAT ordering checks below. Volatile ROLLUP evaluations and returned projection
 assignment/LIMIT behavior remain open. Index-selected input plans and wider
 collation combinations need further evidence before claiming general plan
 parity. The [performance snapshot](../../benchmarks/results/a975585d-grouped-order.md)
 records the DISTINCT grouping path and ordinary controls.
+
+## GROUP_CONCAT ordering and duplicate retention
+
+The [native oracle](../scripts/group-concat-order-oracle.py) checks equal sort
+keys, ascending/descending directions, explicit secondary keys, first duplicate
+retention under an accent/case-insensitive collation, numeric and ENUM ordering,
+binary collation, and NULL ordering keys. Every case passes direct execution
+and SQL PREPARE/EXECUTE on disposable MySQL 8.4.11 with 64 MiB buffer and redo
+limits.
+
+For ids 1 through 8 with alternating keys 2 and 1, `GROUP_CONCAT(id ORDER BY k)`
+returns `8,6,4,2,7,5,3,1`. Equal keys return in reverse arrival order even when
+the ordering direction changes. An explicit secondary key overrides that tie
+behavior. Fsdb previously retained arrival order within equal keys.
+
+DISTINCT retains the first spelling and its source ordering keys before sorting.
+For values `b,a,c,B,d,e,f,A` with those alternating keys, DISTINCT ordered by k
+returns `e,a,f,d,c,b`. Sorting before deduplication selected the wrong retained
+values. With no explicit ordering, DISTINCT returns `a,b,c,d,e,f`; numeric values
+sort numerically and ENUM labels follow declaration order.
+
+Fsdb now deduplicates before ordering, retains the first original value, and
+reverses equal-key arrivals through the shared typed/collation-aware sorter.
+The grouped assignment fixture now returns group 1 `1`, group 2 `3,2`, with
+final `@n=3`, matching the maintained grouped-evaluation oracle. Byte truncation
+and its warnings are also checked through the wire contract.
+
+Volatile ROLLUP evaluations, returned projection assignment/LIMIT behavior,
+and broader index-selected grouping plans remain separate open boundaries.
+
+Validation: 3,047 tests pass with no build warnings/errors under a 4 GiB GC
+heap cap. Native wire contracts pass 57 cases / 6,291 steps with zero differences
+at `20261008T024704006-3122/contracts`. The standalone native ordering oracle
+passes direct and SQL-prepared fixtures. No known-gap signatures are added.

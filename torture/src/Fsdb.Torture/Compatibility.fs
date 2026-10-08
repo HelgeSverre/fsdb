@@ -528,6 +528,7 @@ module ContractCatalog =
                "SELECT SUM(@n:=@n+1) AS a,SUM(@n:=@n+1) AS b FROM contract_grouped_inputs"
                "SELECT v,MIN(@n:=@n+1) AS lo,MAX(@n:=@n+1) AS hi FROM contract_grouped_inputs GROUP BY v ORDER BY v"
                "SELECT v,COUNT(DISTINCT (@n:=@n+1)) AS n FROM contract_grouped_inputs GROUP BY v ORDER BY v"
+               "SELECT v,GROUP_CONCAT(@n:=@n+1 ORDER BY v) AS s FROM contract_grouped_inputs GROUP BY v ORDER BY v"
                "SELECT v,SUM(v) AS s FROM contract_grouped_inputs GROUP BY v WITH ROLLUP"
                "SELECT v,SUM(@n:=@n+1) AS s FROM contract_grouped_inputs GROUP BY v HAVING SUM(@n:=@n+1)>0 ORDER BY v"
                "SELECT COERCIBILITY(SUM(@n:=@n+1)) AS c FROM contract_grouped_inputs GROUP BY v ORDER BY v" |]
@@ -608,6 +609,43 @@ module ContractCatalog =
                    yield Contract.execute "deallocate grouped family" "DEALLOCATE PREPARE grouped_family" |]
           Cleanup = [| "DROP TABLE IF EXISTS contract_group_plan"; "SET @n=NULL" |]
           Coverage = [| "statement:select", [| "aggregation"; "evaluation-order"; "text-differential"; "prepared-differential" |] |] }
+
+    let private groupConcatOrdering =
+        let queries =
+            [| "SELECT GROUP_CONCAT(id ORDER BY k) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(id ORDER BY k DESC) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(id ORDER BY k,id) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(id ORDER BY k,id DESC) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(id ORDER BY k-k) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(v) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(DISTINCT v) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(DISTINCT v ORDER BY k) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(DISTINCT v ORDER BY k DESC) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(v ORDER BY k) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(DISTINCT v ORDER BY k-k) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(DISTINCT id ORDER BY k-k) AS s FROM concat_order"
+               "SELECT GROUP_CONCAT(DISTINCT n) AS s FROM concat_types"
+               "SELECT GROUP_CONCAT(DISTINCT e) AS s FROM concat_types"
+               "SELECT GROUP_CONCAT(DISTINCT e ORDER BY e) AS s FROM concat_types"
+               "SELECT GROUP_CONCAT(DISTINCT v) AS s FROM concat_types"
+               "SELECT GROUP_CONCAT(id ORDER BY v) AS s FROM concat_types" |]
+        { Name = "group-concat-ordering"
+          Setup = [| "CREATE TABLE concat_order(id INT PRIMARY KEY,k INT,v VARCHAR(8) COLLATE utf8mb4_0900_ai_ci)"
+                     "INSERT INTO concat_order VALUES(1,2,'b'),(2,1,'a'),(3,2,'c'),(4,1,'B'),(5,2,'d'),(6,1,'e'),(7,2,'f'),(8,1,'A')"
+                     "CREATE TABLE concat_types(id INT,n INT,e ENUM('z','a','m'),v VARCHAR(8) COLLATE utf8mb4_bin)"
+                     "INSERT INTO concat_types VALUES(1,10,'m','b'),(2,2,'z','a'),(3,1,'a','B'),(4,2,'z',NULL),(5,NULL,NULL,'A')" |]
+          Steps =
+            [| for sql in queries do
+                   yield Contract.query sql sql
+                   yield Contract.execute "prepare concat ordering" ("PREPARE concat_ordering FROM '" + sql.Replace("'", "''") + "'")
+                   yield Contract.query ("prepared: " + sql) "EXECUTE concat_ordering"
+                   yield Contract.execute "deallocate concat ordering" "DEALLOCATE PREPARE concat_ordering"
+               yield Contract.execute "short concat limit" "SET group_concat_max_len=4"
+               yield Contract.query "truncated tied order" "SELECT GROUP_CONCAT(id ORDER BY k) AS s FROM concat_order"
+               yield Contract.query "truncation warnings" "SHOW WARNINGS"
+               yield Contract.execute "restore concat limit" "SET group_concat_max_len=DEFAULT" |]
+          Cleanup = [| "DROP TABLE IF EXISTS concat_order"; "DROP TABLE IF EXISTS concat_types"; "SET group_concat_max_len=DEFAULT" |]
+          Coverage = [| "statement:select", [| "aggregation"; "ordering"; "text-differential"; "prepared-differential" |] |] }
 
     let private exactErrors =
         { Name = "syntax-error-contracts"
@@ -3485,6 +3523,7 @@ module ContractCatalog =
            aggregateOrdering
            groupedAggregateInputs
            groupedAggregateFamilies
+           groupConcatOrdering
            exactErrors
            noDirInCreate
            semanticErrors

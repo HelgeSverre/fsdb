@@ -13683,22 +13683,27 @@ and private evalAggregateUsing<'row>
             evaluateArgument row 0 innerExpr
             |> Result.bind (function
                 | VNull -> Ok None
-                | v -> orderKeys |> traverse (fst >> evalOrderKey ctx) |> Result.map (fun keys -> Some(v, collationKeyOf ctx innerExpr v, keys)))
+                | v ->
+                    let keys =
+                        if distinct && orderKeys.IsEmpty then Ok [ orderValueForExpr ctx innerExpr v ]
+                        else orderKeys |> traverse (fst >> evalOrderKey ctx)
+                    keys |> Result.map (fun keys -> Some(v, collationKeyOf ctx innerExpr v, keys)))
 
         rows
         |> traverseSeq evalRow
         |> Result.map (fun present ->
+            // DISTINCT keeps the first spelling and its original ordering keys.
+            let unique = if distinct then List.distinctBy (fun (_, key, _) -> key) present else present
+            let sort directions =
+                List.sortWith (fun (_, _, ka) (_, _, kb) -> compareByOrderKeys directions ka kb)
             let ordered =
-                if orderKeys.IsEmpty then
-                    present
-                else
-                    let directions = List.map snd orderKeys
-                    present |> List.sortWith (fun (_, _, ka) (_, _, kb) -> compareByOrderKeys directions ka kb)
-            // Collation-aware dedupe: åge/age fold to one value under an
-            // ai_ci column, stay distinct under bin.
-            let deduped = if distinct then List.distinctBy (fun (_, key, _) -> key) ordered else ordered
+                match orderKeys with
+                | [] when distinct -> unique |> sort [ Asc ]
+                | [] -> unique
+                // MySQL inserts equal ordering keys before earlier arrivals.
+                | _ -> unique |> List.rev |> sort (List.map snd orderKeys)
 
-            if deduped.IsEmpty then
+            if ordered.IsEmpty then
                 VNull
             else
                 let limit = groupConcatMaxLen.Value |> Option.defaultValue 1024
@@ -13726,7 +13731,7 @@ and private evalAggregateUsing<'row>
 
                 let mutable truncatedAt = None
 
-                deduped
+                ordered
                 |> List.iteri (fun i (v, _, _) ->
                     let cutBySeparator = i > 0 && appendWithinLimit separator
                     let cutByValue = appendWithinLimit (v |> toText |> Option.defaultValue "")
