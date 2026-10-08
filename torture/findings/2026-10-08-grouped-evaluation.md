@@ -67,7 +67,7 @@ expression would not explain the three-group and LIMIT observations.
 
 ## Implementation boundary and validation
 
-`runGroupedSelect` collects source rows into groups, then `processGroup` calls
+At `9a498be5`, `runGroupedSelect` collects source rows into groups, then `processGroup` calls
 `projectGroup` before `orderKeysOf`. Each call to `rewriteAggregates` evaluates
 its aggregate inputs over that group's stored rows. Sorting and LIMIT run after
 projection and ordering evaluation; returned rows do not restore assignment
@@ -76,7 +76,47 @@ values. These are distinct stages with distinct observable differences.
 The oracle passes all direct and SQL-prepared fixtures on a disposable native
 MySQL 8.4.11 server with 64 MiB buffer and redo limits. Current-engine probes
 use the embedded Debug assembly, .NET SDK 10.0.401, eight logical processors,
-and a 4 GiB GC heap cap. No runtime change or accepted differential-failure
-signature is introduced by this finding. A fix must preserve scalar aggregate
-controls and ordinary alias reuse while addressing input-row accumulation and
-returned-row side effects separately.
+and a 4 GiB GC heap cap. The contracts distinguish scalar aggregate controls,
+ordinary alias reuse, input-row accumulation, and returned-row side effects.
+
+
+## Materialized aggregate inputs
+
+Grouped input rows retain evaluated aggregate arguments before groups are folded.
+Distinct syntax occurrences keep distinct values, even when their expressions
+are structurally equal. Immutable source columns and literals read their retained
+row/syntax value directly; routine variables and computed expressions are
+materialized. Hidden ordering and HAVING inputs precede projected inputs. A bare
+ordering aggregate matching a projection reuses its projected value.
+
+The interleaved SUM, MIN/MAX, repeated projection, hidden ordering/HAVING, and
+scalar aggregate controls now match MySQL. DISTINCT-count controls also pass.
+Pure ROLLUP sums retain source arguments rather than replacing aggregate inputs
+with the rolled-up output key. Numeric COUNT/SUM/AVG metadata reports binary
+charset/collation with coercibility 5; the registry override check remains intact.
+
+Validation: 3,043 tests pass with no build warnings/errors under a 4 GiB GC heap
+cap. Native wire contracts pass 55 cases / 5,859 steps with zero differences at
+`20261008T021834854-55098/contracts`. The maintained native oracle separately
+passes direct and SQL-prepared fixtures, including the open boundaries below,
+on disposable MySQL 8.4.11 with 64 MiB buffer and redo limits. It is not a claim
+that fsdb matches every native-only fixture. No known-gap signatures were added.
+The [grouped-input benchmark](../../benchmarks/results/b81d7e4f-grouped-inputs.md)
+records the measured allocation tradeoff and unstable timing controls.
+
+## Remaining boundaries after materialization
+
+For input `2,1,2`, the maintained family probes still differ:
+
+| Shape | MySQL | fsdb with materialized inputs |
+|---|---|---|
+| GROUP_CONCAT assignment, grouped and ordered by `v` | group 1: `1`; group 2: `3,2` | group 1: `2`; group 2: `1,3` |
+| JSON_ARRAYAGG assignment, grouped and ordered by `v` | group 1: `[1]`; group 2: `[2,3]` | group 1: `[2]`; group 2: `[1,3]` |
+| SUM assignment with ROLLUP | detail totals `2,10`, subtotal `9`, final `@n=6` | detail totals `2,4`, subtotal `6`, final `@n=3` |
+
+The GROUP_CONCAT and JSON observations are consistent with native input grouping
+order differing from the ordinary numeric accumulation path. GROUP_CONCAT also
+orders equal keys differently in this fixture. ROLLUP exposes separate volatile
+argument evaluations across subtotal levels. Materializing one value per source
+row does not establish those contracts. The returned-projection assignment and
+LIMIT differences above also remain open.

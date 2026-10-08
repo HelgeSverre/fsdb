@@ -14,7 +14,37 @@ let private newStore () = create ()
 let tests =
     testList
         "correlated subqueries"
-        [ testCase "ordering aggregates cannot introduce an implicit group"
+        [ testCase "numeric aggregate metadata retains binary numeric coercibility"
+          <| fun _ ->
+              Expect.equal
+                  (runDefault (newStore ()) "SELECT COERCIBILITY(SUM('1')) AS s,COERCIBILITY(AVG('1')) AS a,COERCIBILITY(COUNT(*)) AS c,COLLATION(SUM('1')) AS col,CHARSET(AVG('1')) AS ch")
+                  (ResultSet([ "s"; "a"; "c"; "col"; "ch" ], [ [ Some "5"; Some "5"; Some "5"; Some "binary"; Some "binary" ] ]))
+                  "Metadata-only aggregate expressions retain their result domain"
+
+          testCase "grouped aggregate inputs retain source-row evaluation order"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              let execute sql = connection.Query sql
+              execute "CREATE TABLE aggregate_input(v INT)" |> ignore
+              execute "INSERT INTO aggregate_input VALUES(2),(1),(2)" |> ignore
+              execute "SET @n=0" |> ignore
+              Expect.equal
+                  (execute "SELECT v,SUM(@n:=@n+1) AS s FROM aggregate_input GROUP BY v ORDER BY v")
+                  (ResultSet([ "v"; "s" ], [ [ Some "1"; Some "2" ]; [ Some "2"; Some "4" ] ]))
+                  "Interleaved groups accumulate values at their source-row positions"
+              Expect.equal (execute "SELECT @n") (ResultSet([ "@n" ], [ [ Some "3" ] ])) "Each input evaluates once"
+
+              for sql, names, rows, count in
+                  [ "SELECT COERCIBILITY(SUM(@n:=@n+1)) AS c FROM aggregate_input GROUP BY v ORDER BY v", [ "c" ], [ [ Some "5" ]; [ Some "5" ] ], "3"
+                    "SELECT v,SUM(@n:=@n+1) AS s FROM aggregate_input GROUP BY v HAVING SUM(@n:=@n+1)>0 ORDER BY v", [ "v"; "s" ], [ [ Some "1"; Some "4" ]; [ Some "2"; Some "8" ] ], "6"
+                    "SELECT SUM(@n:=@n+1) AS s FROM aggregate_input GROUP BY v ORDER BY SUM(@n:=@n+1)", [ "s" ], [ [ Some "2" ]; [ Some "4" ] ], "3"
+                    "SELECT SUM(@n:=@n+1) AS s FROM aggregate_input GROUP BY v ORDER BY ABS(SUM(@n:=@n+1))", [ "s" ], [ [ Some "4" ]; [ Some "8" ] ], "6"
+                    "SELECT SUM(@n:=@n+1) AS a,SUM(@n:=@n+1) AS b FROM aggregate_input GROUP BY v ORDER BY ABS(SUM(@n:=@n+1))", [ "a"; "b" ], [ [ Some "5"; Some "6" ]; [ Some "10"; Some "12" ] ], "9" ] do
+                  execute "SET @n=0" |> ignore
+                  Expect.equal (execute sql) (ResultSet(names, rows)) sql
+                  Expect.equal (execute "SELECT @n") (ResultSet([ "@n" ], [ [ Some count ] ])) "Each aggregate occurrence retains its input values"
+
+          testCase "ordering aggregates cannot introduce an implicit group"
           <| fun _ ->
               let store = newStore ()
               runDefault store "CREATE TABLE aggregate_order(v INT)" |> ignore

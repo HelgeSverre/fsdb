@@ -84,9 +84,10 @@ compares alias and source-expression sorting on the same build.
   `@n=0`, `SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM ordering_values
   GROUP BY v ORDER BY IF(a=b,v,-v)` returns the same rows `(1,2,2),(5,6,1)` but
   leaves `@n=6` in MySQL and `@n=8` in fsdb. Repeating an assignment-bearing
-  aggregate explicitly in the ordering expression also differs from referring
-  to its alias: MySQL's projection is `2,4`, while fsdb's is `1,3`; both finish
-  at `@n=4`. These observations are fixture-specific evaluation contracts.
+  aggregate explicitly in the ordering expression requires separate input
+  values from the projection. Materialized aggregate inputs now reproduce
+  MySQL's projection `2,4` and final `@n=4`; projection-assignment replay remains
+  open. These observations are fixture-specific evaluation contracts.
 - A window specification referencing the projection alias has native
   1054 in `window order by`; fsdb uses `order clause` wording.
 
@@ -228,5 +229,6 @@ precedence; the linked finding records the verified coverage and its limits.
 
 The [grouped evaluation matrix](2026-10-08-grouped-evaluation.md) separates
 source-row aggregate accumulation, repeated projection reuse, and assignment
-side effects when sorted or limited rows are returned. Repeated group keys
-expose wrong totals even without ORDER BY.
+side effects when sorted or limited rows are returned. Ordinary numeric totals
+and hidden ordering/HAVING inputs are fixed; the linked finding retains the
+sorted aggregate-family, ROLLUP-level, and returned-assignment boundaries.

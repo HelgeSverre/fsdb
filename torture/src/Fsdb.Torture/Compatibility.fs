@@ -511,6 +511,44 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS contract_aggregate_ordering" |]
           Coverage = [| "statement:select", [| "aggregation"; "ordering"; "text-differential"; "prepared-differential" |] |] }
 
+    let private groupedAggregateInputs =
+        let queries =
+            [| "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs ORDER BY s"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs ORDER BY ABS(s)"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs ORDER BY SUM(@n:=@n+1)"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs ORDER BY ABS(SUM(@n:=@n+1))"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs GROUP BY v"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs GROUP BY v ORDER BY s"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs GROUP BY v ORDER BY ABS(s)"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs GROUP BY v ORDER BY SUM(@n:=@n+1)"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs GROUP BY v ORDER BY ABS(SUM(@n:=@n+1))"
+               "SELECT SUM(@n:=@n+1) AS a,SUM(@n:=@n+1) AS b FROM contract_grouped_inputs GROUP BY v ORDER BY ABS(SUM(@n:=@n+1))"
+               "SELECT SUM(@n:=@n+1) AS s FROM contract_grouped_inputs GROUP BY v HAVING TRUE ORDER BY ABS(SUM(@n:=@n+1))"
+               "SELECT SUM(@n:=@n+1) AS a,SUM(@n:=@n+1) AS b FROM contract_grouped_inputs"
+               "SELECT v,MIN(@n:=@n+1) AS lo,MAX(@n:=@n+1) AS hi FROM contract_grouped_inputs GROUP BY v ORDER BY v"
+               "SELECT v,COUNT(DISTINCT (@n:=@n+1)) AS n FROM contract_grouped_inputs GROUP BY v ORDER BY v"
+               "SELECT v,SUM(v) AS s FROM contract_grouped_inputs GROUP BY v WITH ROLLUP"
+               "SELECT v,SUM(@n:=@n+1) AS s FROM contract_grouped_inputs GROUP BY v HAVING SUM(@n:=@n+1)>0 ORDER BY v"
+               "SELECT COERCIBILITY(SUM(@n:=@n+1)) AS c FROM contract_grouped_inputs GROUP BY v ORDER BY v" |]
+        { Name = "grouped-aggregate-input-order"
+          Setup = [| "DROP TABLE IF EXISTS contract_grouped_inputs"; "CREATE TABLE contract_grouped_inputs(v INT)" |]
+          Steps =
+            [| for values in [ "(2),(1)"; "(2),(1),(3)"; "(2),(1),(2)" ] do
+                   yield Contract.execute "reset input rows" "DELETE FROM contract_grouped_inputs"
+                   yield Contract.execute "input rows" ("INSERT INTO contract_grouped_inputs VALUES" + values)
+                   for sql in queries do
+                       yield Contract.execute "reset counter" "SET @n=0"
+                       yield Contract.query sql sql
+                       yield Contract.query "counter" "SELECT @n"
+                       yield Contract.execute "reset prepared counter" "SET @n=0"
+                       yield Contract.execute "prepare grouped inputs" ("PREPARE grouped_inputs FROM '" + sql.Replace("'", "''") + "'")
+                       yield Contract.query ("prepared: " + sql) "EXECUTE grouped_inputs"
+                       yield Contract.query "prepared counter" "SELECT @n"
+                       yield Contract.execute "deallocate grouped inputs" "DEALLOCATE PREPARE grouped_inputs" |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_grouped_inputs"; "SET @n=NULL" |]
+          Coverage = [| "statement:select", [| "aggregation"; "evaluation-order"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3385,6 +3423,7 @@ module ContractCatalog =
            correlatedOrderAliases
            aggregateOwnership
            aggregateOrdering
+           groupedAggregateInputs
            exactErrors
            noDirInCreate
            semanticErrors

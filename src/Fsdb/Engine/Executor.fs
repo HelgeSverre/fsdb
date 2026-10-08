@@ -1896,6 +1896,10 @@ type private NumericAggregateAccumulator(kind: NumericAggregateKind, divisionPre
             let sum = total |> Option.defaultValue (VDecimal exactTotal)
             Value.divWithIntermediatePrecision divisionPrecision sum (VInt count)
 
+type private GroupInputRow =
+    { Values: Value[]
+      AggregateInputs: (Expr * Value) list }
+
 type private WindowRow = int * (Value list * (Value * Collation.Collation option) list * Value[])
 
 /// Every call to the named function inside `expr` — one walker, since the
@@ -3485,6 +3489,10 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
         |> Option.defaultValue (Ok(connection 4))
     | Distinct value
     | OrderBy(value, _) -> expressionCollation ctx value
+    | FuncCall(name, _)
+        when (equalsIgnoreCase name "COUNT" || equalsIgnoreCase name "SUM" || equalsIgnoreCase name "AVG")
+             && Functions.isUnmodifiedBuiltinAggregate name ctx.Registry ->
+        named "binary" 5
     | FuncCall(name, [ value ])
         when (name.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
               || name.Equals("MAX", System.StringComparison.OrdinalIgnoreCase))
@@ -14611,12 +14619,65 @@ and private runGroupedSelect
         |> prepareOrderProjectionAliases registry columnIndex qualifiers orderProjections
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
-
+    let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex select.Projections)
+    let tryProjectedExpressionIndex expression =
+        orderProjections |> List.tryFindIndex (fun projection -> projection.Expression = expression)
+    let orderExpressions =
+        select.OrderBy |> List.map (fun (expression, direction) ->
+            let bound =
+                Expression.rewrite (fun node ->
+                    if isAggregateCall registry node then Some(bindOrderExpression columnIndex qualifiers orderProjections node)
+                    else None) expression
+            bound, direction)
+    let aggregateArguments =
+        let expressions =
+            (orderExpressions |> List.choose (fun (expression, _) ->
+                if select.GroupBy.IsEmpty || (tryProjectedExpressionIndex expression |> Option.isSome) then None else Some expression))
+            @ (havingExpression |> Option.bind Result.toOption |> Option.toList)
+            @ (select.Projections |> List.map _.Expression)
+        let seen = HashSet<Expr>(HashIdentity.Reference)
+        expressions
+        |> List.collect (fun expression ->
+            collectAggregateCalls registry expression
+            @ (bindNestedAggregates store registry dbName columnIndex qualifiers expression).Aggregates)
+        |> List.collect (function
+            | FuncCall(_, arguments) ->
+                arguments |> List.choose (function
+                    | Star _ -> None
+                    | Distinct expression | OrderBy(expression, _) -> Some expression
+                    | expression -> Some expression)
+            | _ -> [])
+        |> List.filter seen.Add
+        // Source columns and literals already retain their value in the input row or syntax.
+        |> List.filter (function
+            | LiteralValue _ -> false
+            | Col name when (tryRoutineVariable name |> Option.isNone) && Map.containsKey (name.ToLowerInvariant()) columnIndex -> false
+            | QualifiedCol(qualifier, name) ->
+                qualifiers |> Map.tryFind (qualifier.ToLowerInvariant())
+                |> Option.exists (fun (columns, _) -> columns |> List.exists (fun column -> equalsIgnoreCase column.Name name))
+                |> not
+            | _ -> true)
+    let materializeInputs row =
+        if aggregateArguments.IsEmpty then Ok { Values = row; AggregateInputs = [] }
+        else
+            let context = ctxFor row
+            aggregateArguments
+            |> traverse (fun expression -> evalExpr context expression |> Result.map (fun value -> expression, value))
+            |> Result.map (fun inputs -> { Values = row; AggregateInputs = inputs })
+    let aggregateContext (row: GroupInputRow) =
+        let context = ctxFor row.Values
+        if row.AggregateInputs.IsEmpty then context
+        else { context with EvaluatedExpressions = row.AggregateInputs }
     let matches = prepareWhereMatches ctxFor select.Where
+    let representativeOf (groupRows: GroupInputRow list) =
+        groupRows |> List.tryHead |> Option.map _.Values |> Option.defaultValue (probeRow columns)
+    let rewriteGroupAggregates groupRows expression =
+        let context () = ctxFor (representativeOf groupRows)
+        let evaluate row _ argument = evalExpr (aggregateContext row) argument
+        rewriteAggregateValues registry context
+            (evalAggregateUsing evaluate registry aggregateContext groupRows) expression
 
-    let representativeOf (groupRows: Value[] list) : Value[] = groupRows |> List.tryHead |> Option.defaultValue (probeRow columns)
-
-    let projectGroup (rollup: Expr -> Expr) (groupRows: Value[] list) : Result<(string * Value) list, EvalError> =
+    let projectGroup (rollup: Expr -> Expr) (groupRows: GroupInputRow list) : Result<(string * Value) list, EvalError> =
         let representative = representativeOf groupRows
 
         select.Projections
@@ -14625,22 +14686,22 @@ and private runGroupedSelect
             | Star None -> Ok(columns |> List.mapi (fun i c -> c.Name, representative.[i]))
             | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
             | _ ->
-                rewriteAggregates registry ctxFor groupRows (rollup expr)
+                rewriteGroupAggregates groupRows (rollup expr)
                 |> Result.bind (evalExpr (ctxFor representative))
                 |> Result.map (fun v -> [ projectionLabel projection, v ]))
         |> Result.map List.concat
 
-    let havingOk (rollup: Expr -> Expr) (groupRows: Value[] list) : Result<bool, EvalError> =
-        match select.Having with
+    let havingOk (rollup: Expr -> Expr) (groupRows: GroupInputRow list) : Result<bool, EvalError> =
+        match havingExpression with
         | None -> Ok true
-        | Some h ->
-            resolveHavingRef columnIndex select.Projections h
+        | Some resolved ->
+            resolved
             |> Result.map rollup
-            |> Result.bind (rewriteAggregates registry ctxFor groupRows)
+            |> Result.bind (rewriteGroupAggregates groupRows)
             |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = HavingClause })
             |> Result.map (fun v -> truthy v = Some true)
 
-    let orderKeysOf (rollup: Expr -> Expr) (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<(Value * Collation.Collation option) list, EvalError> =
+    let orderKeysOf (rollup: Expr -> Expr) (outputCols: (string * Value) list) (groupRows: GroupInputRow list) : Result<(Value * Collation.Collation option) list, EvalError> =
         let representative = representativeOf groupRows
         let ctx = ctxFor representative
 
@@ -14676,22 +14737,26 @@ and private runGroupedSelect
             evalExpr orderCtx expr |> Result.map (orderKeyOf orderCtx expr)
 
         orderBinding
-        |> Result.bind (fun () -> select.OrderBy |> traverse (fun (expr, _) ->
-            match resolveOrderPosition orderProjections expr with
+        |> Result.bind (fun () -> orderExpressions |> traverse (fun (expr, _) ->
+            let expression = resolveOrderPosition orderProjections expr
+            let projected =
+                if isAggregateCall registry expression then
+                    tryProjectedExpressionIndex expression |> Option.bind (fun index -> outputCols |> List.tryItem index)
+                else None
+            match projected with
+            | Some(_, value) -> Ok(orderKeyOf { ctx with Clause = OrderClause } expression value)
+            | None ->
+            match expression with
             | Col name ->
                 resolveOrderAliasValue columnIndex qualifiers orderProjections name outputCols
                 |> Result.bind (function
                 | Some(sourceExpr, value) ->
                     Ok(orderKeyOf { ctx with Clause = OrderClause } sourceExpr value)
                 | None ->
-                    rewriteAggregates registry ctxFor groupRows (rollup (Col name))
+                    rewriteGroupAggregates groupRows (rollup (Col name))
                     |> Result.bind (evalKey ctx))
             | expression ->
-                let bindAggregate =
-                    Expression.rewrite (fun node ->
-                        if isAggregateCall registry node then Some(bindOrderExpression columnIndex qualifiers orderProjections node)
-                        else None)
-                rewriteAggregates registry ctxFor groupRows (rollup (bindAggregate expression))
+                rewriteGroupAggregates groupRows (rollup expression)
                 |> Result.map bindCachedAlias
                 |> Result.bind (evalKey cachedContext)))
 
@@ -14742,7 +14807,11 @@ and private runGroupedSelect
                     |> List.filter (fun (i, _) -> i >= List.length groupExprs - rolledCount)
                     |> List.map (fun (_, key) -> key, Lit VNull)
 
-                substituteExprs (groupingPairs @ rolledKeys))
+                let replacements = groupingPairs @ rolledKeys
+                Expression.rewrite (fun node ->
+                    replacements
+                    |> List.tryPick (fun (candidate, value) -> if candidate = node then Some value else None)
+                    |> Option.orElseWith (fun () -> if isAggregateCall registry node then Some node else None)))
 
     match rollupRewrite 0 with
     | Error(code, message) -> Err(code, message), [], []
@@ -14841,7 +14910,7 @@ and private runGroupedSelect
         let comparer = SqlValueKeyComparer(collations, false)
         let equalityComparer = comparer :> IEqualityComparer<Value[]>
         let groupIndex = Dictionary<Value[], int>(comparer)
-        let groups = ResizeArray<Value[] * ResizeArray<Value[]>>()
+        let groups = ResizeArray<Value[] * ResizeArray<GroupInputRow>>()
 
         let addGroup key row =
             let groupRows = ResizeArray()
@@ -14870,23 +14939,22 @@ and private runGroupedSelect
                 if not keep then
                     Ok None
                 elif groupExprs.IsEmpty then
-                    Ok(Some row)
+                    materializeInputs row |> Result.map Some
                 else
                     groupExprs
                     |> traverse (evalExpr (ctxFor row))
-                    |> Result.map (fun values ->
-                        let key = Array.ofList values
-
-                        match groupInputOrder with
-                        | ContiguousGroupRows _ -> addOrdered key row
-                        | ArbitraryGroupRows -> addUnordered key row
-
-                        None))
+                    |> Result.bind (fun values ->
+                        materializeInputs row |> Result.map (fun input ->
+                            let key = Array.ofList values
+                            match groupInputOrder with
+                            | ContiguousGroupRows _ -> addOrdered key input
+                            | ArbitraryGroupRows -> addUnordered key input
+                            None)))
 
         match rows |> traverseSeq collect with
         | Error(code, message) -> Err(code, message), [], []
         | Ok matched ->
-            let buildGroups () : Result<(Value list * Value[] list) list, EvalError> =
+            let buildGroups () : Result<(Value list * GroupInputRow list) list, EvalError> =
                 if groupExprs.IsEmpty then
                     Ok [ [], matched ]
                 else
@@ -14896,7 +14964,7 @@ and private runGroupedSelect
                     |> Ok
 
             // MySQL emits each rollup subtotal after its key-ordered children.
-            let expandRollup (groups: (Value list * Value[] list) list) : (int * Value list * Value[] list) list =
+            let expandRollup (groups: (Value list * GroupInputRow list) list) : (int * Value list * GroupInputRow list) list =
                 let probeCtx = ctxFor (probeRow columns)
                 let tagged keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
                 let ascending = List.replicate groupExprs.Length Asc
@@ -14906,7 +14974,7 @@ and private runGroupedSelect
 
                 let total = List.length groupExprs
 
-                let rec emit (level: int) (groups: (Value list * Value[] list) list) =
+                let rec emit (level: int) (groups: (Value list * GroupInputRow list) list) =
                     if level = total then
                         groups |> List.map (fun (key, rows) -> 0, key, rows)
                     else
@@ -14931,7 +14999,7 @@ and private runGroupedSelect
                         baseGroups |> List.map (fun (key, rows) -> 0, key, rows)
 
                 let processGroup
-                    (rolledCount: int, key: Value list, groupRows: Value[] list)
+                    (rolledCount: int, key: Value list, groupRows: GroupInputRow list)
                     : Result<((string * Value) list * (Value * Collation.Collation option) list * Value list) option, EvalError> =
                     rollupRewrite rolledCount
                     |> Result.bind (fun rollup ->
