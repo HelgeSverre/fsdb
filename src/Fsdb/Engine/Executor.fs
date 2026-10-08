@@ -3171,6 +3171,84 @@ let rec private outputColumnSourcesInScope
 
     select.Projections |> List.collect (_.Expression >> originsForExpression)
 
+let private ignoresGroupingColumns = function
+    | FuncCall(name, _) -> equalsIgnoreCase name "ANY_VALUE" || equalsIgnoreCase name "GROUPING"
+    | _ -> false
+
+type private ColumnScopeBinding =
+    | UnresolvedColumnScope
+    | ColumnScope of depth: int
+
+type private NestedQueryBindings =
+    { Aggregates: Expr list
+      UngroupedColumns: Expr list }
+
+/// Aggregates with only enclosing references belong to the nearest referenced scope.
+let private bindNestedAggregates store registry dbName columnIndex qualifiers expression =
+    if (Expression.collectSubqueries expression).IsEmpty then
+        { Aggregates = []; UngroupedColumns = [] }
+    else
+        let sourceScope (select: SelectStmt) =
+            (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+            |> List.collect FromItem.leaves
+            |> List.choose (function
+                | FromItem.Qualified qualifier as source ->
+                    let columns = selectSourceColumns store dbName source |> List.choose id
+                    Some(qualifier.ToLowerInvariant(), columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList)
+                | _ -> None)
+            |> Map.ofList
+        let expressions (select: SelectStmt) =
+            (select.Projections |> List.map _.Expression)
+            @ Option.toList select.Where @ Option.toList select.Having
+            @ select.GroupBy @ (select.OrderBy |> List.map fst)
+            @ (select.Joins |> List.collect (Join.conditions))
+        let root =
+            qualifiers |> Map.map (fun _ (columns: ColumnDef list, _) -> columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList)
+        let rootNames = columnIndex |> Map.keys |> Set.ofSeq
+        let resolve scopes = function
+            | Col name when tryRoutineVariable name |> Option.isSome -> None
+            | Col name ->
+                let name = name.ToLowerInvariant()
+                scopes |> List.tryPick (fun (depth, sources) ->
+                    if (depth = 0 && Set.contains name rootNames) || (sources |> Map.exists (fun _ names -> Set.contains name names)) then Some depth else None)
+                |> Option.map ColumnScope |> Option.defaultValue UnresolvedColumnScope |> Some
+            | QualifiedCol(qualifier, name) ->
+                scopes |> List.tryPick (fun (depth, sources) ->
+                    sources |> Map.tryFind (qualifier.ToLowerInvariant())
+                    |> Option.filter (Set.contains (name.ToLowerInvariant())) |> Option.map (fun _ -> depth))
+                |> Option.map ColumnScope |> Option.defaultValue UnresolvedColumnScope |> Some
+            | _ -> None
+        let nested depth scopes select = (depth + 1, sourceScope select) :: scopes
+        let rec references depth scopes node =
+            let own = resolve scopes node |> Option.toList
+            own
+            @ (Expression.children node |> List.collect (references depth scopes))
+            @ (Expression.subqueries node |> List.collect (fun select ->
+                expressions select |> List.collect (references (depth + 1) (nested depth scopes select))))
+        let rec collect depth scopes node =
+            let owned =
+                if depth > 0 && isAggregateCall registry node then
+                    let arguments = Expression.children node |> List.collect (references depth scopes)
+                    if not arguments.IsEmpty && arguments |> List.forall ((=) (ColumnScope 0)) then [ node ] else []
+                else []
+            owned
+            @ (Expression.children node |> List.collect (collect depth scopes))
+            @ (Expression.subqueries node |> List.collect (fun select ->
+                expressions select |> List.collect (collect (depth + 1) (nested depth scopes select))))
+        let aggregates = collect 0 [ 0, root ] expression
+        let rec ungrouped depth scopes node =
+            if ignoresGroupingColumns node || (depth = 0 && isAggregateCall registry node)
+               || (aggregates |> List.exists (fun aggregate -> obj.ReferenceEquals(aggregate, node))) then []
+            else
+                let own =
+                    if depth > 0 && resolve scopes node = Some(ColumnScope 0) then [ node ] else []
+                own
+                @ (Expression.children node |> List.collect (ungrouped depth scopes))
+                @ (Expression.subqueries node |> List.collect (fun select ->
+                    expressions select |> List.collect (ungrouped (depth + 1) (nested depth scopes select))))
+        { Aggregates = aggregates
+          UngroupedColumns = ungrouped 0 [ 0, root ] expression }
+
 let private outputColumnSources store dbName qualifiers select =
     outputColumnSourcesInScope store dbName qualifiers [] select
 
@@ -7185,6 +7263,13 @@ and private describeQueryColumnsChecked
                 |> Result.bind (fun rewritten ->
                     let projections = expandOrderProjections columns qualifiers rewritten.Projections
                     validateOrderAliases columnIndex qualifiers projections rewritten.OrderBy
+                    |> Result.bind (fun () ->
+                        let nestedGrouping =
+                            (rewritten.Projections |> List.map _.Expression) @ Option.toList rewritten.Having
+                            |> List.exists (fun expression ->
+                                not (bindNestedAggregates store registry dbName columnIndex qualifiers expression).Aggregates.IsEmpty)
+                        if nestedGrouping then validateOnlyFullGroupBy store registry dbName columns qualifiers rewritten
+                        else Ok())
                     |> Result.mapError (Err >> InvalidDescription)
                     |> Result.map (fun () -> rewritten)))
             |> Result.map (fun select ->
@@ -13680,6 +13765,17 @@ and private rewriteAggregates
     : Result<Expr, EvalError> =
     let sub = rewriteAggregates registry ctxFor rows
 
+    let rewriteSubqueries expr =
+        let context = ctxFor (rows |> List.tryHead |> Option.defaultValue [||])
+        (bindNestedAggregates context.Store registry context.DbName context.ColumnIndex context.Qualifiers expr).Aggregates
+        |> traverse (fun aggregate -> sub aggregate |> Result.map (fun value -> aggregate, value))
+        |> Result.map (function
+            | [] -> expr
+            | replacements ->
+                Expression.rewriteTree (fun node ->
+                    replacements |> List.tryPick (fun (aggregate, value) ->
+                        if obj.ReferenceEquals(node, aggregate) then Some value else None)) expr)
+
     match expr with
     | Placeholder _ -> Ok expr
     | UserVariable _
@@ -13707,7 +13803,10 @@ and private rewriteAggregates
     | Like(e, p, cs, esc) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs, esc)))
     | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
     | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
-    | QuantifiedComparison(e, op, quantifier, select) -> sub e |> Result.map (fun e' -> QuantifiedComparison(e', op, quantifier, select))
+    | QuantifiedComparison(e, op, quantifier, select) ->
+        sub e |> Result.map (fun e' -> QuantifiedComparison(e', op, quantifier, select)) |> Result.bind rewriteSubqueries
+    | InSubquery(e, select) ->
+        sub e |> Result.map (fun e' -> InSubquery(e', select)) |> Result.bind rewriteSubqueries
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
@@ -13727,11 +13826,10 @@ and private rewriteAggregates
     | Col _
     | QualifiedCol _
     | Star _
-    | WindowOver _
-    // Subqueries own their aggregate scope.
+    | WindowOver _ -> Ok expr
     | Exists _
-    | Subquery _
-    | InSubquery _ -> Ok expr
+    | Subquery _ ->
+        rewriteSubqueries expr
 
 /// GROUP BY resolves source columns before projection aliases.
 and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr) : Expr =
@@ -14290,7 +14388,7 @@ and private validateOnlyFullGroupBy
                     | None when isAggregateCall registry node -> Expression.Prune None
                     | None ->
                         match node with
-                        | FuncCall(name, _) when equalsIgnoreCase name "ANY_VALUE" || equalsIgnoreCase name "GROUPING" -> Expression.Prune None
+                        | node when ignoresGroupingColumns node -> Expression.Prune None
                         | Star None ->
                             [ 0 .. columns.Length - 1 ]
                             |> List.tryFind (fun position -> not (Set.contains position determined))
@@ -14310,6 +14408,10 @@ and private validateOnlyFullGroupBy
                         | _ -> Expression.Descend None)
                 None
                 expr
+            |> Option.orElseWith (fun () ->
+                (bindNestedAggregates store registry dbName (columnIndexOf columns) qualifiers expr).UngroupedColumns
+                |> List.tryPick (fun reference ->
+                    tryColumnPosition reference |> Option.filter (fun position -> not (Set.contains position determined))))
 
     let groupingError clause index groupExprs determined expr =
         match invalidColumn groupExprs determined expr with
@@ -14832,9 +14934,11 @@ and private runGroupedWindowSelect
     | Error(code, message) -> Err(code, message), [], []
     | Ok groupExprs ->
 
-    let aggregates =
-        (select.Projections |> List.collect (_.Expression >> collectAggregateCalls registry))
-        @ (select.OrderBy |> List.collect (fst >> collectAggregateCalls registry))
+    let expressions = (select.Projections |> List.map _.Expression) @ (select.OrderBy |> List.map fst)
+    let nestedAggregates =
+        expressions |> List.collect (fun expression ->
+            (bindNestedAggregates store registry dbName columnIndex qualifiers expression).Aggregates)
+    let aggregates = (expressions |> List.collect (collectAggregateCalls registry)) @ nestedAggregates
 
     let leaves = (groupExprs @ aggregates) |> List.distinct
 
@@ -14865,9 +14969,17 @@ and private runGroupedWindowSelect
                 (List.replicate leafNames.Length store.ExecutionSettings.ConnectionCollation)
                 groupedMetadata
 
+        let rewriteGroupedExpression expression =
+            let nested =
+                Expression.rewriteTree (fun node ->
+                    if nestedAggregates |> List.exists (fun aggregate -> obj.ReferenceEquals(node, aggregate)) then
+                        replacements |> List.tryPick (fun (aggregate, value) -> if aggregate = node then Some value else None)
+                    else None) expression
+            substituteExprs replacements nested
+
         // Synthetic columns must not leak into result headers.
         let rewrite (projection: Projection) =
-            { Projection.withExpression (substituteExprs replacements projection.Expression) projection with
+            { Projection.withExpression (rewriteGroupedExpression projection.Expression) projection with
                 Alias = Some(projectionLabel projection) }
 
         let outerSelect =
@@ -14879,7 +14991,7 @@ and private runGroupedWindowSelect
                 GroupBy = []
                 Rollup = false
                 Having = None
-                OrderBy = select.OrderBy |> List.map (fun (e, d) -> substituteExprs replacements e, d) }
+                OrderBy = select.OrderBy |> List.map (fun (e, d) -> rewriteGroupedExpression e, d) }
 
         runWindowedSelect
             store
@@ -16737,6 +16849,10 @@ and private runSelect
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, Option.map rowCount select.Limit, Option.map rowCount select.Offset
 
+    let hasOwnedAggregate expression =
+        containsAggregate registry expression
+        || not (bindNestedAggregates store registry dbName columnIndex qualifiers expression).Aggregates.IsEmpty
+
     let hasNestedOrderAggregate =
         orderBy
         |> List.collect (fst >> collectAggregateCalls registry)
@@ -16777,9 +16893,9 @@ and private runSelect
         // pass over the grouped rows, MySQL's own evaluation order.
         let grouping =
             not select.GroupBy.IsEmpty
-            || (select.Having |> Option.exists (containsAggregate registry))
-            || projections |> List.exists (_.Expression >> containsAggregate registry)
-            || orderBy |> List.exists (fst >> containsAggregate registry)
+            || (select.Having |> Option.exists hasOwnedAggregate)
+            || projections |> List.exists (_.Expression >> hasOwnedAggregate)
+            || orderBy |> List.exists (fst >> hasOwnedAggregate)
             || projections |> List.exists (_.Expression >> collectAggregateCalls registry >> List.isEmpty >> not)
 
         if grouping then
@@ -16788,9 +16904,9 @@ and private runSelect
             runWindowedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
     elif
         not select.GroupBy.IsEmpty
-        || (select.Having |> Option.exists (containsAggregate registry))
-        || projections |> List.exists (_.Expression >> containsAggregate registry)
-        || orderBy |> List.exists (fst >> containsAggregate registry)
+        || (select.Having |> Option.exists hasOwnedAggregate)
+        || projections |> List.exists (_.Expression >> hasOwnedAggregate)
+        || orderBy |> List.exists (fst >> hasOwnedAggregate)
     then
         runGroupedSelect store registry dbName columns qualifiers rows groupInputOrder { select with OrderBy = originalOrderBy } outer
     else

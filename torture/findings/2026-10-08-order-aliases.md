@@ -222,5 +222,6 @@ variable timing and the remaining general subquery execution cost retained.
 The remaining aggregate-ordering diagnostic is part of a broader
 [aggregate ownership gap](2026-10-08-order-aggregate-scopes.md): an aggregate
 written in a scalar subquery can belong to its outer query. Native contracts
-now cover the wrong-row result and ordering rejection, so correcting only the
-3029 error number would not close this boundary.
+cover the wrong-row result and ordering rejection. Enclosing aggregate totals
+are fixed for the documented expression-subquery shapes; ORDER BY-only query
+classification and error 3029 remain open.

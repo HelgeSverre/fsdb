@@ -14,7 +14,49 @@ let private newStore () = create ()
 let tests =
     testList
         "correlated subqueries"
-        [ testCase "correlated EXISTS: WHERE EXISTS (... referencing the outer row) — the Eloquent whereHas() shape"
+        [ testCase "aggregate arguments bind a scalar subquery total to the outer source"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE aggregate_order(v INT)" |> ignore
+              runDefault store "INSERT INTO aggregate_order VALUES(2),(1)" |> ignore
+              Expect.equal
+                  (runDefault store "SELECT (SELECT SUM(v)) AS total FROM aggregate_order")
+                  (ResultSet([ "total" ], [ [ Some "3" ] ]))
+                  "Outer-owned aggregation produces one total, not a total per source row"
+              Expect.equal
+                  (runDefault store "SELECT v FROM aggregate_order ORDER BY (SELECT SUM(i.v+aggregate_order.v) FROM aggregate_order i)")
+                  (ResultSet([ "v" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                  "An inner input keeps a mixed aggregate in the inner query"
+              for sql, names, rows in
+                  [ "SELECT (SELECT SUM(v)) AS total,ROW_NUMBER() OVER () AS rn FROM aggregate_order", [ "total"; "rn" ], [ [ Some "3"; Some "1" ] ]
+                    "SELECT v,(SELECT SUM(v)) AS total,ROW_NUMBER() OVER (ORDER BY v) AS rn FROM aggregate_order GROUP BY v ORDER BY v", [ "v"; "total"; "rn" ], [ [ Some "1"; Some "1"; Some "1" ]; [ Some "2"; Some "2"; Some "2" ] ]
+                    "SELECT (SELECT SUM(v)) AS total FROM aggregate_order WHERE FALSE", [ "total" ], [ [ None ] ]
+                    "SELECT (SELECT SUM(v) WHERE FALSE) AS total FROM aggregate_order", [ "total" ], [ [ None ] ]
+                    "SELECT (SELECT (SELECT SUM(v))) AS total FROM aggregate_order", [ "total" ], [ [ Some "3" ] ]
+                    "SELECT (SELECT COUNT(v)) AS total FROM aggregate_order", [ "total" ], [ [ Some "2" ] ]
+                    "SELECT v,(SELECT SUM(v)) AS total FROM aggregate_order GROUP BY v ORDER BY v", [ "v"; "total" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ] ] do
+                  Expect.equal (runDefault store sql) (ResultSet(names, rows)) sql
+              for sql in
+                  [ "SELECT 3 IN (SELECT SUM(v)) AS hit FROM aggregate_order"
+                    "SELECT 3=ANY(SELECT SUM(v)) AS hit FROM aggregate_order"
+                    "SELECT EXISTS(SELECT SUM(v)) AS hit FROM aggregate_order" ] do
+                  Expect.equal (runDefault store sql) (ResultSet([ "hit" ], [ [ Some "1" ] ])) sql
+              match runDefault store "SELECT (SELECT SUM(aggregate_order.v) FROM aggregate_order i) AS total FROM aggregate_order" with
+              | Err(code, _) -> Expect.equal code 1242 "A correlated aggregate does not remove the inner source rows"
+              | result -> failtestf "Expected error 1242, got %A" result
+              match runDefault store "SELECT (SELECT v) AS value,(SELECT SUM(v)) AS total FROM aggregate_order" with
+              | Err(code, _) -> Expect.equal code 1140 "A correlated nonaggregate is still subject to ONLY_FULL_GROUP_BY"
+              | result -> failtestf "Expected error 1140, got %A" result
+              for sql in
+                  [ "SELECT ANY_VALUE((SELECT v)) AS value,(SELECT SUM(v)) AS total FROM aggregate_order"
+                    "SELECT (SELECT ANY_VALUE(v)) AS value,(SELECT SUM(v)) AS total FROM aggregate_order" ] do
+                  Expect.equal (runDefault store sql) (ResultSet([ "value"; "total" ], [ [ Some "2"; Some "3" ] ])) sql
+              let session = Fsdb.Session.create 1 store
+              match Fsdb.QueryHandler.prepareStatementForSession session "SELECT (SELECT v) AS value,(SELECT SUM(v)) AS total FROM aggregate_order" with
+              | Error(code, _) -> Expect.equal code 1140 "Preparation applies the enclosing grouping rule"
+              | result -> failtestf "Expected preparation error 1140, got %A" result
+
+          testCase "correlated EXISTS: WHERE EXISTS (... referencing the outer row) — the Eloquent whereHas() shape"
           <| fun _ ->
               let store = newStore ()
               runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore

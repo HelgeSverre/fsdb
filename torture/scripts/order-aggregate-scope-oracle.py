@@ -36,10 +36,27 @@ cases = [
     ('SELECT v FROM aggregate_order ORDER BY ABS(SUM(v))', (3029, 'HY000')),
     ('SELECT DISTINCT v FROM aggregate_order ORDER BY SUM(v)', (3029, 'HY000')),
     ("SET sql_mode='';SELECT v FROM aggregate_order ORDER BY SUM(v)", (3029, 'HY000')),
+    ('SELECT (SELECT SUM(v)) AS total FROM aggregate_order WHERE FALSE', 'total\nNULL\n'),
+    ('SELECT (SELECT SUM(v) WHERE FALSE) AS total FROM aggregate_order', 'total\nNULL\n'),
+    ('SELECT (SELECT SUM(v) FROM aggregate_order i) AS total FROM aggregate_order', 'total\n3\n3\n'),
+    ('SELECT v,(SELECT SUM(v)) AS total FROM aggregate_order GROUP BY v ORDER BY v', 'v\ttotal\n1\t1\n2\t2\n'),
+    ('SELECT (SELECT (SELECT SUM(v))) AS total FROM aggregate_order', 'total\n3\n'),
+    ('SELECT (SELECT COUNT(v)) AS total FROM aggregate_order', 'total\n2\n'),
+    ('SELECT (SELECT v) AS value,(SELECT SUM(v)) AS total FROM aggregate_order', (1140, '42000')),
+    ('SELECT (SELECT SUM(x)) AS total FROM (SELECT v AS x FROM aggregate_order) d', 'total\n3\n'),
+    ('SELECT 3 IN (SELECT SUM(v)) AS hit FROM aggregate_order', 'hit\n1\n'),
+    ('SELECT 3=ANY(SELECT SUM(v)) AS hit FROM aggregate_order', 'hit\n1\n'),
+    ('SELECT EXISTS(SELECT SUM(v)) AS hit FROM aggregate_order', 'hit\n1\n'),
+    ('SELECT (SELECT SUM(aggregate_order.v) FROM aggregate_order i LIMIT 1) AS total FROM aggregate_order', 'total\n3\n'),
+    ('SELECT (SELECT SUM(aggregate_order.v) FROM aggregate_order i) AS total FROM aggregate_order', (1242, '21000')),
+    ('SELECT ANY_VALUE((SELECT v)) AS value,(SELECT SUM(v)) AS total FROM aggregate_order', 'value\ttotal\n2\t3\n'),
+    ('SELECT (SELECT ANY_VALUE(v)) AS value,(SELECT SUM(v)) AS total FROM aggregate_order', 'value\ttotal\n2\t3\n'),
+    ('SELECT (SELECT SUM(v)) AS total,ROW_NUMBER() OVER () AS rn FROM aggregate_order', 'total\trn\n3\t1\n'),
+    ('SELECT v,(SELECT SUM(v)) AS total,ROW_NUMBER() OVER (ORDER BY v) AS rn FROM aggregate_order GROUP BY v ORDER BY v', 'v\ttotal\trn\n1\t1\t1\n2\t2\t2\n'),
 ]
 
 prepared_cases = [
-    ("PREPARE aggregate_scope FROM '" + sql.replace("'", "''") + "'", expected if isinstance(expected, tuple) else "")
+    ("PREPARE aggregate_scope FROM '" + sql.replace("'", "''") + "'", expected if isinstance(expected, tuple) and expected[0] != 1242 else "")
     for sql, expected in cases
     if sql.startswith("SELECT ")
 ]

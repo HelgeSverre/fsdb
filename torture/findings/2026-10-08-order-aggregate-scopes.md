@@ -7,7 +7,8 @@ recorded ORDER BY error-code difference. With `aggregate_order(v INT)` containin
 
 The [maintained native oracle](../scripts/order-aggregate-scope-oracle.py) verifies
 results and error code/SQLSTATE pairs. Every standalone SELECT is also prepared;
-rejections occur at preparation, independently of whether rows are read.
+binding rejections occur at preparation, independently of whether rows are read.
+Scalar-subquery cardinality error 1242 occurs at execution; preparation succeeds.
 
 ## Native scope boundary
 
@@ -54,3 +55,29 @@ buffer and redo limits. Current-engine observations use the embedded Debug
 assembly, .NET SDK 10.0.401, eight logical processors, and a 4 GiB GC heap cap.
 The script is a native contract, not an accepted differential failure or a claim
 that fsdb implements the behavior. No known-gap signatures were enrolled.
+
+
+## Implemented ownership coverage
+
+Expression-subquery aggregates whose arguments bind only to the enclosing source
+are evaluated over that enclosing group. The one-total fixture above returns
+`3`, including nested scalar forms, empty inputs, membership/existence forms,
+and grouped/window projections. Local-input and literal-only aggregates keep
+their inner scope. Inner source cardinality remains observable.
+
+Grouping validation checks unaggregated enclosing references during execution
+and preparation, while ANY_VALUE retains its exemption in either query scope.
+The scope binder is shared by query classification, aggregate rewriting,
+grouping validation, and grouped-window lowering. Unchanged expression trees
+retain their identity for subquery memoization.
+
+Validation: `just check` passes 3,040 tests with no build warnings or errors and
+a 4 GiB GC heap cap. Native MySQL 8.4.11 contracts pass 53 cases / 5,349 steps
+with zero differences at `20261008T012642104-6253/contracts`, using disposable
+64 MiB buffer and redo limits. The maintained native oracle passes separately.
+The [allocation probe](../../benchmarks/results/d2fed802-aggregate-scope-binding.md)
+records the cost of the scope checks.
+
+ORDER BY-only aggregate classification and error precedence remain open; this
+fix does not implement error 3029. Broader derived/CTE aggregate-scope combinations
+are not established by these expression-subquery fixtures.

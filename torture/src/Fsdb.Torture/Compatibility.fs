@@ -429,6 +429,38 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS contract_ordering_scope" |]
           Coverage = [| "statement:select", [| "ordering"; "aliases"; "subqueries"; "text-differential"; "prepared-differential" |] |] }
 
+    let private aggregateOwnership =
+        let queries =
+            [| "SELECT (SELECT SUM(v)) AS total,ROW_NUMBER() OVER () AS rn FROM contract_aggregate_owner", OracleSuccess
+               "SELECT v,(SELECT SUM(v)) AS total,ROW_NUMBER() OVER (ORDER BY v) AS rn FROM contract_aggregate_owner GROUP BY v ORDER BY v", OracleSuccess
+               "SELECT ANY_VALUE((SELECT v)) AS value,(SELECT SUM(v)) AS total FROM contract_aggregate_owner", OracleSuccess
+               "SELECT (SELECT ANY_VALUE(v)) AS value,(SELECT SUM(v)) AS total FROM contract_aggregate_owner", OracleSuccess
+               "SELECT (SELECT SUM(v)) AS total FROM contract_aggregate_owner", OracleSuccess
+               "SELECT (SELECT SUM(v)) AS total FROM contract_aggregate_owner WHERE FALSE", OracleSuccess
+               "SELECT (SELECT SUM(v) WHERE FALSE) AS total FROM contract_aggregate_owner", OracleSuccess
+               "SELECT (SELECT SUM(v) FROM contract_aggregate_owner i) AS total FROM contract_aggregate_owner", OracleSuccess
+               "SELECT v,(SELECT SUM(v)) AS total FROM contract_aggregate_owner GROUP BY v ORDER BY v", OracleSuccess
+               "SELECT (SELECT (SELECT SUM(v))) AS total FROM contract_aggregate_owner", OracleSuccess
+               "SELECT (SELECT COUNT(v)) AS total FROM contract_aggregate_owner", OracleSuccess
+               "SELECT (SELECT v) AS value,(SELECT SUM(v)) AS total FROM contract_aggregate_owner", OracleError(1140, "42000")
+               "SELECT (SELECT SUM(x)) AS total FROM (SELECT v AS x FROM contract_aggregate_owner) d", OracleSuccess
+               "SELECT 3 IN (SELECT SUM(v)) AS hit FROM contract_aggregate_owner", OracleSuccess
+               "SELECT 3=ANY(SELECT SUM(v)) AS hit FROM contract_aggregate_owner", OracleSuccess
+               "SELECT EXISTS(SELECT SUM(v)) AS hit FROM contract_aggregate_owner", OracleSuccess
+               "SELECT (SELECT SUM(contract_aggregate_owner.v) FROM contract_aggregate_owner i LIMIT 1) AS total FROM contract_aggregate_owner", OracleSuccess
+               "SELECT (SELECT SUM(contract_aggregate_owner.v) FROM contract_aggregate_owner i) AS total FROM contract_aggregate_owner", OracleError(1242, "21000") |]
+        { Name = "correlated-aggregate-ownership"
+          Setup =
+            [| "DROP TABLE IF EXISTS contract_aggregate_owner"
+               "CREATE TABLE contract_aggregate_owner(v INT)"
+               "INSERT INTO contract_aggregate_owner VALUES(2),(1)" |]
+          Steps =
+            [| for sql, expectation in queries do
+                   yield { Contract.query sql sql with Expectation = expectation }
+                   yield { Contract.preparedQuery ("prepared: " + sql) sql [||] with Expectation = expectation } |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_aggregate_owner" |]
+          Coverage = [| "statement:select", [| "aggregation"; "subqueries"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3301,6 +3333,7 @@ module ContractCatalog =
            orderAliases
            duplicateOrderAliases
            correlatedOrderAliases
+           aggregateOwnership
            exactErrors
            noDirInCreate
            semanticErrors
