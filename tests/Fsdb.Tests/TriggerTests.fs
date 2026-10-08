@@ -185,15 +185,27 @@ let tests =
                       (ResultSet([ "seen" ], [ [ Some expected ] ])) "local diagnostics retain warning information"
 
           testCase "Warnings from a failing trigger statement accompany its error" <| fun _ ->
+              for expression in [ "IF('1x',0,0)"; "CAST('x' AS SIGNED)" ] do
+                  let session =
+                      [ "SET sql_mode=''"; "CREATE TABLE audit(n INT PRIMARY KEY)"; "INSERT INTO audit VALUES(1)"
+                        "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(" + expression + "),(1)" ]
+                      |> List.fold step (deleteIgnoreSession ())
+                  let next, result = handle session "DELETE FROM parent WHERE id=1"
+                  match result with
+                  | Err(1062, _) -> ()
+                  | other -> failtestf "Expected duplicate-key failure, got %A" other
+                  Expect.equal (next.Diagnostics |> List.map _.Code) [ 1292; 1062 ] "the failing statement retains its conversion warning"
+
+          testCase "Trigger INSERT validates every row before producing conversion warnings" <| fun _ ->
               let session =
-                  [ "SET sql_mode=''"; "CREATE TABLE audit(n INT PRIMARY KEY)"; "INSERT INTO audit VALUES(1)"
-                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(IF('1x',0,0)),(1)" ]
+                  [ "SET sql_mode=''"; "CREATE TABLE audit(n INT)"
+                    "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit VALUES(CAST('x' AS SIGNED)),(missing)" ]
                   |> List.fold step (deleteIgnoreSession ())
               let next, result = handle session "DELETE FROM parent WHERE id=1"
               match result with
-              | Err(1062, _) -> ()
-              | other -> failtestf "Expected duplicate-key failure, got %A" other
-              Expect.equal (next.Diagnostics |> List.map _.Code) [ 1292; 1062 ] "the failing statement retains its conversion warning"
+              | Err(1054, _) -> ()
+              | other -> failtestf "Expected reference validation failure, got %A" other
+              Expect.equal (next.Diagnostics |> List.map _.Code) [ 1054 ] "invalid bindings prevent value evaluation"
 
           testCase "Warning RESIGNAL stays nonfatal and local to the trigger" <| fun _ ->
               for resignal in [ "RESIGNAL"; "RESIGNAL SQLSTATE '01001' SET MESSAGE_TEXT='changed'" ] do

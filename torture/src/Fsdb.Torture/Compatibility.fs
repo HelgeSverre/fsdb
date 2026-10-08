@@ -6090,6 +6090,103 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS predicate_base"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:update", [| "text-differential" |]; "statement:delete", [| "text-differential" |] |] }
 
+    let private integerCastConditions =
+        let inputs =
+            [
+                  "'x'"
+                  "''"
+                  "' '"
+                  "'12x'"
+                  "'1.9'"
+                  "'-1.9'"
+                  "'1e2'"
+                  "'.5'"
+                  "'+12'"
+                  "'  12  '"
+                  "'12\\tx'"
+                  "'0x10'"
+                  "'9223372036854775807'"
+                  "'9223372036854775808'"
+                  "'18446744073709551615'"
+                  "'18446744073709551616'"
+                  "'-9223372036854775808'"
+                  "'-9223372036854775809'"
+                  "'-18446744073709551615'"
+                  "'-18446744073709551616'"
+                  "'99999999999999999999999999999999999999'"
+                  "NULL"
+                  "1.9"
+                  "-1.9"
+                  "1e2"
+                  "X'3132'"
+                  "_binary'1x'"
+                  "CAST('1x' AS BINARY)"
+                  "_utf16 X'0031002E0035'"
+                  "'１２'"
+                  "'١٢'"
+                  "'9223372036854775808x'"
+                  "'-0.5'"
+                  "'-1'"
+                  "'+ 1'"
+                  "' 12'"
+                  "'12 '"
+            ]
+        let skippedCastConditions =
+            [ "IF(0,CAST('x' AS SIGNED),1)"
+              "IFNULL(1,CAST('x' AS SIGNED))"
+              "COALESCE(1,CAST('x' AS SIGNED))" ]
+        let conditions =
+            skippedCastConditions @
+            [ "IF(1,1,CAST('x' AS SIGNED))"
+              "IF(NULL,CAST('x' AS SIGNED),1)"
+              "IF('1x',1,CAST('x' AS SIGNED))"
+              "IFNULL(NULL,CAST('x' AS SIGNED))"
+              "COALESCE(NULL,CAST('x' AS SIGNED))" ]
+        let observe name expression =
+            [ Contract.query name ("SELECT " + expression + " AS n")
+              Contract.query (name + "-warnings") "SHOW WARNINGS" ]
+        let insert name mode ignore expression columnType expectedError =
+            [ Contract.execute (name + "-drop") "DROP TABLE IF EXISTS cast_target"
+              Contract.execute (name + "-create") ("CREATE TABLE cast_target(n " + columnType + ")")
+              Contract.execute (name + "-mode") ("SET sql_mode='" + mode + "'")
+              let step = Contract.execute name ("INSERT " + ignore + "INTO cast_target VALUES(" + expression + ")")
+              match expectedError with
+              | Some(code, state) -> step |> Contract.fails code state
+              | None -> step
+              Contract.query (name + "-warnings") "SHOW WARNINGS"
+              Contract.query (name + "-rows") "SELECT n FROM cast_target" ]
+        { Name = "integer-cast-conditions"
+          Setup = [| "SET sql_mode=DEFAULT" |]
+          Steps =
+            [| for target in [ "SIGNED"; "UNSIGNED" ] do
+                   for index, value in List.indexed inputs do
+                       yield! observe (sprintf "%s-%d" target index) (sprintf "CAST(%s AS %s)" value target)
+                   for mode in [ ""; "STRICT_ALL_TABLES" ] do
+                       for ignore in [ ""; "IGNORE " ] do
+                           for index, value in List.indexed [ "'x'"; "'1.9'" ] do
+                               let error = if mode <> "" && ignore = "" then Some(1292, "22007") else None
+                               yield! insert (sprintf "%s-%s-%s-%d" target mode ignore index)
+                                   mode ignore (sprintf "CAST(%s AS %s)" value target) "BIGINT" error
+                   for ignore in [ ""; "IGNORE " ] do
+                       let value = if target = "SIGNED" then "'9223372036854775808'" else "'-1'"
+                       yield! insert (sprintf "complement-%s-%s" target ignore) "STRICT_ALL_TABLES" ignore
+                           (sprintf "CAST(%s AS %s)" value target) "DECIMAL(65,0)" None
+               yield Contract.execute "reset-mode" "SET sql_mode=DEFAULT"
+               for index, expression in List.indexed conditions do
+                   yield! observe (sprintf "conditional-%d" index) expression
+               yield Contract.query "unselected-reference" "SELECT COALESCE(1,missing) AS n" |> Contract.fails 1054 "42S22"
+               yield Contract.query "reference-warnings" "SHOW WARNINGS"
+               for index, expression in List.indexed skippedCastConditions do
+                   yield! insert (sprintf "strict-conditional-%d" index) "STRICT_ALL_TABLES" "" expression "INT" None
+               yield Contract.execute "prepare-cast" "PREPARE cast_statement FROM 'SELECT CAST(? AS SIGNED) AS n'"
+               for index, value in List.indexed [ "'1.9'"; "'x'" ] do
+                   yield Contract.execute (sprintf "bind-%d" index) ("SET @cast_parameter=" + value)
+                   yield Contract.query (sprintf "execute-%d" index) "EXECUTE cast_statement USING @cast_parameter"
+                   yield Contract.query (sprintf "prepared-warnings-%d" index) "SHOW WARNINGS"
+               yield Contract.execute "deallocate-cast" "DEALLOCATE PREPARE cast_statement" |]
+          Cleanup = [| "DROP TABLE IF EXISTS cast_target"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:select", [| "text-differential" |]; "statement:insert", [| "text-differential" |] |] }
+
     let private triggerWarningLifetimes =
         let setup =
             [ "DROP TABLE IF EXISTS child"
@@ -6277,7 +6374,8 @@ module ContractCatalog =
           Coverage = [| "statement:delete", [| "text-differential" |] |] }
 
     let all =
-        [| triggerWarningLifetimes
+        [| integerCastConditions
+           triggerWarningLifetimes
            deleteIgnoreForeignKeys
            bareTriggerConditions
            mutationConversion

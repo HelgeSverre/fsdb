@@ -465,6 +465,54 @@ let tests =
                   [ "CREATE TABLE predicate_base(n INT,s VARCHAR(20))"
                     "INSERT INTO predicate_base VALUES(1,'x'),(2,'1x'),(3,'0x')" ]
 
+          testCase "Integer text casts report truncation and signedness conditions" <| fun _ ->
+              for expression, expected, codes in
+                  [ "CAST('x' AS SIGNED)", "0", [ 1292 ]
+                    "CAST('' AS SIGNED)", "0", [ 1292 ]
+                    "CAST('1.9' AS UNSIGNED)", "1", [ 1292 ]
+                    "CAST('1e2' AS UNSIGNED)", "1", [ 1292 ]
+                    "CAST('-1.9' AS UNSIGNED)", "18446744073709551615", [ 1292; 1105 ]
+                    "CAST('18446744073709551615' AS SIGNED)", "-1", [ 1105 ]
+                    "CAST('18446744073709551616' AS SIGNED)", "-1", [ 1292 ]
+                    "CAST('-9223372036854775809' AS UNSIGNED)", "9223372036854775808", [ 1292 ]
+                    "CAST(_utf16 X'0031002E0035' AS SIGNED)", "1", [ 1292 ]
+                    "CAST(_binary'1x' AS UNSIGNED)", "1", [ 1292 ]
+                    "CAST(-1.9 AS UNSIGNED)", "18446744073709551614", []
+                    "CAST(X'3132' AS SIGNED)", "12594", [] ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let next, result = handle session ("SELECT " + expression + " AS n")
+                  Expect.equal result (ResultSet([ "n" ], [ [ Some expected ] ])) expression
+                  Expect.equal (next.Diagnostics |> List.map _.Code) codes "native warning order"
+
+          testCase "Integer CAST warnings follow strict mutation and IGNORE policy" <| fun _ ->
+              for target in [ "SIGNED"; "UNSIGNED" ] do
+                  let run = queryFixture [ "CREATE TABLE cast_target(n BIGINT)"; "SET sql_mode='STRICT_ALL_TABLES'" ]
+                  match run ("INSERT INTO cast_target VALUES(CAST('x' AS " + target + "))") with
+                  | Err(1292, "Truncated incorrect INTEGER value: 'x'") -> ()
+                  | other -> failtestf "Expected strict cast conversion failure, got %A" other
+                  Expect.equal (run "SELECT n FROM cast_target") (ResultSet([ "n" ], [])) "strict failure preserves rows"
+                  Expect.equal (run ("INSERT IGNORE INTO cast_target VALUES(CAST('x' AS " + target + "))"))
+                      (Affected 1UL) "IGNORE retains the coerced value"
+                  Expect.equal (run "SHOW WARNINGS")
+                      (ResultSet([ "Level"; "Code"; "Message" ], [ [ Some "Warning"; Some "1292"; Some "Truncated incorrect INTEGER value: 'x'" ] ])) "IGNORE downgrades the cast condition"
+
+          testCase "Conditional integer casts evaluate only the selected branch" <| fun _ ->
+              for expression in
+                  [ "IF(0,CAST('x' AS SIGNED),1)"
+                    "IFNULL(1,CAST('x' AS SIGNED))"
+                    "COALESCE(1,CAST('x' AS SIGNED))" ] do
+                  let run = queryFixture [ "CREATE TABLE cast_target(n INT)"; "SET sql_mode='STRICT_ALL_TABLES'" ]
+                  Expect.equal (run ("INSERT INTO cast_target VALUES(" + expression + ")"))
+                      (Affected 1UL) "an unselected cast cannot fail a strict write"
+                  Expect.equal (run "SHOW WARNINGS")
+                      (ResultSet([ "Level"; "Code"; "Message" ], [])) "unselected branches produce no warning"
+                  Expect.equal (run "SELECT n FROM cast_target")
+                      (ResultSet([ "n" ], [ [ Some "1" ] ])) "chosen branch value"
+              let run = queryFixture []
+              match run "SELECT COALESCE(1,missing) AS n" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "Expected reference validation in an unselected branch, got %A" other
+
           testCase "Join hint ownership follows derived source merging" <| fun _ ->
               [ "SELECT  d.n FROM (SELECT /*+ JOIN_ORDER(x) */ n FROM merge_base) d;SHOW WARNINGS", "n\n1\n"
                 "SELECT /*+ NO_MERGE(d) */ d.n FROM (SELECT /*+ JOIN_ORDER(x) */ n FROM merge_base) d;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"

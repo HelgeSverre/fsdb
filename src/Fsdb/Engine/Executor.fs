@@ -1712,7 +1712,7 @@ let private validateCreateDirectories (store: Store) tableName (table: CreateTab
 /// DECIMAL/float target also honors a fraction and exponent
 /// (`CAST('1e3' AS DECIMAL(10,2))` is `1000`), so the two targets need
 /// different grammars rather than one regex serving both.
-let private leadingIntegerPrefixRegex = Regex(@"^\s*[+-]?\d+")
+let private leadingIntegerPrefixRegex = Regex(@"^[\t-\r ]*[+-]?[0-9]+")
 let private leadingFloatPrefixRegex = Regex(@"^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
 
 let private leadingNumericPrefix (regex: Regex) (s: string) : string option =
@@ -2610,6 +2610,12 @@ let private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: string)
             unknownQualifiedReference (not ctx.Qualifiers.IsEmpty || ctx.Outer.IsSome) (clauseLabel ctx.Clause) table col
             |> Error
 
+let private validateColumnReference ctx reference =
+    match reference with
+    | None, name -> resolveCol ctx name
+    | Some qualifier, name -> resolveQualifiedCol ctx qualifier name
+    |> Result.map ignore
+
 let private tryDirectColumnForExpr (ctx: EvalContext) (expr: Expr) : (int * ColumnDef) option =
     match expr with
     | Col name when tryRoutineVariable name |> Option.isNone ->
@@ -2749,6 +2755,31 @@ let private strToDateDateTokens =
 let private strToDateTimeTokens =
     [ "%H"; "%h"; "%I"; "%i"; "%s"; "%S"; "%f"; "%k"; "%l"; "%p"; "%r"; "%T" ]
 
+let private castIntegerText unsigned (text: string) =
+    let matched = leadingIntegerPrefixRegex.Match text
+    let prefix = matched.Value.Trim()
+    let negative = prefix.StartsWith("-", System.StringComparison.Ordinal)
+    let parsed, magnitude = System.UInt64.TryParse(prefix.TrimStart([| '+'; '-' |]))
+    let limit = if negative then 1UL <<< 63 else System.UInt64.MaxValue
+    let overflow = matched.Success && (not parsed || magnitude > limit)
+    let magnitude = if overflow then limit else magnitude
+    let trailingText =
+        text.Substring matched.Length
+        |> Seq.exists (fun character -> character <> ' ' && (character < '\t' || character > '\r'))
+
+    if not matched.Success || overflow || trailingText then
+        Diagnostics.numericConversion "INTEGER" text
+
+    // Complement warnings describe a valid signedness conversion, not overflow.
+    if not overflow then
+        if unsigned && negative then
+            Diagnostics.warning 1105 "Cast to unsigned converted negative integer to its positive complement"
+        elif not unsigned && not negative && magnitude > uint64 System.Int64.MaxValue then
+            Diagnostics.warning 1105 "Cast to signed converted positive out-of-range integer to its negative complement"
+
+    let bits = if negative then 0UL - magnitude else magnitude
+    if unsigned then VUInt bits else VInt(int64 bits)
+
 let private castUnsignedValue v =
     let wrap (d: decimal) =
         let n = System.Math.Round(d, System.MidpointRounding.AwayFromZero)
@@ -2775,15 +2806,8 @@ let private castUnsignedValue v =
             raise Value.UnsignedOutOfRange
         else
             wrap (decimal d)
-    | VString s ->
-        // MySQL reads the leading numeric prefix and treats the rest
-        // as garbage (`CAST('12abc' AS UNSIGNED)` is 12).
-        match leadingNumericPrefix leadingFloatPrefixRegex s with
-        | Some prefix ->
-            match System.Decimal.TryParse(prefix, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
-            | true, d -> wrap d
-            | false, _ -> VUInt 0UL
-        | None -> VUInt 0UL
+    | VString _ | VEncodedString _ | VBytes _ ->
+        castIntegerText true (toText v |> Option.defaultValue "")
     | other -> wrap (decimal (toDouble other))
 
 let private scalarSubqueryMaterializes registry (select: SelectStmt) =
@@ -4760,9 +4784,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | None -> evalExprCore ctx expr
             | Some _ ->
                 validateExpressionBindings
-                    (function
-                    | None, name -> resolveCol ctx name |> Result.map ignore
-                    | Some qualifier, name -> resolveQualifiedCol ctx qualifier name |> Result.map ignore)
+                    (validateColumnReference ctx)
                     (fun _ -> Ok()) Expression.tryLiteralNodeDiagnostic id expr
                 |> Result.bind (fun () -> evalExprCore ctx expr)
         with
@@ -5304,6 +5326,22 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | _ -> argument
 
         eval argument |> Result.map (Functions.weightString (keyCollation ctx source))
+    | NamedFunction "IF" [ condition; whenTrue; whenFalse ] when Functions.isUnmodifiedBuiltinScalar "IF" ctx.Registry ->
+        evalConditionalResult ctx expr (fun () ->
+            eval condition |> Result.bind (fun value ->
+                eval (if truthy value = Some true then whenTrue else whenFalse)))
+    | FuncCall(name, arguments) when
+        Functions.isUnmodifiedBuiltinScalar name ctx.Registry
+        && (match name.ToUpperInvariant(), arguments with
+            | "IFNULL", [ _; _ ] | "COALESCE", _ :: _ -> true
+            | _ -> false) ->
+        let rec firstNonNull = function
+            | [] -> Ok VNull
+            | argument :: rest ->
+                eval argument |> Result.bind (function
+                    | VNull -> firstNonNull rest
+                    | value -> Ok(Value.materialize value))
+        evalConditionalResult ctx expr (fun () -> firstNonNull arguments)
     | FuncCall(unquoteName, [ FuncCall(extractName, arguments) ])
         when unquoteName.Equals("JSON_UNQUOTE", System.StringComparison.OrdinalIgnoreCase)
              && extractName.Equals("JSON_EXTRACT", System.StringComparison.OrdinalIgnoreCase)
@@ -5507,6 +5545,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 match v, ty with
                 | VBinaryLiteral bytes, TBigInt false -> VInt(int64 (Value.binaryLiteralNumber bytes))
                 | VUInt u, TBigInt false -> VInt(int64 u)
+                | (VString _ | VEncodedString _ | VBytes _), TBigInt false ->
+                    castIntegerText false (toText v |> Option.defaultValue "")
                 | VString s, (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
                     VString(leadingNumericPrefix leadingIntegerPrefixRegex s |> Option.defaultValue "")
                 | VString s, (TDouble _ | TFloat _ | TDecimal _) ->
@@ -5577,6 +5617,22 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 else
                     Ok value
             | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
+
+and private validateExpressionInContext ctx expression =
+    validateExpressionBindings
+        (validateColumnReference ctx)
+        (fun nested ->
+            match describeQueryColumnsInScope ctx.Store ctx.Registry ctx.DbName (QueryBody(PlainSelect nested)) (Some ctx) with
+            | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
+            | _ -> Ok())
+        Expression.tryLiteralNodeDiagnostic id expression
+
+and private evalConditionalResult ctx expression evaluate =
+    validateExpressionInContext ctx expression
+    |> Result.bind (fun () -> expressionCollation ctx expression)
+    |> Result.bind (fun descriptor ->
+        evaluate ()
+        |> Result.map (normalizeNumericResult ctx expression >> normalizeCompoundString descriptor))
 
 /// Only audited, original builtins can execute during descriptor inference.
 /// Runtime bindings and subqueries retain their materialization boundary.
@@ -17258,15 +17314,7 @@ and private runSelect
             preceding @ keys
             |> traverse (fun (clause, expression) ->
                 let context = { context with Clause = clause }
-                validateExpressionBindings
-                    (function
-                    | None, name -> resolveCol context name |> Result.map ignore
-                    | Some qualifier, name -> resolveQualifiedCol context qualifier name |> Result.map ignore)
-                    (fun nested ->
-                        match describeQueryColumnsInScope store registry dbName (QueryBody(PlainSelect nested)) (Some context) with
-                        | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
-                        | _ -> Ok())
-                    Expression.tryLiteralNodeDiagnostic id expression)
+                validateExpressionInContext context expression)
             |> Result.map ignore
 
     match orderingValidation |> Result.bind (fun () -> windowBindings) with
@@ -21274,45 +21322,54 @@ let rec executeAs
 
         let context = contextFactory runStore registry dbName Map.empty Map.empty None [||]
 
-        let evaluateRow (indices: int list) (row: Expr list) =
+        let validateRow (indices: int list) (row: Expr list) =
             if row.Length <> indices.Length then
                 Error(ColumnCountMismatch(indices.Length, row.Length))
             else
                 row
-                |> traverse (fun expression ->
-                    if isDefault expression then
-                        Ok None
-                    else
-                        evalExpr context expression |> Result.map Some |> Result.mapError ExpressionError)
-                |> Result.bind (fun values ->
-                    let candidate = columns |> List.map (evalDefaultWithMode (temporalCoercionMode runStore)) |> Array.ofList
+                |> traverse (validateExpressionInContext context)
+                |> Result.map ignore
+                |> Result.mapError ExpressionError
 
+        let evaluateRow (indices: int list) (row: Expr list) =
+            row
+            |> traverse (fun expression ->
+                if isDefault expression then
+                    Ok None
+                else
+                    evalExpr context expression |> Result.map Some |> Result.mapError ExpressionError)
+            |> Result.bind (fun values ->
+                let candidate = columns |> List.map (evalDefaultWithMode (temporalCoercionMode runStore)) |> Array.ofList
+
+                List.zip indices values
+                |> List.iter (function
+                    | index, Some value -> candidate.[index] <- value
+                    | _ -> ())
+
+                let defaulted =
                     List.zip indices values
-                    |> List.iter (function
-                        | index, Some value -> candidate.[index] <- value
-                        | _ -> ())
+                    |> List.choose (function
+                        | index, None -> Some index
+                        | _ -> None)
 
-                    let defaulted =
-                        List.zip indices values
-                        |> List.choose (function
-                            | index, None -> Some index
-                            | _ -> None)
+                defaulted
+                |> List.tryPick (fun index ->
+                    let column = columns.[index]
 
-                    defaulted
-                    |> List.tryPick (fun index ->
-                        let column = columns.[index]
-
-                        if column.Default.IsNone && not column.Nullable && not column.AutoIncrement && column.Generated.IsNone then
-                            Some(Error(ExpressionError(1364, sprintf "Field '%s' doesn't have a default value" column.Name)))
-                        else
-                            None)
-                    |> Option.defaultValue (Ok())
-                    |> Result.bind (fun () ->
-                        evaluateFunctionalDefaults runStore db table columns (Set.ofList defaulted) candidate)
-                    |> Result.map (fun candidate -> indices |> List.map (fun index -> candidate.[index])))
+                    if column.Default.IsNone && not column.Nullable && not column.AutoIncrement && column.Generated.IsNone then
+                        Some(Error(ExpressionError(1364, sprintf "Field '%s' doesn't have a default value" column.Name)))
+                    else
+                        None)
+                |> Option.defaultValue (Ok())
+                |> Result.bind (fun () ->
+                    evaluateFunctionalDefaults runStore db table columns (Set.ofList defaulted) candidate)
+                |> Result.map (fun candidate -> indices |> List.map (fun index -> candidate.[index])))
 
         indices
-        |> Result.bind (fun indices -> rows |> traverse (evaluateRow indices))
+        |> Result.bind (fun indices ->
+            rows
+            |> traverse (validateRow indices)
+            |> Result.bind (fun _ -> rows |> traverse (evaluateRow indices)))
 
     let finishInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
         computeGeneratedRow runStore registry db table columns candidate

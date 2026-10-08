@@ -554,6 +554,12 @@ conversion diagnostics across repeated executions. Column assignments keep
 their storage conversion rules. See the [native conversion evidence](../torture/findings/2026-10-08-predicate-conversion.md)
 for the bounded coverage.
 
+Audited SIGNED/UNSIGNED text casts share integer-prefix, truncation, overflow,
+and signedness-warning handling. IF, IFNULL, and COALESCE skip unused arguments
+while retaining column and nested-query validation. INSERT validates its VALUES
+expressions before evaluation, preserving diagnostic order. See the
+[integer-cast evidence](../torture/findings/2026-10-08-integer-casts.md).
+
 `DELETE IGNORE` skips referenced parent rows with detailed warning 1451 and
 continues deleting eligible rows. LIMIT counts attempted rows. BEFORE trigger
 effects survive an ignored blocker; AFTER runs only for successful deletions.

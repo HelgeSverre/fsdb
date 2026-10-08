@@ -1,0 +1,1414 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "49d8df53",
+  "fsdb_dirty": true,
+  "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
+  "cases": [
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "matches": true,
+      "name": "signed-0",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('x' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n",
+      "matches": true,
+      "name": "signed-1",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ' '\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ' '\n",
+      "matches": true,
+      "name": "signed-2",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(' ' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12x'\n",
+      "errors": [],
+      "expected": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12x'\n",
+      "matches": true,
+      "name": "signed-3",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('12x' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\n",
+      "matches": true,
+      "name": "signed-4",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('1.9' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-1.9'\n",
+      "errors": [],
+      "expected": "n\n-1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-1.9'\n",
+      "matches": true,
+      "name": "signed-5",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-1.9' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2'\n",
+      "matches": true,
+      "name": "signed-6",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('1e2' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '.5'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '.5'\n",
+      "matches": true,
+      "name": "signed-7",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('.5' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\n",
+      "errors": [],
+      "expected": "n\n12\n",
+      "matches": true,
+      "name": "signed-8",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('+12' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\n",
+      "errors": [],
+      "expected": "n\n12\n",
+      "matches": true,
+      "name": "signed-9",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('  12  ' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12\tx'\n",
+      "errors": [],
+      "expected": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12\tx'\n",
+      "matches": true,
+      "name": "signed-10",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('12\\tx' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0x10'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0x10'\n",
+      "matches": true,
+      "name": "signed-11",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('0x10' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9223372036854775807\n",
+      "errors": [],
+      "expected": "n\n9223372036854775807\n",
+      "matches": true,
+      "name": "signed-12",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('9223372036854775807' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\n",
+      "errors": [],
+      "expected": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\n",
+      "matches": true,
+      "name": "signed-13",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('9223372036854775808' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-1\nLevel\tCode\tMessage\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\n",
+      "errors": [],
+      "expected": "n\n-1\nLevel\tCode\tMessage\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\n",
+      "matches": true,
+      "name": "signed-14",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('18446744073709551615' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '18446744073709551616'\n",
+      "errors": [],
+      "expected": "n\n-1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '18446744073709551616'\n",
+      "matches": true,
+      "name": "signed-15",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('18446744073709551616' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-9223372036854775808\n",
+      "errors": [],
+      "expected": "n\n-9223372036854775808\n",
+      "matches": true,
+      "name": "signed-16",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-9223372036854775808' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-9223372036854775809'\n",
+      "errors": [],
+      "expected": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-9223372036854775809'\n",
+      "matches": true,
+      "name": "signed-17",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-9223372036854775809' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-18446744073709551615'\n",
+      "errors": [],
+      "expected": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-18446744073709551615'\n",
+      "matches": true,
+      "name": "signed-18",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-18446744073709551615' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-18446744073709551616'\n",
+      "errors": [],
+      "expected": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-18446744073709551616'\n",
+      "matches": true,
+      "name": "signed-19",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-18446744073709551616' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '99999999999999999999999999999999999999'\n",
+      "errors": [],
+      "expected": "n\n-1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '99999999999999999999999999999999999999'\n",
+      "matches": true,
+      "name": "signed-20",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('99999999999999999999999999999999999999' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\nNULL\n",
+      "errors": [],
+      "expected": "n\nNULL\n",
+      "matches": true,
+      "name": "signed-21",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(NULL AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n2\n",
+      "errors": [],
+      "expected": "n\n2\n",
+      "matches": true,
+      "name": "signed-22",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(1.9 AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-2\n",
+      "errors": [],
+      "expected": "n\n-2\n",
+      "matches": true,
+      "name": "signed-23",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(-1.9 AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n100\n",
+      "errors": [],
+      "expected": "n\n100\n",
+      "matches": true,
+      "name": "signed-24",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(1e2 AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12594\n",
+      "errors": [],
+      "expected": "n\n12594\n",
+      "matches": true,
+      "name": "signed-25",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(X'3132' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n",
+      "matches": true,
+      "name": "signed-26",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(_binary'1x' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n",
+      "matches": true,
+      "name": "signed-27",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(CAST('1x' AS BINARY) AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.5'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.5'\n",
+      "matches": true,
+      "name": "signed-28",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(_utf16 X'0031002E0035' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\uff11\uff12'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\uff11\uff12'\n",
+      "matches": true,
+      "name": "signed-29",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('\uff11\uff12' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\u0661\u0662'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\u0661\u0662'\n",
+      "matches": true,
+      "name": "signed-30",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('\u0661\u0662' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "matches": true,
+      "name": "unsigned-0",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('x' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ''\n",
+      "matches": true,
+      "name": "unsigned-1",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ' '\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: ' '\n",
+      "matches": true,
+      "name": "unsigned-2",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(' ' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12x'\n",
+      "errors": [],
+      "expected": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12x'\n",
+      "matches": true,
+      "name": "unsigned-3",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('12x' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\n",
+      "matches": true,
+      "name": "unsigned-4",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('1.9' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n18446744073709551615\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-1.9'\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\n",
+      "errors": [],
+      "expected": "n\n18446744073709551615\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-1.9'\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\n",
+      "matches": true,
+      "name": "unsigned-5",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-1.9' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1e2'\n",
+      "matches": true,
+      "name": "unsigned-6",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('1e2' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '.5'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '.5'\n",
+      "matches": true,
+      "name": "unsigned-7",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('.5' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\n",
+      "errors": [],
+      "expected": "n\n12\n",
+      "matches": true,
+      "name": "unsigned-8",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('+12' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\n",
+      "errors": [],
+      "expected": "n\n12\n",
+      "matches": true,
+      "name": "unsigned-9",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('  12  ' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12\tx'\n",
+      "errors": [],
+      "expected": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12\tx'\n",
+      "matches": true,
+      "name": "unsigned-10",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('12\\tx' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0x10'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '0x10'\n",
+      "matches": true,
+      "name": "unsigned-11",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('0x10' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9223372036854775807\n",
+      "errors": [],
+      "expected": "n\n9223372036854775807\n",
+      "matches": true,
+      "name": "unsigned-12",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('9223372036854775807' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9223372036854775808\n",
+      "errors": [],
+      "expected": "n\n9223372036854775808\n",
+      "matches": true,
+      "name": "unsigned-13",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('9223372036854775808' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n18446744073709551615\n",
+      "errors": [],
+      "expected": "n\n18446744073709551615\n",
+      "matches": true,
+      "name": "unsigned-14",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('18446744073709551615' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n18446744073709551615\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '18446744073709551616'\n",
+      "errors": [],
+      "expected": "n\n18446744073709551615\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '18446744073709551616'\n",
+      "matches": true,
+      "name": "unsigned-15",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('18446744073709551616' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\n",
+      "errors": [],
+      "expected": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\n",
+      "matches": true,
+      "name": "unsigned-16",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-9223372036854775808' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-9223372036854775809'\n",
+      "errors": [],
+      "expected": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-9223372036854775809'\n",
+      "matches": true,
+      "name": "unsigned-17",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-9223372036854775809' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-18446744073709551615'\n",
+      "errors": [],
+      "expected": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-18446744073709551615'\n",
+      "matches": true,
+      "name": "unsigned-18",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-18446744073709551615' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-18446744073709551616'\n",
+      "errors": [],
+      "expected": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-18446744073709551616'\n",
+      "matches": true,
+      "name": "unsigned-19",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-18446744073709551616' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n18446744073709551615\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '99999999999999999999999999999999999999'\n",
+      "errors": [],
+      "expected": "n\n18446744073709551615\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '99999999999999999999999999999999999999'\n",
+      "matches": true,
+      "name": "unsigned-20",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('99999999999999999999999999999999999999' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\nNULL\n",
+      "errors": [],
+      "expected": "n\nNULL\n",
+      "matches": true,
+      "name": "unsigned-21",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(NULL AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n2\n",
+      "errors": [],
+      "expected": "n\n2\n",
+      "matches": true,
+      "name": "unsigned-22",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(1.9 AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n18446744073709551614\n",
+      "errors": [],
+      "expected": "n\n18446744073709551614\n",
+      "matches": true,
+      "name": "unsigned-23",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(-1.9 AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n100\n",
+      "errors": [],
+      "expected": "n\n100\n",
+      "matches": true,
+      "name": "unsigned-24",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(1e2 AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12594\n",
+      "errors": [],
+      "expected": "n\n12594\n",
+      "matches": true,
+      "name": "unsigned-25",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(X'3132' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n",
+      "matches": true,
+      "name": "unsigned-26",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(_binary'1x' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1x'\n",
+      "matches": true,
+      "name": "unsigned-27",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(CAST('1x' AS BINARY) AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.5'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.5'\n",
+      "matches": true,
+      "name": "unsigned-28",
+      "statements": [
+        "USE probe",
+        "SELECT CAST(_utf16 X'0031002E0035' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\uff11\uff12'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\uff11\uff12'\n",
+      "matches": true,
+      "name": "unsigned-29",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('\uff11\uff12' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\u0661\u0662'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\u0661\u0662'\n",
+      "matches": true,
+      "name": "unsigned-30",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('\u0661\u0662' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "matches": true,
+      "name": "insert--SIGNED--'x'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode=''",
+        "INSERT INTO target VALUES(CAST('x' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "matches": true,
+      "name": "insert--SIGNED--'1.9'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode=''",
+        "INSERT INTO target VALUES(CAST('1.9' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "matches": true,
+      "name": "insert--SIGNED-IGNORE -'x'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode=''",
+        "INSERT IGNORE INTO target VALUES(CAST('x' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "matches": true,
+      "name": "insert--SIGNED-IGNORE -'1.9'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode=''",
+        "INSERT IGNORE INTO target VALUES(CAST('1.9' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "matches": true,
+      "name": "insert--UNSIGNED--'x'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode=''",
+        "INSERT INTO target VALUES(CAST('x' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "matches": true,
+      "name": "insert--UNSIGNED--'1.9'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode=''",
+        "INSERT INTO target VALUES(CAST('1.9' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "matches": true,
+      "name": "insert--UNSIGNED-IGNORE -'x'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode=''",
+        "INSERT IGNORE INTO target VALUES(CAST('x' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "matches": true,
+      "name": "insert--UNSIGNED-IGNORE -'1.9'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode=''",
+        "INSERT IGNORE INTO target VALUES(CAST('1.9' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "errors": [
+        {
+          "Item1": 1292,
+          "Item2": "22007"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "matches": true,
+      "name": "insert-STRICT_ALL_TABLES-SIGNED--'x'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(CAST('x' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1292\tTruncated incorrect INTEGER value: '1.9'\n",
+      "errors": [
+        {
+          "Item1": 1292,
+          "Item2": "22007"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1292\tTruncated incorrect INTEGER value: '1.9'\n",
+      "matches": true,
+      "name": "insert-STRICT_ALL_TABLES-SIGNED--'1.9'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(CAST('1.9' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "matches": true,
+      "name": "insert-STRICT_ALL_TABLES-SIGNED-IGNORE -'x'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT IGNORE INTO target VALUES(CAST('x' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "matches": true,
+      "name": "insert-STRICT_ALL_TABLES-SIGNED-IGNORE -'1.9'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT IGNORE INTO target VALUES(CAST('1.9' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "errors": [
+        {
+          "Item1": 1292,
+          "Item2": "22007"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "matches": true,
+      "name": "insert-STRICT_ALL_TABLES-UNSIGNED--'x'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(CAST('x' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1292\tTruncated incorrect INTEGER value: '1.9'\n",
+      "errors": [
+        {
+          "Item1": 1292,
+          "Item2": "22007"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1292\tTruncated incorrect INTEGER value: '1.9'\n",
+      "matches": true,
+      "name": "insert-STRICT_ALL_TABLES-UNSIGNED--'1.9'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(CAST('1.9' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\nn\n0\n",
+      "matches": true,
+      "name": "insert-STRICT_ALL_TABLES-UNSIGNED-IGNORE -'x'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT IGNORE INTO target VALUES(CAST('x' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '1.9'\nn\n1\n",
+      "matches": true,
+      "name": "insert-STRICT_ALL_TABLES-UNSIGNED-IGNORE -'1.9'",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n BIGINT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT IGNORE INTO target VALUES(CAST('1.9' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "short-circuit",
+      "statements": [
+        "USE probe",
+        "SELECT IF(0,CAST('x' AS SIGNED),1) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n2\nn\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "errors": [],
+      "expected": "n\n2\nn\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "matches": true,
+      "name": "prepared",
+      "statements": [
+        "USE probe",
+        "PREPARE s FROM 'SELECT CAST(? AS SIGNED) AS n'",
+        "SET @p='1.9'",
+        "EXECUTE s USING @p",
+        "SHOW WARNINGS",
+        "SET @p='x'",
+        "EXECUTE s USING @p",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '9223372036854775808x'\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\n",
+      "errors": [],
+      "expected": "n\n-9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '9223372036854775808x'\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\n",
+      "matches": true,
+      "name": "extra-SIGNED-0",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('9223372036854775808x' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-0.5'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-0.5'\n",
+      "matches": true,
+      "name": "extra-SIGNED-1",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-0.5' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n-1\n",
+      "errors": [],
+      "expected": "n\n-1\n",
+      "matches": true,
+      "name": "extra-SIGNED-2",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-1' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '+ 1'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '+ 1'\n",
+      "matches": true,
+      "name": "extra-SIGNED-3",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('+ 1' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\u00a012'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\u00a012'\n",
+      "matches": true,
+      "name": "extra-SIGNED-4",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('\u00a012' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12\u00a0'\n",
+      "errors": [],
+      "expected": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12\u00a0'\n",
+      "matches": true,
+      "name": "extra-SIGNED-5",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('12\u00a0' AS SIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '9223372036854775808x'\n",
+      "errors": [],
+      "expected": "n\n9223372036854775808\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '9223372036854775808x'\n",
+      "matches": true,
+      "name": "extra-UNSIGNED-0",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('9223372036854775808x' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-0.5'\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '-0.5'\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\n",
+      "matches": true,
+      "name": "extra-UNSIGNED-1",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-0.5' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n18446744073709551615\nLevel\tCode\tMessage\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\n",
+      "errors": [],
+      "expected": "n\n18446744073709551615\nLevel\tCode\tMessage\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\n",
+      "matches": true,
+      "name": "extra-UNSIGNED-2",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('-1' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '+ 1'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '+ 1'\n",
+      "matches": true,
+      "name": "extra-UNSIGNED-3",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('+ 1' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\u00a012'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '\u00a012'\n",
+      "matches": true,
+      "name": "extra-UNSIGNED-4",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('\u00a012' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12\u00a0'\n",
+      "errors": [],
+      "expected": "n\n12\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: '12\u00a0'\n",
+      "matches": true,
+      "name": "extra-UNSIGNED-5",
+      "statements": [
+        "USE probe",
+        "SELECT CAST('12\u00a0' AS UNSIGNED) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\nn\n-9223372036854775808\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\nn\n-9223372036854775808\n",
+      "matches": true,
+      "name": "strict-complement-SIGNED-",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n DECIMAL(65,0))",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(CAST('9223372036854775808' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\nn\n-9223372036854775808\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1105\tCast to signed converted positive out-of-range integer to its negative complement\nn\n-9223372036854775808\n",
+      "matches": true,
+      "name": "strict-complement-SIGNED-IGNORE ",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n DECIMAL(65,0))",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT IGNORE INTO target VALUES(CAST('9223372036854775808' AS SIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\nn\n18446744073709551615\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\nn\n18446744073709551615\n",
+      "matches": true,
+      "name": "strict-complement-UNSIGNED-",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n DECIMAL(65,0))",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(CAST('-1' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\nn\n18446744073709551615\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1105\tCast to unsigned converted negative integer to its positive complement\nn\n18446744073709551615\n",
+      "matches": true,
+      "name": "strict-complement-UNSIGNED-IGNORE ",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n DECIMAL(65,0))",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT IGNORE INTO target VALUES(CAST('-1' AS UNSIGNED))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "conditional-0",
+      "statements": [
+        "USE probe",
+        "SELECT IF(1,1,CAST('x' AS SIGNED)) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "conditional-1",
+      "statements": [
+        "USE probe",
+        "SELECT IF(NULL,CAST('x' AS SIGNED),1) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "errors": [],
+      "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: '1x'\n",
+      "matches": true,
+      "name": "conditional-2",
+      "statements": [
+        "USE probe",
+        "SELECT IF('1x',1,CAST('x' AS SIGNED)) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "conditional-3",
+      "statements": [
+        "USE probe",
+        "SELECT IFNULL(1,CAST('x' AS SIGNED)) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "matches": true,
+      "name": "conditional-4",
+      "statements": [
+        "USE probe",
+        "SELECT IFNULL(NULL,CAST('x' AS SIGNED)) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "conditional-5",
+      "statements": [
+        "USE probe",
+        "SELECT COALESCE(1,CAST('x' AS SIGNED)) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "errors": [],
+      "expected": "n\n0\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect INTEGER value: 'x'\n",
+      "matches": true,
+      "name": "conditional-6",
+      "statements": [
+        "USE probe",
+        "SELECT COALESCE(NULL,CAST('x' AS SIGNED)) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1054\tUnknown column 'missing' in 'field list'\n",
+      "errors": [
+        {
+          "Item1": 1054,
+          "Item2": "42S22"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1054\tUnknown column 'missing' in 'field list'\n",
+      "matches": true,
+      "name": "conditional-7",
+      "statements": [
+        "USE probe",
+        "SELECT COALESCE(1,missing) AS n",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "strict-conditional-0",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(IF(0,CAST('x' AS SIGNED),1))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "strict-conditional-1",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(IFNULL(1,CAST('x' AS SIGNED)))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    },
+    {
+      "actual": "n\n1\n",
+      "errors": [],
+      "expected": "n\n1\n",
+      "matches": true,
+      "name": "strict-conditional-2",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(n INT)",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "INSERT INTO target VALUES(COALESCE(1,CAST('x' AS SIGNED)))",
+        "SHOW WARNINGS",
+        "SELECT n FROM target"
+      ]
+    }
+  ]
+}

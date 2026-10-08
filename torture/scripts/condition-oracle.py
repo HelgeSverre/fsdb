@@ -1,4 +1,5 @@
-"""Verify trigger warning lifetimes, failure conditions, and RESIGNAL on MySQL 8.4."""
+"""Verify recorded SQL results and condition codes on disposable MySQL 8.4."""
+import argparse
 import json
 import pathlib
 import re
@@ -7,9 +8,8 @@ import subprocess
 
 root = pathlib.Path(__file__).resolve().parents[1]
 oracle = runpy.run_path(str(root / "scripts/fulltext-transaction-oracle.py"))
-cases = json.loads((root / "findings/2026-10-08-trigger-warnings-native.json").read_text())["cases"]
 
-def verify(client, _writer):
+def verify(client, cases):
     for case in cases:
         sql = "DELIMITER //\n" + "//\n".join(case["statements"]) + "//\n"
         result = subprocess.run(
@@ -22,4 +22,8 @@ def verify(client, _writer):
         oracle["expect"](case["name"], result.stdout, case["stdout"])
 
 if __name__ == "__main__":
-    oracle["run"](verify)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("fixture", type=pathlib.Path, help="JSON fixture containing recorded cases")
+    arguments = parser.parse_args()
+    cases = json.loads(arguments.fixture.read_text())["cases"]
+    oracle["run"](lambda client, _writer: verify(client, cases))
