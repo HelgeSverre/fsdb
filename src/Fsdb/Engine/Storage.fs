@@ -1665,19 +1665,28 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
 
     let charsetChecked (text: string) : Result<string, StorageError> =
-        let converted = col.Charset |> Option.map (fun charset -> Charset.transcodeText charset text) |> Option.defaultValue text
-
-        if text = converted then
-            Ok text
-        else
-            let value = escapedUtf8Suffix text converted
-            let message = sprintf "Incorrect string value: '%s' for column '%s' at row %d" value col.Name (Diagnostics.currentRowNumber ())
-
-            if strict then
-                Error(ExpressionError(1366, message))
+        let target = col.Charset |> Option.map Charset.canonicalName
+        let transcode text = target |> Option.map (fun charset -> Charset.transcodeText charset text) |> Option.defaultValue text
+        let conversionFailure preview converted =
+            let message = sprintf "Incorrect string value: '%s' for column '%s' at row %d" preview col.Name (Diagnostics.currentRowNumber ())
+            if strict then Error(ExpressionError(1366, message))
             else
                 Diagnostics.warning 1366 message
                 Ok converted
+        let convertDecoded () =
+            let converted = transcode text
+            if text = converted then Ok text
+            else conversionFailure (escapedUtf8Suffix text converted) converted
+        match v with
+        | VEncodedString(source, bytes) ->
+            match Charset.tryInvalidTextByteOffset source bytes with
+            | Some offset ->
+                let converted =
+                    if target = Some source then Charset.decodeBytes source bytes.[0 .. offset - 1]
+                    else Charset.decodeWithByteReplacement source bytes |> transcode
+                conversionFailure (Charset.invalidBytePreview bytes offset) converted
+            | None -> convertDecoded ()
+        | _ -> convertDecoded ()
 
     let truncationWarning () =
         Diagnostics.warning 1265 (sprintf "Data truncated for column '%s' at row %d" col.Name (Diagnostics.currentRowNumber ()))

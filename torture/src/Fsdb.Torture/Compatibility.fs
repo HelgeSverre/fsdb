@@ -945,7 +945,26 @@ module ContractCatalog =
                            yield Contract.query label fragment
                        else
                            yield Contract.execute label fragment
-               yield Contract.execute "bytes-reset-charset" "SET NAMES utf8mb4" |]
+               yield Contract.execute "bytes-reset-charset" "SET NAMES utf8mb4"
+               for index, (charset, literal) in
+                   [ "ascii", "_ascii X'418042'"
+                     "utf8mb3", "_utf8mb3'a😀b'"
+                     "utf8mb4", "_utf8mb3'a😀b'"
+                     "utf8mb4", "_ascii X'418042'" ] |> List.indexed do
+                   let label name = sprintf "encoded-storage-%d-%s" index name
+                   yield Contract.execute (label "drop") "DROP TABLE IF EXISTS encoded_target"
+                   yield Contract.execute (label "create") ("CREATE TABLE encoded_target(v VARCHAR(20) CHARACTER SET " + charset + ")")
+                   yield Contract.execute (label "permissive") "SET sql_mode=''"
+                   yield Contract.execute (label "insert") ("INSERT INTO encoded_target VALUES(" + literal + ")")
+                   yield Contract.query (label "warnings") "SHOW WARNINGS"
+                   yield Contract.query (label "value") "SELECT HEX(v) AS h FROM encoded_target"
+                   yield Contract.execute (label "truncate") "TRUNCATE encoded_target"
+                   yield Contract.execute (label "strict") "SET sql_mode='STRICT_TRANS_TABLES'"
+                   yield Contract.execute (label "reject") ("INSERT INTO encoded_target VALUES(" + literal + ")") |> Contract.fails 1366 "HY000"
+                   yield Contract.query (label "strict-warnings") "SHOW WARNINGS"
+                   yield Contract.query (label "empty") "SELECT COUNT(*) AS n FROM encoded_target"
+               yield Contract.execute "encoded-storage-drop" "DROP TABLE encoded_target"
+               yield Contract.execute "encoded-storage-mode" "SET sql_mode=DEFAULT" |]
           Cleanup = [||]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential"; "error-contract" |] |] }
 

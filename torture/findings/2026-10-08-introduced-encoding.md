@@ -119,3 +119,23 @@ The accepted-byte matrix has 30 native fixtures, including source lifetimes
 and derived conversions; all match fsdb rows and warning messages. These cases
 also run in the maintained wire contract. The full root gate passes 3,067 tests
 with no build warnings or errors.
+
+## Storage conversion of invalid source bytes
+
+The `encoded-storage-oracle.py` matrix checks ASCII `418042` and UTF8MB3
+`a😀b` inserted into same-charset and UTF8MB4 VARCHAR columns. Non-strict
+same-charset insertion retains the valid prefix (`41` or `61`); conversion
+to UTF8MB4 substitutes each invalid source byte (`413F42` or `613F3F3F3F62`).
+Every conversion emits warning 1366 after the literal diagnostics. Strict
+mode rejects all four shapes with 1366 and leaves the table empty.
+
+Storage now validates encoded source bytes before decoding, sharing the
+Unicode scalar scan with literal validation and the byte-preview formatter
+with derived-row conversion. Ordinary decoded text retains its existing
+target-charset conversion checks. This does not establish complete parity
+for every source/target charset or for malformed UCS2 surrogate output.
+
+The maintained wire contract compares rows, warnings, strict errors, and
+post-error table state. Run `20261008T050419021-25285/contracts` passed
+62 cases and 7,502 steps without differences. The root gate passed 3,068
+tests with no build warnings or errors under the usual 4 GiB heap cap.

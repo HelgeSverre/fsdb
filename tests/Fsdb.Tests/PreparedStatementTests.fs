@@ -538,6 +538,32 @@ let tests =
                   Expect.equal (session.Diagnostics |> List.map _.Code) [ 1300 ] "preparation warning"
                   Expect.equal (run "EXECUTE p") (ResultSet([ "h" ], [ [ Some "F09F9880" ] ])) "prepared bytes"
 
+          testCase "malformed text storage distinguishes same charset and transcoding"
+          <| fun _ ->
+              for charset, literal, expected in
+                  [ "ascii", "_ascii X'418042'", "41"
+                    "utf8mb3", "_utf8mb3'a😀b'", "61"
+                    "utf8mb4", "_utf8mb3'a😀b'", "613F3F3F3F62"
+                    "utf8mb4", "_ascii X'418042'", "413F42" ] do
+                  for strict in [ false; true ] do
+                      let mutable session = create 1 (Fsdb.Storage.create ())
+                      let run sql =
+                          let next, result = handle session sql
+                          session <- next
+                          result
+                      run ("CREATE TABLE encoded_target(v VARCHAR(20) CHARACTER SET " + charset + ")") |> ignore
+                      run ("SET sql_mode='" + (if strict then "STRICT_TRANS_TABLES" else "") + "'") |> ignore
+                      let result = run ("INSERT INTO encoded_target VALUES(" + literal + ")")
+                      if strict then
+                          match result with
+                          | Err(1366, _) -> ()
+                          | other -> failtestf "Expected strict conversion error for %s to %s: %A" literal charset other
+                      else
+                          Expect.equal result (Affected 1UL) "non-strict insert"
+                          Expect.contains (session.Diagnostics |> List.map _.Code) 1366 "conversion warning"
+                          Expect.equal (run "SELECT HEX(v) AS h FROM encoded_target")
+                              (ResultSet([ "h" ], [ [ Some expected ] ])) (literal + " to " + charset)
+
           testCase "ordinary literal parser caches distinguish connection collations"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

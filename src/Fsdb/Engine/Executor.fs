@@ -8051,14 +8051,7 @@ and private materializeRelationValue columnName rowNumber value =
         match invalidOffset with
         | None -> value
         | Some offset ->
-            let remaining = bytes.Length - offset
-            let preview =
-                bytes.[offset .. offset + min 6 remaining - 1]
-                |> Array.map (fun value ->
-                    if value < 0x80uy then string (char value)
-                    else sprintf "\\x%02X" value)
-                |> String.concat ""
-            let preview = if remaining > 6 then preview + "..." else preview
+            let preview = Charset.invalidBytePreview bytes offset
             Diagnostics.warning 1366
                 (sprintf "Incorrect string value: '%s' for column '%s' at row %d" preview columnName rowNumber)
             Value.encodedString charset bytes.[0 .. offset - 1]

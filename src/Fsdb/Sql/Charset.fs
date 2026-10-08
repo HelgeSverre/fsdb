@@ -415,43 +415,44 @@ let padBinaryLiteral (name: string) (bytes: byte[]) =
     if padding = 0 then bytes
     else Array.append (Array.zeroCreate padding) bytes
 
+let private unicodeScalarWidth charset (bytes: byte[]) offset =
+    let remaining = bytes.Length - offset
+    let input = ReadOnlySpan<byte>(bytes, offset, remaining)
+    match charset with
+    | "utf8mb3" | "utf8mb4" ->
+        let mutable rune = Unchecked.defaultof<Rune>
+        let mutable consumed = 0
+        let status = Rune.DecodeFromUtf8(input, &rune, &consumed)
+        if status = System.Buffers.OperationStatus.Done
+           && (charset = "utf8mb4" || rune.Value <= 0xFFFF) then Some consumed
+        else None
+    | "utf16" | "utf16le" when remaining >= 2 ->
+        let codeUnit index =
+            let first, second = int bytes.[index], int bytes.[index + 1]
+            if charset = "utf16le" then first ||| (second <<< 8)
+            else (first <<< 8) ||| second
+        let first = char (codeUnit offset)
+        if Char.IsHighSurrogate first then
+            if remaining >= 4 && Char.IsLowSurrogate(char (codeUnit (offset + 2))) then Some 4
+            else None
+        elif Char.IsLowSurrogate first then None
+        else Some 2
+    | "utf32" when remaining >= 4 ->
+        let codePoint = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian input
+        if codePoint <= 0x10FFFFu && Rune.IsValid(int codePoint) then Some 4 else None
+    | _ -> None
+
 /// First malformed byte in UTF-8/16/32 hex or bit literals. Quoted strings
 /// and UCS-2 have different validation rules in MySQL.
 let tryInvalidUnicodeByteOffset (name: string) (bytes: byte[]) =
     let charset = canonicalName name
-    let scalarWidth offset =
-        let remaining = bytes.Length - offset
-        let input = ReadOnlySpan<byte>(bytes, offset, remaining)
-        match charset with
-        | "utf8mb3" | "utf8mb4" ->
-            let mutable rune = Unchecked.defaultof<Rune>
-            let mutable consumed = 0
-            let status = Rune.DecodeFromUtf8(input, &rune, &consumed)
-            if status = System.Buffers.OperationStatus.Done
-               && (charset = "utf8mb4" || rune.Value <= 0xFFFF) then Some consumed
-            else None
-        | "utf16" | "utf16le" when remaining >= 2 ->
-            let codeUnit index =
-                let first, second = int bytes.[index], int bytes.[index + 1]
-                if charset = "utf16le" then first ||| (second <<< 8)
-                else (first <<< 8) ||| second
-            let first = char (codeUnit offset)
-            if Char.IsHighSurrogate first then
-                if remaining >= 4 && Char.IsLowSurrogate(char (codeUnit (offset + 2))) then Some 4
-                else None
-            elif Char.IsLowSurrogate first then None
-            else Some 2
-        | "utf32" when remaining >= 4 ->
-            let codePoint = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian input
-            if codePoint <= 0x10FFFFu && Rune.IsValid(int codePoint) then Some 4 else None
-        | _ -> None
 
     match charset with
     | "utf8mb3" | "utf8mb4" | "utf16" | "utf16le" | "utf32" ->
         let mutable offset = 0
         let mutable invalid = None
         while offset < bytes.Length && invalid.IsNone do
-            match scalarWidth offset with
+            match unicodeScalarWidth charset bytes offset with
             | Some width -> offset <- offset + width
             | None -> invalid <- Some offset
         invalid
@@ -462,6 +463,38 @@ let tryInvalidTextByteOffset name bytes =
     match canonicalName name with
     | "ascii" -> bytes |> Array.tryFindIndex (fun value -> value > 0x7Fuy)
     | _ -> tryInvalidUnicodeByteOffset name bytes
+
+/// Conversion substitutes each invalid source byte while retaining valid sequences.
+let decodeWithByteReplacement name (bytes: byte[]) =
+    let charset = canonicalName name
+    let output = StringBuilder()
+    let mutable offset = 0
+    let mutable validStart = 0
+    let appendValid finish =
+        if finish > validStart then
+            output.Append(decodeBytes charset bytes.[validStart .. finish - 1]) |> ignore
+    while offset < bytes.Length do
+        let width =
+            if charset = "ascii" then
+                if bytes.[offset] < 0x80uy then Some 1 else None
+            else unicodeScalarWidth charset bytes offset
+        match width with
+        | Some width -> offset <- offset + width
+        | None ->
+            appendValid offset
+            output.Append '?' |> ignore
+            offset <- offset + 1
+            validStart <- offset
+    appendValid offset
+    output.ToString()
+
+let invalidBytePreview (bytes: byte[]) offset =
+    let remaining = bytes.Length - offset
+    let preview =
+        bytes.[offset .. offset + min 6 remaining - 1]
+        |> Array.map (fun value -> if value < 0x80uy then string (char value) else sprintf "\\x%02X" value)
+        |> String.concat ""
+    if remaining > 6 then preview + "..." else preview
 
 let decodeLoadData (name: string) (bytes: byte[]) =
     match tryCodec name with
