@@ -25,7 +25,75 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "HEX preserves exact decimal rounding and reports signed overflow"
+        [ testCase "ALTER converts complete rows in final column order"
+          <| fun _ ->
+              for mode in [ ""; "STRICT_ALL_TABLES" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE row_conversion(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))"
+                  let session, _ = handle session "INSERT INTO row_conversion VALUES(1,'aa','bb'),(2,'cc','dd')"
+                  let session, _ = handle session (sprintf "SET sql_mode='%s'" mode)
+                  let session, result = handle session "ALTER TABLE row_conversion MODIFY w VARCHAR(1), MODIFY v VARCHAR(1)"
+                  let expected =
+                      [ for row in (if mode = "" then [ 1; 2 ] else [ 1 ]) do
+                            for column in [ "v"; "w" ] do
+                                yield (if mode = "" then Fsdb.Diagnostics.Warning else Fsdb.Diagnostics.Error), 1265,
+                                    sprintf "Data truncated for column '%s' at row %d" column row ]
+                  Expect.equal (conditionTriples session) expected "final column order, stopping after the first failing row"
+                  if mode = "" then Expect.equal result (Affected 2UL) "both rows copied"
+                  else
+                      Expect.equal result (Err(1265, "Data truncated for column 'v' at row 1")) "first conversion error returned"
+                      let _, rows = handle session "SELECT v,w FROM row_conversion ORDER BY id"
+                      Expect.equal rows (ResultSet([ "v"; "w" ], [ [ Some "aa"; Some "bb" ]; [ Some "cc"; Some "dd" ] ])) "failed conversion is atomic"
+
+          testCase "ALTER retains typed conversion errors after the first strict failure"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE mixed_conversion(v VARCHAR(8),w VARCHAR(8))"
+              let session, _ = handle session "INSERT INTO mixed_conversion VALUES('aa','x')"
+              let session, _ = handle session "ALTER TABLE mixed_conversion MODIFY v VARCHAR(1), MODIFY w TINYINT"
+              Expect.equal (session.Diagnostics |> List.map _.Message)
+                  [ "Data truncated for column 'v' at row 1"; "Incorrect integer value: 'x' for column 'w' at row 1" ]
+                  "secondary errors retain their target type and row"
+
+          testCase "ALTER converts NULL primary-key values in final column order"
+          <| fun _ ->
+              for mode in [ ""; "STRICT_ALL_TABLES" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE null_primary(id INT,v VARCHAR(8))"
+                  let session, _ = handle session "INSERT INTO null_primary VALUES(NULL,'aa')"
+                  let session, _ = handle session (sprintf "SET sql_mode='%s'" mode)
+                  let session, result = handle session "ALTER TABLE null_primary MODIFY v VARCHAR(1), ADD PRIMARY KEY(id)"
+                  Expect.equal (session.Diagnostics |> List.map _.Message)
+                      [ "Data truncated for column 'id' at row 1"; "Data truncated for column 'v' at row 1" ] "nullability conversion precedes text conversion"
+                  if mode = "" then
+                      Expect.equal result (Affected 1UL) "non-strict mode copies the row"
+                      let _, rows = handle session "SELECT id,v FROM null_primary"
+                      Expect.equal rows (ResultSet([ "id"; "v" ], [ [ Some "0"; Some "a" ] ])) "implicit zero replaces NULL"
+                  else Expect.equal result (Err(1265, "Data truncated for column 'id' at row 1")) "strict mode returns the first error"
+
+          testCase "ALTER validates later definitions before converting earlier columns"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE definition_order(v VARCHAR(8))"
+              let session, _ = handle session "INSERT INTO definition_order VALUES('aa')"
+              let session, result = handle session "ALTER TABLE definition_order MODIFY v VARCHAR(1), MODIFY absent VARCHAR(1)"
+              Expect.equal result (Err(1054, "Unknown column 'absent' in 'definition_order'")) "definition error precedes truncation"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1054 ] "no conversion conditions"
+
+          testCase "ALTER checks uniqueness after all columns of the conflicting row"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE row_unique(v VARCHAR(8),w VARCHAR(8),UNIQUE KEY uq(v))"
+              let session, _ = handle session "INSERT INTO row_unique VALUES('aa','bb'),('ab','dd'),('zz','ff')"
+              let session, _ = handle session "SET sql_mode=''"
+              let session, result = handle session "ALTER TABLE row_unique MODIFY v VARCHAR(1), MODIFY w VARCHAR(1)"
+              Expect.equal result (Err(1062, "Duplicate entry 'a' for key 'row_unique.uq'")) "duplicate rejected"
+              Expect.equal (session.Diagnostics |> List.map _.Message)
+                  [ "Data truncated for column 'v' at row 1"; "Data truncated for column 'w' at row 1"
+                    "Data truncated for column 'v' at row 2"; "Data truncated for column 'w' at row 2"
+                    "Duplicate entry 'a' for key 'row_unique.uq'" ] "no later rows converted"
+
+          testCase "HEX preserves exact decimal rounding and reports signed overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               for expression, expected, overflow in

@@ -1,8 +1,8 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "ff9f2f14",
+  "fsdb_base_revision": "07ce6cf2",
   "fsdb_dirty": true,
-  "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
+  "comparison": "rendered results and conditions, numeric error codes, and SQLSTATEs",
   "cases": [
     {
       "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'v' at row 3\nid\tv\n1\t61\n2\t62\n3\t64\nField\tType\tNull\tKey\tDefault\tExtra\nv\tvarchar(1)\tYES\t\tNULL\t\n",
@@ -447,10 +447,10 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'v' at row 3\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'w' at row 3\nid\tv\tw\n1\ta\tb\n2\tc\td\n3\te\tf\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'v' at row 3\nWarning\t1265\tData truncated for column 'w' at row 3\nid\tv\tw\n1\ta\tb\n2\tc\td\n3\te\tf\n",
       "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'v' at row 3\nWarning\t1265\tData truncated for column 'w' at row 3\nid\tv\tw\n1\ta\tb\n2\tc\td\n3\te\tf\n",
-      "matches": false,
+      "matches": true,
       "name": "multi",
       "statements": [
         "USE probe",

@@ -6820,7 +6820,15 @@ let private coerceAlterValue (mode: TemporalCoercionMode) (newDef: ColumnDef) (v
     let row = Diagnostics.currentRowNumber ()
     let truncated column = ExpressionError(1265, sprintf "Data truncated for column '%s' at row %d" column row)
 
-    coerceStoredValueWithMode mode newDef value
+    let converted =
+        if value = VNull && (not newDef.Nullable || newDef.PrimaryKey) then
+            if mode.Strict then Error(truncated newDef.Name)
+            else
+                Diagnostics.warning 1265 (sprintf "Data truncated for column '%s' at row %d" newDef.Name row)
+                implicitZeroSeed newDef |> Result.bind (coerceStoredValueWithMode mode newDef)
+        else coerceStoredValueWithMode mode newDef value
+
+    converted
     |> Result.mapError (fun error ->
         match newDef.Type, error with
         // ALTER reports 1265 for variable-width binary and character truncation.
@@ -6828,6 +6836,8 @@ let private coerceAlterValue (mode: TemporalCoercionMode) (newDef: ColumnDef) (v
         | _, DataTruncatedForColumn column -> truncated column
         | _, OutOfRangeForColumn column ->
             ExpressionError(1264, sprintf "Out of range value for column '%s' at row %d" column row)
+        | (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _), InvalidValueForColumn(column, value) ->
+            ExpressionError(1366, sprintf "Incorrect integer value: '%s' for column '%s' at row %d" value column row)
         | _, error -> error)
 
 let private mapAlterRows (table: Table) transform =
@@ -6840,6 +6850,22 @@ let private mapAlterRows (table: Table) transform =
         Diagnostics.withRowNumber ordinal (fun () -> transform row)
         |> Result.map (fun updated -> builder.[rowId] <- updated))
     |> Result.map (fun _ -> builder.DrainToImmutable())
+
+let private alterUniqueRowValidator (table: Table) =
+    let uniqueKeys =
+        uniqueKeyGroups table
+        |> List.map (fun group -> group, System.Collections.Generic.HashSet<string>(StringComparer.Ordinal))
+
+    fun row ->
+        uniqueKeys
+        |> List.tryPick (fun (group, seen) ->
+            match encodeUniqueKey table.Columns group row with
+            | Some key when not (seen.Add key) ->
+                Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices row))
+            | _ -> None)
+        |> function
+            | Some error -> Error error
+            | None -> Ok row
 
 /// Applies one `Ast.AlterAction` to `table`, returning its replacement and,
 /// for `RenameTo`, the new key it should be re-filed under in the database
@@ -6990,20 +7016,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                         Columns = columnsExcludingSelf |> insertAt newIdx newDef
                         Indexes = renameIndexColumn oldName newDef.Name table.Indexes }
 
-                let uniqueKeys =
-                    uniqueKeyGroups candidate
-                    |> List.map (fun group -> group, System.Collections.Generic.HashSet<string>(StringComparer.Ordinal))
-
-                let checkUnique row =
-                    uniqueKeys
-                    |> List.tryPick (fun (group, seen) ->
-                        match encodeUniqueKey candidate.Columns group row with
-                        | Some key when not (seen.Add key) ->
-                            Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices row))
-                        | _ -> None)
-                    |> function
-                        | Some error -> Error error
-                        | None -> Ok row
+                let checkUnique = alterUniqueRowValidator candidate
 
                 // Stop at the first conflicting row so later conversions emit no conditions.
                 mapAlterRows table (fun row ->
@@ -7411,6 +7424,74 @@ let private reindexAfterAlter size lengths settings actions preserveFullText bef
                 |> Option.defaultValue index)
         reindexTableWithFullTextIndexes indexes after
 
+type private AlterColumnSource =
+    | StoredColumn of index: int * convert: bool
+    | AddedColumn
+
+let private unknownAlterColumn table column =
+    ExpressionError(1054, sprintf "Unknown column '%s' in '%s'" column table)
+
+let private alterColumnSources (table: Table) actions =
+    let key (name: string) = name.ToLowerInvariant()
+    let initial = table.Columns |> List.mapi (fun index column -> key column.Name, StoredColumn(index, false)) |> Map.ofList
+    let step state action =
+        state |> Result.bind (fun (sources, modified) ->
+            match action with
+            | AddColumn(column, _) -> Ok(Map.add (key column.Name) AddedColumn sources, modified)
+            | DropColumn name -> Ok(Map.remove (key name) sources, modified)
+            | ModifyColumn(column, _) | ChangeColumn(_, column, _) ->
+                let name = match action with ChangeColumn(name, _, _) -> name | _ -> column.Name
+                match Map.tryFind (key name) sources with
+                | Some(StoredColumn(index, _)) when not (Set.contains index modified) ->
+                    Ok(sources |> Map.remove (key name) |> Map.add (key column.Name) (StoredColumn(index, true)), Set.add index modified)
+                | _ -> Error(unknownAlterColumn table.OriginalName name)
+            | RenameColumnTo(oldName, newName) ->
+                match Map.tryFind (key oldName) sources with
+                | Some source -> Ok(sources |> Map.remove (key oldName) |> Map.add (key newName) source, modified)
+                | None -> Error(unknownAlterColumn table.OriginalName oldName)
+            | _ -> Ok(sources, modified))
+    List.fold step (Ok(initial, Set.empty)) actions |> Result.map fst
+
+let private convertAlterRows mode (original: Table) (candidate: Table) actions checkRow =
+    alterColumnSources original actions
+    |> Result.bind (fun sources ->
+        let convertsCharset = actions |> List.exists (function ConvertCharset _ -> true | _ -> false)
+        candidate.Columns
+        |> traverse (fun column ->
+            match Map.tryFind (column.Name.ToLowerInvariant()) sources with
+            | Some(StoredColumn(index, convert)) ->
+                let previous = original.Columns.[index]
+                let convert = convert || column.Nullable <> previous.Nullable || column.PrimaryKey <> previous.PrimaryKey || (convertsCharset && column.Charset.IsSome)
+                Ok(fun (row: Value[]) -> if convert then coerceAlterValue mode column row.[index] else Ok row.[index])
+            | Some AddedColumn ->
+                let fill = if original.RowsArray.IsEmpty then Ok VNull else addedColumnFill mode column
+                fill |> Result.map (fun value -> fun _ -> Ok value)
+            | None -> Error(unknownAlterColumn candidate.OriginalName column.Name))
+        |> Result.bind (fun conversions ->
+            let conversions = Array.ofList conversions
+            let checkUnique = alterUniqueRowValidator candidate
+            mapAlterRows original (fun row ->
+                let values = Array.zeroCreate conversions.Length
+                let mutable firstError = None
+                for index in 0 .. conversions.Length - 1 do
+                    let convertColumn () =
+                        match conversions.[index] row with
+                        | Ok value -> values.[index] <- value
+                        | Error error ->
+                            match firstError with
+                            | None -> firstError <- Some error
+                            | Some _ ->
+                                let code, message = toMySqlError error
+                                Diagnostics.error code message
+                    // MySQL retains all conversion errors from the first failing row.
+                    if firstError.IsSome then Diagnostics.afterError convertColumn
+                    else convertColumn ()
+                match firstError with
+                | Some error -> Error error
+                | None ->
+                    checkUnique values |> Result.bind (fun values -> checkRow candidate values |> Result.map (fun () -> values)))
+            |> Result.map (fun rows -> { candidate with RowsArray = rows })))
+
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
@@ -7424,6 +7505,14 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
             |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
                 let origKey = normalizeTableName tableName
+                let mode = temporalCoercionMode store
+                let convertsColumns = actions |> List.exists (function ModifyColumn _ | ChangeColumn _ -> true | _ -> false)
+                let definition = if convertsColumns then { table with RowsArray = RowStore.empty } else table
+                let addedForeignKeys = actions |> List.choose (function AddForeignKey foreignKey -> Some foreignKey | _ -> None)
+                let checkAddedForeignKeys (candidate: Table) row =
+                    if store.ForeignKeyChecks then
+                        addedForeignKeys |> traverse (checkFkParent catalog dbName db candidate.Columns row) |> Result.map ignore
+                    else Ok()
 
                 let step acc action =
                     acc
@@ -7446,7 +7535,10 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                             | _ -> Ok()
 
                         validation
-                        |> Result.bind (fun () -> applyAlterAction (temporalCoercionMode store) tbl action)
+                        |> Result.bind (fun () -> applyAlterAction mode tbl action)
+                        |> Result.mapError (function
+                            | UnknownColumn name when convertsColumns -> unknownAlterColumn table.OriginalName name
+                            | error -> error)
                         |> Result.map (fun (tbl', newKey) ->
                             (newKey |> Option.defaultValue key), tbl', preserveFullText && alterPreservesFullText tbl tbl' action))
 
@@ -7466,8 +7558,19 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                     | None -> Ok()
 
                 actions
-                |> List.fold step (Ok(origKey, table, true))
+                |> List.fold step (Ok(origKey, definition, true))
                 |> Result.bind (fun state -> validateAutoIncrementKey state |> Result.map (fun () -> state))
+                |> Result.bind (fun (key, candidate, preserveFullText) ->
+                    if not convertsColumns then Ok(key, candidate, preserveFullText)
+                    else
+                        convertAlterRows mode table candidate actions checkAddedForeignKeys
+                        |> Result.bind (fun converted ->
+                            actions
+                            |> List.fold (fun state action ->
+                                match action with
+                                | SetAutoIncrement _ -> state |> Result.bind (fun table -> applyAlterAction mode table action |> Result.map fst)
+                                | _ -> state) (Ok converted))
+                        |> Result.map (fun converted -> key, converted, preserveFullText))
                 |> Result.map (fun (finalKey, finalTable, preserveFullText) ->
                     let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
                     let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) actions preserveFullText table finalTable)

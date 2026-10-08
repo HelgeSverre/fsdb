@@ -1,14 +1,14 @@
 {
   "mysql_version": "8.4.11",
-  "fsdb_base_revision": "10ef4e64",
+  "fsdb_base_revision": "07ce6cf2",
   "fsdb_dirty": true,
   "comparison": "rendered results and conditions, numeric error codes, and SQLSTATEs",
   "cases": [
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'w' at row 2\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
       "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
-      "matches": false,
+      "matches": true,
       "name": "forward-",
       "statements": [
         "USE probe",
@@ -22,10 +22,10 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
       "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
-      "matches": false,
+      "matches": true,
       "name": "reverse-",
       "statements": [
         "USE probe",
@@ -39,10 +39,10 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nw\tid\tv\nb\t1\ta\nd\t2\tc\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'v' at row 2\nw\tid\tv\nb\t1\ta\nd\t2\tc\n",
       "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'v' at row 2\nw\tid\tv\nb\t1\ta\nd\t2\tc\n",
-      "matches": false,
+      "matches": true,
       "name": "position-",
       "statements": [
         "USE probe",
@@ -56,10 +56,10 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
       "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\tw\n1\ta\tb\n2\tc\td\n",
-      "matches": false,
+      "matches": true,
       "name": "later-failure-",
       "statements": [
         "USE probe",
@@ -73,7 +73,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.uq'\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.uq'\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
       "errors": [
         {
           "Item1": 1062,
@@ -81,7 +81,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.uq'\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
-      "matches": false,
+      "matches": true,
       "name": "unique-",
       "statements": [
         "USE probe",
@@ -95,10 +95,10 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'renamed' at row 1\nWarning\t1265\tData truncated for column 'renamed' at row 2\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\trenamed\n1\ta\tb\n2\tc\td\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'renamed' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'renamed' at row 2\nid\tv\trenamed\n1\ta\tb\n2\tc\td\n",
       "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'renamed' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'renamed' at row 2\nid\tv\trenamed\n1\ta\tb\n2\tc\td\n",
-      "matches": false,
+      "matches": true,
       "name": "rename-",
       "statements": [
         "USE probe",
@@ -112,10 +112,10 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\tn\tw\n1\ta\t7\tb\n2\tc\t7\td\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nid\tv\tn\tw\n1\ta\t7\tb\n2\tc\t7\td\n",
       "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nid\tv\tn\tw\n1\ta\t7\tb\n2\tc\t7\td\n",
-      "matches": false,
+      "matches": true,
       "name": "add-between-",
       "statements": [
         "USE probe",
@@ -146,7 +146,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'w' at row 2\nWarning\t1265\tData truncated for column 'w' at row 3\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.uq'\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.uq'\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
       "errors": [
         {
           "Item1": 1062,
@@ -154,7 +154,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'w' at row 2\nError\t1062\tDuplicate entry 'a' for key 'target.uq'\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
-      "matches": false,
+      "matches": true,
       "name": "add-unique-",
       "statements": [
         "USE probe",
@@ -168,7 +168,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nError\t1054\tUnknown column 'absent' in field list\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
+      "actual": "Level\tCode\tMessage\nError\t1054\tUnknown column 'absent' in 'target'\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
       "errors": [
         {
           "Item1": 1054,
@@ -176,7 +176,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1054\tUnknown column 'absent' in 'target'\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
-      "matches": false,
+      "matches": true,
       "name": "invalid-later-",
       "statements": [
         "USE probe",
@@ -190,10 +190,15 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nid\tv\tw\n1\ta\tbbb\n2\tc\tddd\n",
-      "errors": [],
+      "actual": "Level\tCode\tMessage\nError\t1054\tUnknown column 'v' in 'target'\nid\tv\tw\n1\taaa\tbbb\n2\tccc\tddd\n",
+      "errors": [
+        {
+          "Item1": 1054,
+          "Item2": "42S22"
+        }
+      ],
       "expected": "Level\tCode\tMessage\nError\t1054\tUnknown column 'v' in 'target'\nid\tv\tw\n1\taaa\tbbb\n2\tccc\tddd\n",
-      "matches": false,
+      "matches": true,
       "name": "repeated-column-",
       "statements": [
         "USE probe",
@@ -207,10 +212,10 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1366\tIncorrect integer value: 'x' for column 'w' at row 1\nWarning\t1264\tOut of range value for column 'w' at row 2\nid\tv\tw\n1\ta\t0\n2\tc\t127\n",
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1366\tIncorrect integer value: 'x' for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1264\tOut of range value for column 'w' at row 2\nid\tv\tw\n1\ta\t0\n2\tc\t127\n",
       "errors": [],
       "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nWarning\t1366\tIncorrect integer value: 'x' for column 'w' at row 1\nWarning\t1265\tData truncated for column 'v' at row 2\nWarning\t1264\tOut of range value for column 'w' at row 2\nid\tv\tw\n1\ta\t0\n2\tc\t127\n",
-      "matches": false,
+      "matches": true,
       "name": "mixed-",
       "statements": [
         "USE probe",
@@ -224,7 +229,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
       "errors": [
         {
           "Item1": 1265,
@@ -232,7 +237,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
-      "matches": false,
+      "matches": true,
       "name": "forward-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -246,7 +251,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
       "errors": [
         {
           "Item1": 1265,
@@ -254,7 +259,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
-      "matches": false,
+      "matches": true,
       "name": "reverse-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -268,7 +273,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'w' at row 1\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
       "errors": [
         {
           "Item1": 1265,
@@ -276,7 +281,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'w' at row 1\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
-      "matches": false,
+      "matches": true,
       "name": "position-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -290,7 +295,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 2\nid\tv\tw\n1\ta\tbb\n2\tcc\td\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\ta\tbb\n2\tcc\td\n",
       "errors": [
         {
           "Item1": 1265,
@@ -298,7 +303,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\ta\tbb\n2\tcc\td\n",
-      "matches": false,
+      "matches": true,
       "name": "later-failure-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -312,7 +317,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
       "errors": [
         {
           "Item1": 1265,
@@ -320,7 +325,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
-      "matches": false,
+      "matches": true,
       "name": "unique-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -334,7 +339,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'renamed' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'renamed' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
       "errors": [
         {
           "Item1": 1265,
@@ -342,7 +347,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'renamed' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
-      "matches": false,
+      "matches": true,
       "name": "rename-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -356,7 +361,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
       "errors": [
         {
           "Item1": 1265,
@@ -364,7 +369,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
-      "matches": false,
+      "matches": true,
       "name": "add-between-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -400,7 +405,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
       "errors": [
         {
           "Item1": 1265,
@@ -408,7 +413,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1265\tData truncated for column 'w' at row 1\nid\tv\tw\n1\taa\tbb\n2\tab\tdd\n3\tzz\tff\n",
-      "matches": false,
+      "matches": true,
       "name": "add-unique-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -422,15 +427,15 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
+      "actual": "Level\tCode\tMessage\nError\t1054\tUnknown column 'absent' in 'target'\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
       "errors": [
         {
-          "Item1": 1265,
-          "Item2": "01000"
+          "Item1": 1054,
+          "Item2": "42S22"
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1054\tUnknown column 'absent' in 'target'\nid\tv\tw\n1\taa\tbb\n2\tcc\tdd\n",
-      "matches": false,
+      "matches": true,
       "name": "invalid-later-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -444,15 +449,15 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\tw\n1\taaa\tbbb\n2\tccc\tddd\n",
+      "actual": "Level\tCode\tMessage\nError\t1054\tUnknown column 'v' in 'target'\nid\tv\tw\n1\taaa\tbbb\n2\tccc\tddd\n",
       "errors": [
         {
-          "Item1": 1265,
-          "Item2": "01000"
+          "Item1": 1054,
+          "Item2": "42S22"
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1054\tUnknown column 'v' in 'target'\nid\tv\tw\n1\taaa\tbbb\n2\tccc\tddd\n",
-      "matches": false,
+      "matches": true,
       "name": "repeated-column-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",
@@ -466,7 +471,7 @@
       ]
     },
     {
-      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\tw\n1\taa\tx\n2\tcc\t200\n",
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1366\tIncorrect integer value: 'x' for column 'w' at row 1\nid\tv\tw\n1\taa\tx\n2\tcc\t200\n",
       "errors": [
         {
           "Item1": 1265,
@@ -474,7 +479,7 @@
         }
       ],
       "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'v' at row 1\nError\t1366\tIncorrect integer value: 'x' for column 'w' at row 1\nid\tv\tw\n1\taa\tx\n2\tcc\t200\n",
-      "matches": false,
+      "matches": true,
       "name": "mixed-STRICT_ALL_TABLES",
       "statements": [
         "USE probe",

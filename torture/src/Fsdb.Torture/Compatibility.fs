@@ -6656,9 +6656,93 @@ module ContractCatalog =
           Cleanup = [||]
           Coverage = [| "function:HEX", [| "text-differential" |] |] }
 
+    let private alterRowOrder =
+        let cases =
+            [
+              "primary-null",
+                  "CREATE TABLE target(id INT,v VARCHAR(8))",
+                  "INSERT INTO target VALUES(NULL,'aa')",
+                  "ALTER TABLE target MODIFY v VARCHAR(1), ADD PRIMARY KEY(id)", None, Some(1265, "01000")
+              "not-null",
+                  "CREATE TABLE target(id INT,v VARCHAR(8))",
+                  "INSERT INTO target VALUES(NULL,'aa')",
+                  "ALTER TABLE target MODIFY id INT NOT NULL, MODIFY v VARCHAR(1)", None, Some(1265, "01000")
+              "forward",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd')",
+                  "ALTER TABLE target MODIFY v VARCHAR(1), MODIFY w VARCHAR(1)", None, Some(1265, "01000")
+              "reverse",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd')",
+                  "ALTER TABLE target MODIFY w VARCHAR(1), MODIFY v VARCHAR(1)", None, Some(1265, "01000")
+              "position",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd')",
+                  "ALTER TABLE target MODIFY w VARCHAR(1) FIRST, MODIFY v VARCHAR(1)", None, Some(1265, "01000")
+              "later-failure",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'a','bb'),(2,'cc','d')",
+                  "ALTER TABLE target MODIFY v VARCHAR(1), MODIFY w VARCHAR(1)", None, Some(1265, "01000")
+              "unique",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8), UNIQUE KEY uq(v))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'ab','dd'),(3,'zz','ff')",
+                  "ALTER TABLE target MODIFY v VARCHAR(1), MODIFY w VARCHAR(1)", Some(1062, "23000"), Some(1265, "01000")
+              "rename",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd')",
+                  "ALTER TABLE target CHANGE w renamed VARCHAR(1), MODIFY v VARCHAR(1)", None, Some(1265, "01000")
+              "add-between",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd')",
+                  "ALTER TABLE target MODIFY w VARCHAR(1), ADD n INT DEFAULT 7 AFTER v, MODIFY v VARCHAR(1)", None, Some(1265, "01000")
+              "drop-between",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd')",
+                  "ALTER TABLE target MODIFY w VARCHAR(1), DROP v", None, Some(1265, "01000")
+              "add-unique",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'ab','dd'),(3,'zz','ff')",
+                  "ALTER TABLE target ADD UNIQUE KEY uq(v), MODIFY w VARCHAR(1), MODIFY v VARCHAR(1)", Some(1062, "23000"), Some(1265, "01000")
+              "invalid-later",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd')",
+                  "ALTER TABLE target MODIFY v VARCHAR(1), MODIFY absent VARCHAR(1)", Some(1054, "42S22"), Some(1054, "42S22")
+              "repeated-column",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aaa','bbb'),(2,'ccc','ddd')",
+                  "ALTER TABLE target MODIFY v VARCHAR(2), MODIFY v VARCHAR(1)", Some(1054, "42S22"), Some(1054, "42S22")
+              "mixed",
+                  "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),w VARCHAR(8))",
+                  "INSERT INTO target VALUES(1,'aa','x'),(2,'cc','200')",
+                  "ALTER TABLE target MODIFY v VARCHAR(1), MODIFY w TINYINT", None, Some(1265, "01000")
+            ]
+        { Name = "alter-row-order"
+          Setup = [||]
+          Steps =
+            [| for name, definition, insert, alter, normalError, strictError in cases do
+                   for mode, error in [ "", normalError; "STRICT_ALL_TABLES", strictError ] do
+                       let label = name + "-" + mode
+                       yield Contract.execute (label + "-drop") "DROP TABLE IF EXISTS target"
+                       yield Contract.execute (label + "-create") definition
+                       yield Contract.execute (label + "-insert") insert
+                       yield Contract.execute (label + "-mode") (sprintf "SET sql_mode='%s'" mode)
+                       let operation = Contract.execute label alter
+                       yield match error with Some(code, state) -> operation |> Contract.fails code state | None -> operation
+                       yield Contract.query (label + "-warnings") "SHOW WARNINGS"
+                       yield Contract.query (label + "-rows") "SELECT * FROM target ORDER BY id" |]
+          Cleanup = [| "DROP TABLE IF EXISTS target"; "SET sql_mode=DEFAULT" |]
+          Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
+
     let private alterCoercion =
         let cases =
             [
+              "multi",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20),w VARCHAR(20))"
+                    "INSERT INTO target VALUES(1,'aa','bb'),(2,'cc','dd'),(3,'ee','ff')"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v VARCHAR(1), MODIFY w VARCHAR(1)", None,
+                  [ "SHOW WARNINGS"; "SELECT * FROM target ORDER BY id" ]
               "decimal--unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v DECIMAL(8,3))"
@@ -7184,6 +7268,7 @@ module ContractCatalog =
         [| missingTableDiagnostics
            qualifiedDuplicateKeys
            alterCoercion
+           alterRowOrder
            hexNumericConversion
            alterCopyCounts
            alterDefaultBinlogSafety

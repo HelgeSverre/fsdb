@@ -1,0 +1,166 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "07ce6cf2",
+  "fsdb_dirty": true,
+  "comparison": "rendered results and conditions, numeric error codes, and SQLSTATEs",
+  "cases": [
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\tpid\n1\ta\t1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\tpid\n1\ta\t1\n",
+      "matches": true,
+      "name": "fk-valid",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),pid INT)",
+        "INSERT INTO target VALUES(1,'aa',1)",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1), ADD CONSTRAINT fk FOREIGN KEY(pid) REFERENCES parent(id)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`fk`)\nid\tv\tpid\n1\taa\t9\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`#sql-13c84_b`, CONSTRAINT `fk` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\tv\tpid\n1\taa\t9\n",
+      "matches": false,
+      "name": "fk-invalid",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "DROP TABLE IF EXISTS parent",
+        "CREATE TABLE parent(id INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1)",
+        "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(8),pid INT)",
+        "INSERT INTO target VALUES(1,'aa',9)",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1), ADD CONSTRAINT fk FOREIGN KEY(pid) REFERENCES parent(id)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\n10\ta\n11\tb\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\n10\ta\n11\tb\n",
+      "matches": true,
+      "name": "auto-floor",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT AUTO_INCREMENT PRIMARY KEY,v VARCHAR(8))",
+        "INSERT INTO target VALUES(10,'aa')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1), AUTO_INCREMENT=5",
+        "SHOW WARNINGS",
+        "INSERT INTO target(v) VALUES('b')",
+        "SELECT * FROM target ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'id' at row 1\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\n0\ta\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'id' at row 1\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\n0\ta\n",
+      "matches": true,
+      "name": "primary-null",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT,v VARCHAR(8))",
+        "INSERT INTO target VALUES(NULL,'aa')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1), ADD PRIMARY KEY(id)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'id' at row 1\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\n0\ta\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'id' at row 1\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\n0\ta\n",
+      "matches": true,
+      "name": "null--MODIFY v VARCHAR(1), ADD PRIMARY KEY(id)",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT,v VARCHAR(8))",
+        "INSERT INTO target VALUES(NULL,'aa')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY v VARCHAR(1), ADD PRIMARY KEY(id)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'id' at row 1\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\n0\ta\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1265\tData truncated for column 'id' at row 1\nWarning\t1265\tData truncated for column 'v' at row 1\nid\tv\n0\ta\n",
+      "matches": true,
+      "name": "null--MODIFY id INT NOT NULL, MODIFY v VARCHAR(1)",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT,v VARCHAR(8))",
+        "INSERT INTO target VALUES(NULL,'aa')",
+        "SET sql_mode=''",
+        "ALTER TABLE target MODIFY id INT NOT NULL, MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'id' at row 1\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\nNULL\taa\n",
+      "errors": [
+        {
+          "Item1": 1265,
+          "Item2": "01000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'id' at row 1\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\nNULL\taa\n",
+      "matches": true,
+      "name": "null-STRICT_ALL_TABLES-MODIFY v VARCHAR(1), ADD PRIMARY KEY(id)",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT,v VARCHAR(8))",
+        "INSERT INTO target VALUES(NULL,'aa')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY v VARCHAR(1), ADD PRIMARY KEY(id)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'id' at row 1\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\nNULL\taa\n",
+      "errors": [
+        {
+          "Item1": 1265,
+          "Item2": "01000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1265\tData truncated for column 'id' at row 1\nError\t1265\tData truncated for column 'v' at row 1\nid\tv\nNULL\taa\n",
+      "matches": true,
+      "name": "null-STRICT_ALL_TABLES-MODIFY id INT NOT NULL, MODIFY v VARCHAR(1)",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS target",
+        "CREATE TABLE target(id INT,v VARCHAR(8))",
+        "INSERT INTO target VALUES(NULL,'aa')",
+        "SET sql_mode='STRICT_ALL_TABLES'",
+        "ALTER TABLE target MODIFY id INT NOT NULL, MODIFY v VARCHAR(1)",
+        "SHOW WARNINGS",
+        "SELECT * FROM target"
+      ]
+    }
+  ]
+}
