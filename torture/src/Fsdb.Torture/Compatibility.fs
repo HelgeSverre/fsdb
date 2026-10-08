@@ -309,6 +309,84 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS contract_order_alias"; "SET @n=NULL" |]
           Coverage = [| "statement:select", [| "ordering"; "aliases"; "text-differential"; "prepared-differential" |] |] }
 
+    let private duplicateOrderAliases =
+        let queries =
+            [| "SELECT missing,v AS a,w AS a FROM contract_duplicate_values ORDER BY a", OracleError(1054, "42S22")
+               "SELECT v AS a,w AS a FROM contract_duplicate_values WHERE missing ORDER BY a", OracleError(1054, "42S22")
+               "SELECT v AS a,ROW_NUMBER() OVER (ORDER BY v DESC) AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT SUM(-v) AS a,ROW_NUMBER() OVER (ORDER BY v) AS a FROM contract_duplicate_values GROUP BY v ORDER BY a", OracleSuccess
+               "SELECT SUM(-v) AS a,ROW_NUMBER() OVER (ORDER BY v) AS a FROM contract_duplicate_values GROUP BY v ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT v AS a,w AS a,-v AS a FROM contract_duplicate_values ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,w AS a,-v AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleError(1052, "23000")
+               "SELECT v AS a,-v AS a,w AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT v AS a,-v AS a,w AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT -v AS a,v AS a,w AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT -v AS a,v AS a,w AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT v AS a,v AS a,w AS a FROM contract_duplicate_values ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,v AS a,w AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleError(1052, "23000")
+               "SELECT v AS a,contract_duplicate_values.v AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT v AS a,contract_duplicate_values.v AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT contract_duplicate_values.v AS a,v AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT contract_duplicate_values.v AS a,v AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT v AS a,(v) AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT v AS a,(v) AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT v AS a,+v AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT v AS a,+v AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT v AS a,CAST(v AS SIGNED) AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT v AS a,CAST(v AS SIGNED) AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT v AS a,w+0 AS a,-v AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT v AS a,w+0 AS a,-v AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT *,-v AS v FROM contract_duplicate_values ORDER BY v", OracleSuccess
+               "SELECT *,-v AS v FROM contract_duplicate_values ORDER BY ABS(v+3)", OracleSuccess
+               "SELECT *,w AS v FROM contract_duplicate_values ORDER BY v", OracleError(1052, "23000")
+               "SELECT *,w AS v FROM contract_duplicate_values ORDER BY ABS(v+3)", OracleSuccess
+               "SELECT v AS a,v+0 AS a,w AS a FROM contract_duplicate_values ORDER BY a", OracleSuccess
+               "SELECT v AS a,v+0 AS a,w AS a FROM contract_duplicate_values ORDER BY ABS(a+3)", OracleSuccess
+               "SELECT l.v AS a,r.v AS a FROM contract_duplicate_values l JOIN contract_duplicate_values r ON l.v=r.v ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,w AS a FROM contract_duplicate_values WHERE FALSE ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,v AS a FROM contract_duplicate_values GROUP BY v ORDER BY ABS(a)", OracleSuccess
+               "SELECT SUM(v) AS a,SUM(w) AS a FROM contract_duplicate_values GROUP BY v,w ORDER BY ABS(a)", OracleSuccess
+               "SELECT v AS a,w AS a FROM (SELECT v,w FROM contract_duplicate_values) t ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,w AS a,-v AS a FROM (SELECT v,w FROM contract_duplicate_values) t ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,-v AS a,w AS a FROM (SELECT v,w FROM contract_duplicate_values) t ORDER BY a", OracleSuccess
+               "SELECT v AS a,w AS a FROM (SELECT v,w FROM contract_duplicate_values LIMIT 10) t ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,w AS a,-v AS a FROM (SELECT v,w FROM contract_duplicate_values LIMIT 10) t ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,-v AS a,w AS a FROM (SELECT v,w FROM contract_duplicate_values LIMIT 10) t ORDER BY a", OracleSuccess
+               "SELECT v AS a,w AS a FROM (SELECT 1 AS v,2 AS w) t ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,w AS a,-v AS a FROM (SELECT 1 AS v,2 AS w) t ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,-v AS a,w AS a FROM (SELECT 1 AS v,2 AS w) t ORDER BY a", OracleSuccess
+               "SELECT v AS a,w AS a FROM contract_duplicate_view ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,w AS a,-v AS a FROM contract_duplicate_view ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,-v AS a,w AS a FROM contract_duplicate_view ORDER BY a", OracleSuccess
+               "SELECT v AS a,w AS a FROM contract_duplicate_constants ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,w AS a,-v AS a FROM contract_duplicate_constants ORDER BY a", OracleError(1052, "23000")
+               "SELECT v AS a,-v AS a,w AS a FROM contract_duplicate_constants ORDER BY a", OracleSuccess
+               "SELECT v AS a,+w AS a,-v AS a FROM contract_duplicate_values ORDER BY a", OracleError(1052, "23000")
+               "SELECT x AS a,y AS a FROM contract_duplicate_same ORDER BY a", OracleError(1052, "23000")
+               "SELECT x AS a,y AS a FROM (SELECT v AS x,v AS y FROM contract_duplicate_values) t ORDER BY a", OracleError(1052, "23000")
+               "SELECT x AS a,y AS a FROM (SELECT v AS x,v AS y FROM contract_duplicate_values LIMIT 10) t ORDER BY a", OracleError(1052, "23000") |]
+        { Name = "duplicate-ordering-aliases"
+          Setup =
+            [| "DROP VIEW IF EXISTS contract_duplicate_same"
+               "DROP VIEW IF EXISTS contract_duplicate_constants"
+               "DROP VIEW IF EXISTS contract_duplicate_view"
+               "DROP TABLE IF EXISTS contract_duplicate_values"
+               "CREATE TABLE contract_duplicate_values(v INT,w INT)"
+               "INSERT INTO contract_duplicate_values VALUES(2,10),(1,20)"
+               "CREATE VIEW contract_duplicate_view AS SELECT v,w FROM contract_duplicate_values"
+               "CREATE VIEW contract_duplicate_constants AS SELECT 1 AS v,2 AS w"
+               "CREATE VIEW contract_duplicate_same AS SELECT v AS x,v AS y FROM contract_duplicate_values" |]
+          Steps =
+            [| for sql, expectation in queries do
+                   yield { Contract.query sql sql with Expectation = expectation }
+                   yield { Contract.preparedQuery ("prepared: " + sql) sql [||] with Expectation = expectation } |]
+          Cleanup =
+            [| "DROP VIEW IF EXISTS contract_duplicate_same"
+               "DROP VIEW IF EXISTS contract_duplicate_constants"
+               "DROP VIEW IF EXISTS contract_duplicate_view"
+               "DROP TABLE IF EXISTS contract_duplicate_values" |]
+          Coverage = [| "statement:select", [| "ordering"; "aliases"; "name-binding"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3179,6 +3257,7 @@ module ContractCatalog =
     let all =
         [| comments
            orderAliases
+           duplicateOrderAliases
            exactErrors
            noDirInCreate
            semanticErrors

@@ -2128,10 +2128,92 @@ and private overLabel (over: OverClause) : string =
 
 let private projectionLabel = Projection.name exprLabel
 
-let private tryOrderProjectionNamed (projections: Projection list) name =
+type private OrderColumnIdentity =
+    | QualifiedOrderColumn of qualifier: string * name: string
+    | UnqualifiedOrderColumn of name: string
+
+let private orderColumnIdentity (columnIndex: Map<string, int list>) (qualifiers: Map<string, ColumnDef list * int>) (projection: Projection) =
+    let qualified (qualifier: string) (name: string) = QualifiedOrderColumn(qualifier.ToLowerInvariant(), name.ToLowerInvariant())
+    match projection.BindingOrigin, projection.Expression with
+    | Some(ColumnProjection(qualifier, name)), _ -> Some(qualified qualifier name)
+    | Some ComputedProjection, _ -> None
+    | None, QualifiedCol(qualifier, name) -> Some(qualified qualifier name)
+    | None, Col name ->
+        let owner =
+            Map.tryFind (name.ToLowerInvariant()) columnIndex
+            |> Option.bind (function
+                | [ position ] ->
+                    qualifiers |> Map.toSeq |> Seq.tryPick (fun (qualifier, (columns, offset)) ->
+                        if position >= offset && position < offset + columns.Length then Some(qualified qualifier name)
+                        else None)
+                | _ -> None)
+        Some(owner |> Option.defaultValue (UnqualifiedOrderColumn(name.ToLowerInvariant())))
+    | _ -> None
+
+/// A computed match ends the search; different source columns encountered earlier are ambiguous.
+let private resolveOrderProjection columnIndex qualifiers (projections: Projection list) name =
+    let rec choose position candidate = function
+        | [] -> Ok candidate
+        | projection :: rest when not (equalsIgnoreCase (projectionLabel projection) name) -> choose (position + 1) candidate rest
+        | projection :: rest ->
+            match orderColumnIdentity columnIndex qualifiers projection, candidate with
+            | None, _ -> Ok(Some(position, projection))
+            | Some _, None -> choose (position + 1) (Some(position, projection)) rest
+            | Some identity, Some(_, previous) when orderColumnIdentity columnIndex qualifiers previous = Some identity ->
+                choose (position + 1) candidate rest
+            | _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
+    choose 0 None projections
+
+let private tryOrderProjectionNamed columnIndex qualifiers projections name =
+    resolveOrderProjection columnIndex qualifiers projections name
+    |> Result.toOption |> Option.flatten |> Option.map snd
+
+/// Star expansion gives ordinal and alias binding the same output positions.
+let private expandOrderProjections (columns: ColumnDef list) (qualifiers: Map<string, ColumnDef list * int>) (projections: Projection list) =
+    let sourceColumn position (column: ColumnDef) =
+        qualifiers
+        |> Map.toSeq
+        |> Seq.tryPick (fun (qualifier, (sourceColumns, offset)) ->
+            if position >= offset && position < offset + sourceColumns.Length then
+                Some(Projection.create (QualifiedCol(qualifier, column.Name)) None)
+            else None)
+        |> Option.defaultValue (Projection.create (Col column.Name) None)
     projections
-    |> List.filter (fun projection -> equalsIgnoreCase (projectionLabel projection) name)
-    |> List.tryExactlyOne
+    |> List.collect (fun projection ->
+        match projection.Expression with
+        | Star None -> columns |> List.mapi sourceColumn
+        | Star(Some qualifier) ->
+            qualifiers |> Map.tryFind (qualifier.ToLowerInvariant())
+            |> Option.map (fun (sourceColumns, _) -> sourceColumns |> List.map (fun column -> Projection.create (QualifiedCol(qualifier, column.Name)) None))
+            |> Option.defaultValue [ projection ]
+        | _ -> [ projection ])
+
+let private validateOrderAliases columnIndex qualifiers projections orderBy =
+    let names expression =
+        match expression with
+        | Col name -> [ name ]
+        | _ ->
+            Expression.fold
+                (fun names node ->
+                    match node with
+                    | WindowOver _ -> Expression.Prune names
+                    | Col name when not (Map.containsKey (name.ToLowerInvariant()) columnIndex) && (tryRoutineVariable name |> Option.isNone) ->
+                        Expression.Prune(name :: names)
+                    | _ -> Expression.Descend names)
+                [] expression
+            |> List.rev
+    orderBy
+    |> List.collect (fst >> names)
+    |> traverse (resolveOrderProjection columnIndex qualifiers projections)
+    |> Result.map ignore
+
+let private retainProjectionColumn qualifier names (projection: Projection) =
+    let sourceColumn =
+        match projection.Expression with
+        | Col name when (tryRoutineVariable name |> Option.isNone) && (names |> List.exists (equalsIgnoreCase name)) -> Some(qualifier, name)
+        | QualifiedCol(source, name) when equalsIgnoreCase source qualifier && (names |> List.exists (equalsIgnoreCase name)) -> Some(qualifier, name)
+        | _ -> None
+    { projection with BindingOrigin = projection.BindingOrigin |> Option.orElse (sourceColumn |> Option.map ColumnProjection) }
 
 /// Nested ORDER BY references prefer source columns; bare aliases use projected values.
 let private bindOrderExpressionWith (columnIndex: Map<string, int list>) resolveAlias expression =
@@ -2146,8 +2228,8 @@ let private bindOrderExpressionWith (columnIndex: Map<string, int list>) resolve
             | _ -> None)
             expression
 
-let private bindOrderExpression columnIndex projections =
-    bindOrderExpressionWith columnIndex (fun name -> tryOrderProjectionNamed projections name |> Option.map _.Expression)
+let private bindOrderExpression columnIndex qualifiers projections =
+    bindOrderExpressionWith columnIndex (fun name -> tryOrderProjectionNamed columnIndex qualifiers projections name |> Option.map _.Expression)
 
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 
@@ -6981,6 +7063,9 @@ and private describeQueryColumnsChecked
                             else columns
                         qualifier, columns) }
             let sources = scope.Sources
+            let columns = sources |> List.collect (snd >> List.map _.Column)
+            let qualifiers = sources |> List.map (fun (qualifier, source) -> qualifier, source |> List.map _.Column) |> qualifierRanges
+            let columnIndex = columnIndexOf columns
             let rewritten =
                 if select.Joins |> List.exists joinCoalescesColumns then
                     let physicalSources = sources |> List.map (fun (qualifier, columns) -> qualifier, columns |> List.map _.Column)
@@ -7009,14 +7094,15 @@ and private describeQueryColumnsChecked
 
             references
             |> Result.bind (fun _ -> qualifiedClauseReferences)
-            |> Result.bind (fun _ -> rewritten |> Result.mapError InvalidDescription)
+            |> Result.bind (fun _ ->
+                rewritten |> Result.mapError InvalidDescription
+                |> Result.bind (fun rewritten ->
+                    let projections = expandOrderProjections columns qualifiers rewritten.Projections
+                    validateOrderAliases columnIndex qualifiers projections rewritten.OrderBy
+                    |> Result.mapError (Err >> InvalidDescription)
+                    |> Result.map (fun () -> rewritten)))
             |> Result.map (fun select ->
                 let descriptors = sources |> List.collect snd
-                let columns = descriptors |> List.map _.Column
-                let qualifiers =
-                    sources
-                    |> List.map (fun (qualifier, source) -> qualifier, source |> List.map _.Column)
-                    |> qualifierRanges
                 let contextOfScope (scope: DescribedJoinScope) outer =
                     let sources = scope.Sources |> List.map (fun (qualifier, descriptors) -> qualifier, descriptors |> List.map _.Column)
                     let columns = sources |> List.collect snd
@@ -9751,10 +9837,10 @@ and private tryMergeDirectView
                     let expanded =
                         select.Projections |> List.collect (fun projection ->
                             match projection.Expression with
-                            | Star None -> literals |> List.map (fun (name, value) -> Projection.create value (Some name))
+                            | Star None -> literals |> List.map (fun (name, value) -> { Projection.create value (Some name) with BindingOrigin = Some(ColumnProjection(qualifier, name)) })
                             | Star(Some source) when equalsIgnoreCase source qualifier ->
-                                literals |> List.map (fun (name, value) -> Projection.create value (Some name))
-                            | _ -> [ projection ])
+                                literals |> List.map (fun (name, value) -> { Projection.create value (Some name) with BindingOrigin = Some(ColumnProjection(qualifier, name)) })
+                            | _ -> [ retainProjectionColumn qualifier names projection ])
                     let rewriteOrder (expression, direction) =
                         let expression =
                             match expression with
@@ -9809,22 +9895,33 @@ and private tryMergeDirectView
                                 direct.OrderedColumns
                                 |> List.map (fun output -> output, direct.Columns.[output.ToLowerInvariant()])
 
-                            let rewriteOuter expression =
-                                Expression.rewrite
-                                    (function
-                                    | Col name ->
-                                        direct.Columns
-                                        |> Map.tryFind (name.ToLowerInvariant())
-                                        |> Option.map (fun column -> QualifiedCol(viewQualifier, column))
-                                        |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", name)))
-                                    | QualifiedCol(qualifier, name)
-                                        when qualifier.Equals(viewQualifier, System.StringComparison.OrdinalIgnoreCase) ->
-                                        direct.Columns
-                                        |> Map.tryFind (name.ToLowerInvariant())
-                                        |> Option.map (fun column -> QualifiedCol(viewQualifier, column))
-                                        |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", name)))
-                                    | _ -> None)
-                                    expression
+                            let rewriteReference = function
+                                | Col name ->
+                                    direct.Columns
+                                    |> Map.tryFind (name.ToLowerInvariant())
+                                    |> Option.map (fun column -> QualifiedCol(viewQualifier, column))
+                                    |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", name)))
+                                | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier viewQualifier ->
+                                    direct.Columns
+                                    |> Map.tryFind (name.ToLowerInvariant())
+                                    |> Option.map (fun column -> QualifiedCol(viewQualifier, column))
+                                    |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", name)))
+                                | _ -> None
+                            let rewriteOuter = Expression.rewrite rewriteReference
+                            let isAlias name =
+                                select.Projections |> List.exists (fun projection ->
+                                    equalsIgnoreCase (projectionLabel projection) name
+                                    && match projection.Alias, projection.Expression with
+                                       | None, (Col _ | QualifiedCol _ | Star _) -> false
+                                       | _ -> true)
+                            let rewriteOrder = function
+                                | Col name as expression when isAlias name -> expression
+                                | expression ->
+                                    Expression.rewrite
+                                        (function
+                                        | Col name as reference when not (Map.containsKey (name.ToLowerInvariant()) direct.Columns) && isAlias name -> Some reference
+                                        | reference -> rewriteReference reference)
+                                        expression
 
                             let projections =
                                 select.Projections
@@ -9836,20 +9933,22 @@ and private tryMergeDirectView
                                             | QualifiedCol(_, column)
                                                 when not (column.Equals(name, System.StringComparison.OrdinalIgnoreCase)) -> Some name
                                             | _ -> None
-                                        { projection with Expression = rewritten; Alias = alias |> Option.orElse inferredAlias }
+                                        { retainProjectionColumn viewQualifier direct.OrderedColumns projection with Expression = rewritten; Alias = alias |> Option.orElse inferredAlias }
 
                                     match expression with
                                     | Star None ->
                                         outputColumns
                                         |> List.map (fun (output, column) ->
                                             Projection.create (Col column)
-                                                (if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output))
+                                                (if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output)
+                                            |> fun projection -> { projection with BindingOrigin = Some(ColumnProjection(viewQualifier, output)) })
                                     | Star(Some qualifier)
                                         when qualifier.Equals(viewQualifier, System.StringComparison.OrdinalIgnoreCase) ->
                                         outputColumns
                                         |> List.map (fun (output, column) ->
                                             Projection.create (Col column)
-                                                (if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output))
+                                                (if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output)
+                                            |> fun projection -> { projection with BindingOrigin = Some(ColumnProjection(viewQualifier, output)) })
                                     | Col name -> [ directProjection name ]
                                     | QualifiedCol(qualifier, name)
                                         when qualifier.Equals(viewQualifier, System.StringComparison.OrdinalIgnoreCase) ->
@@ -9876,7 +9975,7 @@ and private tryMergeDirectView
                                             if select.OrderBy.IsEmpty then
                                                 direct.OrderBy
                                             else
-                                                select.OrderBy |> List.map (fun (expression, direction) -> rewriteOuter expression, direction) }
+                                                select.OrderBy |> List.map (fun (expression, direction) -> rewriteOrder expression, direction) }
                             )
                 | _ -> Ok None
             | _ -> Ok None
@@ -12414,11 +12513,14 @@ and private tryQualifiedRangeLookup
     tryRangeAccess QualifiedColumn store registry dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
 
-and private resolveOrderAliasValue name outputColumns =
-    match outputColumns |> List.filter (fst >> fun candidate -> equalsIgnoreCase candidate name) with
-    | [] -> Ok None
-    | [ _, value ] -> Ok(Some value)
-    | _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
+and private resolveOrderAliasValue columnIndex qualifiers projections name outputColumns =
+    resolveOrderProjection columnIndex qualifiers projections name
+    |> Result.bind (function
+        | None -> Ok None
+        | Some(position, projection) ->
+            match List.tryItem position outputColumns with
+            | Some(_, value) -> Ok(Some(projection.Expression, value))
+            | None -> Error(1105, "ORDER BY projection position is outside the output row"))
 
 and private transformUsesStoredSemantics (registry: Registry) expression = function
     | None -> true
@@ -13615,16 +13717,9 @@ and private resolveOrderKey
     : Result<Value * Collation.Collation option, EvalError> =
     match expr with
     | Col name ->
-        resolveOrderAliasValue name outputCols
+        resolveOrderAliasValue ctx.ColumnIndex ctx.Qualifiers projections name outputCols
         |> Result.bind (function
-        | Some value ->
-            // An output alias retains its source expression's declared
-            // type for sorting (`SELECT role AS r ... ORDER BY r`). A
-            // computed alias has no direct ENUM column and stays lexical.
-            let sourceExpr =
-                tryProjectionExpressionNamed projections name
-                |> Option.defaultValue expr
-
+        | Some(sourceExpr, value) ->
             Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr value)
         | None -> evalOrderKey ctx (Col name))
     | e -> evalOrderKey ctx e
@@ -14240,6 +14335,9 @@ and private runGroupedSelect
     : QueryResult * ColumnMetadata list * Value[] list =
     let columnIndex = columnIndexOf columns
 
+    let orderProjections = expandOrderProjections columns qualifiers select.Projections
+    let orderBinding = validateOrderAliases columnIndex qualifiers orderProjections select.OrderBy
+
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
     let matches = prepareWhereMatches ctxFor select.Where
@@ -14275,17 +14373,20 @@ and private runGroupedSelect
         let ctx = ctxFor representative
 
         let aliases =
-            outputCols
-            |> List.choose (fun (name, value) ->
-                tryOrderProjectionNamed select.Projections name
-                |> Option.filter (_.Expression >> containsAggregate registry)
-                |> Option.map (fun projection -> name, (RuntimeExpression projection.Expression, value)))
+            orderProjections
+            |> List.map projectionLabel
+            |> List.distinctBy (fun name -> name.ToLowerInvariant())
+            |> List.choose (fun name ->
+                resolveOrderAliasValue columnIndex qualifiers orderProjections name outputCols
+                |> Result.toOption |> Option.flatten
+                |> Option.filter (fst >> containsAggregate registry)
+                |> Option.map (fun (expression, value) -> name, (RuntimeExpression expression, value)))
         let cachedContext = { ctx with EvaluatedExpressions = aliases |> List.map snd }
         let bindCachedAlias =
             bindOrderExpressionWith columnIndex (fun name ->
                 aliases
                 |> List.tryPick (fun (alias, (expression, _)) -> if equalsIgnoreCase alias name then Some expression else None)
-                |> Option.orElseWith (fun () -> tryOrderProjectionNamed select.Projections name |> Option.map _.Expression))
+                |> Option.orElseWith (fun () -> tryOrderProjectionNamed columnIndex qualifiers orderProjections name |> Option.map _.Expression))
 
         // ROLLUP keys lose their ENUM declaration and therefore sort lexically.
         let orderKeyOf (keyCtx: EvalContext) (expr: Expr) (value: Value) =
@@ -14300,17 +14401,13 @@ and private runGroupedSelect
             let orderCtx = { keyCtx with Clause = OrderClause }
             evalExpr orderCtx expr |> Result.map (orderKeyOf orderCtx expr)
 
-        select.OrderBy
-        |> traverse (fun (expr, _) ->
-            match resolveOrderPosition select.Projections expr with
+        orderBinding
+        |> Result.bind (fun () -> select.OrderBy |> traverse (fun (expr, _) ->
+            match resolveOrderPosition orderProjections expr with
             | Col name ->
-                resolveOrderAliasValue name outputCols
+                resolveOrderAliasValue columnIndex qualifiers orderProjections name outputCols
                 |> Result.bind (function
-                | Some value ->
-                    let sourceExpr =
-                        tryProjectionExpressionNamed select.Projections name
-                        |> Option.defaultValue (Col name)
-
+                | Some(sourceExpr, value) ->
                     Ok(orderKeyOf { ctx with Clause = OrderClause } sourceExpr value)
                 | None ->
                     rewriteAggregates registry ctxFor groupRows (rollup (Col name))
@@ -14318,11 +14415,11 @@ and private runGroupedSelect
             | expression ->
                 let bindAggregate =
                     Expression.rewrite (fun node ->
-                        if isAggregateCall registry node then Some(bindOrderExpression columnIndex select.Projections node)
+                        if isAggregateCall registry node then Some(bindOrderExpression columnIndex qualifiers orderProjections node)
                         else None)
                 rewriteAggregates registry ctxFor groupRows (rollup (bindAggregate expression))
                 |> Result.map bindCachedAlias
-                |> Result.bind (evalKey cachedContext))
+                |> Result.bind (evalKey cachedContext)))
 
     // Schema errors are independent of whether the query produces a group.
     match select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections) with
@@ -14379,7 +14476,7 @@ and private runGroupedSelect
 
     let validationSelect =
         { select with
-            OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> bindOrderExpression columnIndex select.Projections expression, direction) }
+            OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> bindOrderExpression columnIndex qualifiers orderProjections expression, direction) }
 
     match validateOnlyFullGroupBy store registry dbName columns qualifiers validationSelect with
     | Error(code, message) -> Err(code, message), [], []
@@ -14663,8 +14760,7 @@ and private runGroupedWindowSelect
 
         // Synthetic columns must not leak into result headers.
         let rewrite (projection: Projection) =
-            { projection with
-                Expression = substituteExprs replacements projection.Expression
+            { Projection.withExpression (substituteExprs replacements projection.Expression) projection with
                 Alias = Some(projectionLabel projection) }
 
         let outerSelect =
@@ -15086,7 +15182,12 @@ and private runWindowedSelect
                         match List.splitAt partitionBy.Length select.OrderBy with
                         | partitionTerms, [ (Col name, Asc) ]
                             when System.String.Equals(name, alias, System.StringComparison.OrdinalIgnoreCase) ->
-                            List.forall2
+                            let projections = expandOrderProjections columns qualifiers select.Projections
+                            let selectsWindow =
+                                tryOrderProjectionNamed columnIndex qualifiers projections name
+                                |> Option.exists (fun projection -> projection.Expression = windowFunc)
+                            selectsWindow
+                            && List.forall2
                                 (fun expected (actual, direction) -> expected = actual && direction = Asc)
                                 partitionBy
                                 partitionTerms
@@ -15776,7 +15877,7 @@ and private runWindowedSelect
                             |> Option.map (fun _ -> exprLabel expr)
                         )
 
-                    [ { projection with Expression = substituteWindowFuncs synthetic expr; Alias = alias } ]
+                    [ { Projection.withExpression (substituteWindowFuncs synthetic expr) projection with Alias = alias } ]
 
             let select' =
                 { select with
@@ -16520,9 +16621,11 @@ and private runSelect
     : QueryResult * ColumnMetadata list * Value[] list =
     let originalOrderBy = select.OrderBy
     let columnIndex = columnIndexOf columns
+    let orderProjections = expandOrderProjections columns qualifiers select.Projections
+    let orderBinding = validateOrderAliases columnIndex qualifiers orderProjections select.OrderBy
     let select =
         { select with
-            OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> bindOrderExpression columnIndex select.Projections expression, direction) }
+            OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> bindOrderExpression columnIndex qualifiers orderProjections expression, direction) }
 
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, Option.map rowCount select.Limit, Option.map rowCount select.Offset
@@ -16586,31 +16689,6 @@ and private runSelect
     else
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
-
-    // Ordinals address output columns, including each column expanded from a star.
-    // Qualify expanded sources so joins with repeated column names stay unambiguous.
-    let orderProjections =
-        let sourceColumn position (column: ColumnDef) =
-            qualifiers
-            |> Map.toSeq
-            |> Seq.tryPick (fun (qualifier, (sourceColumns, offset)) ->
-                if position >= offset && position < offset + sourceColumns.Length then
-                    Some(Projection.create (QualifiedCol(qualifier, column.Name)) None)
-                else
-                    None)
-            |> Option.defaultValue (Projection.create (Col column.Name) None)
-
-        projections
-        |> List.collect (fun ({ Expression = expression } as projection) ->
-            match expression with
-            | Star None -> columns |> List.mapi sourceColumn
-            | Star(Some qualifier) ->
-                qualifiers
-                |> Map.tryFind (qualifier.ToLowerInvariant())
-                |> Option.map (fun (sourceColumns, _) ->
-                    sourceColumns |> List.map (fun column -> Projection.create (QualifiedCol(qualifier, column.Name)) None))
-                |> Option.defaultValue [ projection ]
-            | _ -> [ projection ])
 
     let resolveOrderExpr = resolveOrderPosition orderProjections
 
@@ -16685,7 +16763,8 @@ and private runSelect
     // key — re-running per key would call `projectRow` three times over
     // on the same row for `ORDER BY a, b, c`, for the same result.
     let orderKeysOf (row: Value[]) (outputCols: (string * Value) list) : Result<(Value * Collation.Collation option) list, EvalError> =
-        orderBy |> traverse (fun (expr, _) -> resolveOrderKey (ctxFor row) projections outputCols (resolveOrderExpr expr))
+        orderBinding
+        |> Result.bind (fun () -> orderBy |> traverse (fun (expr, _) -> resolveOrderKey (ctxFor row) orderProjections outputCols (resolveOrderExpr expr)))
 
     // The declared fsp per output column, computed once off the probe
     // context — a temporal column renders exactly its fsp digits (see

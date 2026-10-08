@@ -58,6 +58,11 @@ cases = [
 
 
 selection_cases = [
+    ('SELECT missing,v AS a,w AS a FROM duplicate_values ORDER BY a', (1054, '42S22')),
+    ('SELECT v AS a,w AS a FROM duplicate_values WHERE missing ORDER BY a', (1054, '42S22')),
+    ('SELECT v AS a,ROW_NUMBER() OVER (ORDER BY v DESC) AS a FROM duplicate_values ORDER BY a', 'a\ta\n2\t1\n1\t2\n'),
+    ('SELECT SUM(-v) AS a,ROW_NUMBER() OVER (ORDER BY v) AS a FROM duplicate_values GROUP BY v ORDER BY a', 'a\ta\n-2\t2\n-1\t1\n'),
+    ('SELECT SUM(-v) AS a,ROW_NUMBER() OVER (ORDER BY v) AS a FROM duplicate_values GROUP BY v ORDER BY ABS(a+3)', 'a\ta\n-2\t2\n-1\t1\n'),
     ('SELECT v AS a,w AS a,-v AS a FROM duplicate_values ORDER BY a', (1052, '23000')),
     ('SELECT v AS a,w AS a,-v AS a FROM duplicate_values ORDER BY ABS(a+3)', (1052, '23000')),
     ('SELECT v AS a,-v AS a,w AS a FROM duplicate_values ORDER BY a', 'a\ta\ta\n2\t-2\t10\n1\t-1\t20\n'),
@@ -106,6 +111,10 @@ selection_cases = [
     ('SELECT v AS a,w AS a,-v AS a FROM duplicate_constants ORDER BY a', (1052, '23000')),
     ('SELECT v AS a,-v AS a,w AS a FROM duplicate_constants ORDER BY a', 'a\ta\ta\n1\t-1\t2\n'),
     ('SELECT v AS a,+w AS a,-v AS a FROM duplicate_values ORDER BY a', (1052, '23000')),
+    ('CREATE VIEW duplicate_same AS SELECT v AS x,v AS y FROM duplicate_values', ''),
+    ('SELECT x AS a,y AS a FROM duplicate_same ORDER BY a', (1052, '23000')),
+    ('SELECT x AS a,y AS a FROM (SELECT v AS x,v AS y FROM duplicate_values) t ORDER BY a', (1052, '23000')),
+    ('SELECT x AS a,y AS a FROM (SELECT v AS x,v AS y FROM duplicate_values LIMIT 10) t ORDER BY a', (1052, '23000')),
 ]
 
 # Preparation resolves duplicate names before any source rows are read.

@@ -81,11 +81,6 @@ compares alias and source-expression sorting on the same build.
 ## Remaining boundaries
 
 - Correlated references such as `ORDER BY (SELECT a)` still fail with 1054.
-- Duplicate aliases are not uniformly ambiguous in MySQL. Two different direct
-  columns named `a` fail with 1052, identical direct columns succeed, and the
-  probed computed projections can take precedence over a direct column. Among
-  the tested pairs of computed projections, the first wins. fsdb's selection
-  remains incomplete; the native oracle retains these cases.
 - Grouped volatile expressions still expose evaluation-order differences. With
   `@n=0`, `SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM ordering_values
   GROUP BY v ORDER BY IF(a=b,v,-v)` returns the same rows `(1,2,2),(5,6,1)` but
@@ -142,12 +137,20 @@ on reading rows. At `86b2dbba`, fsdb accepts preparation of the ambiguous triple
 `v,-v,w` and the computed projection after a star with 1052, and reports 1054 for
 the identical qualified/unqualified pair inside `ABS(a+3)`.
 
-A shared selector needs to preserve both the selected projection position and
-its expression. The position identifies the already-projected value; the
-expression supplies type and collation metadata. Name-only lookup cannot choose
-a later computed projection correctly. The same source-aware selection must
-bind prepared statements and run before view expansion changes expression shape.
+The shared selector now retains both the selected projection position and its
+expression. The position identifies the projected value; the expression supplies
+type and collation metadata. Preparation and execution use the same selection
+rule. Projection binding origins survive view expansion and grouped-window
+lowering, so logical fields remain distinct even when they share a physical
+source, and computed expressions remain computed after becoming synthetic columns.
+Window ordering shortcuts apply only when the selected projection is the window
+expression itself. Missing fields in projections or WHERE retain error 1054
+precedence over duplicate-alias ambiguity.
 
-The native matrix passes against MySQL 8.4.11 with the disposable server's
-64 MiB buffer and redo limits. fsdb preparation/execution observations use the
-embedded Debug assembly with `DOTNET_PROCESSOR_COUNT=8` and a 4 GiB GC heap cap.
+Validation of the implementation based on `26716423` passes 3,038 tests with
+`DOTNET_PROCESSOR_COUNT=8` and a 4 GiB GC heap cap. Native MySQL 8.4.11 passes
+the expanded oracle with 64 MiB buffer and redo limits. Text and prepared wire
+contracts pass 51 cases / 5,261 steps with zero differences at
+`torture/artifacts/runs/20261008T003426298-49934/contracts`.
+The [ordering cost measurement](../../benchmarks/results/26716423-order-aliases.md)
+records the current implementation's timing and allocation boundary.

@@ -438,12 +438,18 @@ and CheckConstraintDef =
       Enforced: bool
       Column: string option }
 
+and ProjectionOrigin =
+    | ColumnProjection of qualifier: string * name: string
+    | ComputedProjection
+
 /// A `SELECT` projection: the expression and its optional `AS alias`.
 and Projection =
     { Expression: Expr
       Alias: string option
       /// The parsed output name, retained independently of expression rewrites.
-      SourceName: string option }
+      SourceName: string option
+      /// Binding identity retained when views or window execution rewrite the expression.
+      BindingOrigin: ProjectionOrigin option }
 
 and SelectOutfileOptions =
     { CharacterSet: string option
@@ -664,7 +670,15 @@ module Projection =
         text.Substring first
 
     let create expression alias : Projection =
-        { Expression = expression; Alias = alias; SourceName = None }
+        { Expression = expression; Alias = alias; SourceName = None; BindingOrigin = None }
+
+    let withExpression expression (projection: Projection) =
+        let origin =
+            match projection.BindingOrigin, projection.Expression with
+            | Some origin, _ -> Some origin
+            | None, (Col _ | QualifiedCol _ | Star _) -> None
+            | None, _ -> Some ComputedProjection
+        { projection with Expression = expression; BindingOrigin = origin }
 
     let name fallback (projection: Projection) =
         projection.Alias

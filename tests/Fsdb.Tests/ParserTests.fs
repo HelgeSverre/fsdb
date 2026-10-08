@@ -207,7 +207,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM information_schema.tables AS t")
                         (Select
-                            { Projections = [ { Expression = Star None; Alias = None; SourceName = None } ]
+                            { Projections = [ { Expression = Star None; Alias = None; SourceName = None; BindingOrigin = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false
@@ -232,7 +232,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM t x")
                         (Select
-                            { Projections = [ { Expression = Star None; Alias = None; SourceName = None } ]
+                            { Projections = [ { Expression = Star None; Alias = None; SourceName = None; BindingOrigin = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false
@@ -1875,7 +1875,7 @@ let tests =
                         (InsertSelect(
                             "t",
                             [ "a"; "b" ],
-                            { Projections = [ { Expression = col "x"; Alias = None; SourceName = None }; { Expression = col "y"; Alias = None; SourceName = None } ]
+                            { Projections = [ { Expression = col "x"; Alias = None; SourceName = None; BindingOrigin = None }; { Expression = col "y"; Alias = None; SourceName = None; BindingOrigin = None } ]
                               IntoVariables = []
                               IntoFile = None
                               Distinct = false

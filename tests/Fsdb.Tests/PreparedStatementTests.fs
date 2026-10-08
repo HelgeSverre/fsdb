@@ -33,7 +33,61 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "ORDER BY expressions resolve aliases with source-column precedence"
+        [ testCase "ORDER BY duplicate aliases select by expression and source identity"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for sql in
+                  [ "CREATE TABLE duplicate_values(v INT,w INT)"
+                    "INSERT INTO duplicate_values VALUES(2,10),(1,20)"
+                    "CREATE VIEW duplicate_view AS SELECT v,w FROM duplicate_values"
+                    "CREATE VIEW duplicate_constants AS SELECT 1 AS v,2 AS w"
+                    "CREATE VIEW duplicate_same AS SELECT v AS x,v AS y FROM duplicate_values" ] do
+                  let next, result = handle session sql
+                  session <- next
+                  Expect.equal result (Affected(if sql.StartsWith("INSERT") then 2UL else 0UL)) sql
+              for sql, names, rows in
+                  [ "SELECT v AS a,-v AS a,w AS a FROM duplicate_values ORDER BY a", [ "a"; "a"; "a" ], [ [ "2"; "-2"; "10" ]; [ "1"; "-1"; "20" ] ]
+                    "SELECT v AS a,-v AS a,w AS a FROM duplicate_values ORDER BY ABS(a+3)", [ "a"; "a"; "a" ], [ [ "2"; "-2"; "10" ]; [ "1"; "-1"; "20" ] ]
+                    "SELECT v AS a,duplicate_values.v AS a FROM duplicate_values ORDER BY ABS(a+3)", [ "a"; "a" ], [ [ "1"; "1" ]; [ "2"; "2" ] ]
+                    "SELECT *,-v AS v FROM duplicate_values ORDER BY v", [ "v"; "w"; "v" ], [ [ "2"; "10"; "-2" ]; [ "1"; "20"; "-1" ] ]
+                    "SELECT *,w AS v FROM duplicate_values ORDER BY ABS(v+3)", [ "v"; "w"; "v" ], [ [ "1"; "20"; "20" ]; [ "2"; "10"; "10" ] ]
+                    "SELECT v AS a,v AS a FROM duplicate_values GROUP BY v ORDER BY ABS(a)", [ "a"; "a" ], [ [ "1"; "1" ]; [ "2"; "2" ] ]
+                    "SELECT SUM(v) AS a,SUM(w) AS a FROM duplicate_values GROUP BY v,w ORDER BY ABS(a)", [ "a"; "a" ], [ [ "1"; "20" ]; [ "2"; "10" ] ]
+                    "SELECT v AS a,-v AS a,w AS a FROM duplicate_view ORDER BY a", [ "a"; "a"; "a" ], [ [ "2"; "-2"; "10" ]; [ "1"; "-1"; "20" ] ]
+                    "SELECT v AS a,-v AS a,w AS a FROM duplicate_constants ORDER BY a", [ "a"; "a"; "a" ], [ [ "1"; "-1"; "2" ] ]
+                    "SELECT v AS a,ROW_NUMBER() OVER (ORDER BY v DESC) AS a FROM duplicate_values ORDER BY a", [ "a"; "a" ], [ [ "2"; "1" ]; [ "1"; "2" ] ]
+                    "SELECT SUM(-v) AS a,ROW_NUMBER() OVER (ORDER BY v) AS a FROM duplicate_values GROUP BY v ORDER BY a", [ "a"; "a" ], [ [ "-2"; "2" ]; [ "-1"; "1" ] ]
+                    "SELECT SUM(-v) AS a,ROW_NUMBER() OVER (ORDER BY v) AS a FROM duplicate_values GROUP BY v ORDER BY ABS(a+3)", [ "a"; "a" ], [ [ "-2"; "2" ]; [ "-1"; "1" ] ] ] do
+                  let expected = ResultSet(names, rows |> List.map (List.map Some))
+                  Expect.equal (handle session sql |> snd) expected sql
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%s: %A" sql error)
+                  let statement = createPreparedStatement session sql ast count
+                  Expect.equal (executePrepared session statement [] |> snd) expected ("prepared: " + sql)
+              for sql in
+                  [ "SELECT v AS a,w AS a,-v AS a FROM duplicate_values ORDER BY a"
+                    "SELECT v AS a,w AS a,-v AS a FROM duplicate_values ORDER BY ABS(a+3)"
+                    "SELECT v AS a,w AS a FROM duplicate_values WHERE FALSE ORDER BY a"
+                    "SELECT *,w AS v FROM duplicate_values ORDER BY v"
+                    "SELECT v AS a,w AS a FROM duplicate_constants ORDER BY a"
+                    "SELECT x AS a,y AS a FROM duplicate_same ORDER BY a" ] do
+                  match prepareStatementForSession session sql with
+                  | Error(code, _) -> Expect.equal code 1052 sql
+                  | result -> failtestf "Expected preparation error 1052 for %s: %A" sql result
+                  match handle session sql |> snd with
+                  | Err(code, _) -> Expect.equal code 1052 sql
+                  | result -> failtestf "Expected execution error 1052 for %s: %A" sql result
+
+              for sql in
+                  [ "SELECT missing,v AS a,w AS a FROM duplicate_values ORDER BY a"
+                    "SELECT v AS a,w AS a FROM duplicate_values WHERE missing ORDER BY a" ] do
+                  match prepareStatementForSession session sql with
+                  | Error(code, _) -> Expect.equal code 1054 sql
+                  | result -> failtestf "Expected preparation error 1054 for %s: %A" sql result
+                  match handle session sql |> snd with
+                  | Err(code, _) -> Expect.equal code 1054 sql
+                  | result -> failtestf "Expected execution error 1054 for %s: %A" sql result
+
+          testCase "ORDER BY expressions resolve aliases with source-column precedence"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               for sql in [ "CREATE TABLE ordering_values(v INT)"; "INSERT INTO ordering_values VALUES(2),(1)" ] do
