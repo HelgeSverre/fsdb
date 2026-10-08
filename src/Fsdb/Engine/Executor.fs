@@ -21122,11 +21122,45 @@ let rec executeAs
                                     | Err _ as e -> Some e
                                     | _ -> None))))
 
+    let triggerResult = function
+        | None -> Ok()
+        | Some error -> Error error
+
     let triggerStorageResult =
         function
         | None -> Ok()
         | Some(Err(code, message)) -> Error(ExpressionError(code, message))
         | Some _ -> Error(ExpressionError(1105, "Trigger execution failed"))
+
+    let deleteIgnoredRows (runStore: Store) db table candidates predicate =
+        let before = triggersFor runStore db table "BEFORE" "DELETE"
+        let after = triggersFor runStore db table "AFTER" "DELETE"
+        let deleteRow rowId row =
+            let deleted = [ Some row, None ]
+            triggerResult (fireTriggers runStore db table Before TriggerDelete before deleted)
+            |> Result.bind (fun () ->
+                // Only the attempted deletion can be ignored; BEFORE effects survive a rejected row.
+                match deleteRowsCandidates runStore db table [ rowId, row ] (fun _ -> Ok true) with
+                | Error(ForeignKeyRestrict _ as error) ->
+                    let code, message = Storage.toMySqlError error
+                    Diagnostics.warning code message
+                    Ok 0
+                | Error error -> Error(storageErr error)
+                | Ok 0 -> Ok 0
+                | Ok count ->
+                    triggerResult (fireTriggers runStore db table After TriggerDelete after deleted)
+                    |> Result.map (fun () -> count))
+        candidates
+        |> traverse (fun (rowId, _) ->
+            tableSnapshot runStore db table
+            |> Result.mapError storageErr
+            |> Result.bind (fun current ->
+                match current.RowsArray.TryFind rowId with
+                | None -> Ok 0
+                | Some row ->
+                    predicate row |> Result.mapError storageErr |> Result.bind (fun selected ->
+                        if selected then deleteRow rowId row else Ok 0)))
+        |> Result.map List.sum
 
     let validateViewCandidate (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
         match viewCheckScope.Value with
@@ -23686,7 +23720,7 @@ let rec executeAs
         let tableAlias = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
         let beforeTriggers = triggersFor store db table "BEFORE" "DELETE"
         let afterTriggers = triggersFor store db table "AFTER" "DELETE"
-        let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
+        let useSnapshot = deleteStmt.Ignore || not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
         let baseCatalog, targetStore =
             if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
         let tableRootResult = tableSnapshot targetStore db table
@@ -23768,19 +23802,21 @@ let rec executeAs
                             |> Result.map (fun matches -> matches && targetSet.Contains row)
                         | None, None -> Ok(targetSet.Contains row)
 
-                    match fireTriggers targetStore db table Before TriggerDelete beforeTriggers deletedRows with
-                    | Some error -> ids, error
-                    | None ->
-                        match deleteRowsCandidates targetStore db table targetRows predicate with
-                        | Error e -> ids, storageErr e
-                        | Ok affected ->
-                            match fireTriggers targetStore db table After TriggerDelete afterTriggers deletedRows with
-                            | Some error -> ids, error
-                            | None ->
-                                if useSnapshot then
-                                    Storage.commitCatalogInto store baseCatalog targetStore
-
-                                ids, Affected(uint64 affected)
+                    let apply =
+                        if deleteStmt.Ignore then
+                            deleteIgnoredRows targetStore db table targetRows predicate
+                        else
+                            triggerResult (fireTriggers targetStore db table Before TriggerDelete beforeTriggers deletedRows)
+                            |> Result.bind (fun () -> deleteRowsCandidates targetStore db table targetRows predicate |> Result.mapError storageErr)
+                            |> Result.bind (fun affected ->
+                                triggerResult (fireTriggers targetStore db table After TriggerDelete afterTriggers deletedRows)
+                                |> Result.map (fun () -> affected))
+                    match apply with
+                    | Error error -> ids, error
+                    | Ok affected ->
+                        if useSnapshot then
+                            Storage.commitCatalogInto store baseCatalog targetStore
+                        ids, Affected(uint64 affected)
 
     | Delete deleteStmt ->
         let matchNodes =
@@ -23859,17 +23895,30 @@ let rec executeAs
                                     Ok 0
                                 else
                                     let tdb, tname = tableRef.Database |> Option.defaultValue dbName, tableRef.Table
-                                    let deletedRows = claimedRows.[index] |> Seq.map (fun row -> Some row, None) |> List.ofSeq
-                                    let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "DELETE"
-                                    let afterTriggers = triggersFor snapshot tdb tname "AFTER" "DELETE"
-
-                                    triggerStorageResult (fireTriggers snapshot tdb tname Before TriggerDelete beforeTriggers deletedRows)
-                                    |> Result.bind (fun () ->
-                                        match deleteRows snapshot tdb tname (fun row -> Ok(claimed.[index].Contains row)) with
-                                        | Error error -> Error error
-                                        | Ok count ->
-                                            triggerStorageResult (fireTriggers snapshot tdb tname After TriggerDelete afterTriggers deletedRows)
-                                            |> Result.map (fun () -> count)))
+                                    if deleteStmt.Ignore then
+                                        tableSnapshot snapshot tdb tname
+                                        |> Result.mapError storageErr
+                                        |> Result.bind (fun table ->
+                                            let identities = Dictionary<Value[], RowId>(HashIdentity.Reference)
+                                            for rowId, row in table.RowsArray.Indexed do
+                                                identities.[row] <- rowId
+                                            let candidates =
+                                                claimedRows.[index] |> Seq.choose (fun row ->
+                                                    match identities.TryGetValue row with
+                                                    | true, rowId -> Some(rowId, row)
+                                                    | _ -> None) |> List.ofSeq
+                                            deleteIgnoredRows snapshot tdb tname candidates (fun _ -> Ok true))
+                                    else
+                                        let deletedRows = claimedRows.[index] |> Seq.map (fun row -> Some row, None) |> List.ofSeq
+                                        let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "DELETE"
+                                        let afterTriggers = triggersFor snapshot tdb tname "AFTER" "DELETE"
+                                        triggerResult (fireTriggers snapshot tdb tname Before TriggerDelete beforeTriggers deletedRows)
+                                        |> Result.bind (fun () ->
+                                            match deleteRows snapshot tdb tname (fun row -> Ok(claimed.[index].Contains row)) with
+                                            | Error error -> Error(storageErr error)
+                                            | Ok count ->
+                                                triggerResult (fireTriggers snapshot tdb tname After TriggerDelete afterTriggers deletedRows)
+                                                |> Result.map (fun () -> count)))
                             |> Array.toList
                             |> traverse id)
 
@@ -23877,7 +23926,7 @@ let rec executeAs
                     | Ok counts ->
                         Storage.commitCatalogInto store baseCatalog snapshot
                         ids, Affected(uint64 (List.sum counts))
-                    | Error e -> ids, storageErr e
+                    | Error e -> ids, e
 
     | GrantRoles(roles, users, withAdminOption) ->
         match Auth.grantRoles store roles users withAdminOption with

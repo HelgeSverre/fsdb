@@ -554,6 +554,15 @@ conversion diagnostics across repeated executions. Column assignments keep
 their storage conversion rules. See the [native conversion evidence](../torture/findings/2026-10-08-predicate-conversion.md)
 for the bounded coverage.
 
+`DELETE IGNORE` skips referenced parent rows with detailed warning 1451 and
+continues deleting eligible rows. LIMIT counts attempted rows. BEFORE trigger
+effects survive an ignored blocker; AFTER runs only for successful deletions.
+Fatal trigger errors preserve their SQLSTATE and roll back earlier deletions and
+trigger writes. These behaviors cover ordered single-table and single-target
+joined forms; explicit rollback and ON DELETE CASCADE are also tested.
+Warning-class SIGNAL lifetime and broader ignored-error combinations remain
+bounded by the [delete evidence](../torture/findings/2026-10-08-delete-ignore.md).
+
 ## Server settings
 
 The process-wide numeric and boolean knobs live in `Fsdb.Limits`. Standard

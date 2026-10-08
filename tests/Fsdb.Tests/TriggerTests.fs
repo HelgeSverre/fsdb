@@ -25,6 +25,13 @@ let private step session sql =
     expectOk result sql
     next
 
+let private deleteIgnoreSession () =
+    [ "CREATE DATABASE probe"; "USE probe"
+      "CREATE TABLE parent(id INT PRIMARY KEY)"
+      "CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id))"
+      "INSERT INTO parent VALUES(1),(2),(3)"; "INSERT INTO child VALUES(1,2)" ]
+    |> List.fold step (Fsdb.Session.create 1 (create ()))
+
 /// MySQL 8.4.11's exact 1442 text (write-probed on the disposable server).
 let private text1442 (table: string) =
     sprintf
@@ -73,6 +80,73 @@ let tests =
               | result -> failtestf "Expected trigger signal to remain an error, got %A" result
               Expect.equal (rows store "SELECT id FROM signal_parent ORDER BY id")
                   [ [ Some "1" ]; [ Some "2" ] ] "trigger failure preserves rows"
+
+          testCase "DELETE IGNORE skips referenced rows in trigger and LIMIT order" <| fun _ ->
+              let warning =
+                  "Cannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))"
+              let allEvents = [ "before", "1"; "after", "1"; "before", "2"; "before", "3"; "after", "3" ]
+              let cases =
+                  [ "DELETE IGNORE FROM parent ORDER BY id", 2UL, [ "2" ], allEvents
+                    "DELETE IGNORE FROM parent ORDER BY id DESC LIMIT 2", 1UL, [ "1"; "2" ], [ "before", "3"; "after", "3"; "before", "2" ]
+                    "DELETE IGNORE p FROM parent p LEFT JOIN child c ON c.pid=p.id", 2UL, [ "2" ], allEvents
+                    "DELETE IGNORE FROM p USING parent p LEFT JOIN child c ON c.pid=p.id", 2UL, [ "2" ], allEvents ]
+              for sql, affected, remaining, events in cases do
+                  let mutable session = deleteIgnoreSession ()
+                  for statement in
+                      [ "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT)"
+                        "CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('before',OLD.id)"
+                        "CREATE TRIGGER after_parent AFTER DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('after',OLD.id)"
+                        "BEGIN" ] do
+                      session <- step session statement
+                  let next, result = handle session sql
+                  session <- next
+                  Expect.equal result (Affected affected) sql
+                  Expect.equal (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1451, warning ] "blocked row contributes one detailed warning"
+                  let query statement =
+                      let next, result = handle session statement
+                      session <- next
+                      match result with
+                      | ResultSet(_, rows) -> rows
+                      | other -> failtestf "Expected rows for %s, got %A" statement other
+                  Expect.equal (query "SELECT id FROM parent ORDER BY id")
+                      (remaining |> List.map (fun id -> [ Some id ])) "eligible rows are deleted"
+                  let auditOrder, expectedEvents =
+                      if sql.Contains("JOIN") then "id,seq", List.sortBy snd events else "seq", events
+                  Expect.equal (query ("SELECT phase,id FROM audit ORDER BY " + auditOrder))
+                      (expectedEvents |> List.map (fun (phase, id) -> [ Some phase; Some id ])) "BEFORE survives a skipped row; AFTER only follows a deletion"
+                  Expect.equal (query "SELECT id,pid FROM child ORDER BY id") [ [ Some "1"; Some "2" ] ] "referencing child survives"
+                  session <- step session "ROLLBACK"
+                  Expect.equal (query "SELECT id FROM parent ORDER BY id")
+                      [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ] "rollback restores successful deletions"
+                  Expect.equal (query "SELECT phase,id FROM audit ORDER BY seq") [] "rollback restores trigger writes"
+
+          testCase "DELETE IGNORE rolls back earlier deletions after a fatal AFTER trigger" <| fun _ ->
+              let session =
+                  [ "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT)"
+                    "CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('before',OLD.id)"
+                    "CREATE TRIGGER after_parent AFTER DELETE ON parent FOR EACH ROW BEGIN IF OLD.id=3 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='late failure'; END IF; INSERT INTO audit(phase,id) VALUES('after',OLD.id); END" ]
+                  |> List.fold step (deleteIgnoreSession ())
+              let next, result = handle session "DELETE IGNORE FROM parent ORDER BY id"
+              match result with
+              | Err(1644, "late failure") -> ()
+              | other -> failtestf "Expected fatal AFTER trigger, got %A" other
+              Expect.equal (next.Diagnostics |> List.map (fun condition -> condition.Code, condition.State))
+                  [ 1451, "23000"; 1644, "45000" ] "the skipped row warning precedes the fatal condition"
+              Expect.equal (handle next "SELECT id FROM parent ORDER BY id" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ])) "fatal error restores earlier deletions"
+              Expect.equal (handle next "SELECT phase,id FROM audit ORDER BY seq" |> snd)
+                  (ResultSet([ "phase"; "id" ], [])) "fatal error restores trigger effects"
+
+          testCase "DELETE IGNORE does not ignore foreign-key errors inside a trigger" <| fun _ ->
+              let session = deleteIgnoreSession () |> fun session ->
+                  step session "CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO child VALUES(2,99)"
+              let next, result = handle session "DELETE IGNORE FROM parent ORDER BY id"
+              match result with
+              | Err(1452, _) -> ()
+              | other -> failtestf "Expected fatal child constraint error, got %A" other
+              Expect.equal (handle next "SELECT id FROM parent ORDER BY id" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ])) "trigger failure preserves parents"
 
           testCase "BEFORE INSERT can assign NEW values"
           <| fun _ ->

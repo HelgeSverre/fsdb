@@ -6090,6 +6090,52 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS predicate_base"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:update", [| "text-differential" |]; "statement:delete", [| "text-differential" |] |] }
 
+    let private deleteIgnoreForeignKeys =
+        let setup foreignKeyAction =
+            [ "DROP TABLE IF EXISTS audit"; "DROP TABLE IF EXISTS child"; "DROP TABLE IF EXISTS parent"
+              "CREATE TABLE parent(id INT PRIMARY KEY)"
+              ("CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id)" + foreignKeyAction + ")")
+              "INSERT INTO parent VALUES(1),(2),(3)"; "INSERT INTO child VALUES(1,2)" ]
+        let audit =
+            [ "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT)"
+              "CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('before',OLD.id)"
+              "CREATE TRIGGER after_parent AFTER DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('after',OLD.id)" ]
+        let cases =
+            [ "ordered", "", [], "DELETE IGNORE FROM parent ORDER BY id"
+              "limit-one", "", [], "DELETE IGNORE FROM parent ORDER BY id LIMIT 1"
+              "descending-limit", "", [], "DELETE IGNORE FROM parent ORDER BY id DESC LIMIT 2"
+              "blocked", "", [], "DELETE IGNORE FROM parent WHERE id=2"
+              "joined", "", [], "DELETE IGNORE p FROM parent p LEFT JOIN child c ON c.pid=p.id"
+              "using", "", [], "DELETE IGNORE FROM p USING parent p LEFT JOIN child c ON c.pid=p.id"
+              "cascade", " ON DELETE CASCADE", [], "DELETE IGNORE FROM parent"
+              "update-action", " ON UPDATE CASCADE", [], "DELETE IGNORE FROM parent"
+              "audit", "", audit, "DELETE IGNORE FROM parent ORDER BY id"
+              "audit-limit", "", audit, "DELETE IGNORE FROM parent ORDER BY id DESC LIMIT 2"
+              "audit-joined", "", audit, "DELETE IGNORE p FROM parent p LEFT JOIN child c ON c.pid=p.id"
+              "rollback", "", audit @ [ "BEGIN" ], "DELETE IGNORE FROM parent ORDER BY id"
+              "fatal-after", "", audit @ [ "DROP TRIGGER after_parent"; "CREATE TRIGGER after_parent AFTER DELETE ON parent FOR EACH ROW BEGIN IF OLD.id=3 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='late failure'; END IF; INSERT INTO audit(phase,id) VALUES('after',OLD.id); END" ], "DELETE IGNORE FROM parent ORDER BY id" ]
+        { Name = "delete-ignore-foreign-keys"
+          Setup = [||]
+          Steps =
+            [| for name, foreignKeyAction, additions, sql in cases do
+                   for index, statement in List.indexed (setup foreignKeyAction @ additions) do
+                       Contract.execute (sprintf "%s-setup-%d" name index) statement
+                   let deletion = Contract.execute (name + "-delete") sql
+                   if name = "fatal-after" then deletion |> Contract.fails 1644 "45000" else deletion
+                   Contract.query (name + "-warnings") "SHOW WARNINGS"
+                   Contract.query (name + "-parents") "SELECT id FROM parent ORDER BY id"
+                   Contract.query (name + "-children") "SELECT id,pid FROM child ORDER BY id"
+                   if additions = audit || name = "rollback" || name = "fatal-after" then
+                       let order = if name = "audit-joined" then "id,seq" else "seq"
+                       Contract.query (name + "-audit") ("SELECT phase,id FROM audit ORDER BY " + order)
+                   if name = "rollback" then
+                       Contract.execute "rollback-transaction" "ROLLBACK"
+                       Contract.query "rollback-warnings" "SHOW WARNINGS"
+                       Contract.query "rollback-restored-parents" "SELECT id FROM parent ORDER BY id"
+                       Contract.query "rollback-restored-audit" "SELECT phase,id FROM audit ORDER BY seq" |]
+          Cleanup = [| "ROLLBACK"; "DROP TABLE IF EXISTS child"; "DROP TABLE IF EXISTS parent"; "DROP TABLE IF EXISTS audit" |]
+          Coverage = [| "statement:delete", [| "text-differential" |] |] }
+
     let private bareTriggerConditions =
         { Name = "bare-trigger-conditions"
           Setup = [| "CREATE TABLE signal_parent(id INT PRIMARY KEY)"; "INSERT INTO signal_parent VALUES(1),(2)" |]
@@ -6107,7 +6153,8 @@ module ContractCatalog =
           Coverage = [| "statement:delete", [| "text-differential" |] |] }
 
     let all =
-        [| bareTriggerConditions
+        [| deleteIgnoreForeignKeys
+           bareTriggerConditions
            mutationConversion
            predicateConversion
            joinHintMerging

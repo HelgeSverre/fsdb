@@ -1,0 +1,77 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "960d6fb3",
+  "fsdb_dirty": true,
+  "cases": [
+    {
+      "name": "cascade-setup-8",
+      "connection": "main",
+      "action": "text",
+      "sql": "ALTER TABLE child ADD CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id) ON DELETE CASCADE",
+      "my_sql": {
+        "target": "mysql",
+        "status": "success",
+        "affected_rows": 1,
+        "columns": [],
+        "column_types": [],
+        "rows": [],
+        "data_sha256": "",
+        "error_code": 0,
+        "sql_state": "",
+        "message": "",
+        "elapsed_ms": 3
+      },
+      "fsdb": {
+        "target": "fsdb",
+        "status": "success",
+        "affected_rows": 0,
+        "columns": [],
+        "column_types": [],
+        "rows": [],
+        "data_sha256": "",
+        "error_code": 0,
+        "sql_state": "",
+        "message": "",
+        "elapsed_ms": 2
+      },
+      "classification": "affected_rows_mismatch",
+      "detail": "mysql=1 fsdb=0",
+      "passed": false
+    },
+    {
+      "name": "update-action-setup-8",
+      "connection": "main",
+      "action": "text",
+      "sql": "ALTER TABLE child ADD CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id) ON UPDATE CASCADE",
+      "my_sql": {
+        "target": "mysql",
+        "status": "success",
+        "affected_rows": 1,
+        "columns": [],
+        "column_types": [],
+        "rows": [],
+        "data_sha256": "",
+        "error_code": 0,
+        "sql_state": "",
+        "message": "",
+        "elapsed_ms": 3
+      },
+      "fsdb": {
+        "target": "fsdb",
+        "status": "success",
+        "affected_rows": 0,
+        "columns": [],
+        "column_types": [],
+        "rows": [],
+        "data_sha256": "",
+        "error_code": 0,
+        "sql_state": "",
+        "message": "",
+        "elapsed_ms": 0
+      },
+      "classification": "affected_rows_mismatch",
+      "detail": "mysql=1 fsdb=0",
+      "passed": false
+    }
+  ]
+}

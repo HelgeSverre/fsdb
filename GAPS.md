@@ -72,10 +72,12 @@ under `torture/findings/`.
 ## 1. SQL statements and parser
 
 The application-facing DML surface includes `INSERT`/`REPLACE ... SET`, ODKU,
-`IGNORE`, and multi-table forms. `DELETE IGNORE` retains its modifier through
-parsing and the [audited conversion-warning policy](torture/findings/2026-10-08-mutation-conversion.md);
-[foreign-key row skipping and trigger warning lifetimes](torture/findings/2026-10-08-delete-ignore.md)
-remain divergent; other ignored-delete error classes require further native coverage. `SELECT` covers joins, derived and lateral
+`IGNORE`, and multi-table forms. `DELETE IGNORE` covers the
+[audited conversion-warning policy](torture/findings/2026-10-08-mutation-conversion.md)
+and foreign-key row skipping with ordered LIMIT, single-target joined deletion,
+and trigger rollback. [Warning-class trigger lifetimes remain divergent](torture/findings/2026-10-08-delete-ignore.md);
+other ignored-delete error classes and multi-target combinations require further
+native coverage. `SELECT` covers joins, derived and lateral
 sources, `JSON_TABLE`, expression subqueries, set operations, windows, rollups,
 and ordinary or recursive query-scoped CTEs. CTEs can lead UPDATE or DELETE and
 appear within set-operation branches.
@@ -119,7 +121,7 @@ refuses it through the prepared-statement protocol.
 |---|---|---|---|
 | Server-side files | `IMPORT TABLE` is unsupported | low | refusal |
 | Table maintenance | `CHECKSUM TABLE` uses a stable fsdb row checksum rather than MySQL's engine-specific value; supported `FLUSH` forms operate on fsdb state rather than InnoDB internals | low | divergence |
-| ALTER execution | Accepted changes publish one immutable root; MySQL's COPY/INPLACE/INSTANT algorithms and lock durations do not exist | low | divergence |
+| ALTER execution | Accepted changes publish one immutable root; MySQL's COPY/INPLACE/INSTANT algorithms and lock durations do not exist; [ADD FOREIGN KEY on a populated table reports zero affected rows instead of the copied-row count](torture/findings/2026-10-08-alter-foreign-key-count.md) | low | divergence |
 | Storage engines | Known engine names still use fsdb's shared InnoDB-shaped row store; physical DATA/INDEX DIRECTORY placement is rejected unless `NO_DIR_IN_CREATE` discards it | low | divergence |
 | HASH partitions | Named HASH/LINEAR HASH definitions, comments, and reorganization use the shared row store; InnoDB engine clauses and default inference are validated, and row hints, node groups, and file-per-table declarations are retained; physical partition pruning and placement remain absent ([oracle](torture/findings/2026-10-07-hash-partition-reorganization.md)) | low | divergence/refusal |
 | Administration and replication | Replication source, binlog purge/reset, plugin/component installation, instance, and tablespace statements are unsupported | low | refusal |

@@ -1,0 +1,20 @@
+{
+  "mysql_version": "8.4.11",
+  "cases": [
+    {
+      "sql": "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT);CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('before',OLD.id);CREATE TRIGGER after_parent AFTER DELETE ON parent FOR EACH ROW BEGIN IF OLD.id=3 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='late failure'; END IF; INSERT INTO audit(phase,id) VALUES('after',OLD.id); END;DELETE IGNORE FROM parent ORDER BY id;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT phase,id FROM audit ORDER BY seq",
+      "stdout": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nError\t1644\tlate failure\nid\n1\n2\n3\n",
+      "stderr": "ERROR 1644 (45000) at line 5: late failure\n"
+    },
+    {
+      "sql": "CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO child VALUES(2,99);DELETE IGNORE FROM parent ORDER BY id;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id",
+      "stdout": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "stderr": "ERROR 1452 (23000) at line 1: Cannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\n"
+    },
+    {
+      "sql": "ALTER TABLE child DROP FOREIGN KEY fk_parent;ALTER TABLE child ADD CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id) ON UPDATE CASCADE;DELETE IGNORE FROM parent ORDER BY id;SHOW WARNINGS;SELECT id FROM parent ORDER BY id",
+      "stdout": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`) ON UPDATE CASCADE)\nid\n2\n",
+      "stderr": ""
+    }
+  ]
+}

@@ -1,20 +1,21 @@
 # DELETE IGNORE foreign-key and trigger behavior
 
-Status: bare SIGNAL/RESIGNAL trigger parsing implemented; row-skipping semantics,
-diagnostic detail, and warning-class trigger lifetimes remain incomplete.
+Status: audited foreign-key row skipping, detailed 1451 diagnostics, and fatal
+trigger handling implemented. Warning-class trigger lifetime remains open.
 
 ## Evidence
 
 `torture/scripts/delete-ignore-oracle.py` passes 14 scripts on MySQL 8.4.11.
 Each script starts with parent rows 1, 2, and 3 and a child referencing parent 2.
 The disposable native server uses a 64 MiB InnoDB buffer pool and redo capacity.
-The client continues after errors so final diagnostics and table state remain
+The client continues after errors so diagnostics and final table state remain
 observable; the fixture separately checks error code and SQLSTATE.
 
-At fsdb `1538b449`, seven scripts differ. The successful LIMIT-1 deletion and
-ON DELETE CASCADE control match. Native output and fsdb comparison are preserved
-in `2026-10-08-delete-ignore-baseline.json`. No failure is enrolled in the
-known-gap allowlist.
+The current fsdb replay matches 13 scripts. Exact outputs are in
+`2026-10-08-delete-ignore-row-skipping.json`. Historical baselines remain in
+`2026-10-08-delete-ignore-baseline.json` and
+`2026-10-08-delete-ignore-trigger-current.json`; the latter records nine
+differences before row skipping was implemented.
 
 ## Native contract
 
@@ -30,39 +31,46 @@ known-gap allowlist.
 - The 1451 warning includes the child database/table, constraint name, child
   column, and referenced parent table/column.
 
-## Current differences and implementation constraints
+## Execution and rollback
 
-fsdb's storage deletion applies cascade validation to the whole selected set.
-A blocker therefore aborts the statement instead of allowing eligible rows to
-be deleted. Its 1451 text identifies only the constraint name. Correcting this
-requires preserving candidate order and LIMIT while reporting successful rows
-separately from rejected rows. Trigger execution, cascades, catalog publication,
-and rollback must remain consistent with the actual deletion result.
+Single-table and single-target joined ignored deletes share an ordered row
+executor. Stable row identities are resolved against the statement snapshot;
+a row removed by an earlier cascade is skipped. Each selected row runs BEFORE,
+attempts deletion, and runs AFTER only when deletion succeeds. Ignoring a storage
+foreign-key restriction retains its BEFORE effects and continues to the next row.
+A fatal error prevents publication of the statement snapshot. Explicit transaction
+rollback restores both successful deletions and trigger writes.
 
-Bare SIGNAL and RESIGNAL bodies now use the same simple-statement parser as
-compound bodies. RETURN and local-assignment parsing also share that parser,
-removing duplicate expression handling. Fatal SIGNAL preserves error 1644 and
-its supplied SQLSTATE. Inactive RESIGNAL preserves error 1645 with SQLSTATE
-0K000. DELETE IGNORE does not swallow either error, and the rows remain intact.
+The native late-failure probe deletes parent 1, skips parent 2, and reaches a
+fatal AFTER trigger for parent 3. All parents survive and the audit table is
+empty afterward. Diagnostics retain warning 1451 followed by error 1644 with
+SQLSTATE 45000. A child-insert foreign-key error inside a BEFORE trigger remains
+fatal rather than becoming an ignored outer deletion. Extra native outputs are
+in `2026-10-08-delete-ignore-errors.json`.
 
-The expanded trigger probes establish that BEFORE effects survive an ignored
-foreign-key blocker, while AFTER fires only for successful deletions. Events
-interleave per selected row, including descending LIMIT order. These are
-constraints on the pending ignored-row deletion implementation.
+Bare SIGNAL and RESIGNAL use the shared stored-program statement parser.
+Fatal conditions retain their original SQLSTATE through single and joined
+DELETE execution; inactive RESIGNAL retains error 1645 / SQLSTATE 0K000.
+Foreign-key restrictions carry the child identity and definition for the 1451
+message, including the referenced columns and declared actions.
 
-The current 14-case replay has nine differences: foreign-key skipping and text,
-the corresponding trigger effects, and warning-class SIGNAL diagnostics that
-remain visible after the trigger returns in fsdb but are cleared in MySQL.
-Exact current outputs are in `2026-10-08-delete-ignore-trigger-current.json`.
+## Remaining boundaries
 
-## Bare trigger validation
+A warning-class SIGNAL remains visible after the trigger returns in fsdb,
+whereas MySQL clears it. This is the sole difference in the maintained 14-case
+replay. Other ignored-error classes and multi-target joined combinations need
+further native coverage; these results do not establish complete IGNORE parity.
 
-- `just check`: 3,115 tests passed, no build warnings or errors.
-- The expanded maintained native oracle passes all 14 scripts.
-- Full wire suite: 80 cases, 10,430 steps, zero differences. The bare-trigger
-  contract checks exact SIGNAL/RESIGNAL codes, SQLSTATEs, diagnostics, and
-  unchanged rows after failed DELETE IGNORE.
-  Artifact: `torture/artifacts/runs/20261008T191048169-66375/contracts`.
+The wire fixture also exposed an independent
+[ALTER ADD FOREIGN KEY affected-row count](2026-10-08-alter-foreign-key-count.md)
+difference. Its deletion cases create the intended constraints directly.
+No failure is enrolled in the known-gap allowlist.
 
-Passing trigger controls do not imply the remaining ignored-row deletion or
-warning-lifetime differences are fixed. No failure is allowlisted.
+## Validation
+
+- `just check`: 3,118 tests passed, no build warnings or errors.
+- The maintained native oracle passes all 14 scripts.
+- Full wire suite: 81 cases, 10,600 steps, zero differences. The ignored-delete
+  contract covers affected counts, exact warning text, LIMIT, both joined forms,
+  cascades, trigger ordering, explicit rollback, and a late fatal AFTER trigger.
+  Artifact: `torture/artifacts/runs/20261008T193223390-68910/contracts`.

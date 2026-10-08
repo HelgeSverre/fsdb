@@ -73,7 +73,7 @@ type StorageError =
     | DuplicateKey of keyName: string * value: string
     /// `DELETE`/parent-row `UPDATE` blocked by a child row through a
     /// `RESTRICT`/`NO ACTION` (or unspecified) `ON DELETE` foreign key.
-    | ForeignKeyRestrict of fkName: string
+    | ForeignKeyRestrict of database: string * table: string * foreignKey: ForeignKeyDef
     /// `INSERT`/`UPDATE` of a child row whose foreign key columns don't
     /// match any row in the referenced table.
     | ForeignKeyParentMissing of fkName: string
@@ -118,8 +118,19 @@ let toMySqlError (err: StorageError) : int * string =
     | OutOfRangeForColumn column -> 1264, sprintf "Out of range value for column '%s' at row 1" column
     | ExpressionError(code, message) -> code, message
     | DuplicateKey(keyName, value) -> 1062, sprintf "Duplicate entry '%s' for key '%s'" value keyName
-    | ForeignKeyRestrict fkName ->
-        1451, sprintf "Cannot delete or update a parent row: a foreign key constraint fails (`%s`)" fkName
+    | ForeignKeyRestrict(database, table, foreignKey) ->
+        let quote (name: string) = "`" + name.Replace("`", "``") + "`"
+        let columns = List.map quote >> String.concat ", "
+        let parent =
+            match foreignKey.RefDatabase with
+            | Some parentDatabase when not (parentDatabase.Equals(database, StringComparison.OrdinalIgnoreCase)) ->
+                quote parentDatabase + "." + quote foreignKey.RefTable
+            | _ -> quote foreignKey.RefTable
+        let action clause = Option.map (fun action -> " " + clause + " " + action) >> Option.defaultValue ""
+        1451,
+        sprintf "Cannot delete or update a parent row: a foreign key constraint fails (%s.%s, CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s%s)"
+            (quote database) (quote table) (quote foreignKey.Name) (columns foreignKey.Columns)
+            parent (columns foreignKey.RefColumns) (action "ON DELETE" foreignKey.OnDelete) (action "ON UPDATE" foreignKey.OnUpdate)
     | ForeignKeyParentMissing fkName ->
         1452, sprintf "Cannot add or update a child row: a foreign key constraint fails (`%s`)" fkName
     | PrecisionTooBig(column, precision) ->
@@ -5828,6 +5839,10 @@ let private catalogTableIdentity (catalog: Catalog) address =
 
     database, table
 
+let private foreignKeyRestrict catalog childAddress foreignKey =
+    let database, table = catalogTableIdentity catalog childAddress
+    ForeignKeyRestrict(database, table, foreignKey)
+
 let private referencingForeignKeys (catalog: Catalog) (parent: TableAddress) : (TableAddress * ForeignKeyDef) list =
     catalog
     |> Map.toList
@@ -8508,7 +8523,7 @@ and private cascadeUpdateVisitedFrom
                                 // final `Map.add` silently clobbers, corrupting referential
                                 // integrity and desyncing the WAL from memory.
                                 elif Set.contains childAddress path then
-                                    Error(ForeignKeyRestrict fk.Name)
+                                    Error(foreignKeyRestrict currentCatalog childAddress fk)
                                 else
                                     match fk.OnUpdate |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
                                     | Some "CASCADE" ->
@@ -8590,7 +8605,7 @@ and private cascadeUpdateVisitedFrom
                                             let changes' = changes |> Map.add childAddress ((changes |> Map.tryFind childAddress |> Option.defaultValue []) @ List.rev rowChanges)
 
                                             Ok(updatedCatalog, visited |> Map.add childAddress (alreadyVisited @ matching), changes')
-                                    | _ -> Error(ForeignKeyRestrict fk.Name))
+                                    | _ -> Error(foreignKeyRestrict currentCatalog childAddress fk))
 
         referencingForeignKeys catalog parent |> List.fold checkOne (Ok(catalog, visited, changes))
 
@@ -9055,7 +9070,7 @@ let rec private cascadeDeleteVisited
 
                                     let child = publishRows childTbl { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
                                     Ok(setCatalogTable childAddress child currentCatalog, visited, blanked)
-                            | _ -> Error(ForeignKeyRestrict fk.Name))
+                            | _ -> Error(foreignKeyRestrict currentCatalog childAddress fk))
 
             referencingForeignKeys catalog address
             |> List.fold applyChild (Ok(catalog, visited, blanked))

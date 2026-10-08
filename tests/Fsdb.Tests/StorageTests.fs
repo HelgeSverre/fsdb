@@ -2578,7 +2578,7 @@ let tests =
                     insertRows store "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] |> ignore
 
                     match deleteRows store "parent_db" "parents" (fun _ -> Ok true) with
-                    | Error(ForeignKeyRestrict "fk_cross_parent") -> ()
+                    | Error(ForeignKeyRestrict(_, _, { Name = "fk_cross_parent" })) -> ()
                     | other -> failtestf "expected cross-database restriction, got %A" other
 
                     let rowCount database table =
@@ -2980,8 +2980,8 @@ let tests =
                     |> ignore
 
                     match deleteRows store defaultDatabase "departments" (fun _ -> Ok true) with
-                    | Error(ForeignKeyRestrict "fk_dept") ->
-                        let code, _ = toMySqlError (ForeignKeyRestrict "fk_dept")
+                    | Error(ForeignKeyRestrict(_, _, { Name = "fk_dept" }) as error) ->
+                        let code, _ = toMySqlError error
                         Expect.equal code 1451 "MySQL error code"
                     | other -> failtestf "expected ForeignKeyRestrict, got %A" other
 
@@ -3193,7 +3193,7 @@ let tests =
                     let updater (row: Value[]) = Ok [| VInt 99L; row.[1] |]
 
                     match updateRows store defaultDatabase "departments" None (fun _ -> Ok true) updater with
-                    | Error(ForeignKeyRestrict "fk_dept") ->
+                    | Error(ForeignKeyRestrict(_, _, { Name = "fk_dept" })) ->
                         match scan store defaultDatabase "departments" with
                         | Ok(_, rows) -> Expect.equal (rows |> Seq.map (fun r -> r.[0]) |> List.ofSeq) [ VInt 1L ] "the parent row is untouched"
                         | Error e -> failtestf "expected Ok, got %A" e
@@ -3307,7 +3307,7 @@ let tests =
                     let updater (row: Value[]) = Ok [| VInt 100L; row.[1] |]
 
                     match updateRows store defaultDatabase "cat" None (fun row -> Ok(row.[0] = VInt 1L)) updater with
-                    | Error(ForeignKeyRestrict "fk_parent") ->
+                    | Error(ForeignKeyRestrict(_, _, { Name = "fk_parent" })) ->
                         match scan store defaultDatabase "cat" with
                         | Ok(_, rows) ->
                             Expect.equal
@@ -3421,7 +3421,7 @@ let tests =
                     let updater (_: Value[]) = Ok [| VInt 100L |]
 
                     match updateRows store defaultDatabase "a" None (fun row -> Ok(row.[0] = VInt 1L)) updater with
-                    | Error(ForeignKeyRestrict "fk_b_b") ->
+                    | Error(ForeignKeyRestrict(_, _, { Name = "fk_b_b" })) ->
                         match scan store defaultDatabase "a", scan store defaultDatabase "b" with
                         | Ok(_, aRows), Ok(_, bRows) ->
                             Expect.equal
