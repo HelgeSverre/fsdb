@@ -53,3 +53,36 @@ SQL and binary preparation checks:
 
 No known-gap allowlist entries were added. Recognizing, resolving, and warning
 about these hints does not establish that their physical strategy is applied.
+
+## SET_VAR contextualization and execution
+
+Status: audited `max_points_in_geometry` assignment ordering and preparation
+warning lifetimes fixed. Other SET_VAR variables and broader stored-program
+contexts remain outside this audit.
+
+Native MySQL 8.4.11 processes nested assignments before the parent assignment.
+For example, an outer `SET_VAR(max_points_in_geometry=9)` and a scalar-subquery
+`SET_VAR(max_points_in_geometry=7)` expose 7 throughout the statement; the outer
+assignment warns as a duplicate. UNION branches retain their branch order.
+The first recognized assignment reserves the variable even if its value is
+invalid. An invalid first assignment therefore does not allow a later valid
+assignment to replace it.
+
+Duplicate and unknown-variable warnings belong to contextualization, interleaved
+with query-block and timeout diagnostics. Value validation follows that phase:
+a clamped value warns with 1292, while a quoted nonnumeric value warns with 1232.
+SQL and binary preparation emit both phases. Execution repeats value validation
+but does not repeat duplicate or unknown-variable warnings. Statement overrides
+remain visible in nested queries and do not change the session setting.
+
+The implementation separates assignment selection from value validation and
+shares the resolver's contextual ordering with diagnostic emission. This keeps
+text execution and both preparation paths on the same rules.
+
+Validation: the regression first reproduced fsdb returning 9 where native MySQL
+returned 7. All 18 cases in `torture/scripts/setting-hint-context-oracle.py` pass
+on the disposable native server. All 3,100 root tests pass; the expanded wire
+suite passes 72 contracts / 8,928 steps with zero differences, including repeated
+binary execution and session-setting restoration:
+
+`torture/artifacts/runs/20261008T114635271-9072/contracts`

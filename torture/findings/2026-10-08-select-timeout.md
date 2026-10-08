@@ -394,7 +394,10 @@ than a sentinel. Target deduplication retains native warning spelling, including
 index lists and empty BKA arguments. Rejected second QB_NAME declarations do
 not register an alias; an explicit name matching the current block resolves
 through the registered query-block names. Timeout and query-block context diagnostics
-merge in contextualization order before SET_VAR and unresolved-name diagnostics.
+merge in contextualization order with SET_VAR assignment diagnostics, before
+value validation and unresolved-name diagnostics. See the
+[SET_VAR audit](2026-10-08-hint-families.md#set_var-contextualization-and-execution)
+for nested assignment precedence and preparation lifetimes.
 
 SQL PREPARE and binary-protocol preparation emit target-resolution warnings;
 execution does not repeat them. Valid view-definition hints remain discarded.

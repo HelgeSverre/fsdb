@@ -300,6 +300,30 @@ let tests =
               | Err(1305, _) -> ()
               | other -> failtestf "expected missing routine: %A" other
 
+          testCase "SET_VAR hints follow query block context order"
+          <| fun _ ->
+              [
+                "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n, (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ @@max_points_in_geometry) AS child;SHOW WARNINGS", "n\tchild\n7\t7\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\n"
+                "SELECT /*+ SET_VAR(unknown_outer=1) */ (SELECT /*+ SET_VAR(unknown_inner=1) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name 'unknown_inner' for SET_VAR hint\nWarning\t3128\tUnresolved name 'unknown_outer' for SET_VAR hint\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=9) SET_VAR(max_points_in_geometry=8) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=8)  is ignored as conflicting/duplicated\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ 1 AS n UNION ALL SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 2 AS n;SHOW WARNINGS", "n\n1\n2\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=7)  is ignored as conflicting/duplicated\n"
+                "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1 AS n) SELECT /*+ SET_VAR(max_points_in_geometry=9) */ n FROM c;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=2) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=2)  is ignored as conflicting/duplicated\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ (SELECT /*+ SET_VAR(max_points_in_geometry=2) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\nWarning\t1292\tTruncated incorrect max_points_in_geometry value: '2'\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=9) QB_NAME(q) QB_NAME(r) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) QB_NAME(q) QB_NAME(r) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint QB_NAME(`r`) is ignored as conflicting/duplicated\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\nWarning\t3126\tHint QB_NAME(`q`) is ignored as conflicting/duplicated\n"
+                "SELECT /*+ SET_VAR(unknown_outer=1) */ (SELECT /*+ BKA(x) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name 'unknown_outer' for SET_VAR hint\nWarning\t3128\tUnresolved name `x`@`select#2` for BKA hint\n"
+                "SELECT /*+ BKA(x) */ (SELECT /*+ SET_VAR(unknown_inner=1) */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name 'unknown_inner' for SET_VAR hint\nWarning\t3128\tUnresolved name `x`@`select#1` for BKA hint\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ (SELECT /*+ SET_VAR(max_points_in_geometry='bad') */ 1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\nWarning\t1232\tIncorrect argument type to variable 'max_points_in_geometry'\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry='bad') SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n;SHOW WARNINGS", "n\n65536\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\nWarning\t1232\tIncorrect argument type to variable 'max_points_in_geometry'\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=2) SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n;SHOW WARNINGS", "n\n3\nLevel\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\nWarning\t1292\tTruncated incorrect max_points_in_geometry value: '2'\n"
+                "SELECT /*+ SET_VAR(unknown=1) SET_VAR(unknown=2) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name 'unknown' for SET_VAR hint\nWarning\t3128\tUnresolved name 'unknown' for SET_VAR hint\n"
+                "PREPARE s FROM 'SELECT /*+ SET_VAR(max_points_in_geometry=2) SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3126\tHint SET_VAR(max_points_in_geometry=9)  is ignored as conflicting/duplicated\nWarning\t1292\tTruncated incorrect max_points_in_geometry value: '2'\nn\n3\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect max_points_in_geometry value: '2'\n"
+                "PREPARE s FROM 'SELECT /*+ SET_VAR(unknown=1) */ 1 AS n';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name 'unknown' for SET_VAR hint\nn\n1\n"
+                "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1) AS n;SELECT @@max_points_in_geometry AS restored;SHOW WARNINGS", "n\n1\nrestored\n65536\n"
+              ]
+              |> verifyHintCases
+
           testCase "optimizer hint families retain native conflict rules"
           <| fun _ ->
               [

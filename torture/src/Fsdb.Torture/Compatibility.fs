@@ -5134,8 +5134,68 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE t" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private settingHintContext =
+        { Name = "setting-hint-context"
+          Setup = [||]
+          Steps =
+            [|
+               Contract.query "case-1-1" "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n, (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ @@max_points_in_geometry) AS child"
+               Contract.query "case-1-2" "SHOW WARNINGS"
+               Contract.query "case-2-1" "SELECT /*+ SET_VAR(unknown_outer=1) */ (SELECT /*+ SET_VAR(unknown_inner=1) */ 1) AS n"
+               Contract.query "case-2-2" "SHOW WARNINGS"
+               Contract.query "case-3-1" "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1) AS n"
+               Contract.query "case-3-2" "SHOW WARNINGS"
+               Contract.query "case-4-1" "SELECT /*+ SET_VAR(max_points_in_geometry=9) SET_VAR(max_points_in_geometry=8) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1) AS n"
+               Contract.query "case-4-2" "SHOW WARNINGS"
+               Contract.query "case-5-1" "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ 1 AS n UNION ALL SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 2 AS n"
+               Contract.query "case-5-2" "SHOW WARNINGS"
+               Contract.query "case-6-1" "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1 AS n) SELECT /*+ SET_VAR(max_points_in_geometry=9) */ n FROM c"
+               Contract.query "case-6-2" "SHOW WARNINGS"
+               Contract.query "case-7-1" "SELECT /*+ SET_VAR(max_points_in_geometry=2) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1) AS n"
+               Contract.query "case-7-2" "SHOW WARNINGS"
+               Contract.query "case-8-1" "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ (SELECT /*+ SET_VAR(max_points_in_geometry=2) */ 1) AS n"
+               Contract.query "case-8-2" "SHOW WARNINGS"
+               Contract.query "case-9-1" "SELECT /*+ SET_VAR(max_points_in_geometry=9) QB_NAME(q) QB_NAME(r) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) QB_NAME(q) QB_NAME(r) */ 1) AS n"
+               Contract.query "case-9-2" "SHOW WARNINGS"
+               Contract.query "case-10-1" "SELECT /*+ SET_VAR(unknown_outer=1) */ (SELECT /*+ BKA(x) */ 1) AS n"
+               Contract.query "case-10-2" "SHOW WARNINGS"
+               Contract.query "case-11-1" "SELECT /*+ BKA(x) */ (SELECT /*+ SET_VAR(unknown_inner=1) */ 1) AS n"
+               Contract.query "case-11-2" "SHOW WARNINGS"
+               Contract.query "case-12-1" "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ (SELECT /*+ SET_VAR(max_points_in_geometry='bad') */ 1) AS n"
+               Contract.query "case-12-2" "SHOW WARNINGS"
+               Contract.query "case-13-1" "SELECT /*+ SET_VAR(max_points_in_geometry='bad') SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n"
+               Contract.query "case-13-2" "SHOW WARNINGS"
+               Contract.query "case-14-1" "SELECT /*+ SET_VAR(max_points_in_geometry=2) SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n"
+               Contract.query "case-14-2" "SHOW WARNINGS"
+               Contract.query "case-15-1" "SELECT /*+ SET_VAR(unknown=1) SET_VAR(unknown=2) */ 1 AS n"
+               Contract.query "case-15-2" "SHOW WARNINGS"
+               Contract.query "case-16-1" "PREPARE s FROM 'SELECT /*+ SET_VAR(max_points_in_geometry=2) SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n'"
+               Contract.query "case-16-2" "SHOW WARNINGS"
+               Contract.query "case-16-3" "EXECUTE s"
+               Contract.query "case-16-4" "SHOW WARNINGS"
+               Contract.query "case-17-1" "PREPARE s FROM 'SELECT /*+ SET_VAR(unknown=1) */ 1 AS n'"
+               Contract.query "case-17-2" "SHOW WARNINGS"
+               Contract.query "case-17-3" "EXECUTE s"
+               Contract.query "case-17-4" "SHOW WARNINGS"
+               Contract.query "case-18-1" "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ (SELECT /*+ SET_VAR(max_points_in_geometry=7) */ 1) AS n"
+               Contract.query "case-18-2" "SELECT @@max_points_in_geometry AS restored"
+               Contract.query "case-18-3" "SHOW WARNINGS"
+               Contract.prepare "binary-prepare" "setting-hint" Query
+                   "SELECT /*+ SET_VAR(max_points_in_geometry=9) */ @@max_points_in_geometry AS n, (SELECT /*+ SET_VAR(max_points_in_geometry=2) */ @@max_points_in_geometry) AS child" [||]
+               Contract.query "binary-prepare-warnings" "SHOW WARNINGS"
+               Contract.invoke "binary-execute" "setting-hint" OracleSuccess
+               Contract.query "binary-execute-warnings" "SHOW WARNINGS"
+               Contract.invoke "binary-execute-again" "setting-hint" OracleSuccess
+               Contract.query "binary-execute-again-warnings" "SHOW WARNINGS"
+               Contract.close "binary-close" "setting-hint"
+               Contract.query "restored-setting" "SELECT @@max_points_in_geometry AS n"
+            |]
+          Cleanup = [| "DEALLOCATE PREPARE s" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
+
     let all =
-        [| hintFamilyConflicts
+        [| settingHintContext
+           hintFamilyConflicts
            tableHintResolution
            mixedOptimizerHints
            routineAlterations

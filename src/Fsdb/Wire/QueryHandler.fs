@@ -1242,18 +1242,25 @@ let private normalizeGeometryPointLimit =
     | VUInt value -> bounded (int64 value)
     | _ -> Error(Err(1232, "Incorrect argument type to variable 'max_points_in_geometry'"))
 
-let private statementGeometryPointLimit (hints: OptimizerHints.Hint list) =
-    let mutable pointLimit = None
+let private statementGeometryAssignment (hints: OptimizerHints.Hint list) =
+    let mutable assignment = None
+    let diagnostics = ResizeArray<int * int * string>()
+    for hint in hints do
+        match hint.Value with
+        | OptimizerHints.SetVariable(rawName, value) ->
+            let name = rawName.ToLowerInvariant()
+            if name <> "max_points_in_geometry" then
+                diagnostics.Add(hint.Offset, 3128, sprintf "Unresolved name '%s' for SET_VAR hint" name)
+            elif assignment.IsSome then
+                diagnostics.Add(hint.Offset, 3126,
+                    sprintf "Hint SET_VAR(max_points_in_geometry=%s)  is ignored as conflicting/duplicated" value)
+            else assignment <- Some value
+        | _ -> ()
+    assignment, List.ofSeq diagnostics
 
-    let applyAssignment (rawName: string) (value: string) =
-        let name = rawName.ToLowerInvariant()
-        if name <> "max_points_in_geometry" then
-            Diagnostics.warning 3128 (sprintf "Unresolved name '%s' for SET_VAR hint" name)
-        elif pointLimit.IsSome then
-            Diagnostics.warning
-                3126
-                (sprintf "Hint SET_VAR(max_points_in_geometry=%s) is ignored as conflicting/duplicated" value)
-        elif value.Length > 0 && (value |> Seq.forall (fun character -> character >= '0' && character <= '9')) then
+let private statementGeometryPointLimit assignment =
+    assignment |> Option.bind (fun (value: string) ->
+        if value.Length > 0 && (value |> Seq.forall (fun character -> character >= '0' && character <= '9')) then
             let mutable significant = 0
 
             while significant < value.Length && value.[significant] = '0' do
@@ -1279,16 +1286,10 @@ let private statementGeometryPointLimit (hints: OptimizerHints.Hint list) =
                     1292
                     (sprintf "Truncated incorrect max_points_in_geometry value: '%s'" value)
 
-            pointLimit <- Some bounded
+            Some bounded
         else
             Diagnostics.warning 1232 "Incorrect argument type to variable 'max_points_in_geometry'"
-
-    for hint in hints do
-        match hint.Value with
-        | OptimizerHints.SetVariable(name, value) -> applyAssignment name value
-        | _ -> ()
-
-    pointLimit
+            None)
 
 let private parsedStatementHints emitWarnings options (sql: string) =
     let parsed =
@@ -1341,22 +1342,30 @@ let private resolveStatementHints (session: Session) options sql hints =
 let private emitHintDiagnostics diagnostics =
     for code, message in diagnostics do Diagnostics.warning code message
 
+let private hintContextOrder order offset =
+    Map.tryFind offset order |> Option.defaultValue 0, offset
+
 let private emitContextHintDiagnostics order diagnostics =
     diagnostics
-    |> List.sortBy (fun (offset, _, _) ->
-        let rank = Map.tryFind offset order |> Option.defaultValue 0
-        rank, offset)
+    |> List.sortBy (fun (offset, _, _) -> hintContextOrder order offset)
     |> List.iter (fun (_, code, message) -> Diagnostics.warning code message)
+
+let private geometryAssignmentInContext order hints =
+    hints
+    |> List.sortBy (fun (hint: OptimizerHints.Hint) -> hintContextOrder order hint.Offset)
+    |> statementGeometryAssignment
 
 let private withStatementHintsCore session scope emitWarnings options sql body =
     let hints = parsedStatementHints emitWarnings options sql
     let resolution =
-        if emitWarnings && scope = StandaloneStatement then resolveStatementHints session options sql hints
+        if scope = StandaloneStatement then resolveStatementHints session options sql hints
         else OptimizerHintResolution.empty
     let timeout, timeoutDiagnostics = statementTimeoutHint scope options sql hints
-    if emitWarnings then emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics)
-    let pointLimit = statementGeometryPointLimit hints
-    emitHintDiagnostics resolution.Resolution
+    let assignment, variableDiagnostics = geometryAssignmentInContext resolution.ContextOrder hints
+    if emitWarnings then
+        emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics @ variableDiagnostics)
+    let pointLimit = statementGeometryPointLimit assignment
+    if emitWarnings then emitHintDiagnostics resolution.Resolution
     DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
         match pointLimit with
         | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
@@ -5190,7 +5199,9 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
         let hints = parsedStatementHints true options sql
         let resolution = resolveStatementHints session options sql hints
         let _, timeoutDiagnostics = statementTimeoutHint StandaloneStatement options sql hints
-        emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics)
+        let assignment, variableDiagnostics = geometryAssignmentInContext resolution.ContextOrder hints
+        emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics @ variableDiagnostics)
+        statementGeometryPointLimit assignment |> ignore
         emitHintDiagnostics resolution.Resolution
         match statement with
         | None -> Ok(statement, count)

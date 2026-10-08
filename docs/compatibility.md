@@ -603,7 +603,10 @@ transaction conflict waits, and recursive CTEs. Session-scoped
 buffer strategies without invalidating values created under an earlier limit.
 The `/*+ SET_VAR(max_points_in_geometry=...) */` hint applies the same bound to
 one statement, including prepared execution, without changing the session
-value.
+value. Nested SELECT assignments are considered before their parent; the first
+recognized assignment wins even if its value is invalid. Preparation reports
+duplicate and unknown-variable hints once, while execution repeats value
+validation warnings when applicable.
 
 Optimizer hints are parsed in order. A syntax error stops later hints in that
 comment while retaining accepted earlier hints. SELECT hint diagnostics cover
