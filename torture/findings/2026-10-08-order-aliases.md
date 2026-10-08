@@ -225,3 +225,8 @@ cover the wrong-row result and ordering rejection. Enclosing aggregate totals
 are fixed for the documented expression-subquery shapes. ORDER BY-only query
 classification now returns error 3029 with native term ordering and binding-error
 precedence; the linked finding records the verified coverage and its limits.
+
+The [grouped evaluation matrix](2026-10-08-grouped-evaluation.md) separates
+source-row aggregate accumulation, repeated projection reuse, and assignment
+side effects when sorted or limited rows are returned. Repeated group keys
+expose wrong totals even without ORDER BY.
