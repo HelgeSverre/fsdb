@@ -41,7 +41,8 @@ rewrites preserve the field through record updates.
 
 ## Remaining coverage
 
-DELETE IGNORE is verified here for numeric predicate conversion. Foreign-key,
-trigger, and other ignored error classes require their own native evidence;
+DELETE IGNORE is verified here for numeric predicate conversion. [Foreign-key and trigger probes](2026-10-08-delete-ignore.md) establish remaining
+row-skipping, diagnostic-detail, and trigger-body parsing differences. Other
+ignored error classes require their own native evidence;
 parsing the modifier does not establish full IGNORE behavior. Joined mutations,
 additional SQL modes, and additional conversion families need broader coverage.
