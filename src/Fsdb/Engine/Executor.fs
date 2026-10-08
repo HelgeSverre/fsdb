@@ -3942,7 +3942,7 @@ let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'
 
     while error.IsNone && enumerator.MoveNext() do
         if untilCancellationCheck = 0 then
-            token.ThrowIfCancellationRequested()
+            Limits.checkQueryInterruption token
             untilCancellationCheck <- cancellationCheckInterval
         untilCancellationCheck <- untilCancellationCheck - 1
 
@@ -3976,7 +3976,7 @@ let private boundedTopN (capacity: int) (cmp: 'b -> 'b -> int) (f: 'a -> Result<
 
         while error.IsNone && enumerator.MoveNext() do
             if i % cancellationCheckInterval = 0 then
-                token.ThrowIfCancellationRequested()
+                Limits.checkQueryInterruption token
 
             i <- i + 1
 
@@ -4016,7 +4016,7 @@ let private streamLimited
 
     while error.IsNone && wantMore () && enumerator.MoveNext() do
         if i % cancellationCheckInterval = 0 then
-            token.ThrowIfCancellationRequested()
+            Limits.checkQueryInterruption token
 
         i <- i + 1
 
@@ -5217,18 +5217,22 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 Error(1235, "This version of MySQL doesn't yet support SLEEP durations beyond its resource limit")
             else
                 let cancellation = Storage.queryCancellation.Value
+                let stopwatch = System.Diagnostics.Stopwatch.StartNew()
                 let mutable remaining = seconds
                 let mutable interrupted = false
                 let mutable deadlineExpired = false
 
-                while remaining > 0.0 && not interrupted && not deadlineExpired do
+                while remaining > 0.0 && not interrupted && not deadlineExpired && not (Limits.selectDeadlineExpired ()) do
                     deadlineExpired <- Limits.queryWorkDeadlineExpired ()
                     let deadlineRemaining = Limits.queryWorkDeadlineRemaining () |> Option.map _.TotalSeconds
-                    let interval = min remaining 0.1 |> fun value -> deadlineRemaining |> Option.map (min value) |> Option.defaultValue value
+                    let interval =
+                        min remaining 0.1
+                        |> fun value -> deadlineRemaining |> Option.map (min value) |> Option.defaultValue value
+                        |> fun value -> Limits.selectDeadlineRemaining () |> Option.map (fun milliseconds -> min value (milliseconds / 1000.0)) |> Option.defaultValue value
                     interrupted <- cancellation.WaitHandle.WaitOne(System.TimeSpan.FromSeconds interval)
-                    remaining <- remaining - interval
+                    remaining <- max 0.0 (seconds - stopwatch.Elapsed.TotalSeconds)
 
-                if interrupted then
+                if interrupted || Limits.selectDeadlineExpired () then
                     Ok(VInt 1L)
                 elif deadlineExpired || remaining > 0.0 && Limits.queryWorkDeadlineExpired () then
                     Error(1235, "This version of MySQL doesn't yet support BENCHMARK execution beyond its resource limit")
@@ -5263,9 +5267,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     let mutable failure = None
 
                     DynamicScope.withThreadValue Limits.queryWorkDeadline (Some effectiveDeadline) (fun () ->
-                        while iteration < count && failure.IsNone do
+                        while iteration < count && failure.IsNone && not (Limits.selectDeadlineExpired ()) do
                             if iteration % int64 Storage.cancellationCheckInterval = 0L then
-                                cancellation.ThrowIfCancellationRequested()
+                                Limits.checkQueryInterruption cancellation
 
                             match eval body with
                             | Ok _ when stopwatch.Elapsed > Limits.maxBenchmarkDuration ->
@@ -20770,7 +20774,7 @@ let rec executeAs
                                         | None -> complete (Err(1339, "Case not found for CASE statement"))
                                 | StoredProgram.While(label, condition, body) ->
                                     let rec iterate () =
-                                        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                                        Limits.checkQueryInterruption Storage.queryCancellation.Value
 
                                         match evalExpr (localContext ()) condition with
                                         | Error(code, message) -> complete (Err(code, message))
@@ -20787,7 +20791,7 @@ let rec executeAs
                                     iterate ()
                                 | StoredProgram.Repeat(label, body, until) ->
                                     let rec iterate () =
-                                        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                                        Limits.checkQueryInterruption Storage.queryCancellation.Value
 
                                         match runStatements scope body with
                                         | (Err _ as error), _ -> complete error
@@ -20804,7 +20808,7 @@ let rec executeAs
                                     iterate ()
                                 | StoredProgram.Loop(label, body) ->
                                     let rec iterate () =
-                                        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                                        Limits.checkQueryInterruption Storage.queryCancellation.Value
 
                                         match runStatements scope body with
                                         | (Err _ as error), _ -> complete error

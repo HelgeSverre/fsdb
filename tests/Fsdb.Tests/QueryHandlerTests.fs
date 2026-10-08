@@ -82,6 +82,53 @@ let tests =
               let _, reset = handle (create 3 store) "SELECT @@max_execution_time AS n"
               Expect.equal reset (ResultSet([ "n" ], [ [ Some "0" ] ])) "global default is zero"
 
+          testCase "SELECT timeouts preserve transactions and exempt procedure statements"
+          <| fun _ ->
+              let run = queryFixture [ "CREATE TABLE timed(n INT)"; "INSERT INTO timed VALUES(1),(2)" ]
+              let timeout = Err(3024, "Query execution was interrupted, maximum statement execution time exceeded")
+              run "SET max_execution_time=1" |> ignore
+              Expect.equal (run "SELECT n,SLEEP(0.1) FROM timed") timeout "table read times out"
+              run "CREATE TEMPORARY TABLE timed_temp(n INT)" |> ignore
+              run "INSERT INTO timed_temp VALUES(1),(2)" |> ignore
+              Expect.equal (run "SELECT n,SLEEP(0.1) FROM timed_temp") timeout "temporary table read times out"
+              Expect.equal (run "SELECT SLEEP(0.1) AS slept")
+                  (ResultSet([ "slept" ], [ [ Some "1" ] ])) "scalar sleep reports interruption"
+              Expect.equal (run "SELECT BENCHMARK(10000000,SHA2('abc',256)) AS n")
+                  (ResultSet([ "n" ], [ [ Some "0" ] ])) "scalar benchmark reports interruption"
+              Expect.equal (run "SELECT SLEEP(0.1) UNION ALL SELECT 1") timeout "UNION is interrupted"
+              run "START TRANSACTION" |> ignore
+              run "INSERT INTO timed VALUES(3)" |> ignore
+              run "SAVEPOINT retained" |> ignore
+              Expect.equal (run "SELECT n,SLEEP(0.1) FROM timed") timeout "transaction read times out"
+              run "SET max_execution_time=0" |> ignore
+              Expect.equal (run "ROLLBACK TO retained") (Affected 0UL) "savepoint survives"
+              Expect.equal (run "COMMIT") (Affected 0UL) "transaction survives"
+              Expect.equal (run "SELECT COUNT(*) AS n FROM timed")
+                  (ResultSet([ "n" ], [ [ Some "3" ] ])) "earlier writes survive"
+              run "CREATE PROCEDURE timed_proc() SELECT n,SLEEP(0.01) AS slept FROM timed ORDER BY n" |> ignore
+              run "SET max_execution_time=1" |> ignore
+              match run "CALL timed_proc()" with
+              | ProcedureResult(_, rows) ->
+                  Expect.equal rows [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ] "procedure reads are exempt"
+              | other -> failtestf "expected procedure rows, got %A" other
+
+          testCase "data-changing functions disable the SELECT deadline"
+          <| fun _ ->
+              let run = queryFixture
+                            [ "CREATE TABLE timed_source(n INT)"
+                              "INSERT INTO timed_source VALUES(1),(2)"
+                              "CREATE TABLE timed_log(n INT)"
+                              "CREATE FUNCTION timed_write() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO timed_log VALUES(1); RETURN SLEEP(0.3); END" ]
+              run "SET max_execution_time=500" |> ignore
+              Expect.equal (run "SELECT n,timed_write() AS slept FROM timed_source ORDER BY n")
+                  (ResultSet([ "n"; "slept" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) "write disables deadline"
+              Expect.equal (run "SHOW WARNINGS")
+                  (ResultSet([ "Level"; "Code"; "Message" ],
+                      [ [ Some "Note"; Some "3025"; Some "Select is not a read only statement, disabling timer" ] ])) "native diagnostic"
+              run "SET max_execution_time=0" |> ignore
+              Expect.equal (run "SELECT COUNT(*) AS n FROM timed_log")
+                  (ResultSet([ "n" ], [ [ Some "2" ] ])) "both writes complete"
+
           testCase "nested derived sources retain enclosing query correlation"
           <| fun _ ->
               let run = queryFixture

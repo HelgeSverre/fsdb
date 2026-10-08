@@ -46,11 +46,39 @@ let mutable maxPreparedStmtCount = 16382
 let queryCancellation = new ThreadLocal<CancellationToken>(fun () -> CancellationToken.None)
 let queryWorkDeadline = new ThreadLocal<int64 option>(fun () -> None)
 
+exception SelectTimeoutExpired
+
+/// Scalar-only reads report interruption through SLEEP/BENCHMARK return values.
+/// Row-producing queries instead fail with error 3024.
+type SelectDeadline =
+    { StartedAt: int64
+      Milliseconds: uint64
+      InterruptRowWork: bool }
+
+let selectDeadline = new ThreadLocal<SelectDeadline option>(fun () -> None)
+
+let selectDeadlineRemaining () =
+    selectDeadline.Value
+    |> Option.map (fun deadline ->
+        max 0.0 (float deadline.Milliseconds - Diagnostics.Stopwatch.GetElapsedTime(deadline.StartedAt).TotalMilliseconds))
+
+let selectDeadlineExpired () =
+    selectDeadlineRemaining () |> Option.exists (fun remaining -> remaining <= 0.0)
+
+let checkSelectDeadline () =
+    match selectDeadline.Value with
+    | Some deadline when deadline.InterruptRowWork && selectDeadlineExpired () -> raise SelectTimeoutExpired
+    | _ -> ()
+
+let checkQueryInterruption (cancellation: CancellationToken) =
+    cancellation.ThrowIfCancellationRequested()
+    checkSelectDeadline ()
+
 let cancellationCheckInterval = 256
 
 let checkQueryCancellation iteration =
     if iteration % cancellationCheckInterval = 0 then
-        queryCancellation.Value.ThrowIfCancellationRequested()
+        checkQueryInterruption queryCancellation.Value
 
 let queryWorkDeadlineAfter (duration: TimeSpan) =
     System.Diagnostics.Stopwatch.GetTimestamp()

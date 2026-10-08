@@ -577,7 +577,7 @@ let private getAdvisoryLock (session: Session) = function
                             VInt 1L
                         | _ when not infinite && deadline.Elapsed.TotalSeconds >= seconds -> VInt 0L
                         | _ ->
-                            Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                            Limits.checkQueryInterruption Storage.queryCancellation.Value
 
                             let waitMilliseconds =
                                 if infinite then 50 else max 1 (min 50 (int ((seconds - deadline.Elapsed.TotalSeconds) * 1000.0)))
@@ -2287,7 +2287,7 @@ let private readUncommittedBase (session: Session) =
 
     TransactionRegistry.others session.Store session.ConnectionId
     |> List.iter (fun view ->
-        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+        Limits.checkQueryInterruption Storage.queryCancellation.Value
         let changedTables = view.ChangedTables.Count
 
         if not view.ChangedDatabases.IsEmpty then
@@ -3148,12 +3148,40 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
                     lastInsertId, lastGeneratedId, result, [], None)
 
+        let withSelectDeadline body =
+            let eligible =
+                session.RoutineStack.IsEmpty
+                && (match stmt with Select _ | Union _ -> true | _ -> false)
+            let milliseconds =
+                sessionValue session "max_execution_time"
+                |> Option.bind (fun value -> match UInt64.TryParse value with true, number -> Some number | _ -> None)
+                |> Option.defaultValue 0UL
+            if not eligible || milliseconds = 0UL then body ()
+            else
+                let interruptRowWork =
+                    match stmt with
+                    | Union _ -> true
+                    | _ -> not (TableLocks.dependenciesForStatement store session.TemporaryCatalog dbName stmt).IsEmpty
+                let deadline: Limits.SelectDeadline =
+                    { StartedAt = System.Diagnostics.Stopwatch.GetTimestamp()
+                      Milliseconds = milliseconds
+                      InterruptRowWork = interruptRowWork }
+                DynamicScope.withThreadValue Limits.selectDeadline (Some deadline) (fun () ->
+                    let result = body ()
+                    Limits.checkSelectDeadline ()
+                    result)
+
         let evaluateWithLockingView () =
             try
-                match lockingReadView () with
-                | Some current -> Executor.withLockingReadStore current (lockWaitTimeout session) evaluate
-                | None -> evaluate ()
-            with Diagnostics.RaisedCondition error ->
+                withSelectDeadline (fun () ->
+                    match lockingReadView () with
+                    | Some current -> Executor.withLockingReadStore current (lockWaitTimeout session) evaluate
+                    | None -> evaluate ())
+            with
+            | Limits.SelectTimeoutExpired ->
+                session.LastInsertId, session.LastGeneratedId,
+                Err(3024, "Query execution was interrupted, maximum statement execution time exceeded"), [], None
+            | Diagnostics.RaisedCondition error ->
                 session.LastInsertId, session.LastGeneratedId, ErrInfo error, [], None
 
         let startedDynamicWriteRebase = beginDynamicWriteRebaseForStatement session store
@@ -3300,6 +3328,13 @@ let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Stateme
         )
     | _ ->
         let execute () =
+            if Limits.selectDeadline.Value.IsSome && insideFunctionOrTrigger session then
+                let writesData =
+                    TableLocks.dependenciesForStatement store session.TemporaryCatalog database stmt
+                    |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)
+                if writesData then
+                    Limits.selectDeadline.Value <- None
+                    Diagnostics.note 3025 "Select is not a read only statement, disabling timer"
             DynamicScope.withValue storedProgramProtectedTables (Set.union protectedTables statementTables) (fun () ->
                 InformationSchema.withViewer
                     store
@@ -6107,7 +6142,7 @@ let private runRoutineStatements
                         |> continueAfterNested scope rest results affectedRows
             | StoredProgram.While(label, condition, body) ->
                 let rec iterate current locals results affectedRows =
-                    Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                    Limits.checkQueryInterruption Storage.queryCancellation.Value
                     let next, evaluated = evaluate locals current condition
 
                     match evaluated with
@@ -6130,7 +6165,7 @@ let private runRoutineStatements
                 iterate current locals results affectedRows
             | StoredProgram.Repeat(label, body, until) ->
                 let rec iterate current locals results affectedRows =
-                    Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                    Limits.checkQueryInterruption Storage.queryCancellation.Value
                     let bodyRun = run scope current locals [] 0UL body
                     let results = List.rev bodyRun.Results @ results
                     let affectedRows = affectedRows + bodyRun.AffectedRows
@@ -6155,7 +6190,7 @@ let private runRoutineStatements
                 iterate current locals results affectedRows
             | StoredProgram.Loop(label, body) ->
                 let rec iterate current locals results affectedRows =
-                    Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                    Limits.checkQueryInterruption Storage.queryCancellation.Value
                     let bodyRun = run scope current locals [] 0UL body
                     let results = List.rev bodyRun.Results @ results
                     let affectedRows = affectedRows + bodyRun.AffectedRows

@@ -1523,7 +1523,7 @@ let traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
         | [] -> Ok(List.rev acc)
         | x :: rest ->
             if i % cancellationCheckInterval = 0 then
-                token.ThrowIfCancellationRequested()
+                Limits.checkQueryInterruption token
 
             match f x with
             | Ok y -> loop (i + 1) (y :: acc) rest
@@ -1540,7 +1540,7 @@ let foldWithCancellation (step: 'acc -> 'a -> 'acc) (init: 'acc) (xs: 'a list) :
     |> List.fold
         (fun (i, acc) x ->
             if i % cancellationCheckInterval = 0 then
-                token.ThrowIfCancellationRequested()
+                Limits.checkQueryInterruption token
 
             i + 1, step acc x)
         (0, init)
@@ -3569,7 +3569,7 @@ let private acquireStripe
             if available () then claim () else false, false)
     | WaitUntilAvailable ->
         let cancellation = queryCancellation.Value
-        cancellation.ThrowIfCancellationRequested()
+        Limits.checkQueryInterruption cancellation
 
         match lock stripe.SyncRoot (fun () -> if available () then Some(claim ()) else None) with
         | Some acquired -> acquired
@@ -3583,7 +3583,7 @@ let private acquireStripe
 
             lock stripe.SyncRoot (fun () ->
                 let rec acquire () =
-                    cancellation.ThrowIfCancellationRequested()
+                    Limits.checkQueryInterruption cancellation
 
                     if available () then
                         claim ()
@@ -3607,7 +3607,7 @@ let private acquireStripe
                         finally
                             clearLockWait waits context.Owner
 
-                        cancellation.ThrowIfCancellationRequested()
+                        Limits.checkQueryInterruption cancellation
 
                         if context.DeadlockVictim then
                             raise (DeadlockVictim dbName)

@@ -4568,8 +4568,33 @@ module ContractCatalog =
           Cleanup = [| "SET GLOBAL max_execution_time=DEFAULT"; "SET max_execution_time=DEFAULT" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
 
+    let private selectTimeoutExecution =
+        let slowRead = "SELECT n,SLEEP(0.1) FROM deadline_rows"
+        { Name = "select-timeout-execution"
+          Setup = [| "CREATE TABLE deadline_rows(n INT)"; "INSERT INTO deadline_rows VALUES(1),(2)" |]
+          Steps =
+            [| Contract.prepare "prepare" "deadline-read" Query slowRead [||]
+               Contract.execute "enable" "SET max_execution_time=1"
+               Contract.query "table-read" slowRead |> Contract.fails 3024 "HY000"
+               Contract.invoke "prepared-read" "deadline-read" (OracleError(3024, "HY000"))
+               Contract.query "scalar-sleep" "SELECT SLEEP(0.1) AS slept"
+               Contract.query "scalar-benchmark" "SELECT BENCHMARK(10000000,SHA2('abc',256)) AS n"
+               Contract.query "union" "SELECT SLEEP(0.1) UNION ALL SELECT 1" |> Contract.fails 3024 "HY000"
+               Contract.execute "begin" "START TRANSACTION"
+               Contract.execute "insert" "INSERT INTO deadline_rows VALUES(3)"
+               Contract.execute "savepoint" "SAVEPOINT retained"
+               Contract.query "transaction-read" slowRead |> Contract.fails 3024 "HY000"
+               Contract.execute "disable" "SET max_execution_time=0"
+               Contract.execute "retained-savepoint" "ROLLBACK TO retained"
+               Contract.execute "commit" "COMMIT"
+               Contract.query "retained-writes" "SELECT n FROM deadline_rows ORDER BY n"
+               Contract.close "close" "deadline-read" |]
+          Cleanup = [| "SET max_execution_time=0"; "DROP TABLE deadline_rows" |]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-protocol" |] |] }
+
     let all =
-        [| selectTimeoutSettings
+        [| selectTimeoutExecution
+           selectTimeoutSettings
            joinCandidateTraversal
            comments
            orderAliases

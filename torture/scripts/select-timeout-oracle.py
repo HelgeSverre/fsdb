@@ -26,6 +26,9 @@ cases = [
 ]
 
 lifetime_cases = [
+    ("CREATE TEMPORARY TABLE temp_t(n INT);INSERT INTO temp_t VALUES(1),(2);SET max_execution_time=1;SELECT n,SLEEP(0.1) FROM temp_t", "", [(3024, "HY000")]),
+    ("CREATE TABLE write_source(n INT);INSERT INTO write_source VALUES(1),(2);CREATE TABLE write_log(n INT);\nDELIMITER //\nCREATE FUNCTION write_timeout() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO write_log VALUES(1); RETURN SLEEP(0.03); END//\nDELIMITER ;\nSET max_execution_time=1;SELECT n,write_timeout() AS slept FROM write_source;SHOW WARNINGS;SET max_execution_time=0;SELECT COUNT(*) FROM write_log", "n\tslept\n1\t0\n2\t0\nLevel\tCode\tMessage\nNote\t3025\tSelect is not a read only statement, disabling timer\nCOUNT(*)\n2\n", []),
+
     ('CREATE TABLE t(n INT);INSERT INTO t VALUES(1),(2)', '', []),
     ('SET GLOBAL max_execution_time=12;SELECT @@session.max_execution_time,@@global.max_execution_time;SET max_execution_time=DEFAULT;SELECT @@max_execution_time;SET GLOBAL max_execution_time=DEFAULT', '@@session.max_execution_time\t@@global.max_execution_time\n0\t12\n@@max_execution_time\n12\n', []),
     ('CREATE PROCEDURE p() SELECT n,SLEEP(0.03) FROM t;SET max_execution_time=1;CALL p()', 'n\tSLEEP(0.03)\n1\t0\n2\t0\n', []),
