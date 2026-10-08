@@ -1250,9 +1250,9 @@ let private statementGeometryAssignment (hints: OptimizerHints.Hint list) =
         | OptimizerHints.SetVariable(rawName, value) ->
             let name = rawName.ToLowerInvariant()
             if name <> "max_points_in_geometry" then
-                diagnostics.Add(hint.Offset, 3128, sprintf "Unresolved name '%s' for SET_VAR hint" name)
+                diagnostics.Add(OptimizerHints.contextOrder hint, 3128, sprintf "Unresolved name '%s' for SET_VAR hint" name)
             elif assignment.IsSome then
-                diagnostics.Add(hint.Offset, 3126,
+                diagnostics.Add(OptimizerHints.contextOrder hint, 3126,
                     sprintf "Hint SET_VAR(max_points_in_geometry=%s)  is ignored as conflicting/duplicated" value)
             else assignment <- Some value
         | _ -> ()
@@ -1317,15 +1317,15 @@ let private statementTimeoutHint scope options sql (hints: OptimizerHints.Hint l
         | OptimizerHints.Timeout value ->
             let hint = parsed.Location
             if scope = StoredRoutine then
-                warn parsed.Offset 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
+                warn (OptimizerHints.contextOrder parsed) 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
             else
                 match hint.StatementKeyword with
                 | "CREATE" | "ALTER" when viewDefinition.Value -> ()
                 | "SELECT" | "WITH" | "EXPLAIN" when hint.IsLeadingSelect ->
                     match timeout with
-                    | Some _ -> warn parsed.Offset 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
+                    | Some _ -> warn (OptimizerHints.contextOrder parsed) 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
                     | None -> timeout <- Some value
-                | _ -> warn parsed.Offset 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
+                | _ -> warn (OptimizerHints.contextOrder parsed) 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
         | _ -> ()
     timeout, List.ofSeq diagnostics
 
@@ -1342,29 +1342,21 @@ let private resolveStatementHints (session: Session) options sql hints =
 let private emitHintDiagnostics diagnostics =
     for code, message in diagnostics do Diagnostics.warning code message
 
-let private hintContextOrder order offset =
-    Map.tryFind offset order |> Option.defaultValue 0, offset
-
-let private emitContextHintDiagnostics order diagnostics =
+let private emitContextHintDiagnostics diagnostics =
     diagnostics
-    |> List.sortBy (fun (offset, _, _) -> hintContextOrder order offset)
+    |> List.sortBy (fun (order, _, _) -> order)
     |> List.iter (fun (_, code, message) -> Diagnostics.warning code message)
-
-let private geometryAssignmentInContext order hints =
-    hints
-    |> List.sortBy (fun (hint: OptimizerHints.Hint) -> hintContextOrder order hint.Offset)
-    |> statementGeometryAssignment
 
 let private withStatementHintsCore session scope emitWarnings options sql body =
     let hints = parsedStatementHints emitWarnings options sql
     let resolution =
         if scope = StandaloneStatement then resolveStatementHints session options sql hints
         else OptimizerHintResolution.empty
-    let hints = hints |> List.filter (fun hint -> not (resolution.Ignored.Contains hint.Offset))
+    let hints = resolution.Hints |> Option.defaultValue hints
     let timeout, timeoutDiagnostics = statementTimeoutHint scope options sql hints
-    let assignment, variableDiagnostics = geometryAssignmentInContext resolution.ContextOrder hints
+    let assignment, variableDiagnostics = statementGeometryAssignment hints
     if emitWarnings then
-        emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics @ variableDiagnostics)
+        emitContextHintDiagnostics (resolution.Context @ timeoutDiagnostics @ variableDiagnostics)
     let pointLimit = statementGeometryPointLimit assignment
     if emitWarnings then emitHintDiagnostics resolution.Resolution
     DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
@@ -1380,7 +1372,7 @@ let private emitRoutineHintDiagnostics (session: Session) kind schema name optio
         parsedStatementHints true options definition
         |> statementTimeoutHint StoredRoutine options definition
         |> snd
-        |> emitContextHintDiagnostics Map.empty
+        |> emitContextHintDiagnostics
 
 let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
     markRoutineVariables connectionVariableNames
@@ -5199,10 +5191,10 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
         let options = parserOptionsForSession session
         let hints = parsedStatementHints true options sql
         let resolution = resolveStatementHints session options sql hints
-        let hints = hints |> List.filter (fun hint -> not (resolution.Ignored.Contains hint.Offset))
+        let hints = resolution.Hints |> Option.defaultValue hints
         let _, timeoutDiagnostics = statementTimeoutHint StandaloneStatement options sql hints
-        let assignment, variableDiagnostics = geometryAssignmentInContext resolution.ContextOrder hints
-        emitContextHintDiagnostics resolution.ContextOrder (resolution.Context @ timeoutDiagnostics @ variableDiagnostics)
+        let assignment, variableDiagnostics = statementGeometryAssignment hints
+        emitContextHintDiagnostics (resolution.Context @ timeoutDiagnostics @ variableDiagnostics)
         statementGeometryPointLimit assignment |> ignore
         emitHintDiagnostics resolution.Resolution
         match statement with

@@ -617,9 +617,11 @@ Audited conflict rules distinguish table-wide and per-index hints, join-order
 hints, and subquery strategies. Nested query blocks contextualize their hints
 before their parent; unresolved-target diagnostics follow a separate order.
 INSERT SELECT and REPLACE SELECT share the first SELECT block with the target
-table, and SELECT hints are considered before statement hints. Unused mutation
-CTEs do not apply setting overrides or semantic hint warnings in the audited
-cases.
+table, and SELECT hints are considered before statement hints. Unused or
+shadowed CTEs do not apply setting overrides or semantic hint warnings in the
+audited cases. Each referenced CTE instance has its own hint context, including
+repeated warnings and conflicts where required. Repeated syntax warnings from
+native CTE reparsing remain incomplete.
 Target-resolution warnings appear during SQL or binary preparation and do not
 repeat on execution. Recognizing a hint and resolving its targets does not
 imply that its physical optimizer strategy is implemented.

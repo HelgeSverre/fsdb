@@ -25,8 +25,11 @@ type Value =
 
 type Hint =
     { Offset: int
+      ContextOrder: int option
       Location: Parser.OptimizerHintLocation
       Value: Value }
+
+let contextOrder (hint: Hint) = hint.ContextOrder |> Option.defaultValue hint.Offset
 
 type Diagnostic =
     { Prefix: string
@@ -216,6 +219,6 @@ let parse options (location: Parser.OptimizerHintLocation) =
                     let indexes = commaList true word
                     symbol ')' |> ignore
                     Some(IndexHint(name, table, block, indexes))
-            value |> Option.iter (fun value -> hints.Add { Offset = location.BodyOffset + start; Location = location; Value = value })
+            value |> Option.iter (fun value -> hints.Add { Offset = location.BodyOffset + start; ContextOrder = None; Location = location; Value = value })
     with SyntaxAt offset -> warn "Optimizer hint syntax error" offset
     List.ofSeq hints, List.ofSeq diagnostics
