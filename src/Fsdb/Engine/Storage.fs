@@ -6829,16 +6829,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | AddIndex index -> AddIndex(normalizeGeometryIndex table.Columns index)
         | action -> action
 
-    let strict = mode.Strict
-    // MODIFY/CHANGE re-coerce every existing row into the new definition —
-    // MySQL's copy-alter semantics. `coerceValue` gives temporal fsp
-    // narrowing its half-up rounding for free; on top of it, ALTER enforces
-    // the narrowing checks the oracle showed: a string longer than the new
-    // CHAR/VARCHAR length is 1265 "Data truncated" (not INSERT's 1406) in
-    // strict mode (silently truncated non-strict), an integer outside the
-    // new type's range is 1264 "Out of range" in strict mode (clamped
-    // non-strict). The first failing row aborts the whole ALTER, leaving
-    // the table untouched.
+    // ALTER uses 1265 for strict CHAR/VARCHAR narrowing; other conversions
+    // share the regular coercer's range checks and temporal rounding.
     let recoerce (newDef: ColumnDef) (v: Value) : Result<Value, StorageError> =
         let value =
             match newDef.Type, v with
@@ -6849,30 +6841,23 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     | _ -> s
 
                 match truncateRunes n text with
-                | Some truncated when strict -> Error(DataTruncatedForColumn newDef.Name)
+                | Some _ when mode.Strict -> Error(DataTruncatedForColumn newDef.Name)
                 | Some truncated -> Ok(VString truncated)
                 | None -> Ok(VString text)
             | _ -> Ok v
 
         value
         |> Result.bind (coerceValueWithMode mode newDef)
-        |> Result.bind (fun coerced ->
-            match newDef.Type, coerced with
-            | intType, VInt i ->
-                let range =
-                    match intType with
-                    | TTinyInt unsigned -> Some(if unsigned then 0L, 255L else -128L, 127L)
-                    | TBool -> Some(-128L, 127L)
-                    | TSmallInt unsigned -> Some(if unsigned then 0L, 65535L else -32768L, 32767L)
-                    | TMediumInt unsigned -> Some(if unsigned then 0L, 16777215L else -8388608L, 8388607L)
-                    | TInt unsigned -> Some(if unsigned then 0L, 4294967295L else -2147483648L, 2147483647L)
-                    | _ -> None
 
-                match range with
-                | Some(lo, hi) when i < lo || i > hi ->
-                    if strict then Error(OutOfRangeForColumn newDef.Name) else Ok(VInt(max lo (min hi i)))
-                | _ -> Ok coerced
-            | _ -> Ok coerced)
+    let mapRows transform =
+        let builder = table.RowsArray.ToBuilder()
+
+        table.RowsArray.Indexed
+        |> List.ofSeq
+        |> traverse (fun (rowId, row) ->
+            transform row
+            |> Result.map (fun updated -> builder.[rowId] <- updated))
+        |> Result.map (fun _ -> builder.DrainToImmutable())
 
     // Reject a too-big fsp on any column this action introduces (1426),
     // before it can reach the table — the DDL-time counterpart to
@@ -7003,21 +6988,14 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
 
             resolvePosition columnsExcludingSelf oldIdx position
             |> Result.bind (fun newIdx ->
-                table.RowsArray.Indexed
-                |> List.ofSeq
-                |> traverse (fun (rowId, r: Value[]) ->
-                    recoerce newDef r.[oldIdx]
-                    |> Result.map (fun value -> rowId, (r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx value |> Array.ofList)))
+                mapRows (fun row ->
+                    recoerce newDef row.[oldIdx]
+                    |> Result.map (fun value -> row |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx value |> Array.ofList))
                 |> Result.bind (fun rows ->
-                    let rowStore = table.RowsArray.ToBuilder()
-
-                    for rowId, row in rows do
-                        rowStore.[rowId] <- row
-
                     let candidate =
                         { table with
                             Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                            RowsArray = rowStore.DrainToImmutable()
+                            RowsArray = rows
                             Indexes = renameIndexColumn oldName newDef.Name table.Indexes }
 
                     // A narrowing re-coercion that folds two unique-key
@@ -7028,7 +7006,6 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                         uniqueKeyGroups candidate
                         |> List.tryPick (fun group ->
                             rows
-                            |> Seq.map snd
                             |> tryDuplicateUniqueValue candidate.Columns group
                             |> Option.map (fun value -> DuplicateKey(table.OriginalName, group.Name, value)))
 
@@ -7217,22 +7194,18 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                 |> List.indexed
                 |> List.filter (snd >> isTextColumn)
 
-            let builder = table.RowsArray.ToBuilder()
-
-            table.RowsArray.Indexed
-            |> List.ofSeq
-            |> traverse (fun (rowId, row) ->
+            mapRows (fun row ->
                 let updated = Array.copy row
 
                 changedColumns
                 |> traverse (fun (index, column) ->
                     recoerce column row.[index]
                     |> Result.map (fun value -> updated.[index] <- value))
-                |> Result.map (fun _ -> builder.[rowId] <- updated))
-            |> Result.map (fun _ ->
+                |> Result.map (fun _ -> updated))
+            |> Result.map (fun rows ->
                 { table with
                     Columns = columns
-                    RowsArray = builder.DrainToImmutable()
+                    RowsArray = rows
                     TableCharset = Some charset
                     TableCollation = Some collation },
                 None)
