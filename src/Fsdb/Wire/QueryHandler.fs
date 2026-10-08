@@ -1309,7 +1309,7 @@ let private tryHintArgument (hint: string) afterName =
         else
             None
 
-let private statementGeometryPointLimit options sql =
+let private statementGeometryPointLimit (hints: Parser.OptimizerHintLocation list) =
     let mutable pointLimit = None
 
     let syntaxWarning () =
@@ -1373,7 +1373,8 @@ let private statementGeometryPointLimit options sql =
                 else
                     Diagnostics.warning 1232 "Incorrect argument type to variable 'max_points_in_geometry'"
 
-    for hint in Parser.optimizerHintsWithOptions options sql do
+    for location in hints do
+        let hint = location.Body
         let matches = setVarHint.Matches hint
 
         for matched in matches |> Seq.cast<Match> |> Seq.filter (fun found -> isTopLevelHintToken hint found.Index) do
@@ -1385,7 +1386,37 @@ let private statementGeometryPointLimit options sql =
 
 let private timeoutHintName = Regex(@"\bMAX_EXECUTION_TIME\b", RegexOptions.IgnoreCase)
 
-let private statementTimeoutHint emitWarnings options (sql: string) =
+type private TimeoutHintError =
+    | InvalidTimeoutSyntax of offset: int
+    | UnsupportedTimeout of offset: int
+
+let private parseTimeoutHintArgument (body: string) afterName =
+    let skipWhitespace offset =
+        let mutable index = offset
+        while index < body.Length && Char.IsWhiteSpace body.[index] do
+            index <- index + 1
+        index
+
+    let openAt = skipWhitespace afterName
+    if openAt >= body.Length || body.[openAt] <> '(' then
+        Error(InvalidTimeoutSyntax openAt)
+    else
+        let start = skipWhitespace (openAt + 1)
+        let mutable finish = start
+        while finish < body.Length && body.[finish] >= '0' && body.[finish] <= '9' do
+            finish <- finish + 1
+        let closeAt = skipWhitespace finish
+        if finish = start then
+            Error(InvalidTimeoutSyntax start)
+        elif closeAt >= body.Length || body.[closeAt] <> ')' then
+            let offset = if closeAt < body.Length && body.[closeAt] = '.' then start else closeAt
+            Error(InvalidTimeoutSyntax offset)
+        else
+            match UInt64.TryParse(body.Substring(start, finish - start)) with
+            | true, value when value <= uint64 UInt32.MaxValue -> Ok value
+            | _ -> Error(UnsupportedTimeout closeAt)
+
+let private statementTimeoutHint emitWarnings options (sql: string) (hints: Parser.OptimizerHintLocation list) =
     let mutable timeout = None
     let warn code message =
         if emitWarnings then Diagnostics.warning code message
@@ -1394,54 +1425,33 @@ let private statementTimeoutHint emitWarnings options (sql: string) =
         let line = 1 + (sql.Substring(0, position) |> Seq.filter ((=) '\n') |> Seq.length)
         warn 1064 (sprintf "%s near '%s' at line %d" prefix suffix line)
 
-    for hint in Parser.optimizerHintLocationsWithOptions options sql do
+    for hint in hints do
         let viewDefinition =
             lazy (match Parser.parseWithOptions options sql with Ok(CreateView _) -> true | _ -> false)
         let mutable validSyntax = true
-        let skipWhitespace offset =
-            let mutable index = offset
-            while index < hint.Body.Length && Char.IsWhiteSpace hint.Body.[index] do
-                index <- index + 1
-            index
-        let syntaxError offset =
-            validSyntax <- false
-            near "Optimizer hint syntax error" (hint.BodyOffset + offset)
-
         for token in timeoutHintName.Matches hint.Body |> Seq.cast<Match> do
             if validSyntax && isTopLevelHintToken hint.Body token.Index then
-                let openAt = skipWhitespace (token.Index + token.Length)
-                if openAt >= hint.Body.Length || hint.Body.[openAt] <> '(' then
-                    syntaxError openAt
-                else
-                    let start = skipWhitespace (openAt + 1)
-                    let mutable finish = start
-                    while finish < hint.Body.Length && hint.Body.[finish] >= '0' && hint.Body.[finish] <= '9' do
-                        finish <- finish + 1
-                    let closeAt = skipWhitespace finish
-                    if finish = start then syntaxError start
-                    elif closeAt >= hint.Body.Length || hint.Body.[closeAt] <> ')' then
-                        syntaxError (if closeAt < hint.Body.Length && hint.Body.[closeAt] = '.' then start else closeAt)
-                    else
-                        let digits = hint.Body.Substring(start, finish - start)
-                        match UInt64.TryParse digits with
-                        | false, _ -> near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + closeAt)
-                        | true, value when value > uint64 UInt32.MaxValue ->
-                            near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + closeAt)
-                        | true, value ->
-                            if (hint.StatementKeyword = "CREATE" || hint.StatementKeyword = "ALTER") && viewDefinition.Value then
-                                ()
-                            elif not hint.IsLeadingSelect
-                               || (hint.StatementKeyword <> "SELECT" && hint.StatementKeyword <> "WITH" && hint.StatementKeyword <> "EXPLAIN") then
-                                warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
-                            elif timeout.IsSome then
-                                warn 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
-                            else timeout <- Some value
+                match parseTimeoutHintArgument hint.Body (token.Index + token.Length) with
+                | Error(InvalidTimeoutSyntax offset) ->
+                    validSyntax <- false
+                    near "Optimizer hint syntax error" (hint.BodyOffset + offset)
+                | Error(UnsupportedTimeout offset) ->
+                    near "Unsupported MAX_EXECUTION_TIME" (hint.BodyOffset + offset)
+                | Ok value ->
+                    match hint.StatementKeyword with
+                    | "CREATE" | "ALTER" when viewDefinition.Value -> ()
+                    | "SELECT" | "WITH" | "EXPLAIN" when hint.IsLeadingSelect ->
+                        match timeout with
+                        | Some _ -> warn 3126 (sprintf "Hint MAX_EXECUTION_TIME(%d) is ignored as conflicting/duplicated" value)
+                        | None -> timeout <- Some value
+                    | _ -> warn 3125 "MAX_EXECUTION_TIME hint is supported by top-level standalone SELECT statements only"
     timeout
 
 let private withStatementHintsCore emitTimeoutWarnings options sql body =
-    let timeout = statementTimeoutHint emitTimeoutWarnings options sql
+    let hints = Parser.optimizerHintLocationsWithOptions options sql
+    let timeout = statementTimeoutHint emitTimeoutWarnings options sql hints
     DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
-        match statementGeometryPointLimit options sql with
+        match statementGeometryPointLimit hints with
         | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
         | None -> body ())
 
@@ -5259,7 +5269,10 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
 let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
     prepareStatementWithOptions (parserOptionsForSession session) sql
     |> Result.bind (fun (statement, count) ->
-        statementTimeoutHint true (parserOptionsForSession session) sql |> ignore
+        let options = parserOptionsForSession session
+        Parser.optimizerHintLocationsWithOptions options sql
+        |> statementTimeoutHint true options sql
+        |> ignore
         match statement with
         | None -> Ok(statement, count)
         | Some ast ->
