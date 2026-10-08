@@ -99,3 +99,55 @@ compares alias and source-expression sorting on the same build.
 
 The native-only oracle includes these open boundaries. They are not enrolled as
 accepted differential failures or presented as implemented behavior.
+
+## Duplicate selection order and preparation
+
+For `duplicate_values(v INT,w INT)` containing `(2,10),(1,20)`, each expression
+in the following projection lists is named `a`. The observed selection rule
+scans matching projections from left to right: direct columns remain candidates,
+a distinct direct column makes the reference ambiguous, and the first computed
+match stops the scan. A computed projection does not rescue an ambiguity already
+encountered earlier in the list.
+
+| Projection expressions, in order | Native selection |
+|---|---|
+| `v,w,-v` | 1052 / 23000 |
+| `v,-v,w` | `-v` |
+| `-v,v,w` | `-v` |
+| `v,v,w` | 1052 / 23000 |
+| `v,v+0,w` | `v+0` |
+| `v,w+0,-v` | `w+0` |
+| `v,duplicate_values.v` | the same source column; accepted |
+| `v,+w,-v` | 1052 / 23000; unary plus does not make a new computed candidate |
+
+Both `ORDER BY a` and `ORDER BY ABS(a+3)` obey these outcomes when the source has
+no column named `a`. Distinct table aliases remain distinct sources even when a
+join equates their values: `l.v AS a,r.v AS a` is ambiguous under `ON l.v=r.v`.
+
+The tested direct-column/computed ordering also holds through a pass-through
+view, mergeable and LIMIT-materialized derived tables, and constant-only derived
+tables and views. Source identity therefore matters before literal-view
+expansion: replacing source references with literal syntax would misclassify
+them as computed candidates.
+
+Star expansion participates in bare-alias selection. `SELECT *,-v AS v ...
+ORDER BY v` selects the computed projection, whereas `SELECT *,w AS v ...
+ORDER BY v` is ambiguous. Nested references still prefer the source: both forms
+accept `ORDER BY ABS(v+3)` and order using the original `v` column.
+
+The native oracle checks these SELECTs and prepares each statement separately.
+The ambiguity is a preparation error even with `WHERE FALSE`; it does not depend
+on reading rows. At `86b2dbba`, fsdb accepts preparation of the ambiguous triple
+`v,w,-v` and raises 1052 only on execution. It also rejects the valid triple
+`v,-v,w` and the computed projection after a star with 1052, and reports 1054 for
+the identical qualified/unqualified pair inside `ABS(a+3)`.
+
+A shared selector needs to preserve both the selected projection position and
+its expression. The position identifies the already-projected value; the
+expression supplies type and collation metadata. Name-only lookup cannot choose
+a later computed projection correctly. The same source-aware selection must
+bind prepared statements and run before view expansion changes expression shape.
+
+The native matrix passes against MySQL 8.4.11 with the disposable server's
+64 MiB buffer and redo limits. fsdb preparation/execution observations use the
+embedded Debug assembly with `DOTNET_PROCESSOR_COUNT=8` and a 4 GiB GC heap cap.
