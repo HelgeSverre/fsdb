@@ -6090,8 +6090,25 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS predicate_base"; "SET sql_mode=DEFAULT" |]
           Coverage = [| "statement:update", [| "text-differential" |]; "statement:delete", [| "text-differential" |] |] }
 
+    let private bareTriggerConditions =
+        { Name = "bare-trigger-conditions"
+          Setup = [| "CREATE TABLE signal_parent(id INT PRIMARY KEY)"; "INSERT INTO signal_parent VALUES(1),(2)" |]
+          Steps =
+            [| Contract.execute "create-signal" "CREATE TRIGGER guard_parent BEFORE DELETE ON signal_parent FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='blocked'"
+               Contract.execute "signal-delete" "DELETE IGNORE FROM signal_parent WHERE id=1" |> Contract.fails 1644 "45000"
+               Contract.query "signal-warnings" "SHOW WARNINGS"
+               Contract.query "signal-rows" "SELECT id FROM signal_parent ORDER BY id"
+               Contract.execute "drop-signal" "DROP TRIGGER guard_parent"
+               Contract.execute "create-resignal" "CREATE TRIGGER guard_parent BEFORE DELETE ON signal_parent FOR EACH ROW RESIGNAL"
+               Contract.execute "resignal-delete" "DELETE IGNORE FROM signal_parent WHERE id=1" |> Contract.fails 1645 "0K000"
+               Contract.query "resignal-warnings" "SHOW WARNINGS"
+               Contract.query "resignal-rows" "SELECT id FROM signal_parent ORDER BY id" |]
+          Cleanup = [| "DROP TABLE IF EXISTS signal_parent" |]
+          Coverage = [| "statement:delete", [| "text-differential" |] |] }
+
     let all =
-        [| mutationConversion
+        [| bareTriggerConditions
+           mutationConversion
            predicateConversion
            joinHintMerging
            joinHintLifecycle

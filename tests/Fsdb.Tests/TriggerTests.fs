@@ -49,6 +49,31 @@ let tests =
                   Expect.isNone creation.Order "order"
               | other -> failtestf "expected BEFORE DELETE trigger AST, got %A" other
 
+          testCase "Bare RESIGNAL triggers require an active handler" <| fun _ ->
+              let store = create ()
+              let mutable session = Fsdb.Session.create 1 store
+              session <- step session "CREATE TABLE resignal_parent(id INT PRIMARY KEY)"
+              session <- step session "INSERT INTO resignal_parent VALUES(1)"
+              session <- step session "CREATE TRIGGER guard_parent BEFORE DELETE ON resignal_parent FOR EACH ROW RESIGNAL"
+              let next, result = handle session "DELETE IGNORE FROM resignal_parent"
+              match result with
+              | Err(1645, "RESIGNAL when handler not active") -> ()
+              | result -> failtestf "Expected inactive-handler error, got %A" result
+              Expect.equal (next.Diagnostics |> List.map _.State) [ "0K000" ] "native RESIGNAL SQLSTATE"
+              Expect.equal (rows store "SELECT id FROM resignal_parent") [ [ Some "1" ] ] "failed RESIGNAL preserves rows"
+
+          testCase "DELETE IGNORE preserves errors from bare SIGNAL triggers" <| fun _ ->
+              let store = create ()
+              let mutable session = Fsdb.Session.create 1 store
+              session <- step session "CREATE TABLE signal_parent(id INT PRIMARY KEY)"
+              session <- step session "INSERT INTO signal_parent VALUES(1),(2)"
+              session <- step session "CREATE TRIGGER guard_parent BEFORE DELETE ON signal_parent FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='blocked'"
+              match handle session "DELETE IGNORE FROM signal_parent WHERE id=1" |> snd with
+              | Err(1644, "blocked") -> ()
+              | result -> failtestf "Expected trigger signal to remain an error, got %A" result
+              Expect.equal (rows store "SELECT id FROM signal_parent ORDER BY id")
+                  [ [ Some "1" ]; [ Some "2" ] ] "trigger failure preserves rows"
+
           testCase "BEFORE INSERT can assign NEW values"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

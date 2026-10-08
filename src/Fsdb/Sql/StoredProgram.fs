@@ -1154,6 +1154,84 @@ let private parseWithFallback
                          && isSupportedText text -> Ok(TextSql text)
                 | Error error -> Error error
 
+    let parseStatement text =
+        let declaration = declarationPattern.Match text
+        let conditionDeclaration = conditionDeclarationPattern.Match text
+        let cursorDeclaration = cursorDeclarationPattern.Match text
+        let openCursor = openCursorPattern.Match text
+        let fetchCursor = fetchCursorPattern.Match text
+        let closeCursor = closeCursorPattern.Match text
+        let returnStatement = returnPattern.Match text
+        let assignment = assignmentPattern.Match text
+        let leave = leavePattern.Match text
+        let iterate = iteratePattern.Match text
+        let signal = signalPattern.Match text
+        let resignal = resignalPattern.Match text
+
+        match parseDiagnostics options text with
+        | Error error -> Error error
+        | Ok(Some diagnostics) -> Ok(GetDiagnostics diagnostics)
+        | Ok None when conditionDeclaration.Success ->
+            parseConditionValue conditionDeclaration.Groups.["condition"].Value
+            |> Result.map (fun condition ->
+                DeclareCondition(normalizeLabel conditionDeclaration.Groups.["name"].Value, condition))
+        | Ok None when cursorDeclaration.Success ->
+            Parser.parseStoredStatementWithOptions options cursorDeclaration.Groups.["query"].Value
+            |> Result.bind (function
+                | (Ast.Select _ | Ast.Union _) as query ->
+                    Ok(DeclareCursor(normalizeLabel cursorDeclaration.Groups.["name"].Value, query))
+                | _ -> Error "Cursor declaration requires a SELECT statement")
+        | Ok None when declaration.Success ->
+            Parser.parseColumnTypeWithOptions options declaration.Groups.["type"].Value
+            |> Result.bind (fun columnType ->
+                if declaration.Groups.["default"].Success then
+                    Parser.parseExpressionWithOptions options declaration.Groups.["default"].Value
+                    |> Result.map Some
+                else
+                    Ok None
+                |> Result.map (fun initialValue ->
+                    Declare
+                        { Name = declaration.Groups.["name"].Value.ToLowerInvariant()
+                          ColumnType = columnType
+                          InitialValue = initialValue }))
+        | Ok None when assignment.Success ->
+            Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
+            |> Result.map (fun value -> SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))
+        | Ok None when openCursor.Success ->
+            Ok(OpenCursor(normalizeLabel openCursor.Groups.["name"].Value))
+        | Ok None when fetchCursor.Success ->
+            let targets =
+                Parser.splitTopLevelCommaSeparatedWithOptions options fetchCursor.Groups.["targets"].Value
+                |> List.map normalizeLabel
+
+            Ok(FetchCursor(normalizeLabel fetchCursor.Groups.["name"].Value, targets))
+        | Ok None when closeCursor.Success ->
+            Ok(CloseCursor(normalizeLabel closeCursor.Groups.["name"].Value))
+        | Ok None when returnStatement.Success ->
+            Parser.parseExpressionWithOptions options returnStatement.Groups.["value"].Value
+            |> Result.map Return
+        | Ok None when leave.Success ->
+            Ok(Leave(normalizeLabel leave.Groups.["label"].Value))
+        | Ok None when iterate.Success ->
+            Ok(Iterate(normalizeLabel iterate.Groups.["label"].Value))
+        | Ok None when signal.Success ->
+            parseConditionValue signal.Groups.["condition"].Value
+            |> Result.bind (fun condition ->
+                parseSignalInformation options signal.Groups.["information"].Value
+                |> Result.map (fun information -> Signal(condition, information)))
+        | Ok None when resignal.Success ->
+            let condition =
+                if resignal.Groups.["condition"].Success then
+                    parseConditionValue resignal.Groups.["condition"].Value |> Result.map Some
+                else
+                    Ok None
+
+            condition
+            |> Result.bind (fun condition ->
+                parseSignalInformation options resignal.Groups.["information"].Value
+                |> Result.map (fun information -> Resignal(condition, information)))
+        | Ok None -> parseSql text
+
     let compound = compoundPattern.Match body
 
     if compound.Success then
@@ -1353,84 +1431,6 @@ let private parseWithFallback
         and parseLoop label bodyStart =
             parseClosedBody label bodyStart EndLoop "LOOP is missing END LOOP" (fun body -> Loop(label, body))
 
-        and parseStatement text =
-            let declaration = declarationPattern.Match text
-            let conditionDeclaration = conditionDeclarationPattern.Match text
-            let cursorDeclaration = cursorDeclarationPattern.Match text
-            let openCursor = openCursorPattern.Match text
-            let fetchCursor = fetchCursorPattern.Match text
-            let closeCursor = closeCursorPattern.Match text
-            let returnStatement = returnPattern.Match text
-            let assignment = assignmentPattern.Match text
-            let leave = leavePattern.Match text
-            let iterate = iteratePattern.Match text
-            let signal = signalPattern.Match text
-            let resignal = resignalPattern.Match text
-
-            match parseDiagnostics options text with
-            | Error error -> Error error
-            | Ok(Some diagnostics) -> Ok(GetDiagnostics diagnostics)
-            | Ok None when conditionDeclaration.Success ->
-                parseConditionValue conditionDeclaration.Groups.["condition"].Value
-                |> Result.map (fun condition ->
-                    DeclareCondition(normalizeLabel conditionDeclaration.Groups.["name"].Value, condition))
-            | Ok None when cursorDeclaration.Success ->
-                Parser.parseStoredStatementWithOptions options cursorDeclaration.Groups.["query"].Value
-                |> Result.bind (function
-                    | (Ast.Select _ | Ast.Union _) as query ->
-                        Ok(DeclareCursor(normalizeLabel cursorDeclaration.Groups.["name"].Value, query))
-                    | _ -> Error "Cursor declaration requires a SELECT statement")
-            | Ok None when declaration.Success ->
-                Parser.parseColumnTypeWithOptions options declaration.Groups.["type"].Value
-                |> Result.bind (fun columnType ->
-                    if declaration.Groups.["default"].Success then
-                        Parser.parseExpressionWithOptions options declaration.Groups.["default"].Value
-                        |> Result.map Some
-                    else
-                        Ok None
-                    |> Result.map (fun initialValue ->
-                        Declare
-                            { Name = declaration.Groups.["name"].Value.ToLowerInvariant()
-                              ColumnType = columnType
-                              InitialValue = initialValue }))
-            | Ok None when assignment.Success ->
-                Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
-                |> Result.map (fun value -> SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))
-            | Ok None when openCursor.Success ->
-                Ok(OpenCursor(normalizeLabel openCursor.Groups.["name"].Value))
-            | Ok None when fetchCursor.Success ->
-                let targets =
-                    Parser.splitTopLevelCommaSeparatedWithOptions options fetchCursor.Groups.["targets"].Value
-                    |> List.map normalizeLabel
-
-                Ok(FetchCursor(normalizeLabel fetchCursor.Groups.["name"].Value, targets))
-            | Ok None when closeCursor.Success ->
-                Ok(CloseCursor(normalizeLabel closeCursor.Groups.["name"].Value))
-            | Ok None when returnStatement.Success ->
-                Parser.parseExpressionWithOptions options returnStatement.Groups.["value"].Value
-                |> Result.map Return
-            | Ok None when leave.Success ->
-                Ok(Leave(normalizeLabel leave.Groups.["label"].Value))
-            | Ok None when iterate.Success ->
-                Ok(Iterate(normalizeLabel iterate.Groups.["label"].Value))
-            | Ok None when signal.Success ->
-                parseConditionValue signal.Groups.["condition"].Value
-                |> Result.bind (fun condition ->
-                    parseSignalInformation options signal.Groups.["information"].Value
-                    |> Result.map (fun information -> Signal(condition, information)))
-            | Ok None when resignal.Success ->
-                let condition =
-                    if resignal.Groups.["condition"].Success then
-                        parseConditionValue resignal.Groups.["condition"].Value |> Result.map Some
-                    else
-                        Ok None
-
-                condition
-                |> Result.bind (fun condition ->
-                    parseSignalInformation options resignal.Groups.["information"].Value
-                    |> Result.map (fun information -> Resignal(condition, information)))
-            | Ok None -> parseSql text
-
         match rootLabel, rootEndLabel with
         | None, Some actual -> Error(sprintf "End label '%s' has no matching start label" actual)
         | Some expected, Some actual when expected <> actual ->
@@ -1446,16 +1446,9 @@ let private parseWithFallback
                     | None -> Ok statements)
     else
         let body = body.Trim()
-        let returned = returnPattern.Match body
-        let assignment = assignmentPattern.Match body
-
-        if returned.Success then
-            Parser.parseExpressionWithOptions options returned.Groups.["value"].Value
-            |> Result.map (fun value -> [ Return value ])
-        elif assignment.Success then
-            Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
-            |> Result.map (fun value ->
-                [ SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value) ])
+        if returnPattern.IsMatch body || assignmentPattern.IsMatch body
+           || signalPattern.IsMatch body || resignalPattern.IsMatch body then
+            parseStatement body |> Result.map List.singleton
         else
             parseSql body |> Result.map List.singleton
 

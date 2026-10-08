@@ -86,6 +86,55 @@ cases = [('DELETE IGNORE FROM parent ORDER BY id;SHOW WARNINGS;SELECT id FROM pa
   '1\t2\n',
   [])]
 
+cases += [("CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '45000' SET "
+  "MESSAGE_TEXT='blocked';DELETE IGNORE FROM parent WHERE id=1;SHOW WARNINGS;SELECT id FROM parent "
+  'ORDER BY id',
+  'Level\tCode\tMessage\nError\t1644\tblocked\nid\n1\n2\n3\n',
+  [(1644, '45000')]),
+ ("CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET "
+  "MESSAGE_TEXT='noticed';DELETE IGNORE FROM parent WHERE id=1;SHOW WARNINGS;SELECT id FROM parent "
+  'ORDER BY id',
+  'id\n2\n3\n',
+  []),
+ ('CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW RESIGNAL;DELETE IGNORE FROM '
+  'parent WHERE id=1;SHOW WARNINGS;SELECT id FROM parent ORDER BY id',
+  'Level\tCode\tMessage\nError\t1645\tRESIGNAL when handler not active\nid\n1\n2\n3\n',
+  [(1645, '0K000')]),
+ ('DROP TABLE IF EXISTS audit;CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase '
+  'VARCHAR(10),id INT);CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT '
+  "INTO audit(phase,id) VALUES('before',OLD.id);CREATE TRIGGER after_parent AFTER DELETE ON parent "
+  "FOR EACH ROW INSERT INTO audit(phase,id) VALUES('after',OLD.id);DELETE IGNORE FROM parent;SHOW "
+  'WARNINGS;SELECT id FROM parent ORDER BY id;SELECT phase,id FROM audit ORDER BY seq',
+  'Level\tCode\tMessage\n'
+  'Warning\t1451\tCannot delete or update a parent row: a foreign key constraint fails '
+  '(`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\n'
+  'id\n'
+  '2\n'
+  'phase\tid\n'
+  'before\t1\n'
+  'after\t1\n'
+  'before\t2\n'
+  'before\t3\n'
+  'after\t3\n',
+  []),
+ ('DROP TABLE IF EXISTS audit;CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase '
+  'VARCHAR(10),id INT);CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT '
+  "INTO audit(phase,id) VALUES('before',OLD.id);CREATE TRIGGER after_parent AFTER DELETE ON parent "
+  "FOR EACH ROW INSERT INTO audit(phase,id) VALUES('after',OLD.id);DELETE IGNORE FROM parent ORDER "
+  'BY id DESC LIMIT 2;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT phase,id FROM audit '
+  'ORDER BY seq',
+  'Level\tCode\tMessage\n'
+  'Warning\t1451\tCannot delete or update a parent row: a foreign key constraint fails '
+  '(`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\n'
+  'id\n'
+  '1\n'
+  '2\n'
+  'phase\tid\n'
+  'before\t3\n'
+  'after\t3\n'
+  'before\t2\n',
+  [])]
+
 def verify(client, _writer):
     for sql, expected, errors in cases:
         result = subprocess.run(

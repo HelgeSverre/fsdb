@@ -1,0 +1,91 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "b3713d55",
+  "fsdb_dirty": true,
+  "cases": [
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`fk_parent`)\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n2\nid\tpid\n1\t2\n",
+      "matches": false,
+      "sql": "DELETE IGNORE FROM parent ORDER BY id;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "id\n2\n3\nid\tpid\n1\t2\n",
+      "expected": "id\n2\n3\nid\tpid\n1\t2\n",
+      "matches": true,
+      "sql": "DELETE IGNORE FROM parent ORDER BY id LIMIT 1;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`fk_parent`)\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n1\n2\nid\tpid\n1\t2\n",
+      "matches": false,
+      "sql": "DELETE IGNORE FROM parent ORDER BY id DESC LIMIT 2;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`fk_parent`)\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "matches": false,
+      "sql": "DELETE IGNORE FROM parent WHERE id=2;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`fk_parent`)\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n2\nid\tpid\n1\t2\n",
+      "matches": false,
+      "sql": "DELETE IGNORE p FROM parent p LEFT JOIN child c ON c.pid=p.id;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`fk_parent`)\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n2\nid\tpid\n1\t2\n",
+      "matches": false,
+      "sql": "DELETE IGNORE FROM p USING parent p LEFT JOIN child c ON c.pid=p.id;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tblocked\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "expected": "Level\tCode\tMessage\nError\t1644\tblocked\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "matches": true,
+      "sql": "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='blocked';DELETE IGNORE FROM parent WHERE id=1;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "",
+      "expected": "",
+      "matches": true,
+      "sql": "ALTER TABLE child DROP FOREIGN KEY fk_parent;ALTER TABLE child ADD CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id) ON DELETE CASCADE;DELETE IGNORE FROM parent;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`fk_parent`)\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n1\n2\n3\nid\tpid\n1\t2\n",
+      "matches": false,
+      "sql": "BEGIN;DELETE IGNORE FROM parent ORDER BY id;SHOW WARNINGS;ROLLBACK;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT id,pid FROM child ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1644\tblocked\nid\n1\n2\n3\n",
+      "expected": "Level\tCode\tMessage\nError\t1644\tblocked\nid\n1\n2\n3\n",
+      "matches": true,
+      "sql": "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='blocked';DELETE IGNORE FROM parent WHERE id=1;SHOW WARNINGS;SELECT id FROM parent ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1642\tnoticed\nid\n2\n3\n",
+      "expected": "id\n2\n3\n",
+      "matches": false,
+      "sql": "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW SIGNAL SQLSTATE '01000' SET MESSAGE_TEXT='noticed';DELETE IGNORE FROM parent WHERE id=1;SHOW WARNINGS;SELECT id FROM parent ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1645\tRESIGNAL when handler not active\nid\n1\n2\n3\n",
+      "expected": "Level\tCode\tMessage\nError\t1645\tRESIGNAL when handler not active\nid\n1\n2\n3\n",
+      "matches": true,
+      "sql": "CREATE TRIGGER guard_parent BEFORE DELETE ON parent FOR EACH ROW RESIGNAL;DELETE IGNORE FROM parent WHERE id=1;SHOW WARNINGS;SELECT id FROM parent ORDER BY id"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`fk_parent`)\nid\n1\n2\n3\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n2\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "matches": false,
+      "sql": "DROP TABLE IF EXISTS audit;CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT);CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('before',OLD.id);CREATE TRIGGER after_parent AFTER DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('after',OLD.id);DELETE IGNORE FROM parent;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT phase,id FROM audit ORDER BY seq"
+    },
+    {
+      "actual": "Level\tCode\tMessage\nError\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`fk_parent`)\nid\n1\n2\n3\n",
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk_parent` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`))\nid\n1\n2\nphase\tid\nbefore\t3\nafter\t3\nbefore\t2\n",
+      "matches": false,
+      "sql": "DROP TABLE IF EXISTS audit;CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT);CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('before',OLD.id);CREATE TRIGGER after_parent AFTER DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('after',OLD.id);DELETE IGNORE FROM parent ORDER BY id DESC LIMIT 2;SHOW WARNINGS;SELECT id FROM parent ORDER BY id;SELECT phase,id FROM audit ORDER BY seq"
+    }
+  ]
+}

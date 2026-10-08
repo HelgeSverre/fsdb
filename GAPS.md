@@ -74,7 +74,7 @@ under `torture/findings/`.
 The application-facing DML surface includes `INSERT`/`REPLACE ... SET`, ODKU,
 `IGNORE`, and multi-table forms. `DELETE IGNORE` retains its modifier through
 parsing and the [audited conversion-warning policy](torture/findings/2026-10-08-mutation-conversion.md);
-[foreign-key row skipping and a bare SIGNAL trigger control](torture/findings/2026-10-08-delete-ignore.md)
+[foreign-key row skipping and trigger warning lifetimes](torture/findings/2026-10-08-delete-ignore.md)
 remain divergent; other ignored-delete error classes require further native coverage. `SELECT` covers joins, derived and lateral
 sources, `JSON_TABLE`, expression subqueries, set operations, windows, rollups,
 and ordinary or recursive query-scoped CTEs. CTEs can lead UPDATE or DELETE and
