@@ -119,6 +119,63 @@ let tests =
                   | result -> failtestf "Expected ROLLUP rows, got %A" result
                   Expect.equal (execute "SELECT @n") (ResultSet([ "@n" ], [ [ Some counter ] ])) sql
 
+          testCase "grouped projections restore returned root assignments"
+          <| fun _ ->
+              let connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              let execute sql = connection.Query sql
+              execute "CREATE TABLE replay_input(v INT)" |> ignore
+              execute "INSERT INTO replay_input VALUES(2),(1),(3)" |> ignore
+              for sql, expected, variables in
+                  [ "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)", [ [ Some "9"; Some "10"; Some "3" ]; [ Some "1"; Some "2"; Some "2" ]; [ Some "5"; Some "6"; Some "1" ] ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "9"; Some "10"; Some "3" ] ], [ Some "10"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1", [ [ Some "1"; Some "2"; Some "2" ] ], [ Some "2"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0", [  ], [ Some "0"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10", [  ], [ Some "12"; Some "0" ]
+                    "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)", [ [ Some "109"; Some "110"; Some "3" ]; [ Some "101"; Some "102"; Some "2" ]; [ Some "105"; Some "106"; Some "1" ] ], [ Some "12"; Some "0" ]
+                    "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "109"; Some "110"; Some "3" ] ], [ Some "12"; Some "0" ]
+                    "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1", [ [ Some "101"; Some "102"; Some "2" ] ], [ Some "12"; Some "0" ]
+                    "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0", [  ], [ Some "0"; Some "0" ]
+                    "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10", [  ], [ Some "12"; Some "0" ]
+                    "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)", [ [ Some "109"; Some "110"; Some "3" ]; [ Some "101"; Some "102"; Some "2" ]; [ Some "105"; Some "106"; Some "1" ] ], [ Some "106"; Some "12" ]
+                    "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "109"; Some "110"; Some "3" ] ], [ Some "110"; Some "12" ]
+                    "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1", [ [ Some "101"; Some "102"; Some "2" ] ], [ Some "102"; Some "12" ]
+                    "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0", [  ], [ Some "0"; Some "0" ]
+                    "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10", [  ], [ Some "112"; Some "12" ]
+                    "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)", [ [ Some "3"; Some "3"; Some "1" ]; [ Some "1"; Some "1"; Some "2" ]; [ Some "5"; Some "5"; Some "3" ] ], [ Some "5"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "3"; Some "3"; Some "1" ] ], [ Some "3"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1", [ [ Some "1"; Some "1"; Some "2" ] ], [ Some "1"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0", [  ], [ Some "0"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10", [  ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)", [ [ Some "3"; Some "3"; Some "1" ]; [ Some "1"; Some "1"; Some "2" ]; [ Some "5"; Some "5"; Some "3" ] ], [ Some "5"; Some "5" ]
+                    "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "3"; Some "3"; Some "1" ] ], [ Some "3"; Some "3" ]
+                    "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1", [ [ Some "1"; Some "1"; Some "2" ] ], [ Some "1"; Some "1" ]
+                    "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0", [  ], [ Some "0"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10", [  ], [ Some "6"; Some "6" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input ORDER BY IF(a=b,v,-v)", [ [ Some "9"; Some "10"; Some "3" ]; [ Some "1"; Some "2"; Some "2" ]; [ Some "5"; Some "6"; Some "1" ] ], [ Some "12"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY (@m:=v) DESC LIMIT 1", [ [ Some "5"; Some "6"; Some "3" ] ], [ Some "6"; Some "3" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING v>1 ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "9"; Some "10"; Some "3" ] ], [ Some "10"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input WHERE v>1 GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "5"; Some "6"; Some "3" ] ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING v>1", [ [ Some "1"; Some "2"; Some "2" ]; [ Some "5"; Some "6"; Some "3" ] ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING v>1 ORDER BY v", [ [ Some "1"; Some "2"; Some "2" ]; [ Some "5"; Some "6"; Some "3" ] ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING v>1 ORDER BY IF(a=b,v,-v)", [ [ Some "9"; Some "10"; Some "3" ]; [ Some "1"; Some "2"; Some "2" ] ], [ Some "2"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 2", [ [ Some "5"; Some "6"; Some "1" ] ], [ Some "6"; Some "0" ]
+                    "SELECT SQL_CALC_FOUND_ROWS (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0", [  ], [ Some "12"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v,COUNT(DISTINCT v) AS c FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "9"; Some "10"; Some "3"; Some "1" ] ], [ Some "10"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v,COUNT(DISTINCT v) AS c FROM replay_input GROUP BY v HAVING v>1 ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "9"; Some "10"; Some "3"; Some "1" ] ], [ Some "10"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v,SUM(v) AS c FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "5"; Some "6"; Some "3"; Some "3" ] ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v,SUM(v) AS c FROM replay_input GROUP BY v HAVING v>1 ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "5"; Some "6"; Some "3"; Some "3" ] ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v WITH ROLLUP ORDER BY IF(a=b,v,-v) LIMIT 1", [ [ Some "13"; Some "14"; None ] ], [ Some "14"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING a>2 ORDER BY v", [ [ Some "3"; Some "4"; Some "1" ]; [ Some "5"; Some "6"; Some "3" ] ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,v FROM replay_input GROUP BY v HAVING FALSE ORDER BY a+0", [  ], [ Some "0"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,v FROM replay_input GROUP BY v HAVING 1=0 ORDER BY a+0", [  ], [ Some "0"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,v FROM replay_input GROUP BY v HAVING v<0 ORDER BY a+0", [  ], [ Some "6"; Some "0" ]
+                    "SELECT (@n:=@n+1) AS a,v FROM replay_input GROUP BY v HAVING TRUE ORDER BY a+0", [ [ Some "1"; Some "2" ]; [ Some "3"; Some "1" ]; [ Some "5"; Some "3" ] ], [ Some "5"; Some "0" ] ] do
+                  execute "SET @n=0,@m=0" |> ignore
+                  match execute sql with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | result -> failtestf "Expected grouped projection rows, got %A" result
+                  Expect.equal (execute "SELECT @n,@m") (ResultSet([ "@n"; "@m" ], [ variables ])) sql
+
           testCase "ordering aggregates cannot introduce an implicit group"
           <| fun _ ->
               let store = newStore ()

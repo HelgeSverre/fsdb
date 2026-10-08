@@ -370,3 +370,44 @@ HAVING-group projections; the latter changes both row values and counters.
 The embedded comparison uses eight logical processors and a 4 GiB GC heap cap.
 These native-only boundaries are not enrolled as passing wire contracts or
 known-gap signatures.
+
+## Returned assignment restoration
+
+Grouped execution now separates projection and ordering evaluation from HAVING
+acceptance. Rejected groups retain the projection side effects observed by the
+native fixtures. HAVING aliases reuse projected values by syntax-node identity;
+aggregate argument nodes remain intact so their materialized inputs are not
+reevaluated. Scalar aggregation retains HAVING-before-projection behavior.
+
+Ordinary aggregate grouping reuses projected values for nested ordering aliases.
+Group-key aggregation, including DISTINCT aggregates, retains the independently
+observed alias reevaluation. This distinction matters even when an aggregate
+such as SUM(v) is adjacent to otherwise unchanged assignment projections.
+
+After sorting, duplicate elimination, and LIMIT/OFFSET, only assignments at the
+projection root receive the corresponding returned typed values. Nested
+assignments and expression trees are not rerun. Ordinary nongrouped SELECT
+keeps its existing evaluation state. An offset beyond the results restores
+nothing. Ordinary LIMIT 0 skips runtime input and projection evaluation while
+retaining metadata validation.
+
+SQL_CALC_FOUND_ROWS evaluates the unbounded query once. It retains its query
+flag and scopes the original output slice so grouped assignment restoration
+uses only rows that the caller will return. The full result remains available
+for counting. This preserves the LIMIT 0 case's evaluation state and FOUND_ROWS()
+without treating counted rows as returned rows.
+
+The expanded native oracle passes direct and SQL-prepared cases for SUM,
+COUNT DISTINCT, ROLLUP, HAVING aliases, nested assignments, and output offsets.
+The wire lane passes 59 cases / 6,847 steps with zero differences at
+`20261008T031751580-8564/contracts`, including prepared execution and found-row
+counts. No known-gap signatures are added. The explicit assignment replay and
+HAVING/LIMIT boundaries above are resolved for these fixtures; broader plan,
+index, and collation combinations are not a claim of universal evaluation parity.
+
+Constant-false HAVING (`FALSE` and `1=0`) skips runtime projection work. A
+row-dependent predicate (`v<0`) that rejects every group still retains its
+projection and ordering side effects. The existing audited constant-expression
+evaluator distinguishes these paths without evaluating session variables early.
+Final validation passes 3,049 tests with no build warnings/errors under a 4 GiB
+GC heap cap, plus the expanded direct/prepared native oracle and wire lane.

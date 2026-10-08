@@ -80,19 +80,15 @@ compares alias and source-expression sorting on the same build.
 
 ## Remaining boundaries
 
-- Grouped volatile expressions still expose evaluation-order differences. With
-  `@n=0`, `SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM ordering_values
-  GROUP BY v ORDER BY IF(a=b,v,-v)` returns the same rows `(1,2,2),(5,6,1)` but
-  leaves `@n=6` in MySQL and `@n=8` in fsdb. Repeating an assignment-bearing
-  aggregate explicitly in the ordering expression requires separate input
-  values from the projection. Materialized aggregate inputs now reproduce
-  MySQL's projection `2,4` and final `@n=4`; projection-assignment replay remains
-  open. These observations are fixture-specific evaluation contracts.
-- A window specification referencing the projection alias has native
-  1054 in `window order by`; fsdb uses `order clause` wording.
+Grouped aggregate input ordering and returned projection-assignment replay now
+match their maintained native fixtures, including hidden aggregate occurrences,
+HAVING, LIMIT/OFFSET, ROLLUP, and SQL_CALC_FOUND_ROWS. The
+[grouped evaluation evidence](2026-10-08-grouped-evaluation.md) records the
+phase-specific contracts and differential validation.
 
-The native-only oracle includes these open boundaries. They are not enrolled as
-accepted differential failures or presented as implemented behavior.
+A window specification referencing a projection alias still has native error
+1054 in `window order by`, while fsdb uses `order clause` wording. This native-only
+boundary is not enrolled as an accepted differential failure.
 
 ## Duplicate selection order and preparation
 

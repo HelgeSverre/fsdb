@@ -694,6 +694,71 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS rollup_input"; "SET @n=NULL" |]
           Coverage = [| "statement:select", [| "aggregation"; "rollup"; "evaluation-order"; "text-differential"; "prepared-differential" |] |] }
 
+    let private groupedProjectionReplay =
+        let queries =
+            [| "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10"
+               "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)"
+               "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1"
+               "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0"
+               "SELECT 100+(@n:=@n+1) AS a,100+(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10"
+               "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)"
+               "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1"
+               "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0"
+               "SELECT (@n:=100+(@m:=@m+1)) AS a,(@n:=100+(@m:=@m+1)) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10"
+               "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)"
+               "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1"
+               "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0"
+               "SELECT (@n:=@n+1) AS a,@n AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10"
+               "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v)"
+               "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 1"
+               "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0"
+               "SELECT (@n:=@n+1) AS a,(@m:=@n) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 10"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input ORDER BY IF(a=b,v,-v)"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY (@m:=v) DESC LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING v>1 ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input WHERE v>1 GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING v>1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING v>1 ORDER BY v"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING v>1 ORDER BY IF(a=b,v,-v)"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1 OFFSET 2"
+               "SELECT SQL_CALC_FOUND_ROWS (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 0"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v,COUNT(DISTINCT v) AS c FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v,COUNT(DISTINCT v) AS c FROM replay_input GROUP BY v HAVING v>1 ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v,SUM(v) AS c FROM replay_input GROUP BY v ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v,SUM(v) AS c FROM replay_input GROUP BY v HAVING v>1 ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v WITH ROLLUP ORDER BY IF(a=b,v,-v) LIMIT 1"
+               "SELECT (@n:=@n+1) AS a,(@n:=@n+1) AS b,v FROM replay_input GROUP BY v HAVING a>2 ORDER BY v"
+               "SELECT (@n:=@n+1) AS a,v FROM replay_input GROUP BY v HAVING FALSE ORDER BY a+0"
+               "SELECT (@n:=@n+1) AS a,v FROM replay_input GROUP BY v HAVING 1=0 ORDER BY a+0"
+               "SELECT (@n:=@n+1) AS a,v FROM replay_input GROUP BY v HAVING v<0 ORDER BY a+0"
+               "SELECT (@n:=@n+1) AS a,v FROM replay_input GROUP BY v HAVING TRUE ORDER BY a+0" |]
+        { Name = "grouped-projection-replay"
+          Setup = [| "CREATE TABLE replay_input(v INT)"; "INSERT INTO replay_input VALUES(2),(1),(3)" |]
+          Steps =
+            [| for sql in queries do
+                   yield Contract.execute "reset variables" "SET @n=0,@m=0"
+                   yield Contract.query sql sql
+                   if sql.Contains("SQL_CALC_FOUND_ROWS") then
+                       yield Contract.query "found rows" "SELECT FOUND_ROWS()"
+                   yield Contract.query "variables" "SELECT @n,@m"
+                   yield Contract.execute "reset prepared variables" "SET @n=0,@m=0"
+                   yield Contract.execute "prepare replay" ("PREPARE projection_replay FROM '" + sql.Replace("'", "''") + "'")
+                   yield Contract.query ("prepared: " + sql) "EXECUTE projection_replay"
+                   if sql.Contains("SQL_CALC_FOUND_ROWS") then
+                       yield Contract.query "prepared found rows" "SELECT FOUND_ROWS()"
+                   yield Contract.query "prepared variables" "SELECT @n,@m"
+                   yield Contract.execute "deallocate replay" "DEALLOCATE PREPARE projection_replay" |]
+          Cleanup = [| "DROP TABLE IF EXISTS replay_input"; "SET @n=NULL,@m=NULL" |]
+          Coverage = [| "statement:select", [| "aggregation"; "evaluation-order"; "text-differential"; "prepared-differential" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3572,6 +3637,7 @@ module ContractCatalog =
            groupedAggregateFamilies
            groupConcatOrdering
            rollupEvaluation
+           groupedProjectionReplay
            exactErrors
            noDirInCreate
            semanticErrors

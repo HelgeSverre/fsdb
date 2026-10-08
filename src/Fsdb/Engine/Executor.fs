@@ -605,6 +605,7 @@ let private viewMergeDepth = System.Threading.AsyncLocal<int>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
 let private triggerSessionExecutor = System.Threading.AsyncLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
+let private foundRowsOutputSlice = System.Threading.AsyncLocal<(int option * int option) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private metadataProbe = System.Threading.AsyncLocal<bool>()
 let private planningProbe = System.Threading.AsyncLocal<bool>()
@@ -14739,12 +14740,21 @@ and private runGroupedSelect
                 |> Result.map (fun v -> [ projectionLabel projection, v ]))
         |> Result.map List.concat
 
-    let havingOk (rollup: Expr -> Expr) (groupRows: GroupInputRow list) : Result<bool, EvalError> =
+    let havingOk (rollup: Expr -> Expr) projected (groupRows: GroupInputRow list) : Result<bool, EvalError> =
         match havingExpression with
         | None -> Ok true
         | Some resolved ->
+            let bindProjectedAliases expression =
+                match projected with
+                | None -> expression
+                | Some values ->
+                    let bindings = List.map2 (fun (projection: Projection) (_, value) -> projection.Expression, value) orderProjections values
+                    Expression.rewrite (fun node ->
+                        bindings |> List.tryPick (fun (candidate, value) ->
+                            if obj.ReferenceEquals(candidate, node) then Some(Lit value) else None)
+                        |> Option.orElseWith (fun () -> if isAggregateCall registry node then Some node else None)) expression
             resolved
-            |> Result.map rollup
+            |> Result.map (bindProjectedAliases >> rollup)
             |> Result.bind (rewriteGroupAggregates groupRows)
             |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = HavingClause })
             |> Result.map (fun v -> truthy v = Some true)
@@ -14760,7 +14770,9 @@ and private runGroupedSelect
             |> List.choose (fun name ->
                 resolveOrderAliasValue columnIndex qualifiers orderProjections name outputCols
                 |> Result.toOption |> Option.flatten
-                |> Option.filter (fst >> containsAggregate registry)
+                |> Option.filter (fun (expression, _) ->
+                    containsAggregate registry expression
+                    || (aggregateInputOrder = SourceRowOrder && not aggregateCalls.IsEmpty))
                 |> Option.map (fun (expression, value) -> name, (RuntimeExpression expression, value)))
         let cachedContext =
             let context = { ctx with EvaluatedExpressions = aliases |> List.map snd }
@@ -14881,7 +14893,7 @@ and private runGroupedSelect
             withSuppressedVariableAssignments (fun () ->
                 matches probe
                 |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr { probeContext with Clause = GroupStatement }) |> Result.map ignore)
-                |> Result.bind (fun _ -> havingOk probeRewrite [])
+                |> Result.bind (fun _ -> havingOk probeRewrite None [])
                 |> Result.bind (fun _ -> projectGroup probeRewrite [])
                 |> Result.bind (fun probeProjected ->
                     orderKeysOf probeRewrite probeProjected []
@@ -15003,7 +15015,15 @@ and private runGroupedSelect
                             | ArbitraryGroupRows -> addUnordered key input
                             None)))
 
-        match rows |> traverseSeq collect with
+        let impossibleHaving =
+            havingExpression |> Option.bind Result.toOption
+            |> Option.bind (tryClosedNumericValue probeContext)
+            |> Option.exists (fun value -> truthy value <> Some true)
+        let skipRuntime =
+            impossibleHaving
+            || (not select.CalculateFoundRows && (select.Limit |> Option.exists (fun limit -> rowCount limit = 0)))
+        let inputRows = if skipRuntime then Seq.empty else rows
+        match inputRows |> traverseSeq collect with
         | Error(code, message) -> Err(code, message), [], []
         | Ok matched ->
             let ascending = List.replicate groupExprs.Length Asc
@@ -15082,22 +15102,27 @@ and private runGroupedSelect
                     : Result<((string * Value) list * (Value * Collation.Collation option) list * Value list) option, EvalError> =
                     rollupRewrite rolledCount
                     |> Result.bind (fun rollup ->
-                        havingOk rollup groupRows
-                        |> Result.bind (fun keep ->
-                            if not keep then
-                                Ok None
-                            else
-                                projectGroup rollup groupRows
-                                |> Result.bind (fun proj ->
-                                    // A single aggregate group has no runtime sort; the metadata probe still validates its names.
-                                    let orderKeys = if groupExprs.IsEmpty then Ok [] else orderKeysOf rollup proj groupRows
-                                    orderKeys |> Result.map (fun keys -> Some(proj, keys, key)))))
+                        let project () =
+                            projectGroup rollup groupRows
+                            |> Result.bind (fun projection ->
+                                // A single aggregate group has no runtime sort; the metadata probe still validates its names.
+                                let keys = if groupExprs.IsEmpty then Ok [] else orderKeysOf rollup projection groupRows
+                                keys |> Result.map (fun keys -> projection, keys, key))
+                        if groupExprs.IsEmpty then
+                            havingOk rollup None groupRows
+                            |> Result.bind (fun keep -> if keep then project () |> Result.map Some else Ok None)
+                        else
+                            project ()
+                            |> Result.bind (fun ((projection, _, _) as output) ->
+                                havingOk rollup (Some projection) groupRows
+                                |> Result.map (fun keep -> if keep then Some output else None)))
 
                 let limit = select.Limit |> Option.map rowCount
                 let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
                 let stopAfter =
-                    if select.Rollup && not select.CalculateFoundRows
-                       && (limit = Some 0 || (select.OrderBy.IsEmpty && not select.Distinct)) then
+                    if skipRuntime then Some 0L
+                    elif select.Rollup && not select.CalculateFoundRows
+                         && select.OrderBy.IsEmpty && not select.Distinct then
                         limit |> Option.map (fun count -> if count = 0 then 0L else int64 count + int64 offset)
                     else None
                 let mutable emitted = 0L
@@ -15137,7 +15162,29 @@ and private runGroupedSelect
                     let limited =
                         dedupedPaired
                         |> applyLimitOffset (Option.map rowCount select.Limit) (Option.map rowCount select.Offset)
-                    ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
+                    let returnedAssignments =
+                        if groupExprs.IsEmpty then []
+                        else
+                            orderProjections |> List.mapi (fun index projection ->
+                                match projection.Expression with
+                                | AssignUserVariable(variable, _) -> Some(index, variable)
+                                | _ -> None)
+                            |> List.choose id
+                    let restoreAssignments (_, values: Value[]) =
+                        returnedAssignments
+                        |> traverse (fun (index, variable) ->
+                            evalExpr groupCtx (AssignUserVariable(variable, Lit values.[index])) |> Result.map ignore)
+                        |> Result.map ignore
+                    let returned =
+                        match select.CalculateFoundRows, foundRowsOutputSlice.Value with
+                        | true, Some(limit, offset) -> limited |> applyLimitOffset limit offset
+                        | _ -> limited
+                    let restored =
+                        if returnedAssignments.IsEmpty then Ok ()
+                        else returned |> traverse restoreAssignments |> Result.map ignore
+                    match restored with
+                    | Error(code, message) -> Err(code, message), [], []
+                    | Ok () -> ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
 /// MySQL evaluates windows after grouping.
 and private runGroupedWindowSelect
@@ -18839,13 +18886,15 @@ let runTopLevelSelect
     if select.CalculateFoundRows then
         let unbounded =
             { executable with
-                CalculateFoundRows = false
                 Limit = None
                 Offset = None }
 
-        let result, types, values = runSelectStmt store registry dbName unbounded None
         let limit = select.Limit |> Option.map rowCount
         let offset = select.Offset |> Option.map rowCount
+        // Counting evaluates all rows, but grouped assignment replay belongs only to returned rows.
+        let result, types, values =
+            DynamicScope.withValue foundRowsOutputSlice (Some(limit, offset)) (fun () ->
+                runSelectStmt store registry dbName unbounded None)
 
         match result with
         | ResultSet(columns, rows) ->
