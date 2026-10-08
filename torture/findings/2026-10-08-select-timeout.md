@@ -86,3 +86,25 @@ Remaining: MAX_EXECUTION_TIME hint parsing, validation and precedence; native
 overflow behavior for extreme unsigned durations; broader scalar-only and
 stored-routine combinations. Deadline checks are cooperative, so operations
 without an internal polling point are observed at the next engine check.
+
+## Timeout hint diagnostics
+
+`select-timeout-hints-oracle.py` pins native warning behavior. Signed, decimal,
+quoted, NULL, empty, and multiple-argument spellings warn with 1064 and retain
+successful query execution. Syntax diagnostics identify the offending source
+suffix and line. The first accepted hint wins; later duplicates warn with 3126,
+including when the first value is zero. Nested SELECT and UPDATE hints warn
+with 3125, while misplaced hint comments are ignored. Prepared statements emit
+these warnings at preparation and do not repeat them on EXECUTE.
+
+The native fixture accepts 4,294,967,295 and warns for 4,294,967,296. An exploratory
+UINT64_MAX hint interrupted its own scalar readback; that unstable overflow case
+is excluded from the deterministic diagnostic fixture and remains open.
+
+The existing comment scanner exposes hint body offsets, owning and statement
+keywords, and parenthesis depth. Its body-only interface retains existing
+behavior. The scanner regression covers nesting, quoted parentheses, misplaced
+comments, and statement batches. All 3,089 tests pass, and the existing wire
+suite remains at 65 cases / 8,381 steps / zero differences:
+`torture/artifacts/runs/20261008T082458417-8827/contracts`.
+Timeout-hint interpretation and preparation-lifetime diagnostics remain open.

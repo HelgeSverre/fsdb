@@ -3823,6 +3823,17 @@ let tests =
                       "only statement delimiters split the batch"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "optimizer hint locations retain scope and source offsets"
+          <| fun _ ->
+              let sql = "SELECT /*+ MAX_EXECUTION_TIME(10) */ '(', (SELECT /*+ MAX_EXECUTION_TIME(2) */ 1) AS n /*+ ignored */; UPDATE /*+ MAX_EXECUTION_TIME(3) */ t SET n=1"
+              let hints = optimizerHintLocationsWithOptions defaultOptions sql
+              Expect.equal
+                  (hints |> List.map (fun hint -> hint.Keyword, hint.StatementKeyword, hint.ParenthesisDepth))
+                  [ "SELECT", "SELECT", 0; "SELECT", "SELECT", 1; "UPDATE", "UPDATE", 0 ]
+                  "quoted parentheses and misplaced hints do not alter scope"
+              for hint in hints do
+                  Expect.equal (sql.Substring(hint.BodyOffset, hint.Body.Length)) hint.Body "body points into original SQL"
+
           testCase "statement batches retain executable optimizer hints"
           <| fun _ ->
               let hinted = "SELECT /*+ SET_VAR(max_points_in_geometry=3) */ 1"

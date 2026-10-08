@@ -271,6 +271,13 @@ let private lineEnd (sql: string) (start: int) =
     | index, -1 -> index
     | cr, lf -> min cr lf
 
+type internal OptimizerHintLocation =
+    { Body: string
+      BodyOffset: int
+      Keyword: string
+      StatementKeyword: string
+      ParenthesisDepth: int }
+
 /// mysqldump wraps version-specific SQL in `/*!NNNNN ... */` (or a bare
 /// `/*! ... */` for "any version") so one dump can target several server
 /// versions at once: MySQL's grammar runs the wrapped SQL as ordinary
@@ -285,9 +292,12 @@ let private lineEnd (sql: string) (start: int) =
 /// with whitespace between a built-in name and `(` under `IGNORE_SPACE`.
 let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options: ParserOptions) (sql: string) =
     let output = if rewrite then Text.StringBuilder(sql.Length) else null
-    let optimizerHints = ResizeArray<string>()
+    let optimizerHints = ResizeArray<OptimizerHintLocation>()
     let mutable i = 0
     let mutable optimizerHintMayFollow = false
+    let mutable hintKeyword = ""
+    let mutable statementKeyword = None
+    let mutable parenthesisDepth = 0
 
     let appendChar (value: char) =
         if not (isNull output) then
@@ -385,7 +395,12 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
                 i <- sql.Length
             else
                 if sql.[i + 2] = '+' && optimizerHintMayFollow then
-                    optimizerHints.Add(sql.Substring(i + 3, closeAt - (i + 3)))
+                    optimizerHints.Add
+                        { Body = sql.Substring(i + 3, closeAt - (i + 3))
+                          BodyOffset = i + 3
+                          Keyword = hintKeyword.ToUpperInvariant()
+                          StatementKeyword = (statementKeyword |> Option.defaultValue hintKeyword).ToUpperInvariant()
+                          ParenthesisDepth = parenthesisDepth }
 
                 optimizerHintMayFollow <- false
 
@@ -438,6 +453,8 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
 
             let word = sql.Substring(start, i - start)
             appendText word
+            hintKeyword <- word
+            if statementKeyword.IsNone then statementKeyword <- Some hintKeyword
 
             optimizerHintMayFollow <-
                 word.Equals("SELECT", StringComparison.OrdinalIgnoreCase)
@@ -446,6 +463,11 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options:
                 || word.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)
                 || word.Equals("DELETE", StringComparison.OrdinalIgnoreCase)
         | None ->
+            match sql.[i] with
+            | '(' -> parenthesisDepth <- parenthesisDepth + 1
+            | ')' -> parenthesisDepth <- max 0 (parenthesisDepth - 1)
+            | ';' when parenthesisDepth = 0 -> statementKeyword <- None
+            | _ -> ()
             if not (Char.IsWhiteSpace sql.[i]) then
                 optimizerHintMayFollow <- false
 
@@ -466,11 +488,14 @@ let stripVersionComments (sql: string) : string =
 /// Optimizer-hint bodies attached to a statement or nested query keyword.
 /// Comment-like text inside literals and misplaced `/*+ ... */` comments is
 /// intentionally excluded here, before individual hint grammars inspect it.
-let internal optimizerHintsWithOptions (options: ParserOptions) (sql: string) : string list =
+let internal optimizerHintLocationsWithOptions (options: ParserOptions) (sql: string) : OptimizerHintLocation list =
     if sql.IndexOf("/*+", StringComparison.Ordinal) < 0 then
         []
     else
         scanComments false false options sql |> snd
+
+let internal optimizerHintsWithOptions options sql =
+    optimizerHintLocationsWithOptions options sql |> List.map _.Body
 
 let private expandVersionComments (options: ParserOptions) (sql: string) =
     rewriteVersionComments false options sql
