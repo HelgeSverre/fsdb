@@ -1,7 +1,7 @@
 # ALTER stored-value coercion conditions
 
 Status: audited single-column conditions and COPY affected-row counts implemented;
-multi-column ordering and decimal HEX conversion remain open.
+multi-column ordering remains open.
 
 ## Native evidence
 
@@ -9,7 +9,7 @@ multi-column ordering and decimal HEX conversion remain open.
 replays 23 scripts on disposable native MySQL 8.4.11 with a 64 MiB buffer pool
 and redo capacity. The fixture records statements, rendered results and warnings,
 and numeric error codes with SQLSTATEs. It does not capture affected-row counts.
-The fsdb replay matches 20 scripts exactly; the three remaining results are
+The fsdb replay matches 22 scripts exactly; the remaining mismatch is
 retained in `2026-10-08-alter-coercion-current.json`.
 
 ## Established behavior
@@ -31,7 +31,7 @@ narrowed to VARCHAR(1), MySQL emits truncation warnings for rows 1 and 2, then
 1062. It emits no warning for row 3. The engine shares stored-value coercion with
 ordinary writes and checks unique keys as each converted row is built.
 
-The `alter-coercion` wire contract covers all 20 matching scripts, including
+The `alter-coercion` wire contract covers all 22 matching scripts, including
 successful COPY affected-row counts, error codes, SQLSTATEs, ordered conditions,
 retained or converted rows, and schema. The [ALTER count finding](2026-10-08-alter-copy-counts.md)
 records the algorithm matrix supporting the result policy.
@@ -50,19 +50,18 @@ all three commands and object kinds.
   MySQL converts both columns of each row before advancing. Correct error and
   warning order requires a row-oriented ALTER conversion plan; sorting messages
   after execution cannot reproduce early failures.
-- Both `decimal` scripts store the same values, `1.1` and `2.5`, and produce the
-  same scale-loss notes. `HEX(2.5)` returns `3` in MySQL and `2` in fsdb. The direct
-  value query retained in each script distinguishes HEX conversion from storage
-  rounding.
+Both decimal scripts now match, including HEX conversion and the stored values.
+The [numeric HEX audit](2026-10-08-hex-numeric.md) records the rounding rules
+and separate computed-DOUBLE overflow counterexamples.
 
 No mismatch is enrolled in the known-gap allowlist.
 
 ## Validation
 
-- `just check`: 3,139 tests pass, no build warnings or errors.
+- `just check`: 3,144 tests pass, no build warnings or errors.
 - The duplicate-key regression fails before the implementation and passes after.
-- Native fixture: all 23 scripts reproduced; fsdb replay: 20 exact matches.
+- Native fixture: all 23 scripts reproduced; fsdb replay: 22 exact matches.
 - Key-diagnostic replay: 15 of 16 scripts match, including narrowing ALTER.
-- Full native wire suite: 87 contracts / 13,106 steps / zero differences.
+- Full native wire suite: 90 contracts / 13,627 steps / zero differences.
 
-Wire artifact: `torture/artifacts/runs/20261008T213004035-77251/contracts`.
+Wire artifact: `torture/artifacts/runs/20261008T215647294-79984/contracts`.

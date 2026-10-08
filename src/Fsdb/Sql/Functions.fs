@@ -373,7 +373,7 @@ let private toUInt64 (v: Value) : uint64 =
 /// cast does the truncating (MySQL-verified: `BIT_COUNT(3.5)` = 1 — 3.5
 /// rounds to 4 — where `BIT_COUNT('3.5')` = 2, truncating to 3).
 ///
-/// Not folded into `toUInt64`: BIN/OCT/HEX are `CONV(N, 10, b)` in MySQL,
+/// Not folded into `toUInt64`: BIN/OCT are `CONV(N, 10, b)` in MySQL,
 /// which reads its first argument as a *string*, so those truncate
 /// (`BIN(2.5)` is '10', not '11').
 let private roundNumeric (v: Value) : Value =
@@ -3612,7 +3612,13 @@ let private hexFn: Scalar =
             | VInt value -> VString(value.ToString "X")
             | VUInt value -> VString(value.ToString "X")
             | VString value -> VString(Text.Encoding.UTF8.GetBytes value |> Array.map (fun byte -> byte.ToString "X2") |> String.concat "")
-            | _ -> VString((int64 (toDouble value)).ToString "X")
+            | VDecimal number ->
+                let rounded = Math.Round(number, MidpointRounding.AwayFromZero)
+                let bounded = max (decimal Int64.MinValue) (min (decimal Int64.MaxValue) rounded)
+                if bounded <> rounded then
+                    Diagnostics.numericConversion "DECIMAL" (req value)
+                VString((int64 bounded).ToString "X")
+            | _ -> VString((value |> roundNumeric |> integerArgument).ToString "X")
     | _ -> VNull
 
 let private unhexFn: Scalar =

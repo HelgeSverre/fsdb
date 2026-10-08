@@ -231,6 +231,9 @@ or locking retain the general SELECT pipeline.
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.
+HEX preserves audited decimal rounding, signed-range warnings, and ordinary
+DOUBLE rounding; [computed-DOUBLE overflow](torture/findings/2026-10-08-hex-numeric.md#remaining-counterexamples)
+still differs from MySQL's expression-sensitive integer conversion.
 `WEIGHT_STRING()` returns host-ICU sort-key bytes for textual collations, not
 MySQL's UCA weight-table bytes.
 SUM and AVG convert text before accumulation, including single-row windows;

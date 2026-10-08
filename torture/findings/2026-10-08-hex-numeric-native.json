@@ -1,0 +1,342 @@
+{
+  "mysql_version": "8.4.11",
+  "innodb_buffer_pool_size": "64M",
+  "innodb_redo_log_capacity": "64M",
+  "cases": [
+    {
+      "name": "0.5",
+      "statements": [
+        "SELECT HEX(0.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n1\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "1.5",
+      "statements": [
+        "SELECT HEX(1.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n2\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "2.5",
+      "statements": [
+        "SELECT HEX(2.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n3\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-0.5",
+      "statements": [
+        "SELECT HEX(-0.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\nFFFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-1.5",
+      "statements": [
+        "SELECT HEX(-1.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\nFFFFFFFFFFFFFFFE\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-2.5",
+      "statements": [
+        "SELECT HEX(-2.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\nFFFFFFFFFFFFFFFD\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "2.49",
+      "statements": [
+        "SELECT HEX(2.49) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n2\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "2.51",
+      "statements": [
+        "SELECT HEX(2.51) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n3\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "2.5e0",
+      "statements": [
+        "SELECT HEX(2.5e0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n2\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "1.5e0",
+      "statements": [
+        "SELECT HEX(1.5e0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n2\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-2.5e0",
+      "statements": [
+        "SELECT HEX(-2.5e0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\nFFFFFFFFFFFFFFFE\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-0.5e0",
+      "statements": [
+        "SELECT HEX(-0.5e0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n0\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "9223372036854775807.0",
+      "statements": [
+        "SELECT HEX(9223372036854775807.0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "9223372036854775808.0",
+      "statements": [
+        "SELECT HEX(9223372036854775808.0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '9223372036854775808.0'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "18446744073709551615.0",
+      "statements": [
+        "SELECT HEX(18446744073709551615.0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551615.0'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "18446744073709551615.5",
+      "statements": [
+        "SELECT HEX(18446744073709551615.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551615.5'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "18446744073709551616.0",
+      "statements": [
+        "SELECT HEX(18446744073709551616.0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551616.0'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-9223372036854775808.0",
+      "statements": [
+        "SELECT HEX(-9223372036854775808.0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n8000000000000000\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-9223372036854775809.0",
+      "statements": [
+        "SELECT HEX(-9223372036854775809.0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n8000000000000000\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '-9223372036854775809.0'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "1e30",
+      "statements": [
+        "SELECT HEX(1e30) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-1e30",
+      "statements": [
+        "SELECT HEX(-1e30) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '-(1e30)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in '-(1e30)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "'2.5'",
+      "statements": [
+        "SELECT HEX('2.5') AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n322E35\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "NULL",
+      "statements": [
+        "SELECT HEX(NULL) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\nNULL\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "2.51e0",
+      "statements": [
+        "SELECT HEX(2.51e0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n3\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-2.51e0",
+      "statements": [
+        "SELECT HEX(-2.51e0) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\nFFFFFFFFFFFFFFFD\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "9223372036854775807.4",
+      "statements": [
+        "SELECT HEX(9223372036854775807.4) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "9223372036854775807.5",
+      "statements": [
+        "SELECT HEX(9223372036854775807.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '9223372036854775807.5'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "-9223372036854775808.5",
+      "statements": [
+        "SELECT HEX(-9223372036854775808.5) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n8000000000000000\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '-9223372036854775808.5'\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "CAST(18446744073709551615 AS UNSIGNED)",
+      "statements": [
+        "SELECT HEX(CAST(18446744073709551615 AS UNSIGNED)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\nFFFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "CAST(2.5 AS DECIMAL(10,1))",
+      "statements": [
+        "SELECT HEX(CAST(2.5 AS DECIMAL(10,1))) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "value\n3\n",
+      "stderr": "",
+      "errors": []
+    },
+    {
+      "name": "CAST('-1e30' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('-1e30' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('-1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('-1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    },
+    {
+      "name": "CAST('1e30' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('1e30' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ],
+      "stdout": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "stderr": "ERROR 1690 (22003) at line 1: BIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "errors": [
+        [
+          1690,
+          "22003"
+        ]
+      ]
+    }
+  ]
+}

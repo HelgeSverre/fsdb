@@ -1,0 +1,360 @@
+{
+  "mysql_version": "8.4.11",
+  "fsdb_base_revision": "ff9f2f14",
+  "fsdb_dirty": true,
+  "comparison": "rendered result rows, numeric error codes, and SQLSTATEs",
+  "cases": [
+    {
+      "actual": "value\n1\n",
+      "errors": [],
+      "expected": "value\n1\n",
+      "matches": true,
+      "name": "0.5",
+      "statements": [
+        "SELECT HEX(0.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n2\n",
+      "errors": [],
+      "expected": "value\n2\n",
+      "matches": true,
+      "name": "1.5",
+      "statements": [
+        "SELECT HEX(1.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n3\n",
+      "errors": [],
+      "expected": "value\n3\n",
+      "matches": true,
+      "name": "2.5",
+      "statements": [
+        "SELECT HEX(2.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\nFFFFFFFFFFFFFFFF\n",
+      "errors": [],
+      "expected": "value\nFFFFFFFFFFFFFFFF\n",
+      "matches": true,
+      "name": "-0.5",
+      "statements": [
+        "SELECT HEX(-0.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\nFFFFFFFFFFFFFFFE\n",
+      "errors": [],
+      "expected": "value\nFFFFFFFFFFFFFFFE\n",
+      "matches": true,
+      "name": "-1.5",
+      "statements": [
+        "SELECT HEX(-1.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\nFFFFFFFFFFFFFFFD\n",
+      "errors": [],
+      "expected": "value\nFFFFFFFFFFFFFFFD\n",
+      "matches": true,
+      "name": "-2.5",
+      "statements": [
+        "SELECT HEX(-2.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n2\n",
+      "errors": [],
+      "expected": "value\n2\n",
+      "matches": true,
+      "name": "2.49",
+      "statements": [
+        "SELECT HEX(2.49) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n3\n",
+      "errors": [],
+      "expected": "value\n3\n",
+      "matches": true,
+      "name": "2.51",
+      "statements": [
+        "SELECT HEX(2.51) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n2\n",
+      "errors": [],
+      "expected": "value\n2\n",
+      "matches": true,
+      "name": "2.5e0",
+      "statements": [
+        "SELECT HEX(2.5e0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n2\n",
+      "errors": [],
+      "expected": "value\n2\n",
+      "matches": true,
+      "name": "1.5e0",
+      "statements": [
+        "SELECT HEX(1.5e0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\nFFFFFFFFFFFFFFFE\n",
+      "errors": [],
+      "expected": "value\nFFFFFFFFFFFFFFFE\n",
+      "matches": true,
+      "name": "-2.5e0",
+      "statements": [
+        "SELECT HEX(-2.5e0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n0\n",
+      "errors": [],
+      "expected": "value\n0\n",
+      "matches": true,
+      "name": "-0.5e0",
+      "statements": [
+        "SELECT HEX(-0.5e0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\n",
+      "errors": [],
+      "expected": "value\n7FFFFFFFFFFFFFFF\n",
+      "matches": true,
+      "name": "9223372036854775807.0",
+      "statements": [
+        "SELECT HEX(9223372036854775807.0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '9223372036854775808.0'\n",
+      "errors": [],
+      "expected": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '9223372036854775808.0'\n",
+      "matches": true,
+      "name": "9223372036854775808.0",
+      "statements": [
+        "SELECT HEX(9223372036854775808.0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551615.0'\n",
+      "errors": [],
+      "expected": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551615.0'\n",
+      "matches": true,
+      "name": "18446744073709551615.0",
+      "statements": [
+        "SELECT HEX(18446744073709551615.0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551615.5'\n",
+      "errors": [],
+      "expected": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551615.5'\n",
+      "matches": true,
+      "name": "18446744073709551615.5",
+      "statements": [
+        "SELECT HEX(18446744073709551615.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551616.0'\n",
+      "errors": [],
+      "expected": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '18446744073709551616.0'\n",
+      "matches": true,
+      "name": "18446744073709551616.0",
+      "statements": [
+        "SELECT HEX(18446744073709551616.0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n8000000000000000\n",
+      "errors": [],
+      "expected": "value\n8000000000000000\n",
+      "matches": true,
+      "name": "-9223372036854775808.0",
+      "statements": [
+        "SELECT HEX(-9223372036854775808.0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n8000000000000000\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '-9223372036854775809.0'\n",
+      "errors": [],
+      "expected": "value\n8000000000000000\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '-9223372036854775809.0'\n",
+      "matches": true,
+      "name": "-9223372036854775809.0",
+      "statements": [
+        "SELECT HEX(-9223372036854775809.0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\n",
+      "errors": [],
+      "expected": "value\n7FFFFFFFFFFFFFFF\n",
+      "matches": true,
+      "name": "1e30",
+      "statements": [
+        "SELECT HEX(1e30) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n8000000000000000\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in '-(1e30)'\n",
+      "matches": false,
+      "name": "-1e30",
+      "statements": [
+        "SELECT HEX(-1e30) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n322E35\n",
+      "errors": [],
+      "expected": "value\n322E35\n",
+      "matches": true,
+      "name": "'2.5'",
+      "statements": [
+        "SELECT HEX('2.5') AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\nNULL\n",
+      "errors": [],
+      "expected": "value\nNULL\n",
+      "matches": true,
+      "name": "NULL",
+      "statements": [
+        "SELECT HEX(NULL) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n3\n",
+      "errors": [],
+      "expected": "value\n3\n",
+      "matches": true,
+      "name": "2.51e0",
+      "statements": [
+        "SELECT HEX(2.51e0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\nFFFFFFFFFFFFFFFD\n",
+      "errors": [],
+      "expected": "value\nFFFFFFFFFFFFFFFD\n",
+      "matches": true,
+      "name": "-2.51e0",
+      "statements": [
+        "SELECT HEX(-2.51e0) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\n",
+      "errors": [],
+      "expected": "value\n7FFFFFFFFFFFFFFF\n",
+      "matches": true,
+      "name": "9223372036854775807.4",
+      "statements": [
+        "SELECT HEX(9223372036854775807.4) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '9223372036854775807.5'\n",
+      "errors": [],
+      "expected": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '9223372036854775807.5'\n",
+      "matches": true,
+      "name": "9223372036854775807.5",
+      "statements": [
+        "SELECT HEX(9223372036854775807.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n8000000000000000\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '-9223372036854775808.5'\n",
+      "errors": [],
+      "expected": "value\n8000000000000000\nLevel\tCode\tMessage\nWarning\t1292\tTruncated incorrect DECIMAL value: '-9223372036854775808.5'\n",
+      "matches": true,
+      "name": "-9223372036854775808.5",
+      "statements": [
+        "SELECT HEX(-9223372036854775808.5) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\nFFFFFFFFFFFFFFFF\n",
+      "errors": [],
+      "expected": "value\nFFFFFFFFFFFFFFFF\n",
+      "matches": true,
+      "name": "CAST(18446744073709551615 AS UNSIGNED)",
+      "statements": [
+        "SELECT HEX(CAST(18446744073709551615 AS UNSIGNED)) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n3\n",
+      "errors": [],
+      "expected": "value\n3\n",
+      "matches": true,
+      "name": "CAST(2.5 AS DECIMAL(10,1))",
+      "statements": [
+        "SELECT HEX(CAST(2.5 AS DECIMAL(10,1))) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n8000000000000000\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('-1e30' as double)'\n",
+      "matches": false,
+      "name": "CAST('-1e30' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('-1e30' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ]
+    },
+    {
+      "actual": "value\n7FFFFFFFFFFFFFFF\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nError\t1690\tBIGINT value is out of range in 'cast('1e30' as double)'\n",
+      "matches": false,
+      "name": "CAST('1e30' AS DOUBLE)",
+      "statements": [
+        "SELECT HEX(CAST('1e30' AS DOUBLE)) AS value",
+        "SHOW WARNINGS"
+      ]
+    }
+  ]
+}

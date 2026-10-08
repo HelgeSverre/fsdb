@@ -25,7 +25,25 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "SHOW WARNINGS LIMIT n is accepted, matching the mysql CLI's/mysqli's routine probe"
+        [ testCase "HEX preserves exact decimal rounding and reports signed overflow"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for expression, expected, overflow in
+                  [ "2.5", "3", false
+                    "-2.5", "FFFFFFFFFFFFFFFD", false
+                    "2.5e0", "2", false
+                    "2.51e0", "3", false
+                    "9223372036854775807.0", "7FFFFFFFFFFFFFFF", false
+                    "9223372036854775807.5", "7FFFFFFFFFFFFFFF", true
+                    "-9223372036854775808.5", "8000000000000000", true ] do
+                  let actualSession, result = handle session (sprintf "SELECT HEX(%s) AS value" expression)
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) expression
+                  let expectedConditions =
+                      if overflow then [ warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" expression) ]
+                      else []
+                  Expect.equal (conditionTriples actualSession) expectedConditions (expression + " conditions")
+
+          testCase "SHOW WARNINGS LIMIT n is accepted, matching the mysql CLI's/mysqli's routine probe"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 

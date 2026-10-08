@@ -6614,9 +6614,65 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS target"; "DROP TABLE IF EXISTS renamed"; "DROP TABLE IF EXISTS parent"; "SET foreign_key_checks=1" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
+    let private hexNumericConversion =
+        let expressions =
+            [
+              "0.5"
+              "1.5"
+              "2.5"
+              "-0.5"
+              "-1.5"
+              "-2.5"
+              "2.49"
+              "2.51"
+              "2.5e0"
+              "1.5e0"
+              "-2.5e0"
+              "-0.5e0"
+              "9223372036854775807.0"
+              "9223372036854775808.0"
+              "18446744073709551615.0"
+              "18446744073709551615.5"
+              "18446744073709551616.0"
+              "-9223372036854775808.0"
+              "-9223372036854775809.0"
+              "1e30"
+              "'2.5'"
+              "NULL"
+              "2.51e0"
+              "-2.51e0"
+              "9223372036854775807.4"
+              "9223372036854775807.5"
+              "-9223372036854775808.5"
+              "CAST(18446744073709551615 AS UNSIGNED)"
+              "CAST(2.5 AS DECIMAL(10,1))"
+            ]
+        { Name = "hex-numeric-conversion"
+          Setup = [||]
+          Steps =
+            [| for index, expression in List.indexed expressions do
+                   yield Contract.query (sprintf "hex-%d" index) (sprintf "SELECT HEX(%s) AS value" expression)
+                   yield Contract.query (sprintf "warnings-%d" index) "SHOW WARNINGS" |]
+          Cleanup = [||]
+          Coverage = [| "function:HEX", [| "text-differential" |] |] }
+
     let private alterCoercion =
         let cases =
             [
+              "decimal--unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DECIMAL(8,3))"
+                    "INSERT INTO target VALUES(1,1.123),(2,2.456)"
+                    "SET sql_mode=''" ],
+                  "ALTER TABLE target MODIFY v DECIMAL(4,1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'"; "SELECT v FROM target ORDER BY id" ]
+              "decimal-STRICT_ALL_TABLES-unique-False",
+                  [ "DROP TABLE IF EXISTS target"
+                    "CREATE TABLE target(id INT PRIMARY KEY,v DECIMAL(8,3))"
+                    "INSERT INTO target VALUES(1,1.123),(2,2.456)"
+                    "SET sql_mode='STRICT_ALL_TABLES'" ],
+                  "ALTER TABLE target MODIFY v DECIMAL(4,1)", None,
+                  [ "SHOW WARNINGS"; "SELECT id,HEX(v) AS v FROM target ORDER BY id"; "SHOW COLUMNS FROM target LIKE 'v'"; "SELECT v FROM target ORDER BY id" ]
               "varchar--unique-False",
                   [ "DROP TABLE IF EXISTS target"
                     "CREATE TABLE target(id INT PRIMARY KEY,v VARCHAR(20))"
@@ -7128,6 +7184,7 @@ module ContractCatalog =
         [| missingTableDiagnostics
            qualifiedDuplicateKeys
            alterCoercion
+           hexNumericConversion
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings
