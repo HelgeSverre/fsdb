@@ -839,6 +839,72 @@ module ContractCatalog =
           Cleanup = [| "DROP VIEW IF EXISTS identity_column,identity_expression,identity_literal"; "DROP TABLE IF EXISTS identity_base,identity_numbers"; "SET NAMES utf8mb4" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private introducedEncoding =
+        let invalid =
+            [
+                "SELECT _utf8mb4 X'FF'"
+                "SELECT _utf8mb4 X'C080'"
+                "SELECT _utf8mb4 X'E282'"
+                "SELECT _utf8mb3 X'F09F9880'"
+                "SELECT _utf8mb4 X'41FF42' WHERE FALSE"
+                "SELECT CHARSET(_utf8mb4 X'FF')"
+                "SELECT IF(FALSE,_utf8mb4 X'FF','ok')"
+                "SELECT _utf8mb4 X'FF' COLLATE latin1_bin"
+                "SELECT _utf8 X'F09F9880'"
+                "SELECT _utf8mb4 0xFF"
+                "SELECT _utf8mb4 0b11111111"
+                "SELECT _utf16 X'D800'"
+                "SELECT _utf16 X'0041D8000042'"
+                "SELECT _utf32 X'00110000'"
+                "SELECT _utf8mb4 X'41FF42434445'"
+                "SELECT _utf16le X'410000D84200'"
+                "SELECT _utf32 X'000000410000'"
+                "SELECT _utf8mb3 X'41F09F9880FF'"
+                "SELECT HEX(_utf32 X'110000') AS h"
+            ]
+        let valid =
+            [
+                "SELECT HEX(_utf8mb4 X'41F09F988042') AS h"
+                "SELECT HEX(_utf8mb3 X'E282AC') AS h"
+                "SELECT HEX(_utf16 X'0041D83DDE000042') AS h"
+                "SELECT HEX(_utf16le X'41003DD800DE4200') AS h"
+                "SELECT HEX(_utf32 X'000000410001F60000000042') AS h"
+                "SELECT HEX(_utf8mb4 X'') AS h"
+                "SELECT HEX(_latin1 X'FF') AS h"
+                "SELECT HEX(_binary X'FF') AS h"
+                "SELECT HEX(_utf16 X'FFFE') AS h"
+                "SELECT HEX(_utf16 X'41') AS h"
+                "SELECT HEX(_utf16 X'0041FF') AS h"
+                "SELECT HEX(_utf16 X'110000') AS h"
+                "SELECT HEX(_utf16 X'') AS h"
+                "SELECT HEX(_utf16le X'41') AS h"
+                "SELECT HEX(_utf16le X'0041FF') AS h"
+                "SELECT HEX(_utf16le X'110000') AS h"
+                "SELECT HEX(_utf16le X'') AS h"
+                "SELECT HEX(_ucs2 X'41') AS h"
+                "SELECT HEX(_ucs2 X'0041FF') AS h"
+                "SELECT HEX(_ucs2 X'110000') AS h"
+                "SELECT HEX(_ucs2 X'') AS h"
+                "SELECT HEX(_utf32 X'41') AS h"
+                "SELECT HEX(_utf32 X'0041FF') AS h"
+                "SELECT HEX(_utf32 X'') AS h"
+            ]
+        { Name = "introduced-literal-encoding"
+          Setup = [||]
+          Steps =
+            [| for index, sql in List.indexed invalid do
+                   yield Contract.query (sprintf "invalid-direct-%d" index) sql |> Contract.fails 1300 "HY000"
+                   yield Contract.prepare (sprintf "invalid-binary-%d" index) (sprintf "invalid-encoding-%d" index) Query sql [||] |> Contract.fails 1300 "HY000"
+                   yield Contract.execute (sprintf "invalid-prepare-%d" index) ("PREPARE invalid_encoding FROM '" + sql.Replace("'", "''") + "'") |> Contract.fails 1300 "HY000"
+               for index, sql in List.indexed valid do
+                   yield Contract.query (sprintf "valid-direct-%d" index) sql
+                   yield Contract.preparedQuery (sprintf "valid-binary-%d" index) sql [||]
+                   yield Contract.execute (sprintf "valid-prepare-%d" index) ("PREPARE valid_encoding FROM '" + sql.Replace("'", "''") + "'")
+                   yield Contract.query (sprintf "valid-execute-%d" index) "EXECUTE valid_encoding"
+                   yield Contract.execute (sprintf "valid-close-%d" index) "DEALLOCATE PREPARE valid_encoding" |]
+          Cleanup = [||]
+          Coverage = [| "statement:select", [| "text-differential"; "prepared-differential"; "error-contract" |] |] }
+
     let private exactErrors =
         { Name = "syntax-error-contracts"
           Setup = [||]
@@ -3720,6 +3786,7 @@ module ContractCatalog =
            groupedProjectionReplay
            windowBindings
            sourceExpressionCollation
+           introducedEncoding
            exactErrors
            noDirInCreate
            semanticErrors

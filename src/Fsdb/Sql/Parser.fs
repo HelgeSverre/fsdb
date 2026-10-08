@@ -44,6 +44,10 @@ let trySemanticError (detail: string) =
     match detail.Trim() with
     | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
     | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
+    | message when
+        [ "utf8mb3"; "utf8mb4"; "utf16"; "utf16le"; "utf32" ]
+        |> List.exists (fun charset -> message.StartsWith("Invalid " + charset + " character string: '", StringComparison.Ordinal)) ->
+        Some(1300, message)
     | _ -> None
 
 // Ordinary parser backtracking must not reinterpret a rejected native call as a column.
@@ -856,11 +860,19 @@ let private introducedStringLit: Parser<Expr, unit> =
         let bytes =
             match value with
             | VString text -> Text.Encoding.UTF8.GetBytes text
-            | _ -> Value.tryRawBytes value |> Option.defaultValue [||]
+            | _ -> Value.tryRawBytes value |> Option.defaultValue [||] |> Charset.padBinaryLiteral charset
         match Charset.canonicalName charset with
         | "binary" -> preturn (Lit(VBytes bytes))
         | charset when Charset.tryFind charset |> Option.isSome ->
-            preturn (IntroducedLiteral(VString(Charset.decodeBytes charset bytes), charset))
+            let invalidOffset =
+                match value with
+                | VString _ -> None
+                | _ -> Charset.tryInvalidUnicodeByteOffset charset bytes
+            match invalidOffset with
+            | Some offset ->
+                let fragment = Convert.ToHexString(bytes, offset, min 3 (bytes.Length - offset))
+                raise (SemanticParseError(sprintf "Invalid %s character string: '%s'" charset fragment))
+            | None -> preturn (IntroducedLiteral(VString(Charset.decodeBytes charset bytes), charset))
         | _ -> fail (sprintf "Unknown character set: '%s'" charset)
 
 let private nationalStringLit: Parser<Value, unit> =

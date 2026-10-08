@@ -404,6 +404,59 @@ let decodeBytes (name: string) (bytes: byte[]) =
     | Some codec -> codec.Decode bytes
     | None -> Encoding.UTF8.GetString bytes
 
+/// Fixed-width introducers left-pad binary literals to complete code units.
+let padBinaryLiteral (name: string) (bytes: byte[]) =
+    let width =
+        match canonicalName name with
+        | "ucs2" | "utf16" | "utf16le" -> 2
+        | "utf32" -> 4
+        | _ -> 1
+    let padding = (width - bytes.Length % width) % width
+    if padding = 0 then bytes
+    else Array.append (Array.zeroCreate padding) bytes
+
+/// First malformed byte in UTF-8/16/32 hex or bit literals. Quoted strings
+/// and UCS-2 have different validation rules in MySQL.
+let tryInvalidUnicodeByteOffset (name: string) (bytes: byte[]) =
+    let charset = canonicalName name
+    let scalarWidth offset =
+        let remaining = bytes.Length - offset
+        let input = ReadOnlySpan<byte>(bytes, offset, remaining)
+        match charset with
+        | "utf8mb3" | "utf8mb4" ->
+            let mutable rune = Unchecked.defaultof<Rune>
+            let mutable consumed = 0
+            let status = Rune.DecodeFromUtf8(input, &rune, &consumed)
+            if status = System.Buffers.OperationStatus.Done
+               && (charset = "utf8mb4" || rune.Value <= 0xFFFF) then Some consumed
+            else None
+        | "utf16" | "utf16le" when remaining >= 2 ->
+            let codeUnit index =
+                let first, second = int bytes.[index], int bytes.[index + 1]
+                if charset = "utf16le" then first ||| (second <<< 8)
+                else (first <<< 8) ||| second
+            let first = char (codeUnit offset)
+            if Char.IsHighSurrogate first then
+                if remaining >= 4 && Char.IsLowSurrogate(char (codeUnit (offset + 2))) then Some 4
+                else None
+            elif Char.IsLowSurrogate first then None
+            else Some 2
+        | "utf32" when remaining >= 4 ->
+            let codePoint = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian input
+            if codePoint <= 0x10FFFFu && Rune.IsValid(int codePoint) then Some 4 else None
+        | _ -> None
+
+    match charset with
+    | "utf8mb3" | "utf8mb4" | "utf16" | "utf16le" | "utf32" ->
+        let mutable offset = 0
+        let mutable invalid = None
+        while offset < bytes.Length && invalid.IsNone do
+            match scalarWidth offset with
+            | Some width -> offset <- offset + width
+            | None -> invalid <- Some offset
+        invalid
+    | _ -> None
+
 let decodeLoadData (name: string) (bytes: byte[]) =
     match tryCodec name with
     | None -> Error(sprintf "Unsupported character set '%s'" (canonicalName name))

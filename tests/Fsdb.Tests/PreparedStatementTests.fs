@@ -371,6 +371,67 @@ let tests =
                       (ResultSet([ "COERCIBILITY(v)"; "CHARSET(v)"; "COLLATION(v)" ], [ [ Some coercibility; Some "binary"; Some "binary" ] ])) columnType
                   Expect.equal (execute "DROP TEMPORARY TABLE type_identity") (Affected 0UL) columnType
 
+          testCase "introduced binary literals reject malformed unicode before evaluation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, message in
+                  [
+                    "SELECT _utf8mb4 X'FF'", "Invalid utf8mb4 character string: 'FF'"
+                    "SELECT _utf8mb4 X'C080'", "Invalid utf8mb4 character string: 'C080'"
+                    "SELECT _utf8mb4 X'E282'", "Invalid utf8mb4 character string: 'E282'"
+                    "SELECT _utf8mb3 X'F09F9880'", "Invalid utf8mb3 character string: 'F09F98'"
+                    "SELECT _utf8mb4 X'41FF42' WHERE FALSE", "Invalid utf8mb4 character string: 'FF42'"
+                    "SELECT CHARSET(_utf8mb4 X'FF')", "Invalid utf8mb4 character string: 'FF'"
+                    "SELECT IF(FALSE,_utf8mb4 X'FF','ok')", "Invalid utf8mb4 character string: 'FF'"
+                    "SELECT _utf8mb4 X'FF' COLLATE latin1_bin", "Invalid utf8mb4 character string: 'FF'"
+                    "SELECT _utf8 X'F09F9880'", "Invalid utf8mb3 character string: 'F09F98'"
+                    "SELECT _utf8mb4 0xFF", "Invalid utf8mb4 character string: 'FF'"
+                    "SELECT _utf8mb4 0b11111111", "Invalid utf8mb4 character string: 'FF'"
+                    "SELECT _utf16 X'D800'", "Invalid utf16 character string: 'D800'"
+                    "SELECT _utf16 X'0041D8000042'", "Invalid utf16 character string: 'D80000'"
+                    "SELECT _utf32 X'00110000'", "Invalid utf32 character string: '001100'"
+                    "SELECT _utf8mb4 X'41FF42434445'", "Invalid utf8mb4 character string: 'FF4243'"
+                    "SELECT _utf16le X'410000D84200'", "Invalid utf16le character string: '00D842'"
+                    "SELECT _utf32 X'000000410000'", "Invalid utf32 character string: '004100'"
+                    "SELECT _utf8mb3 X'41F09F9880FF'", "Invalid utf8mb3 character string: 'F09F98'"
+                    "SELECT HEX(_utf32 X'110000') AS h", "Invalid utf32 character string: '001100'"
+                  ] do
+                  Expect.equal (handle session sql |> snd) (Err(1300, message)) sql
+                  let prepared = "PREPARE invalid_encoding FROM '" + sql.Replace("'", "''") + "'"
+                  Expect.equal (handle session prepared |> snd) (Err(1300, message)) prepared
+
+          testCase "introduced unicode literals preserve valid bytes and pad complete code units"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expected in
+                  [
+                    "SELECT HEX(_utf8mb4 X'41F09F988042') AS h", "41F09F988042"
+                    "SELECT HEX(_utf8mb3 X'E282AC') AS h", "E282AC"
+                    "SELECT HEX(_utf16 X'0041D83DDE000042') AS h", "0041D83DDE000042"
+                    "SELECT HEX(_utf16le X'41003DD800DE4200') AS h", "41003DD800DE4200"
+                    "SELECT HEX(_utf32 X'000000410001F60000000042') AS h", "000000410001F60000000042"
+                    "SELECT HEX(_utf8mb4 X'') AS h", ""
+                    "SELECT HEX(_latin1 X'FF') AS h", "FF"
+                    "SELECT HEX(_binary X'FF') AS h", "FF"
+                    "SELECT HEX(_utf16 X'FFFE') AS h", "FFFE"
+                    "SELECT HEX(_utf16 X'41') AS h", "0041"
+                    "SELECT HEX(_utf16 X'0041FF') AS h", "000041FF"
+                    "SELECT HEX(_utf16 X'110000') AS h", "00110000"
+                    "SELECT HEX(_utf16 X'') AS h", ""
+                    "SELECT HEX(_utf16le X'41') AS h", "0041"
+                    "SELECT HEX(_utf16le X'0041FF') AS h", "000041FF"
+                    "SELECT HEX(_utf16le X'110000') AS h", "00110000"
+                    "SELECT HEX(_utf16le X'') AS h", ""
+                    "SELECT HEX(_ucs2 X'41') AS h", "0041"
+                    "SELECT HEX(_ucs2 X'0041FF') AS h", "000041FF"
+                    "SELECT HEX(_ucs2 X'110000') AS h", "00110000"
+                    "SELECT HEX(_ucs2 X'') AS h", ""
+                    "SELECT HEX(_utf32 X'41') AS h", "00000041"
+                    "SELECT HEX(_utf32 X'0041FF') AS h", "000041FF"
+                    "SELECT HEX(_utf32 X'') AS h", ""
+                  ] do
+                  Expect.equal (handle session sql |> snd) (ResultSet([ "h" ], [ [ Some expected ] ])) sql
+
           testCase "ordinary literal parser caches distinguish connection collations"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
