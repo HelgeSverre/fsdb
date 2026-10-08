@@ -1356,11 +1356,11 @@ let private withStatementHintsCore session scope emitWarnings options sql body =
         emitContextHintDiagnostics (resolution.Context @ timeoutDiagnostics @ variableDiagnostics)
     let pointLimit = statementGeometryPointLimit assignment
     if emitWarnings then emitHintDiagnostics resolution.Resolution
-    emitHintDiagnostics resolution.Execution
-    DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
-        match pointLimit with
-        | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
-        | None -> body ())
+    Executor.withJoinHintDiagnostics resolution.Execution (fun () ->
+        DynamicScope.withValue selectTimeoutOverride timeout (fun () ->
+            match pointLimit with
+            | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
+            | None -> body ()))
 
 let private withPreparedStatementHints session options sql body =
     withStatementHintsCore session StandaloneStatement false options sql body

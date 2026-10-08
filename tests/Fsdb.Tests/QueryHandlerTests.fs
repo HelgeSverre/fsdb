@@ -303,7 +303,7 @@ let tests =
               | Err(1305, _) -> ()
               | other -> failtestf "expected missing routine: %A" other
 
-          testCase "Join hint targets warn during execution rather than preparation" <| fun _ ->
+          testCase "Join hint warnings follow bound query planning" <| fun _ ->
               [ "SELECT /*+ JOIN_ORDER(x) */ 1 AS n;SHOW WARNINGS", "n\n1\n"
                 "SELECT /*+ JOIN_PREFIX(x) JOIN_SUFFIX(y) */ 1 AS n;SHOW WARNINGS", "n\n1\n"
                 "SELECT /*+ JOIN_PREFIX(x) JOIN_PREFIX(y) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_PREFIX( `y`) is ignored as conflicting/duplicated\n"
@@ -314,6 +314,7 @@ let tests =
                 "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM DUAL;SHOW WARNINGS", "n\n1\n"
                 "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM (SELECT 1 AS n) d;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
                 "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE 0;SHOW WARNINGS", ""
                 "SELECT /*+ JOIN_ORDER(x) */ (SELECT n FROM t) AS n;SHOW WARNINGS", "n\n1\n"
                 "SELECT (SELECT /*+ JOIN_ORDER(x) */ 1) AS n FROM t;SHOW WARNINGS", "n\n1\n"
                 "WITH c AS (SELECT /*+ JOIN_ORDER(x) */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1;SHOW WARNINGS", "n\n1\n"
@@ -321,11 +322,47 @@ let tests =
                 "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ 1 AS n';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS", "n\n1\n"
                 "SELECT /*+ QB_NAME(q) JOIN_PREFIX(@q x) JOIN_SUFFIX(x@q) */ 1 AS n;SHOW WARNINGS", "n\n1\n"
                 "SET sql_mode='ANSI_QUOTES';SELECT /*+ JOIN_PREFIX(x) JOIN_PREFIX(y) JOIN_ORDER(@missing x) */ 1 AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_PREFIX( \"y\") is ignored as conflicting/duplicated\nWarning\t3127\tQuery block name \"missing\" is not found for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE FALSE;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\n"
+                "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE NULL;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\n"
+                "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 1=0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\n"
                 "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE n<0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t LIMIT 0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\n"
                 "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 1=1;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t HAVING 0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\n"
+                "SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 0 OR n=1;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE 0';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS", ""
                 "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t';SHOW WARNINGS;SELECT 'after_prepare' AS phase;EXECUTE s;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nphase\nafter_prepare\nn\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 0';SHOW WARNINGS;SELECT 'after_prepare' AS phase;EXECUTE s;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nphase\nafter_prepare\n"
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t LIMIT 0';SHOW WARNINGS;SELECT 'after_prepare' AS phase;EXECUTE s;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `y`@`select#1` for BKA hint\nphase\nafter_prepare\n"
                 "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ n FROM t';SHOW WARNINGS;EXECUTE s;SHOW WARNINGS;EXECUTE s;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\nn\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
-                "DELETE FROM t;SELECT /*+ JOIN_ORDER(x) */ n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n" ]
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ n FROM t WHERE ?';SHOW WARNINGS;SET @p=0;EXECUTE s USING @p;SHOW WARNINGS;SET @p=1;EXECUTE s USING @p;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ n FROM t LIMIT ?';SHOW WARNINGS;SET @p=0;EXECUTE s USING @p;SHOW WARNINGS;SET @p=1;EXECUTE s USING @p;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "DELETE FROM t;SELECT /*+ JOIN_ORDER(x) */ n FROM t;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ COUNT(*) AS n FROM t WHERE 0;SHOW WARNINGS", "n\n0\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=2;SHOW WARNINGS", ""
+                "SELECT /*+ JOIN_ORDER(x) */ SQL_CALC_FOUND_ROWS n FROM t LIMIT 0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t1287\tSQL_CALC_FOUND_ROWS is deprecated and will be removed in a future release. Consider using two separate queries instead.\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE 0 AND n=1;SHOW WARNINGS", ""
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=1;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=2 OR n=1;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=2 OR 0;SHOW WARNINGS", ""
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=2 UNION ALL SELECT 2;SHOW WARNINGS", "n\n2\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t HAVING COUNT(*)=0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE 1/0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t1365\tDivision by 0\n"
+                "SELECT IF(0,(SELECT /*+ JOIN_ORDER(x) */ n FROM t),1) AS n;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT (SELECT /*+ JOIN_ORDER(x) */ n FROM t) AS n WHERE 0;SHOW WARNINGS", ""
+                "WITH c AS (SELECT /*+ JOIN_ORDER(x) */ n FROM (SELECT 1 AS n) t WHERE 0) SELECT a.n FROM c a JOIN c b ON a.n=b.n;SHOW WARNINGS", ""
+                "SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM t WHERE 0;SELECT /*+ JOIN_ORDER(x) */ n FROM t;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ n FROM t WHERE ?+0';SHOW WARNINGS;SET @p=0;EXECUTE s USING @p;SHOW WARNINGS;SET @p=1;EXECUTE s USING @p;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT d.n FROM (SELECT /*+ JOIN_ORDER(x) */ n FROM t) d WHERE 0;SHOW WARNINGS", ""
+                "SELECT /*+ JOIN_ORDER(x) */ n FROM t UNION ALL SELECT 2 LIMIT 0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT 2 UNION ALL SELECT /*+ JOIN_ORDER(x) */ n FROM t LIMIT 0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ n FROM t WHERE n=1 AND n=2 OR n=1;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ n FROM t WHERE n=1 AND n=2 LIMIT 0;SHOW WARNINGS", ""
+                "PREPARE s FROM 'SELECT /*+ JOIN_ORDER(x) */ n FROM t WHERE ?';SHOW WARNINGS;SET @p=NULL;EXECUTE s USING @p;SHOW WARNINGS;SET @p=1;EXECUTE s USING @p;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "SELECT /*+ JOIN_ORDER(x) */ n FROM t HAVING 1/0;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t1365\tDivision by 0\n"
+                "CREATE TEMPORARY TABLE f(v DOUBLE);INSERT INTO f VALUES(9007199254740992);SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM f WHERE v=9007199254740992 AND v=9007199254740993;SHOW WARNINGS", "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "CREATE TEMPORARY TABLE f(v DECIMAL(20,0));INSERT INTO f VALUES(9007199254740992);SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM f WHERE v=9007199254740992 AND v=9007199254740993;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n"
+                "CREATE TEMPORARY TABLE f(v DOUBLE);INSERT INTO f VALUES(1);SELECT /*+ JOIN_ORDER(x) */ 1 AS n FROM f WHERE v=1 AND v=2;SHOW WARNINGS", "Level\tCode\tMessage\nWarning\t3128\tUnresolved name `x` for JOIN_ORDER hint\n" ]
               |> verifyHintCasesWith [ "CREATE TEMPORARY TABLE t(n INT)"; "INSERT INTO t VALUES(1)" ]
 
           testCase "Hint diagnostics quote identifiers using the session SQL mode" <| fun _ ->
@@ -2359,6 +2396,20 @@ let tests =
               | session, ResultSet([ "id"; "name" ], [ [ Some "1"; Some "a" ] ]) ->
                   Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong; TypeVarString ] "id reports INT's own width, name is a string"
               | _, other -> failtestf "expected a resultset, got %A" other
+
+          testCase "scalar column subqueries retain declared types when the outer result is empty"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t(n INT)"
+              let session, _ = handle session "INSERT INTO t VALUES(1)"
+              for sql in [ "SELECT (SELECT n FROM t) AS n WHERE 0"
+                           "SELECT (SELECT n FROM t) AS n"
+                           "SELECT (SELECT n FROM t WHERE 0) AS n" ] do
+                  let resultSession, result = handle session sql
+                  match result with
+                  | ResultSet _ ->
+                      Expect.equal (resultSession.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong ] sql
+                  | other -> failtestf "unexpected scalar subquery result: %A" other
 
           testCase "all-NULL rows retain declared and inferred result metadata"
           <| fun _ ->

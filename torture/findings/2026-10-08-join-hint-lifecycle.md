@@ -1,8 +1,10 @@
 # Join-order hint diagnostic lifecycle
 
-Status: partially implemented. Native MySQL 8.4.11 confirms that join-order target warnings belong
+Status: audited query-elimination cases implemented; merge/materialization
+interactions remain open. Native MySQL 8.4.11 confirms that join-order target warnings belong
 to optimization/execution, unlike table/index target warnings emitted during
-preparation. The fsdb baseline at `75fa9901` differs in 28 of 36 cases.
+preparation. The historical fsdb baseline at `75fa9901` differs in 28 of 36 cases;
+all of those original cases now match.
 
 ## Evidence
 
@@ -40,19 +42,46 @@ binary executions, and source-free blocks (including DUAL) suppress them.
 Contextual conflicts and missing query-block names retain their preparation
 phase. Empty tables and data-dependent filters still produce target warnings.
 
-`just check` passes 3,106 tests. The native fixture passes all 36 cases; fsdb
-replay now differs in 13 query-elimination cases, down from the original 28.
-The full wire lane passes 76 cases and 9,460 steps with zero differences:
-`torture/artifacts/runs/20261008T131329085-40960/contracts`.
+## Bound query planning
 
-## Remaining query-elimination behavior
+Pending warnings retain their query-block numbers until the executor receives
+the bound statement. The shared scope walker supplies each block's SELECT and
+parent. Existing safe constant-condition analysis handles false/NULL predicates;
+integer-column equality conflicts and LIMIT 0 suppress the audited warnings.
+Eliminated parents suppress child-block warnings. An unchosen IF expression
+still plans its subquery. SQL_CALC_FOUND_ROWS keeps planning active for LIMIT 0,
+and a UNION's global LIMIT 0 does not suppress its branches' warnings.
+Floating-point and DECIMAL equality conflicts retain native warning behavior.
 
-Attach pending execution diagnostics to the relevant query-block execution/optimization path after bound
-parameters and query-elimination decisions are available. Preserve contextual
-conflicts and missing query-block diagnostics in their existing preparation
-phase. Bound SQL and binary parameter changes need matching regression coverage for
-query elimination.
-A guard on an empty source list alone does not satisfy this contract.
+SQL and binary prepared statements reevaluate these decisions for bound values,
+including repeated transitions between zero, one, and NULL. Planning does not
+execute user-defined functions or assignments to infer constants. Scalar
+subqueries projecting a column retain its declared result metadata when the
+outer query returns no rows, as required by the full wire comparison.
 
-The baseline is evidence of an open gap, not an allowlist. Physical join-plan
-controls remain a separate incomplete feature.
+`just check` passes 3,107 tests. The native fixture passes all 62 cases; fsdb
+matches 59, including every case in the original 36-case baseline. The remaining
+outputs are preserved in `2026-10-08-join-hint-elimination.json`.
+The full wire lane passes 76 cases and 9,486 steps with zero differences:
+`torture/artifacts/runs/20261008T134702569-48507/contracts`.
+The [performance comparison](../../benchmarks/results/06dbbefb-join-planning.md)
+records common-path and join-hint allocation costs.
+
+## Remaining gaps
+
+The native fixture retains these cases without enrolling them in a known-gap
+allowlist:
+
+- A repeated, mergeable CTE whose body contains JOIN_ORDER over a constant
+  derived source emits no native target warning; fsdb emits warnings for its
+  instantiated CTE contexts. Hint ownership after query merging remains open.
+- NO_MERGE on a derived source causes native MySQL to plan that source even
+  when its parent's WHERE is false. fsdb currently suppresses the child warning
+  with the eliminated parent. Materialization-aware planning remains open.
+- `SELECT n FROM t WHERE 'x'` emits native warning 1292 for numeric conversion;
+  fsdb returns the correct empty result but omits that warning. This is a
+  predicate-conversion diagnostic gap independent of join-order hints.
+
+Physical join-plan controls and more general predicate propagation remain
+incomplete. The passing cases establish the audited behavior above, not full
+optimizer equivalence.

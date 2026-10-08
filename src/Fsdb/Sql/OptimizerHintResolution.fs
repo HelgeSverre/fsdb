@@ -10,7 +10,7 @@ type Diagnostics =
     { Context: (int * int * string) list
       Hints: OptimizerHints.Hint list option
       Resolution: (int * string) list
-      Execution: (int * string) list }
+      Execution: (int * (int * string) list) list }
 
 let empty = { Context = []; Hints = None; Resolution = []; Execution = [] }
 let private sameName left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
@@ -153,7 +153,7 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
             let positionOf (select: SelectStmt) =
                 positions |> List.tryPick (fun (position, parsed) ->
                     if Object.ReferenceEquals(select.Projections, parsed.Projections) then Some position else None)
-            let scopes = OptimizerHintScopes.collect positionOf statement
+            let scopes = OptimizerHintScopes.collect (OptimizerHintScopes.SourceOffsets positionOf) statement
             match scopes.Numbered with
             | [] -> empty
             | root :: _ ->
@@ -251,6 +251,9 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                 let resolution =
                     scopes.Resolution |> List.collect (fun scope -> targetWarnings quote indexesFor blocks.[scope.Number])
                 let execution =
-                    scopes.Resolution |> List.collect (fun scope -> joinTargetWarnings quote blocks.[scope.Number])
+                    scopes.Resolution |> List.choose (fun scope ->
+                        match joinTargetWarnings quote blocks.[scope.Number] with
+                        | [] -> None
+                        | warnings -> Some(scope.Number, warnings))
                 { Context = List.ofSeq context; Hints = Some(contextHints |> List.map snd)
                   Resolution = resolution; Execution = execution }

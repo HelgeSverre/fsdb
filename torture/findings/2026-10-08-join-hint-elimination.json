@@ -1,0 +1,374 @@
+[
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_PREFIX(x) JOIN_SUFFIX(y) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_PREFIX( \u0060y\u0060) is ignored as conflicting/duplicated\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_PREFIX( \u0060y\u0060) is ignored as conflicting/duplicated\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_PREFIX(x) JOIN_PREFIX(y) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_ORDER( \u0060x\u0060) is ignored as conflicting/duplicated\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_ORDER( \u0060x\u0060) is ignored as conflicting/duplicated\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_FIXED_ORDER() JOIN_ORDER(x) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3127\tQuery block name \u0060missing\u0060 is not found for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3127\tQuery block name \u0060missing\u0060 is not found for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(@missing x) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x@missing) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060@\u0060select#1\u0060 for BKA hint\nWarning\t3128\tUnresolved name \u0060x\u0060@\u0060select#1\u0060 for NO_INDEX hint\nWarning\t3128\tUnresolved name \u0060x\u0060@\u0060select#1\u0060 \u0060i\u0060 for NO_INDEX hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060@\u0060select#1\u0060 for BKA hint\nWarning\t3128\tUnresolved name \u0060x\u0060@\u0060select#1\u0060 for NO_INDEX hint\nWarning\t3128\tUnresolved name \u0060x\u0060@\u0060select#1\u0060 \u0060i\u0060 for NO_INDEX hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B BKA(x) NO_INDEX(x i) JOIN_ORDER(y) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM DUAL;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM (SELECT 1 AS n) d;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ (SELECT n FROM t) AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "SELECT (SELECT /*\u002B JOIN_ORDER(x) */ 1) AS n FROM t;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "WITH c AS (SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n) SELECT a.n FROM c a JOIN c b ON 1;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n2\n",
+    "expected": "n\n1\n2\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n UNION ALL SELECT 2;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n\u0027;SHOW WARNINGS;EXECUTE s;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\n",
+    "expected": "n\n1\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B QB_NAME(q) JOIN_PREFIX(@q x) JOIN_SUFFIX(x@q) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_PREFIX( \u0022y\u0022) is ignored as conflicting/duplicated\nWarning\t3127\tQuery block name \u0022missing\u0022 is not found for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3126\tHint JOIN_PREFIX( \u0022y\u0022) is ignored as conflicting/duplicated\nWarning\t3127\tQuery block name \u0022missing\u0022 is not found for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SET sql_mode=\u0027ANSI_QUOTES\u0027;SELECT /*\u002B JOIN_PREFIX(x) JOIN_PREFIX(y) JOIN_ORDER(@missing x) */ 1 AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE FALSE;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE NULL;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 1=0;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE n\u003C0;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t LIMIT 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 1=1;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t HAVING 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 0 OR n=1;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE 0\u0027;SHOW WARNINGS;EXECUTE s;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nphase\nafter_prepare\nn\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nphase\nafter_prepare\nn\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t\u0027;SHOW WARNINGS;SELECT \u0027after_prepare\u0027 AS phase;EXECUTE s;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nphase\nafter_prepare\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nphase\nafter_prepare\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t WHERE 0\u0027;SHOW WARNINGS;SELECT \u0027after_prepare\u0027 AS phase;EXECUTE s;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nphase\nafter_prepare\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060y\u0060@\u0060select#1\u0060 for BKA hint\nphase\nafter_prepare\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) BKA(y) */ 1 AS n FROM t LIMIT 0\u0027;SHOW WARNINGS;SELECT \u0027after_prepare\u0027 AS phase;EXECUTE s;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\nn\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\nn\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) */ n FROM t\u0027;SHOW WARNINGS;EXECUTE s;SHOW WARNINGS;EXECUTE s;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) */ n FROM t WHERE ?\u0027;SHOW WARNINGS;SET @p=0;EXECUTE s USING @p;SHOW WARNINGS;SET @p=1;EXECUTE s USING @p;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) */ n FROM t LIMIT ?\u0027;SHOW WARNINGS;SET @p=0;EXECUTE s USING @p;SHOW WARNINGS;SET @p=1;EXECUTE s USING @p;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "DELETE FROM t;SELECT /*\u002B JOIN_ORDER(x) */ n FROM t;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n0\n",
+    "expected": "n\n0\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ COUNT(*) AS n FROM t WHERE 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=2;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1287\tSQL_CALC_FOUND_ROWS is deprecated and will be removed in a future release. Consider using two separate queries instead.\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t1287\tSQL_CALC_FOUND_ROWS is deprecated and will be removed in a future release. Consider using two separate queries instead.\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ SQL_CALC_FOUND_ROWS n FROM t LIMIT 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE 0 AND n=1;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=1;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=2 OR n=1;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=2 OR 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n2\n",
+    "expected": "n\n2\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE n=1 AND n=2 UNION ALL SELECT 2;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t HAVING COUNT(*)=0;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1365\tDivision by 0\n",
+    "expected": "Level\tCode\tMessage\nWarning\t1365\tDivision by 0\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE 1/0;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT IF(0,(SELECT /*\u002B JOIN_ORDER(x) */ n FROM t),1) AS n;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "SELECT (SELECT /*\u002B JOIN_ORDER(x) */ n FROM t) AS n WHERE 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\n",
+    "matches": false,
+    "sql": "WITH c AS (SELECT /*\u002B JOIN_ORDER(x) */ n FROM (SELECT 1 AS n) t) SELECT a.n FROM c a JOIN c b ON a.n=b.n;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "WITH c AS (SELECT /*\u002B JOIN_ORDER(x) */ n FROM (SELECT 1 AS n) t WHERE 0) SELECT a.n FROM c a JOIN c b ON a.n=b.n;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM t WHERE 0;SELECT /*\u002B JOIN_ORDER(x) */ n FROM t;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) */ n FROM t WHERE ?\u002B0\u0027;SHOW WARNINGS;SET @p=0;EXECUTE s USING @p;SHOW WARNINGS;SET @p=1;EXECUTE s USING @p;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "SELECT d.n FROM (SELECT /*\u002B JOIN_ORDER(x) */ n FROM t) d WHERE 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": false,
+    "sql": "SELECT /*\u002B NO_MERGE(d) */ d.n FROM (SELECT /*\u002B JOIN_ORDER(x) */ n FROM t) d WHERE 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ n FROM t UNION ALL SELECT 2 LIMIT 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT 2 UNION ALL SELECT /*\u002B JOIN_ORDER(x) */ n FROM t LIMIT 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ n FROM t WHERE n=1 AND n=2 OR n=1;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ n FROM t WHERE n=1 AND n=2 LIMIT 0;SHOW WARNINGS"
+  },
+  {
+    "actual": "",
+    "expected": "Level\tCode\tMessage\nWarning\t1292\tTruncated incorrect DOUBLE value: \u0027x\u0027\n",
+    "matches": false,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ n FROM t WHERE \u0027x\u0027;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "PREPARE s FROM \u0027SELECT /*\u002B JOIN_ORDER(x) */ n FROM t WHERE ?\u0027;SHOW WARNINGS;SET @p=NULL;EXECUTE s USING @p;SHOW WARNINGS;SET @p=1;EXECUTE s USING @p;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1365\tDivision by 0\n",
+    "expected": "Level\tCode\tMessage\nWarning\t1365\tDivision by 0\n",
+    "matches": true,
+    "sql": "SELECT /*\u002B JOIN_ORDER(x) */ n FROM t HAVING 1/0;SHOW WARNINGS"
+  },
+  {
+    "actual": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "n\n1\nLevel\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "CREATE TEMPORARY TABLE f(v DOUBLE);INSERT INTO f VALUES(9007199254740992);SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM f WHERE v=9007199254740992 AND v=9007199254740993;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "CREATE TEMPORARY TABLE f(v DECIMAL(20,0));INSERT INTO f VALUES(9007199254740992);SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM f WHERE v=9007199254740992 AND v=9007199254740993;SHOW WARNINGS"
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "expected": "Level\tCode\tMessage\nWarning\t3128\tUnresolved name \u0060x\u0060 for JOIN_ORDER hint\n",
+    "matches": true,
+    "sql": "CREATE TEMPORARY TABLE f(v DOUBLE);INSERT INTO f VALUES(1);SELECT /*\u002B JOIN_ORDER(x) */ 1 AS n FROM f WHERE v=1 AND v=2;SHOW WARNINGS"
+  }
+]

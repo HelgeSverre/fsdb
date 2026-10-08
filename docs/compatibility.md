@@ -620,14 +620,16 @@ INSERT SELECT and REPLACE SELECT share the first SELECT block with the target
 table, and SELECT hints are considered before statement hints. Unused or
 shadowed CTEs do not apply setting overrides or semantic hint warnings in the
 audited cases. Each referenced CTE instance has its own hint context, including
-repeated warnings and conflicts where required. Audited CTE reparsing preserves syntax warning text, line numbers, and context
-ordering. Hint identifier diagnostics honor ANSI_QUOTES. Join-order target diagnostics
-appear on execution, repeat for prepared statements, and are suppressed for
-source-free blocks. Suppression when optimization eliminates a query remains
-incomplete.
+repeated warnings and conflicts where required. Audited CTE reparsing preserves
+syntax warning text, line numbers, and context ordering. Hint identifier
+diagnostics honor ANSI_QUOTES. Join-order target diagnostics appear on execution,
+repeat for prepared statements, and are suppressed for source-free blocks and
+audited false/NULL predicates, integer equality conflicts, and LIMIT 0. Bound
+parameters determine these decisions on each execution. Merge/materialization
+interactions and more general predicate propagation remain incomplete.
 Audited table/index target-resolution warnings appear during SQL or binary
-preparation and do not repeat on execution. Recognizing a hint and resolving its targets does not
-imply that its physical optimizer strategy is implemented.
+preparation and do not repeat on execution. Recognizing a hint and resolving its
+targets does not imply that its physical optimizer strategy is implemented.
 
 An idle connection uses `wait_timeout`. Once the first packet byte arrives,
 every pause in ordinary, TLS, compressed, and LOCAL INFILE traffic uses

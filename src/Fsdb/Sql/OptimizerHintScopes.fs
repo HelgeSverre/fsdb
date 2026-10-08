@@ -9,7 +9,13 @@ open Fsdb.Sql
 type Block =
     { Number: int
       SourceOffset: int option
-      Sources: FromItem list }
+      Sources: FromItem list
+      Query: SelectStmt option
+      ParentBlock: int option }
+
+type QuerySource =
+    | SourceOffsets of (SelectStmt -> int option)
+    | BoundStatement
 
 type ContextStep = BlockHints of Block | Reparse of CommonTableExpr
 
@@ -52,11 +58,11 @@ let private mutationSource (name: string) =
         else Some(name.Substring(0, separator)), name.Substring(separator + 1)
     FromTable { Database = database; Table = table; Alias = None; Partitions = [] }
 
-let collect positionOf statement =
+let collect querySource statement =
     let mutable nextNumber = 0
-    let allocate offset sources =
+    let allocate offset sources query =
         nextNumber <- nextNumber + 1
-        { Number = nextNumber; SourceOffset = offset; Sources = sources }
+        { Number = nextNumber; SourceOffset = offset; Sources = sources; Query = query; ParentBlock = None }
     let rec query scope active = function
         | PlainSelect select -> selectBlock scope active select
         | UnionSelect(first, rest, ordering, limit, offset) ->
@@ -92,7 +98,11 @@ let collect positionOf statement =
         values |> List.collect Expression.collectSubqueries |> List.map (selectBlock scope active) |> combine
     and selectBlock scope active (select: SelectStmt) =
         let scope = extend scope select.Ctes
-        let block = positionOf select |> Option.map (fun offset -> allocate (Some offset) (sources select))
+        let block =
+            match querySource with
+            | SourceOffsets positionOf ->
+                positionOf select |> Option.map (fun offset -> allocate (Some offset) (sources select) (Some select))
+            | BoundStatement -> Some(allocate None (sources select) (Some select))
         let projections = expressions scope active (select.Projections |> List.map _.Expression)
         let from = combine [select.From |> Option.map (source scope active) |> Option.defaultValue empty; joinBlocks scope active select.Joins]
         let remaining =
@@ -100,13 +110,16 @@ let collect positionOf statement =
                 (Option.toList select.Where @ select.GroupBy @ Option.toList select.Having
                  @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
                  @ (select.OrderBy |> List.map fst) @ Option.toList select.Limit @ Option.toList select.Offset)
-        { Numbered = Option.toList block @ projections.Numbered @ from.Numbered @ remaining.Numbered
+        let nested blocks =
+            blocks |> List.map (fun child ->
+                { child with ParentBlock = child.ParentBlock |> Option.orElse (block |> Option.map _.Number) })
+        { Numbered = Option.toList block @ nested (projections.Numbered @ from.Numbered @ remaining.Numbered)
           Context = projections.Context @ from.Context @ remaining.Context @ (block |> Option.toList |> List.map BlockHints)
-          Resolution = Option.toList block @ from.Resolution @ projections.Resolution @ remaining.Resolution }
+          Resolution = Option.toList block @ nested (from.Resolution @ projections.Resolution @ remaining.Resolution) }
     let scope = { Parent = None; Definitions = [] }
     let mutation ctes from (joins: Join list) values =
         let scope = extend scope ctes
-        let block = allocate None (from :: (joins |> List.map _.Table))
+        let block = allocate None (from :: (joins |> List.map _.Table)) None
         let children = combine [source scope [] from; joinBlocks scope [] joins; expressions scope [] values]
         { Numbered = block :: children.Numbered
           Context = children.Context @ [BlockHints block]

@@ -5762,6 +5762,34 @@ module ContractCatalog =
                Contract.invoke "execute-again" "join-hint" OracleSuccess
                Contract.query "execute-again-warnings" "SHOW WARNINGS"
                Contract.close "close" "join-hint"
+               Contract.query "constant-elimination" "SELECT /*+ JOIN_ORDER(x) BKA(y) */ n FROM t WHERE 0"
+               Contract.query "constant-elimination-warnings" "SHOW WARNINGS"
+               Contract.query "contradiction" "SELECT /*+ JOIN_ORDER(x) */ n FROM t WHERE n=1 AND n=2"
+               Contract.query "contradiction-warnings" "SHOW WARNINGS"
+               Contract.query "subquery-elimination" "SELECT (SELECT /*+ JOIN_ORDER(x) */ n FROM t) AS n WHERE 0"
+               Contract.query "subquery-elimination-warnings" "SHOW WARNINGS"
+               Contract.query "unchosen-subquery" "SELECT IF(0,(SELECT /*+ JOIN_ORDER(x) */ n FROM t),1) AS n"
+               Contract.query "unchosen-subquery-warnings" "SHOW WARNINGS"
+               Contract.prepare "where-prepare" "join-where" Query
+                   "SELECT /*+ JOIN_ORDER(x) */ n FROM t WHERE ?+0" [| box 0 |]
+               Contract.query "where-prepare-warnings" "SHOW WARNINGS"
+               Contract.invoke "where-false" "join-where" OracleSuccess
+               Contract.query "where-false-warnings" "SHOW WARNINGS"
+               Contract.invokeWith "where-true" "join-where" [| box 1 |]
+               Contract.query "where-true-warnings" "SHOW WARNINGS"
+               Contract.invokeWith "where-null" "join-where" [| box DBNull.Value |]
+               Contract.query "where-null-warnings" "SHOW WARNINGS"
+               Contract.close "where-close" "join-where"
+               Contract.prepare "limit-prepare" "join-limit" Query
+                   "SELECT /*+ JOIN_ORDER(x) */ n FROM t LIMIT ?" [| box 0 |]
+               Contract.query "limit-prepare-warnings" "SHOW WARNINGS"
+               Contract.invoke "limit-zero" "join-limit" OracleSuccess
+               Contract.query "limit-zero-warnings" "SHOW WARNINGS"
+               Contract.invokeWith "limit-one" "join-limit" [| box 1 |]
+               Contract.query "limit-one-warnings" "SHOW WARNINGS"
+               Contract.invokeWith "limit-zero-again" "join-limit" [| box 0 |]
+               Contract.query "limit-zero-again-warnings" "SHOW WARNINGS"
+               Contract.close "limit-close" "join-limit"
                Contract.execute "empty-table" "DELETE FROM t"
                Contract.query "empty-query" "SELECT /*+ JOIN_ORDER(x) */ n FROM t"
                Contract.query "empty-query-warnings" "SHOW WARNINGS" |]

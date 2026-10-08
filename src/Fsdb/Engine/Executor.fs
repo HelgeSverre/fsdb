@@ -607,6 +607,12 @@ let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVa
 let private triggerSessionExecutor = System.Threading.AsyncLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
 let private foundRowsOutputSlice = System.Threading.AsyncLocal<(int option * int option) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
+let private joinHintDiagnostics = System.Threading.AsyncLocal<(int * (int * string) list) list>()
+
+let internal withJoinHintDiagnostics diagnostics body =
+    if List.isEmpty diagnostics && List.isEmpty (DynamicScope.valueOrDefault [] joinHintDiagnostics) then body ()
+    else DynamicScope.withValue joinHintDiagnostics diagnostics body
+
 let private metadataProbe = System.Threading.AsyncLocal<bool>()
 let private planningProbe = System.Threading.AsyncLocal<bool>()
 let private directOnlyRestriction = System.Threading.AsyncLocal<string option>()
@@ -6466,7 +6472,12 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
             |> List.tryHead
             |> Option.flatten
             |> Option.map ColumnWire.metadataOfColumn
-            |> Option.filter (fun metadata -> metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat)
+            |> Option.filter (fun metadata ->
+                let directColumn =
+                    match select.Projections with
+                    | [ { Expression = Col _ | QualifiedCol _ } ] -> true
+                    | _ -> false
+                directColumn || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat)
             |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags &&& ~~~NotNullFlag }))
     | Placeholder _
     | Star _ -> None
@@ -17549,6 +17560,90 @@ and private runSelect
                 let limited = dedupedPaired |> applyLimitOffset limit offset
                 ResultSet(colNames, limited |> List.map (fst >> fst)), typesOf (limited |> List.map (fst >> snd)), limited |> List.map (fst >> snd)
 
+// Bound parameters retain RuntimeExpression wrappers for descriptor inference;
+// planning can inspect their values without changing the executable expression.
+let rec private boundPlanningExpression = function
+    | RuntimeExpression operand -> boundPlanningExpression operand
+    | expression -> Expression.mapChildren boundPlanningExpression expression
+
+let private queryEliminatesJoinPlanning store registry schema (select: SelectStmt) =
+    let sources =
+        (Option.toList select.From @ (select.Joins |> List.map _.Table))
+        |> List.collect FromItem.leaves
+        |> List.choose (fun source ->
+            FromItem.tryQualifier source |> Option.map (fun qualifier ->
+                qualifier, selectSourceColumns store schema source |> List.choose id))
+    let context = contextFactory store registry schema Map.empty Map.empty None [||]
+    let sameName left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+    // Native equality propagation distinguishes integer columns from floating-point and decimal domains.
+    let integerType = function
+        | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+        | _ -> false
+    let integerColumn expression =
+        let requested =
+            match expression with
+            | Col name -> Some(None, name)
+            | QualifiedCol(qualifier, name) -> Some(Some qualifier, name)
+            | _ -> None
+        requested |> Option.bind (fun (qualifier, name) ->
+            sources |> List.collect (fun (source, columns) ->
+                if qualifier |> Option.forall (sameName source) then
+                    columns |> List.choose (fun column ->
+                        if sameName name column.Name && integerType column.Type then
+                            Some(source.ToLowerInvariant(), column.Name.ToLowerInvariant())
+                        else None)
+                else [])
+            |> function [ identity ] -> Some identity | _ -> None)
+    let equality expression =
+        let pair column value =
+            match integerColumn column, tryClosedNumericValue context value with
+            | Some column, Some value when isNumericIndexValue value -> Some(column, value)
+            | _ -> None
+        match expression with
+        | BinOp(Eq, left, right) -> pair left right |> Option.orElseWith (fun () -> pair right left)
+        | _ -> None
+    let contradictoryEqualities expression =
+        let values = Dictionary<string * string, Value>()
+        conjuncts expression |> List.exists (fun term ->
+            match equality term with
+            | None -> false
+            | Some(column, value) ->
+                match values.TryGetValue column with
+                | true, previous ->
+                    tryClosedNumericValue context (BinOp(Eq, Lit previous, Lit value))
+                    |> Option.exists (fun result -> truthy result = Some false)
+                | _ ->
+                    values.Add(column, value)
+                    false)
+    let rec impossible expression =
+        match expression with
+        | BinOp(And, left, right) -> impossible left || impossible right || contradictoryEqualities expression
+        | BinOp(Or, left, right) -> impossible left && impossible right
+        | _ -> not (Set.contains (Some true) (possibleConditionTruths context expression))
+    let conditionEliminates = Option.exists (boundPlanningExpression >> impossible)
+    let zeroLimit = not select.CalculateFoundRows && (select.Limit |> Option.exists (fun limit -> rowCount limit = 0))
+    zeroLimit || conditionEliminates select.Where || conditionEliminates select.Having
+
+let private emitJoinHintDiagnostics store registry schema statement =
+    let pending = DynamicScope.valueOrDefault [] joinHintDiagnostics
+    if not pending.IsEmpty then
+        // A statement can enter the executor again for a mutation rewrite or stored body.
+        joinHintDiagnostics.Value <- []
+        let scopes = OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement
+        let eliminated = HashSet<int>()
+        for block in scopes.Numbered do
+            let parentEliminated = block.ParentBlock |> Option.exists eliminated.Contains
+            let queryEliminated () =
+                block.Query |> Option.exists (fun query ->
+                    try Diagnostics.suppress (fun () -> queryEliminatesJoinPlanning store registry schema query)
+                    with
+                    | Value.UnsignedOutOfRange | Value.SignedOutOfRange
+                    | :? System.OverflowException | Functions.SqlError _ -> false)
+            if parentEliminated || queryEliminated () then eliminated.Add block.Number |> ignore
+        for number, warnings in pending do
+            if not (eliminated.Contains number) then
+                for code, message in warnings do Diagnostics.warning code message
+
 /// Reference identity preserves duplicate-valued rows while matching scan
 /// candidates back to the same immutable table root.
 let private referenceSet (rows: Value[] list) : System.Collections.Generic.HashSet<Value[]> =
@@ -18982,6 +19077,7 @@ let runTopLevelSelect
     resetStatementMemo ()
     let executable = SelectStmt.withoutDestination select
     Deprecation.reportQuery (Select select)
+    emitJoinHintDiagnostics store registry dbName (Select select)
 
     if select.CalculateFoundRows then
         let unbounded =
@@ -19018,6 +19114,7 @@ let runTopLevelUnion
     resetStatementMemo ()
     let executable = SelectStmt.withoutDestination first
     Deprecation.reportQuery (Union(first, rest, orderBy, limit, offset))
+    emitJoinHintDiagnostics store registry dbName (Union(first, rest, orderBy, limit, offset))
 
     if first.CalculateFoundRows then
         let result, types, values =
@@ -20440,6 +20537,7 @@ let rec executeAs
     // Query results are stable only for the statement that produced them.
     resetStatementMemo ()
     Deprecation.reportStatement stmt
+    emitJoinHintDiagnostics store registry dbName stmt
 
     /// Bodies execute with the trigger's schema `db` as the default
     /// database — MySQL resolves a body's unqualified table names against
