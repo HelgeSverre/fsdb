@@ -1,0 +1,75 @@
+[
+  {
+    "name": "cleanup-drop-foreign-keys",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))",
+      "RENAME TABLE child TO renamed",
+      "ALTER TABLE child DROP FOREIGN KEY child_ibfk_1",
+      "ALTER TABLE other DROP FOREIGN KEY renamed_ibfk_1",
+      "DROP TABLE child,other,parent",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'renamed_ibfk_1'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ],
+    "live": true
+  },
+  {
+    "name": "cleanup-blocker-first",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))",
+      "RENAME TABLE child TO renamed",
+      "SET foreign_key_checks=0",
+      "DROP TABLE other",
+      "DROP TABLE child,parent",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'renamed_ibfk_1'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ],
+    "live": true
+  },
+  {
+    "name": "cleanup-drop-database",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))",
+      "RENAME TABLE child TO renamed",
+      "DROP DATABASE probe",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'renamed_ibfk_1'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ],
+    "live": true
+  }
+]

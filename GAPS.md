@@ -322,13 +322,22 @@ Foreign keys use unique parent probes, cycle-safe cascade, set-null, and
 restrict actions, qualified cross-database targets, and the session
 `foreign_key_checks` gate. [Audited candidate validation and diagnostics](torture/findings/2026-10-09-foreign-key-validation.md)
 cover self-references, missing parents, and changes to supporting index records.
+Native audits cover [ignored updates](torture/findings/2026-10-09-update-ignore.md),
+[constraint numbering](torture/findings/2026-10-09-foreign-key-names.md),
+[supporting indexes](torture/findings/2026-10-09-foreign-key-indexes.md), and
+[collision diagnostics](torture/findings/2026-10-09-foreign-key-collisions.md).
+[Required-index protection](torture/findings/2026-10-09-foreign-key-lifecycle.md),
+[generated-index lifecycle](torture/findings/2026-10-09-foreign-key-index-origin.md),
+and [rename collisions](torture/findings/2026-10-09-foreign-key-rename.md) also
+match the tested cases.
+
 Named CHECK constraints support enforcement state
 and `ALTER` validation, and ENUM or SET values enforce membership. Adding a
 unique key over colliding data returns 1062 without publishing a corrupt index.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Foreign-key edge cases | ignored writes skip rejected rows; declarations create supporting indexes and reject reserved names | [audited UPDATE IGNORE](torture/findings/2026-10-09-update-ignore.md), [CREATE/ALTER numbering](torture/findings/2026-10-09-foreign-key-names.md), [supporting indexes](torture/findings/2026-10-09-foreign-key-indexes.md), and [collision/error precedence](torture/findings/2026-10-09-foreign-key-collisions.md) match native behavior; [required-index protection](torture/findings/2026-10-09-foreign-key-lifecycle.md) matches; [generated-index lifecycle and persisted provenance](torture/findings/2026-10-09-foreign-key-index-origin.md) match; rename collisions and broader combined ALTER actions remain unaudited | low | unverified |
+| Combined foreign-key ALTER actions | validates the final schema atomically | remaining action-order and error-precedence combinations lack native coverage | low | unverified |
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality and ordered structures cover common complete-key and left-prefix probes, joins, ranges, ordering, grouping, and supported unary functional compositions; unsupported expression orderings and grouping shapes retain scan/sort fallback | high (scale) | divergence |
 | Expression indexes | functional key parts participate in physical access and uniqueness | the [supported functional keys](README.md#indexes-and-joins), including compatible unary compositions, have physical equality, uniqueness, ordering, and grouping paths; other non-unique expressions retain DDL and metadata but scan, while unsupported unique expressions are refused | low | divergence/refusal |
 

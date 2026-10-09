@@ -1,0 +1,49 @@
+2026-10-09T08:08:47.113060Z 0 [System] [MY-015015] [Server] MySQL Server - start.
+2026-10-09T08:08:47.249786Z 0 [System] [MY-010116] [Server] /opt/homebrew/Cellar/mysql@8.4/8.4.11_5/bin/mysqld (mysqld 8.4.11) starting as process 3805
+2026-10-09T08:08:47.250960Z 0 [Warning] [MY-010159] [Server] Setting lower_case_table_names=2 because file system for /var/folders/xr/z75qc4354_v3lm18m65xkz580000gn/T/fsdb-natural-phrase-oracle-i43aklve/ is case insensitive
+2026-10-09T08:08:47.254806Z 1 [System] [MY-013576] [InnoDB] InnoDB initialization has started.
+2026-10-09T08:08:47.297280Z 1 [System] [MY-013577] [InnoDB] InnoDB initialization has ended.
+2026-10-09T08:08:47.441754Z 0 [Warning] [MY-010068] [Server] CA certificate ca.pem is self signed.
+2026-10-09T08:08:47.441778Z 0 [System] [MY-013602] [Server] Channel mysql_main configured to support TLS. Encrypted connections are now supported for this channel.
+2026-10-09T08:08:47.491985Z 0 [System] [MY-010931] [Server] /opt/homebrew/Cellar/mysql@8.4/8.4.11_5/bin/mysqld: ready for connections. Version: '8.4.11'  socket: '/var/folders/xr/z75qc4354_v3lm18m65xkz580000gn/T/fsdb-natural-phrase-oracle-i43aklve/mysql.sock'  port: 49979  Homebrew.
+2026-10-09T08:09:01Z UTC - mysqld got signal 11 ;
+Signal SIGSEGV (Invalid permissions for mapped object) at address 0xd013890000138af
+Most likely, you have hit a bug, but this error can also be caused by malfunctioning hardware.
+Thread pointer: 0x1171a0e00
+Attempting backtrace. You can use the following information to find out
+where mysqld died. If you see no messages after this, something went
+terribly wrong...
+stack_bottom = 17942af28 thread_stack 0x100000
+0   mysqld                              0x0000000102eeb5c8 my_print_stacktrace(unsigned char const*, unsigned long) + 68
+1   mysqld                              0x000000010274d2ac print_fatal_signal(int, __siginfo*) + 904
+2   mysqld                              0x000000010274cec8 handle_fatal_signal(int, __siginfo*, void*) + 104
+3   libsystem_platform.dylib            0x00000001947bd6a4 _sigtramp + 56
+4   mysqld                              0x0000000102faa8e8 std::__1::__tree_const_iterator<dict_foreign_t*, std::__1::__tree_node<dict_foreign_t*, void*>*, long> std::__1::__tree<dict_foreign_t*, dict_foreign_compare, ut::allocator<dict_foreign_t*, ut::detail::allocator_base_pfs<dict_foreign_t*>>>::find<dict_foreign_t*>(dict_foreign_t* const&) const + 36
+5   mysqld                              0x0000000102faa8e8 std::__1::__tree_const_iterator<dict_foreign_t*, std::__1::__tree_node<dict_foreign_t*, void*>*, long> std::__1::__tree<dict_foreign_t*, dict_foreign_compare, ut::allocator<dict_foreign_t*, ut::detail::allocator_base_pfs<dict_foreign_t*>>>::find<dict_foreign_t*>(dict_foreign_t* const&) const + 36
+6   mysqld                              0x0000000102fab0bc unsigned long std::__1::__tree<dict_foreign_t*, dict_foreign_compare, ut::allocator<dict_foreign_t*, ut::detail::allocator_base_pfs<dict_foreign_t*>>>::__erase_unique<dict_foreign_t*>(dict_foreign_t* const&) + 24
+7   mysqld                              0x0000000102faa450 dict_foreign_remove_partial::operator()(dict_foreign_t*) + 48
+8   mysqld                              0x0000000102fa19fc dict_foreign_remove_partial std::__1::for_each[abi:ne190102]<std::__1::__tree_const_iterator<dict_foreign_t*, std::__1::__tree_node<dict_foreign_t*, void*>*, long>, dict_foreign_remove_partial>(std::__1::__tree_const_iterator<dict_foreign_t*, std::__1::__tree_node<dict_foreign_t*, void*>*, long>, std::__1::__tree_const_iterator<dict_foreign_t*, std::__1::__tree_node<dict_foreign_t*, void*>*, long>, dict_foreign_remove_partial) + 44
+9   mysqld                              0x0000000102fa01e8 dict_table_remove_from_cache_low(dict_table_t*, bool) + 176
+10  mysqld                              0x000000010313f04c row_drop_table_for_mysql(char const*, trx_t*, bool, dict_table_t*) + 2472
+11  mysqld                              0x000000010305be34 int innobase_basic_ddl::delete_impl<dd::Table>(THD*, char const*, dd::Table const*, TABLE const*) + 640
+12  mysqld                              0x0000000102380fd4 ha_delete_table(THD*, handlerton*, char const*, char const*, char const*, dd::Table const*, bool) + 684
+13  mysqld                              0x0000000102693854 drop_base_table(THD*, Drop_tables_ctx const&, Table_ref*, bool, std::__1::set<handlerton*, std::__1::less<handlerton*>, std::__1::allocator<handlerton*>>*, Foreign_key_parents_invalidator*, std::__1::vector<MDL_ticket*, std::__1::allocator<MDL_ticket*>>*, MEM_ROOT*) + 1152
+14  mysqld                              0x00000001026928e4 mysql_rm_table_no_locks(THD*, Table_ref*, bool, bool, bool, bool*, std::__1::set<handlerton*, std::__1::less<handlerton*>, std::__1::allocator<handlerton*>>*, Foreign_key_parents_invalidator*, std::__1::vector<MDL_ticket*, std::__1::allocator<MDL_ticket*>>*) + 3652
+15  mysqld                              0x0000000102691498 mysql_rm_table(THD*, Table_ref*, bool, bool) + 264
+16  mysqld                              0x000000010263b824 mysql_execute_command(THD*, bool) + 9588
+17  mysqld                              0x0000000102638560 dispatch_sql_command(THD*, Parser_state*) + 744
+18  mysqld                              0x0000000102636bd8 dispatch_command(THD*, COM_DATA const*, enum_server_command) + 3436
+19  mysqld                              0x0000000102637d0c do_command(THD*) + 396
+20  mysqld                              0x000000010273b39c handle_connection(void*) + 484
+21  mysqld                              0x00000001033a3924 pfs_spawn_thread(void*) + 300
+22  libsystem_pthread.dylib             0x0000000194783c0c _pthread_start + 136
+23  libsystem_pthread.dylib             0x000000019477eb80 thread_start + 8
+
+Trying to get some variables.
+Some pointers may be invalid and cause the dump to abort.
+Query (123766030): DROP TABLE IF EXISTS child,other,parent,renamed,parent_new,fk_rename_target.other,fk_rename_target.renamed
+Connection ID (thread ID): 43
+Status: NOT_KILLED
+
+The manual page at http://dev.mysql.com/doc/mysql/en/crashing.html contains
+information that should help you find out what is causing the crash.

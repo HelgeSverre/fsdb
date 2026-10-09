@@ -6362,6 +6362,78 @@ module ContractCatalog =
           Cleanup = [| "DROP DATABASE IF EXISTS fk_lifecycle_probe" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
+    let private foreignKeyRenameCollisions =
+        let reset =
+            [ "USE fk_rename_probe"
+              "SET foreign_key_checks=0"
+              "DROP TABLE IF EXISTS child,other,parent,renamed,parent_new,fk_rename_target.other,fk_rename_target.renamed"
+              "SET foreign_key_checks=1"
+              "CREATE TABLE parent(n INT PRIMARY KEY)" ]
+        let observe =
+            [ "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('fk_rename_probe','fk_rename_target') ORDER BY TABLE_SCHEMA,TABLE_NAME"
+              "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('fk_rename_probe','fk_rename_target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME" ]
+        let cases =
+            [
+              "rename-generated-collision", Some(7, 1826, "HY000"),
+                  [ "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))"
+                    "RENAME TABLE child TO renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.child DROP FOREIGN KEY child_ibfk_1"
+                    "ALTER TABLE fk_rename_probe.other DROP FOREIGN KEY renamed_ibfk_1" ]
+              "alter-generated-collision", Some(7, 1826, "HY000"),
+                  [ "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child RENAME TO renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.child DROP FOREIGN KEY child_ibfk_1"
+                    "ALTER TABLE fk_rename_probe.other DROP FOREIGN KEY renamed_ibfk_1" ]
+              "rename-cross-explicit", Some(7, 1826, "HY000"),
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE fk_rename_target.other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES fk_rename_probe.parent(n))"
+                    "RENAME TABLE child TO fk_rename_target.renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.child DROP FOREIGN KEY shared"
+                    "ALTER TABLE fk_rename_target.other DROP FOREIGN KEY shared" ]
+              "rename-cross-generated", Some(7, 1826, "HY000"),
+                  [ "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE fk_rename_target.other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES fk_rename_probe.parent(n))"
+                    "RENAME TABLE child TO fk_rename_target.renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.child DROP FOREIGN KEY child_ibfk_1"
+                    "ALTER TABLE fk_rename_target.other DROP FOREIGN KEY renamed_ibfk_1" ]
+              "rename-prefixed-explicit", None,
+                  [ "CREATE TABLE child(a INT,CONSTRAINT child_ibfk_01 FOREIGN KEY(a) REFERENCES parent(n))"
+                    "RENAME TABLE child TO renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.renamed DROP FOREIGN KEY renamed_ibfk_01" ]
+              "rename-explicit", None,
+                  [ "CREATE TABLE child(a INT,CONSTRAINT custom FOREIGN KEY(a) REFERENCES parent(n))"
+                    "RENAME TABLE child TO renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.renamed DROP FOREIGN KEY custom" ]
+              "rename-clear-collision", None,
+                  [ "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))"
+                    "RENAME TABLE other TO fk_rename_target.other,child TO renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.renamed DROP FOREIGN KEY renamed_ibfk_1"
+                    "ALTER TABLE fk_rename_target.other DROP FOREIGN KEY renamed_ibfk_1" ]
+              "rename-batch-atomic", Some(7, 1826, "HY000"),
+                  [ "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))"
+                    "RENAME TABLE parent TO parent_new,child TO renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.child DROP FOREIGN KEY child_ibfk_1"
+                    "ALTER TABLE fk_rename_probe.other DROP FOREIGN KEY renamed_ibfk_1" ]
+              "alter-generated", None,
+                  [ "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child RENAME TO renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.renamed DROP FOREIGN KEY renamed_ibfk_1" ]
+              "alter-prefixed-explicit", None,
+                  [ "CREATE TABLE child(a INT,CONSTRAINT child_ibfk_01 FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child RENAME TO renamed" ],
+                  [ "ALTER TABLE fk_rename_probe.renamed DROP FOREIGN KEY renamed_ibfk_01" ]
+            ]
+        { Name = "foreign-key-rename-collisions"
+          Setup = [| "CREATE DATABASE fk_rename_probe"; "CREATE DATABASE fk_rename_target" |]
+          // MySQL 8.4.11 can crash when dropping tables after a rename collision; remove constraints first.
+          Steps = cases |> List.map (fun (name, error, statements, teardown) -> name, error, reset @ statements @ observe @ teardown) |> isolatedScriptSteps
+          Cleanup = [| "SET foreign_key_checks=0"; "DROP DATABASE IF EXISTS fk_rename_probe"; "DROP DATABASE IF EXISTS fk_rename_target"; "SET foreign_key_checks=1" |]
+          Coverage = [| "statement:rename-table", [| "text-differential" |]; "statement:alter-table", [| "text-differential" |] |] }
+
     let private foreignKeyNames =
         let cases =
             [
@@ -8163,6 +8235,7 @@ module ContractCatalog =
            foreignKeyNames
            foreignKeyIndexesAndCollisions
            foreignKeyIndexLifecycle
+           foreignKeyRenameCollisions
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings

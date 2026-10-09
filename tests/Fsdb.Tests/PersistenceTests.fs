@@ -290,7 +290,43 @@ let private rowsOf (store: Store) (dbName: string) (table: string) : Value[] lis
 let tests =
     testList
         "persistence"
-        [ testCase "generated index provenance survives WAL and snapshots"
+        [ testCase "foreign-key rename collisions and names survive recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let directory = tempDataDir()
+                  let store = load directory
+                  attach directory store
+                  let mutable session = Fsdb.Session.create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                        "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                        "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))" ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  if checkpoint then snapshotNow directory store
+                  let recovered = load directory
+                  attach directory recovered
+                  session <- Fsdb.Session.create 2 recovered
+                  Expect.equal
+                      (run "RENAME TABLE parent TO parent_new,child TO renamed" |> errorInfo |> Option.map _.Code)
+                      (Some 1826) "failed batch is rejected after recovery"
+                  let unchanged = (load directory).Catalog.[defaultDatabase]
+                  Expect.isTrue (unchanged.ContainsKey "parent" && unchanged.ContainsKey "child") "failed batch leaves original names on disk"
+                  Expect.isFalse (unchanged.ContainsKey "parent_new" || unchanged.ContainsKey "renamed") "failed batch is not journaled"
+                  Expect.isNone (run "ALTER TABLE child RENAME TO valid" |> errorInfo) "noncolliding rename succeeds"
+                  let verify (store: Store) =
+                      let database = store.Catalog.[defaultDatabase]
+                      Expect.isFalse (database.ContainsKey "child") "old table name is gone"
+                      Expect.equal (database.["valid"].ForeignKeys |> List.map _.Name) [ "valid_ibfk_1" ] "renamed constraint survives"
+                  verify recovered
+                  verify (load directory)
+                  snapshotNow directory recovered
+                  verify (load directory)
+
+          testCase "generated index provenance survives WAL and snapshots"
           <| fun _ ->
               for checkpoint in [ false; true ] do
                   let directory = tempDataDir()

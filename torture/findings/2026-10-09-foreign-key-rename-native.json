@@ -1,0 +1,193 @@
+[
+  {
+    "name": "rename-generated-collision",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))",
+      "RENAME TABLE child TO renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tchild\nprobe\tother\nprobe\tparent\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\tchild_ibfk_1\tchild\tparent\nprobe\trenamed_ibfk_1\tother\tparent\n",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'renamed_ibfk_1'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ],
+    "live": true
+  },
+  {
+    "name": "alter-generated-collision",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child RENAME TO renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tchild\nprobe\tother\nprobe\tparent\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\tchild_ibfk_1\tchild\tparent\nprobe\trenamed_ibfk_1\tother\tparent\n",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'renamed_ibfk_1'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ],
+    "live": true
+  },
+  {
+    "name": "rename-cross-explicit",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE target.other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES probe.parent(n))",
+      "RENAME TABLE child TO target.renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tchild\nprobe\tparent\ntarget\tother\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\tshared\tchild\tparent\ntarget\tshared\tother\tparent\n",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'shared'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ],
+    "live": true
+  },
+  {
+    "name": "rename-cross-generated",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE target.other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES probe.parent(n))",
+      "RENAME TABLE child TO target.renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tchild\nprobe\tparent\ntarget\tother\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\tchild_ibfk_1\tchild\tparent\ntarget\trenamed_ibfk_1\tother\tparent\n",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'renamed_ibfk_1'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ],
+    "live": true
+  },
+  {
+    "name": "rename-prefixed-explicit",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT child_ibfk_01 FOREIGN KEY(a) REFERENCES parent(n))",
+      "RENAME TABLE child TO renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tparent\nprobe\trenamed\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\trenamed_ibfk_01\trenamed\tparent\n",
+    "stderr": "",
+    "errors": [],
+    "live": true
+  },
+  {
+    "name": "rename-explicit",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT custom FOREIGN KEY(a) REFERENCES parent(n))",
+      "RENAME TABLE child TO renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tparent\nprobe\trenamed\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\tcustom\trenamed\tparent\n",
+    "stderr": "",
+    "errors": [],
+    "live": true
+  },
+  {
+    "name": "rename-clear-collision",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))",
+      "RENAME TABLE other TO target.other,child TO renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tparent\nprobe\trenamed\ntarget\tother\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\trenamed_ibfk_1\trenamed\tparent\ntarget\trenamed_ibfk_1\tother\tparent\n",
+    "stderr": "",
+    "errors": [],
+    "live": true
+  },
+  {
+    "name": "rename-batch-atomic",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))",
+      "RENAME TABLE parent TO parent_new,child TO renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tchild\nprobe\tother\nprobe\tparent\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\tchild_ibfk_1\tchild\tparent\nprobe\trenamed_ibfk_1\tother\tparent\n",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'renamed_ibfk_1'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ],
+    "live": true
+  },
+  {
+    "name": "alter-generated",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child RENAME TO renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tparent\nprobe\trenamed\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\trenamed_ibfk_1\trenamed\tparent\n",
+    "stderr": "",
+    "errors": [],
+    "live": true
+  },
+  {
+    "name": "alter-prefixed-explicit",
+    "statements": [
+      "USE probe",
+      "CREATE DATABASE target",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT child_ibfk_01 FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child RENAME TO renamed",
+      "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('probe','target') ORDER BY TABLE_SCHEMA,TABLE_NAME",
+      "SELECT CONSTRAINT_SCHEMA,CONSTRAINT_NAME,TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN ('probe','target') ORDER BY CONSTRAINT_SCHEMA,TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "TABLE_SCHEMA\tTABLE_NAME\nprobe\tparent\nprobe\trenamed\nCONSTRAINT_SCHEMA\tCONSTRAINT_NAME\tTABLE_NAME\tREFERENCED_TABLE_NAME\nprobe\trenamed_ibfk_01\trenamed\tparent\n",
+    "stderr": "",
+    "errors": [],
+    "live": true
+  }
+]

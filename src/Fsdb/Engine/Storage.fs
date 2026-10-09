@@ -6439,6 +6439,14 @@ let private validateForeignKeyNames (database: Database) (foreignKeys: ForeignKe
     | Some name -> Error(ExpressionError(1826, sprintf "Duplicate foreign key constraint name '%s'" name))
     | None -> Ok()
 
+let private renamedForeignKeyName oldTableName newTableName (foreignKey: ForeignKeyDef) =
+    let prefix = oldTableName + "_ibfk_"
+
+    if foreignKey.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) then
+        newTableName + foreignKey.Name.Substring(oldTableName.Length)
+    else
+        foreignKey.Name
+
 let createTableSeeded
     (store: Store)
     (dbName: string)
@@ -7062,7 +7070,11 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     |> Result.map (fun value -> row |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx value |> Array.ofList)
                     |> Result.bind checkUnique)
                 |> Result.map (fun rows -> { candidate with RowsArray = rows }, None)))
-    | RenameTo newName -> Ok({ table with OriginalName = newName }, Some(normalizeTableName newName))
+    | RenameTo newName ->
+        let foreignKeys =
+            table.ForeignKeys
+            |> List.map (fun foreignKey -> foreignKey.WithName(renamedForeignKeyName table.OriginalName newName foreignKey))
+        Ok({ table with OriginalName = newName; ForeignKeys = foreignKeys }, Some(normalizeTableName newName))
     | RenameColumnTo(oldName, newName) ->
         resolveColumn table.Columns oldName
         |> Result.map (fun idx ->
@@ -7685,6 +7697,11 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 validateIndexNames indexes
                 |> Result.bind (fun () -> actions |> List.fold step (Ok(origKey, definition, true, [])))
                 |> Result.bind (fun state -> validateForeignKeyNames db addedForeignKeys |> Result.map (fun () -> state))
+                |> Result.bind (fun ((_, candidate, _, _) as state) ->
+                    let validation =
+                        if candidate.OriginalName = table.OriginalName then Ok()
+                        else validateForeignKeyNames (Map.remove origKey db) candidate.ForeignKeys
+                    validation |> Result.map (fun () -> state))
                 |> Result.bind (fun state -> validateAutoIncrementKey state |> Result.map (fun () -> state))
                 |> Result.bind (fun (key, candidate, preserveFullText, droppedIndexes) ->
                     validateDroppedForeignKeyIndexes catalog (tableAddress dbName origKey) candidate droppedIndexes
@@ -7736,14 +7753,6 @@ let private tableHasTriggers (catalog: Catalog) address =
         |> Seq.exists (fun trigger ->
             String.Equals(trigger.Schema, address.Database, StringComparison.OrdinalIgnoreCase)
             && String.Equals(trigger.Table, address.Table, StringComparison.OrdinalIgnoreCase)))
-
-let private renamedForeignKeyName oldTableName newTableName (foreignKey: ForeignKeyDef) =
-    let prefix = oldTableName + "_ibfk_"
-
-    if foreignKey.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) then
-        newTableName + foreignKey.Name.Substring(oldTableName.Length)
-    else
-        foreignKey.Name
 
 let private moveTableInCatalog
     (store: Store)
@@ -7800,10 +7809,11 @@ let private moveTableInCatalog
 
                 let destination = tryCatalogDatabase targetDatabaseName withoutSource |> Option.get
 
-                withoutSource
-                |> setCatalogDatabase targetDatabaseName (Map.add targetKey moved destination)
-                |> retargetForeignKeys sourceAddress targetDatabaseName targetTableName
-                |> Ok)
+                validateForeignKeyNames destination foreignKeys
+                |> Result.map (fun () ->
+                    withoutSource
+                    |> setCatalogDatabase targetDatabaseName (Map.add targetKey moved destination)
+                    |> retargetForeignKeys sourceAddress targetDatabaseName targetTableName))
 
 /// Atomically renames a left-to-right batch, including qualified cross-database moves.
 let renameTables (store: Store) (defaultDatabase: string) (pairs: (string * string) list) : Result<unit, StorageError> =

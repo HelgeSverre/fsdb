@@ -35,7 +35,33 @@ let private routineUpdateSetup functionSql =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "Generated foreign-key indexes are replaced unless explicitly renamed"
+        [ testCase "Foreign-key rename collisions reject the complete statement atomically"
+          <| fun _ ->
+              for sql in
+                  [ "RENAME TABLE child TO renamed"
+                    "ALTER TABLE child RENAME TO renamed"
+                    "RENAME TABLE parent TO parent_new,child TO renamed" ] do
+                  let store = Fsdb.Storage.create()
+                  let mutable session = create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for setup in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                        "CREATE TABLE child(a INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                        "CREATE TABLE other(a INT,CONSTRAINT renamed_ibfk_1 FOREIGN KEY(a) REFERENCES parent(n))" ] do
+                      Expect.isNone (run setup |> errorInfo) setup
+                  let before = store.Catalog
+                  Expect.equal
+                      (run sql |> errorInfo |> Option.map (fun error -> error.Code, error.State, error.Message))
+                      (Some(1826, "HY000", "Duplicate foreign key constraint name 'renamed_ibfk_1'")) sql
+                  let tables = store.Catalog.[Fsdb.Storage.defaultDatabase]
+                  Expect.isTrue (tables.ContainsKey "parent" && tables.ContainsKey "child" && tables.ContainsKey "other") "all original names survive"
+                  Expect.isFalse (tables.ContainsKey "renamed" || tables.ContainsKey "parent_new") "no partial rename is published"
+                  Expect.equal tables.["child"].ForeignKeys before.[Fsdb.Storage.defaultDatabase].["child"].ForeignKeys "constraint identity is unchanged"
+
+          testCase "Generated foreign-key indexes are replaced unless explicitly renamed"
           <| fun _ ->
               for preparation, expected in
                   [ [], [ "replacement"; "replacement" ]

@@ -1,0 +1,16 @@
+2026-10-09T08:02:27.191187Z 0 [System] [MY-015017] [Server] MySQL Server Initialization - start.
+2026-10-09T08:02:27.192265Z 0 [System] [MY-013169] [Server] /opt/homebrew/Cellar/mysql@8.4/8.4.11_5/bin/mysqld (mysqld 8.4.11) initializing of server in progress as process 3242
+2026-10-09T08:02:27.193316Z 0 [Warning] [MY-010159] [Server] Setting lower_case_table_names=2 because file system for /var/folders/xr/z75qc4354_v3lm18m65xkz580000gn/T/fsdb-fulltext-transactions-ib5chqr5/data/ is case insensitive
+2026-10-09T08:02:27.195022Z 1 [System] [MY-013576] [InnoDB] InnoDB initialization has started.
+2026-10-09T08:02:27.253455Z 1 [System] [MY-013577] [InnoDB] InnoDB initialization has ended.
+2026-10-09T08:02:27.666166Z 5 [Warning] [MY-010453] [Server] root@localhost is created with an empty password ! Please consider switching off the --initialize-insecure option.
+2026-10-09T08:02:27.977587Z 0 [System] [MY-013172] [Server] Received SHUTDOWN from user <via user signal>. Shutting down mysqld (Version: 8.4.11).
+2026-10-09T08:02:28.489476Z 0 [System] [MY-015018] [Server] MySQL Server Initialization - end.
+2026-10-09T08:02:28.544964Z 0 [System] [MY-015015] [Server] MySQL Server - start.
+2026-10-09T08:02:28.683357Z 0 [System] [MY-010116] [Server] /opt/homebrew/Cellar/mysql@8.4/8.4.11_5/bin/mysqld (mysqld 8.4.11) starting as process 3257
+2026-10-09T08:02:28.684913Z 0 [Warning] [MY-010159] [Server] Setting lower_case_table_names=2 because file system for /var/folders/xr/z75qc4354_v3lm18m65xkz580000gn/T/fsdb-fulltext-transactions-ib5chqr5/data/ is case insensitive
+2026-10-09T08:02:28.688126Z 1 [System] [MY-013576] [InnoDB] InnoDB initialization has started.
+2026-10-09T08:02:28.747668Z 1 [System] [MY-013577] [InnoDB] InnoDB initialization has ended.
+2026-10-09T08:02:28.882264Z 0 [Warning] [MY-010068] [Server] CA certificate ca.pem is self signed.
+2026-10-09T08:02:28.882302Z 0 [System] [MY-013602] [Server] Channel mysql_main configured to support TLS. Encrypted connections are now supported for this channel.
+2026-10-09T08:02:28.936120Z 0 [System] [MY-010931] [Server] /opt/homebrew/Cellar/mysql@8.4/8.4.11_5/bin/mysqld: ready for connections. Version: '8.4.11'  socket: '/var/folders/xr/z75qc4354_v3lm18m65xkz580000gn/T/fsdb-fulltext-transactions-ib5chqr5/mysql.sock'  port: 0  Homebrew.
