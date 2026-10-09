@@ -6278,7 +6278,7 @@ module ContractCatalog =
           Cleanup = [| "DROP DATABASE IF EXISTS fk_index_probe" |]
           Coverage = [| "statement:create-table", [| "text-differential" |]; "statement:alter-table", [| "text-differential" |] |] }
 
-    let private foreignKeyIndexProtection =
+    let private foreignKeyIndexLifecycle =
         let reset =
             [ "USE fk_lifecycle_probe"
               "SET foreign_key_checks=0"
@@ -6286,61 +6286,79 @@ module ContractCatalog =
               "SET foreign_key_checks=1"
               "CREATE TABLE parent(n INT PRIMARY KEY)"
               "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))" ]
+        let observe =
+            [ "SHOW INDEX FROM child"
+              "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
         let cases =
             [
+              "duplicate-primary", Some(7, 1068, "42000"),
+                  [ "ALTER TABLE child ADD PRIMARY KEY(a)"; "ALTER TABLE child ADD PRIMARY KEY(b)" ]
+              "duplicate-generated-name", None, [ "ALTER TABLE child ADD INDEX fk(a,b)" ]
               "drop-child", Some(6, 1553, "HY000"),
-                  [ "ALTER TABLE child DROP INDEX fk"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                  [ "ALTER TABLE child DROP INDEX fk" ]
               "drop-child-off", Some(7, 1553, "HY000"),
                   [ "SET foreign_key_checks=0"
-                    "ALTER TABLE child DROP INDEX fk"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                    "ALTER TABLE child DROP INDEX fk" ]
               "drop-parent", Some(6, 1553, "HY000"),
-                  [ "ALTER TABLE parent DROP PRIMARY KEY"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                  [ "ALTER TABLE parent DROP PRIMARY KEY" ]
               "drop-constraint-index", None,
-                  [ "ALTER TABLE child DROP FOREIGN KEY fk,DROP INDEX fk"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk,DROP INDEX fk" ]
               "drop-index-constraint", None,
-                  [ "ALTER TABLE child DROP INDEX fk,DROP FOREIGN KEY fk"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                  [ "ALTER TABLE child DROP INDEX fk,DROP FOREIGN KEY fk" ]
               "replace-index", None,
-                  [ "ALTER TABLE child DROP INDEX fk,ADD INDEX replacement(a,b)"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                  [ "ALTER TABLE child DROP INDEX fk,ADD INDEX replacement(a,b)" ]
+              "add-redundant", None,
+                  [ "ALTER TABLE child ADD INDEX replacement(a,b)" ]
+              "drop-after-replacement", Some(7, 1091, "42000"),
+                  [ "ALTER TABLE child ADD INDEX replacement(a,b)"
+                    "ALTER TABLE child DROP INDEX fk" ]
               "drop-constraint", None,
-                  [ "ALTER TABLE child DROP FOREIGN KEY fk"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk" ]
               "rename-index", Some(7, 1553, "HY000"),
                   [ "ALTER TABLE child RENAME INDEX fk TO replacement"
-                    "ALTER TABLE child DROP INDEX replacement"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                    "ALTER TABLE child DROP INDEX replacement" ]
               "drop-parent-off", Some(7, 1553, "HY000"),
                   [ "SET foreign_key_checks=0"
-                    "ALTER TABLE parent DROP PRIMARY KEY"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                    "ALTER TABLE parent DROP PRIMARY KEY" ]
               "replace-parent", None,
-                  [ "ALTER TABLE parent DROP PRIMARY KEY,ADD UNIQUE KEY replacement(n)"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                  [ "ALTER TABLE parent DROP PRIMARY KEY,ADD UNIQUE KEY replacement(n)" ]
+              "child-alternate", Some(7, 1553, "HY000"),
+                  [ "ALTER TABLE child ADD INDEX alternate(a,b)"
+                    "ALTER TABLE child DROP INDEX alternate" ]
               "explicit-retained", None,
                   [ "ALTER TABLE child DROP FOREIGN KEY fk,DROP INDEX fk,ADD INDEX explicit_index(a)"
                     "ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n)"
-                    "ALTER TABLE child ADD INDEX replacement(a,b)"
-                    "SHOW INDEX FROM child"
-                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_lifecycle_probe' ORDER BY CONSTRAINT_NAME" ]
+                    "ALTER TABLE child ADD INDEX replacement(a,b)" ]
+              "renamed-generated", None,
+                  [ "ALTER TABLE child RENAME INDEX fk TO renamed"
+                    "ALTER TABLE child ADD INDEX replacement(a,b)" ]
+              "orphan-generated", None,
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk"
+                    "ALTER TABLE child ADD INDEX replacement(a,b)" ]
+              "prefix-replacement", None,
+                  [ "ALTER TABLE child ADD INDEX replacement(b,a)" ]
+              "unique-replacement", None,
+                  [ "ALTER TABLE child ADD UNIQUE INDEX replacement(a,b)" ]
+              "create-like", None,
+                  [ "CREATE TABLE copied LIKE child"
+                    "SHOW INDEX FROM copied"
+                    "ALTER TABLE copied ADD INDEX replacement(a,b)"
+                    "SHOW INDEX FROM copied"
+                    "DROP TABLE copied" ]
+              "rename-alone", None,
+                  [ "ALTER TABLE child RENAME INDEX fk TO renamed" ]
+              "visibility", None,
+                  [ "ALTER TABLE child ALTER INDEX fk INVISIBLE"
+                    "ALTER TABLE child ADD INDEX replacement(a,b)" ]
+              "primary-replacement", None,
+                  [ "ALTER TABLE child ADD PRIMARY KEY(a)" ]
+              "longer-generated-replacement", None,
+                  [ "ALTER TABLE parent ADD COLUMN m INT,ADD UNIQUE INDEX two(n,m)"
+                    "ALTER TABLE child ADD CONSTRAINT longer FOREIGN KEY(a,b) REFERENCES parent(n,m)" ]
             ]
-        { Name = "foreign-key-index-protection"
+        { Name = "foreign-key-index-lifecycle"
           Setup = [| "CREATE DATABASE fk_lifecycle_probe" |]
-          Steps = cases |> List.map (fun (name, error, statements) -> name, error, reset @ statements) |> isolatedScriptSteps
+          Steps = cases |> List.map (fun (name, error, statements) -> name, error, reset @ statements @ observe) |> isolatedScriptSteps
           Cleanup = [| "DROP DATABASE IF EXISTS fk_lifecycle_probe" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
@@ -8144,7 +8162,7 @@ module ContractCatalog =
            routineUpdateWrites
            foreignKeyNames
            foreignKeyIndexesAndCollisions
-           foreignKeyIndexProtection
+           foreignKeyIndexLifecycle
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings

@@ -40,7 +40,20 @@ let complete (indexes: IndexDef list) (declarations: (string option * string lis
                 available 1)
         indexes @
             [ { Name = name
+                GeneratedForForeignKey = true
                 KeyColumns = indexColumns columns
                 Unique = false
                 Visible = true
                 Kind = BTree } ]) indexes
+
+/// Explicit indexes win ties; equal generated indexes retain the last declaration.
+let removeRedundantGenerated (indexes: IndexDef list) =
+    let positioned = List.indexed indexes
+    positioned |> List.choose (fun (position, index) ->
+        let redundant =
+            index.GeneratedForForeignKey
+            && (positioned |> List.exists (fun (otherPosition, other) ->
+                position <> otherPosition
+                && supports index.Columns other
+                && (not other.GeneratedForForeignKey || other.Columns.Length > index.Columns.Length || otherPosition > position)))
+        if redundant then None else Some index)

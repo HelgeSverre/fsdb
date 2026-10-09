@@ -35,7 +35,66 @@ let private routineUpdateSetup functionSql =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "Foreign keys protect their last child and parent index even with checks disabled"
+        [ testCase "Generated foreign-key indexes are replaced unless explicitly renamed"
+          <| fun _ ->
+              for preparation, expected in
+                  [ [], [ "replacement"; "replacement" ]
+                    [ "ALTER TABLE child DROP FOREIGN KEY fk" ], [ "replacement"; "replacement" ]
+                    [ "ALTER TABLE child RENAME INDEX fk TO renamed" ], [ "renamed"; "replacement"; "replacement" ] ] do
+                  let mutable session = create 1 (Fsdb.Storage.create())
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                        "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))" ]
+                      @ preparation @ [ "ALTER TABLE child ADD INDEX replacement(a,b)" ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  match run "SHOW INDEX FROM child" with
+                  | ResultSet(_, rows) -> Expect.equal (rows |> List.map (List.item 2)) (expected |> List.map Some) "native index retention"
+                  | result -> failtestf "expected indexes, got %A" result
+
+          testCase "An explicit index can replace a generated index under the same name"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child ADD INDEX fk(a,b)" ] do
+                  Expect.isNone (run sql |> errorInfo) sql
+              match run "SHOW INDEX FROM child" with
+              | ResultSet(_, rows) ->
+                  Expect.equal (rows |> List.map (List.item 4)) [ Some "a"; Some "b" ] "one replacement index survives"
+              | result -> failtestf "expected replacement index, got %A" result
+
+          testCase "A new primary key replaces generated foreign-key indexes and reports nonnullable columns"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child ADD PRIMARY KEY(a)" ] do
+                  Expect.isNone (run sql |> errorInfo) sql
+              match run "SHOW INDEX FROM child" with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row.[2] (Some "PRIMARY") "generated index is replaced"
+                  Expect.equal row.[9] (Some "") "primary key cannot contain NULL"
+              | result -> failtestf "expected primary index, got %A" result
+              Expect.equal
+                  (run "ALTER TABLE child ADD PRIMARY KEY(b)" |> errorInfo |> Option.map (fun error -> error.Code, error.State))
+                  (Some(1068, "42000"))
+                  "duplicate primary key retains its diagnostic"
+
+          testCase "Foreign keys protect their last child and parent index even with checks disabled"
           <| fun _ ->
               for checks in [ "0"; "1" ] do
                   for sql, name in

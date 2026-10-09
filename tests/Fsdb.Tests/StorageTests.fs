@@ -199,7 +199,7 @@ let tests =
                     Expect.equal (createTable store defaultDatabase "wide_latin1" [ latin1 ] [] [] None None) (Ok()) "latin1 uses one byte per character"
 
                     let keyColumns = [ 1..5 ] |> List.map (fun index -> col (sprintf "value%d" index) (TVarchar 255) false)
-                    let wideKey = { Name = "ix_wide"; KeyColumns = indexColumns (keyColumns |> List.map _.Name); Unique = false; Visible = true; Kind = BTree }
+                    let wideKey = { Name = "ix_wide"; GeneratedForForeignKey = false; KeyColumns = indexColumns (keyColumns |> List.map _.Name); Unique = false; Visible = true; Kind = BTree }
 
                     match createTable store defaultDatabase "wide_key" keyColumns [ wideKey ] [] None None with
                     | Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes")) -> ()
@@ -937,7 +937,7 @@ let tests =
                     let store = create ()
                     let id = { col "id" (TInt false) false with PrimaryKey = true }
                     let shape = { col "shape" (TGeometry Geometry) false with Srid = Some 0u }
-                    let index = { Name = "sx"; KeyColumns = indexColumns [ "shape" ]; Unique = false; Visible = true; Kind = SpatialIndex }
+                    let index = { Name = "sx"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "shape" ]; Unique = false; Visible = true; Kind = SpatialIndex }
                     let geometry text = VGeometry(tryGeometryFromText 0 text |> Option.get)
                     let parsed text = tryGeometryFromText 0 text |> Option.get
 
@@ -1000,7 +1000,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -1028,6 +1028,7 @@ let tests =
                         "prefixed"
                         [ col "value" (TVarchar 50) false ]
                         [ { Name = "uq_value"
+                            GeneratedForForeignKey = false
                             KeyColumns = [ { Name = "value"; PrefixLength = Some 10; Transform = None; Direction = Asc } ]
                             Unique = true
                             Visible = true
@@ -1057,6 +1058,7 @@ let tests =
                         "binary_prefix"
                         [ col "id" (TInt false) false; col "value" (TVarBinary 8) false ]
                         [ { Name = "ix_value"
+                            GeneratedForForeignKey = false
                             KeyColumns = [ { Name = "value"; PrefixLength = Some 2; Transform = None; Direction = Asc } ]
                             Unique = false
                             Visible = true
@@ -1270,7 +1272,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -1473,7 +1475,7 @@ let tests =
                 testCase "a candidate delete evaluates the current row after the row changes"
                 <| fun _ ->
                     let store = create ()
-                    let index = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Visible = true; Kind = BTree }
+                    let index = { Name = "ix_category"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "category" ]; Unique = false; Visible = true; Kind = BTree }
 
                     createTable
                         store
@@ -1513,7 +1515,7 @@ let tests =
                 testCase "a candidate delete waits for its row lock before publishing"
                 <| fun _ ->
                     let store = create ()
-                    let index = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Visible = true; Kind = BTree }
+                    let index = { Name = "ix_category"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "category" ]; Unique = false; Visible = true; Kind = BTree }
 
                     createTable
                         store
@@ -1987,7 +1989,7 @@ let tests =
                 testCase "AddIndex / DropIndexAction manage the table's index metadata"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let ix = { Name = "idx_name"; KeyColumns = indexColumns [ "name" ]; Unique = false; Visible = true; Kind = BTree }
+                    let ix = { Name = "idx_name"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "name" ]; Unique = false; Visible = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
                     | Ok() ->
@@ -2003,7 +2005,7 @@ let tests =
                 testCase "a secondary ordered index follows inserted, updated, deleted, and replaced row identities"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let index = { Name = "idx_age"; KeyColumns = indexColumns [ "age" ]; Unique = false; Visible = true; Kind = BTree }
+                    let index = { Name = "idx_age"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "age" ]; Unique = false; Visible = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex index ] with
                     | Ok() -> ()
@@ -2085,6 +2087,7 @@ let tests =
 
                     let index =
                         { Name = "idx_age"
+                          GeneratedForForeignKey = false
                           KeyColumns = indexColumns [ "age" ]
                           Unique = false
                           Visible = true
@@ -2130,7 +2133,7 @@ let tests =
                 testCase "an ordered lookup counts adjacent SQL-equal keys without resolving rows"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let index = { Name = "idx_age"; KeyColumns = indexColumns [ "age" ]; Unique = false; Visible = true; Kind = BTree }
+                    let index = { Name = "idx_age"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "age" ]; Unique = false; Visible = true; Kind = BTree }
                     alterTable store defaultDatabase "users" [ AddIndex index ] |> Result.defaultWith (failtestf "add index failed: %A")
 
                     insertRows
@@ -2165,6 +2168,7 @@ let tests =
 
                     let index =
                         { Name = "ix_age_name"
+                          GeneratedForForeignKey = false
                           KeyColumns = indexColumns [ "age"; "name" ]
                           Unique = false
                           Visible = true
@@ -2235,7 +2239,7 @@ let tests =
                 testCase "a composite secondary index follows row mutations incrementally"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let index = { Name = "idx_name_age"; KeyColumns = indexColumns [ "name"; "age" ]; Unique = false; Visible = true; Kind = BTree }
+                    let index = { Name = "idx_name_age"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "name"; "age" ]; Unique = false; Visible = true; Kind = BTree }
                     alterTable store defaultDatabase "users" [ AddIndex index ] |> Result.defaultWith (failtestf "add index failed: %A")
                     let reindexesBefore = reindexCallCount ()
 
@@ -2308,7 +2312,7 @@ let tests =
                         [ [ VNull; VString "dup"; VInt 1L ]; [ VNull; VString "dup"; VInt 2L ]; [ VNull; VString "unique"; VInt 3L ] ]
                     |> ignore
 
-                    let ix = { Name = "uq_name"; KeyColumns = indexColumns [ "name" ]; Unique = true; Visible = true; Kind = BTree }
+                    let ix = { Name = "uq_name"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "name" ]; Unique = true; Visible = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
                     | Error(DuplicateKey(_, "uq_name", _)) -> ()
@@ -2440,7 +2444,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -2859,6 +2863,7 @@ let tests =
                         "parents"
                         [ idCol; col "other" (TInt false) false ]
                         [ { Name = "uq_pair"
+                            GeneratedForForeignKey = false
                             KeyColumns = indexColumns [ "id"; "other" ]
                             Unique = true
                             Visible = true

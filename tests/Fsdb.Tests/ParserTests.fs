@@ -1119,6 +1119,7 @@ let tests =
                                 OnUpdateCurrentTimestamp = false } ] with
                                 Indexes =
                                     [ { Name = "PRIMARY"
+                                        GeneratedForForeignKey = false
                                         KeyColumns = indexColumns [ "id" ]
                                         Unique = true
                                         Visible = true
@@ -1232,6 +1233,7 @@ let tests =
                                     OnUpdateCurrentTimestamp = false } ] with
                                 Indexes =
                                     [ { Name = "PRIMARY"
+                                        GeneratedForForeignKey = false
                                         KeyColumns = indexColumns [ "id" ]
                                         Unique = true
                                         Visible = true
@@ -2283,8 +2285,8 @@ let tests =
                         (parseOk "ALTER TABLE t ADD UNIQUE INDEX uq (a), ADD KEY idx (b), DROP INDEX uq, DROP KEY idx")
                         (AlterTable(
                             "t",
-                            [ AddIndex { Name = "uq"; KeyColumns = indexColumns [ "a" ]; Unique = true; Visible = true; Kind = BTree }
-                              AddIndex { Name = "idx"; KeyColumns = indexColumns [ "b" ]; Unique = false; Visible = true; Kind = BTree }
+                            [ AddIndex { Name = "uq"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "a" ]; Unique = true; Visible = true; Kind = BTree }
+                              AddIndex { Name = "idx"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "b" ]; Unique = false; Visible = true; Kind = BTree }
                               DropIndexAction "uq"
                               DropIndexAction "idx" ]
                         ))
@@ -2347,6 +2349,7 @@ let tests =
                             "document_type",
                             [ AddIndex
                                   { Name = "uniq.document_type.name"
+                                    GeneratedForForeignKey = false
                                     KeyColumns = indexColumns [ "technical_name" ]
                                     Unique = true
                                     Visible = true

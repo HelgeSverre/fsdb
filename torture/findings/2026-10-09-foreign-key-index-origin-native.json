@@ -1,0 +1,483 @@
+[
+  {
+    "name": "drop-child",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP INDEX fk",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "ERROR 1553 (HY000) at line 7: Cannot drop index 'fk': needed in a foreign key constraint\n",
+    "errors": [
+      [
+        1553,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-child-off",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "SET foreign_key_checks=0",
+      "ALTER TABLE child DROP INDEX fk",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "ERROR 1553 (HY000) at line 8: Cannot drop index 'fk': needed in a foreign key constraint\n",
+    "errors": [
+      [
+        1553,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-parent",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE parent DROP PRIMARY KEY",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "ERROR 1553 (HY000) at line 7: Cannot drop index 'PRIMARY': needed in a foreign key constraint\n",
+    "errors": [
+      [
+        1553,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-constraint-index",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY fk,DROP INDEX fk",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "drop-index-constraint",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP INDEX fk,DROP FOREIGN KEY fk",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "replace-index",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP INDEX fk,ADD INDEX replacement(a,b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "add-redundant",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD INDEX replacement(a,b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "drop-after-replacement",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD INDEX replacement(a,b)",
+      "ALTER TABLE child DROP INDEX fk",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "ERROR 1091 (42000) at line 8: Can't DROP 'fk'; check that column/key exists\n",
+    "errors": [
+      [
+        1091,
+        "42000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-constraint",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY fk",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "rename-index",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child RENAME INDEX fk TO replacement",
+      "ALTER TABLE child DROP INDEX replacement",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "ERROR 1553 (HY000) at line 8: Cannot drop index 'replacement': needed in a foreign key constraint\n",
+    "errors": [
+      [
+        1553,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-parent-off",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "SET foreign_key_checks=0",
+      "ALTER TABLE parent DROP PRIMARY KEY",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "ERROR 1553 (HY000) at line 8: Cannot drop index 'PRIMARY': needed in a foreign key constraint\n",
+    "errors": [
+      [
+        1553,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "replace-parent",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE parent DROP PRIMARY KEY,ADD UNIQUE KEY replacement(n)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "child-alternate",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD INDEX alternate(a,b)",
+      "ALTER TABLE child DROP INDEX alternate",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\talternate\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\talternate\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "ERROR 1553 (HY000) at line 8: Cannot drop index 'alternate': needed in a foreign key constraint\n",
+    "errors": [
+      [
+        1553,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "explicit-retained",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY fk,DROP INDEX fk,ADD INDEX explicit_index(a)",
+      "ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n)",
+      "ALTER TABLE child ADD INDEX replacement(a,b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\texplicit_index\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "renamed-generated",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child RENAME INDEX fk TO renamed",
+      "ALTER TABLE child ADD INDEX replacement(a,b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\trenamed\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "orphan-generated",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY fk",
+      "ALTER TABLE child ADD INDEX replacement(a,b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "prefix-replacement",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD INDEX replacement(b,a)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t1\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t2\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "unique-replacement",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD UNIQUE INDEX replacement(a,b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t0\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t0\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "create-like",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE copied LIKE child",
+      "SHOW INDEX FROM copied",
+      "ALTER TABLE copied ADD INDEX replacement(a,b)",
+      "SHOW INDEX FROM copied",
+      "DROP TABLE copied",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\ncopied\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nTable\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\ncopied\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\ncopied\t1\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nTable\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "rename-alone",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child RENAME INDEX fk TO renamed",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\trenamed\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "visibility",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ALTER INDEX fk INVISIBLE",
+      "ALTER TABLE child ADD INDEX replacement(a,b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\treplacement\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\treplacement\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "primary-replacement",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD PRIMARY KEY(a)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t0\tPRIMARY\t1\ta\tA\t0\tNULL\tNULL\t\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "longer-generated-replacement",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE parent ADD COLUMN m INT,ADD UNIQUE INDEX two(n,m)",
+      "ALTER TABLE child ADD CONSTRAINT longer FOREIGN KEY(a,b) REFERENCES parent(n,m)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tlonger\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\tlonger\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\nlonger\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "duplicate-generated-name",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD INDEX fk(a,b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\tfk\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "duplicate-primary",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD PRIMARY KEY(a)",
+      "ALTER TABLE child ADD PRIMARY KEY(b)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY CONSTRAINT_NAME"
+    ],
+    "stdout": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t0\tPRIMARY\t1\ta\tA\t0\tNULL\tNULL\t\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "stderr": "ERROR 1068 (42000) at line 8: Multiple primary key defined\n",
+    "errors": [
+      [
+        1068,
+        "42000"
+      ]
+    ]
+  }
+]

@@ -292,6 +292,14 @@ type Table =
 let private isPrimaryIndex (index: IndexDef) =
     String.Equals(index.Name, "PRIMARY", StringComparison.OrdinalIgnoreCase)
 
+let private primaryIndexDefinition columns : IndexDef =
+    { Name = "PRIMARY"
+      GeneratedForForeignKey = false
+      KeyColumns = columns
+      Unique = true
+      Visible = true
+      Kind = BTree }
+
 let primaryKeyColumns (table: Table) =
     table.Indexes
     |> List.tryFind isPrimaryIndex
@@ -4439,6 +4447,7 @@ let private mysqlCompatibilityTableDefs =
 let private mysqlCompatibilityTableIndexes =
     let grantor =
         { Name = "Grantor"
+          GeneratedForForeignKey = false
           KeyColumns =
             [ { Name = "Grantor"
                 PrefixLength = None
@@ -7117,7 +7126,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some _ ->
             let indexes =
                 table.Indexes
-                |> List.map (fun index -> if equal index.Name oldName then { index with Name = newName } else index)
+                |> List.map (fun index -> if equal index.Name oldName then { index with Name = newName; GeneratedForForeignKey = false } else index)
 
             Ok(
                 { table with
@@ -7157,12 +7166,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                                 else
                                     column)
 
-                        let primary =
-                            { Name = "PRIMARY"
-                              KeyColumns = cols
-                              Unique = true
-                              Visible = true
-                              Kind = BTree }
+                        let primary = primaryIndexDefinition cols
 
                         Ok(
                             { table with
@@ -7542,14 +7546,30 @@ let private resolveAlterForeignKeys (table: Table) actions =
         actions |> List.fold (fun indexes action ->
             match action with
             | AddIndex index -> indexes @ [ index ]
+            | AddPrimaryKey columns ->
+                if indexes |> List.exists isPrimaryIndex then indexes
+                else primaryIndexDefinition columns :: indexes
+            | DropPrimaryKey -> indexes |> List.filter (not << isPrimaryIndex)
             | DropIndexAction name -> indexes |> List.filter (fun index -> not (String.Equals(index.Name, name, StringComparison.OrdinalIgnoreCase)))
             | RenameIndex(oldName, newName) ->
                 indexes |> List.map (fun index ->
-                    if String.Equals(index.Name, oldName, StringComparison.OrdinalIgnoreCase) then { index with Name = newName }
+                    if String.Equals(index.Name, oldName, StringComparison.OrdinalIgnoreCase) then { index with Name = newName; GeneratedForForeignKey = false }
                     else index)
             | _ -> indexes) table.Indexes
-    let indexes = ForeignKeyIndexes.complete declaredIndexes declarations
-    let generatedIndexes = indexes |> List.skip declaredIndexes.Length |> List.map AddIndex
+    let completed = ForeignKeyIndexes.complete declaredIndexes declarations
+    let indexes = ForeignKeyIndexes.removeRedundantGenerated completed
+    let generatedIndexes = completed |> List.skip declaredIndexes.Length |> List.map AddIndex
+    let removedIndexes =
+        declaredIndexes
+        |> List.filter (fun index -> indexes |> List.contains index |> not)
+    let replacesGenerated (index: IndexDef) =
+        removedIndexes |> List.exists (fun removed -> String.Equals(removed.Name, index.Name, StringComparison.OrdinalIgnoreCase))
+    let replacementNames =
+        actions |> List.choose (function AddIndex index when replacesGenerated index -> Some index.Name | _ -> None)
+    let removalsAfterActions =
+        removedIndexes
+        |> List.filter (fun index -> replacementNames |> List.exists (fun name -> String.Equals(name, index.Name, StringComparison.OrdinalIgnoreCase)) |> not)
+        |> List.map (fun index -> DropIndexAction index.Name)
     let resolved =
         actions
         |> List.mapFold (fun sequence action ->
@@ -7558,7 +7578,10 @@ let private resolveAlterForeignKeys (table: Table) actions =
                 AddForeignKey(foreignKey.WithName(prefix + string sequence)), sequence + 1I
             | _ -> action, sequence) nextSequence
         |> fst
-    resolved @ generatedIndexes, indexes
+        |> List.collect (function
+            | AddIndex index when replacesGenerated index -> [ DropIndexAction index.Name; AddIndex index ]
+            | action -> [ action ])
+    resolved @ generatedIndexes @ removalsAfterActions, indexes
 
 let private indexesIncludingPrimaryKey (table: Table) =
     if table.Indexes |> List.exists isPrimaryIndex then table.Indexes
@@ -7566,11 +7589,7 @@ let private indexesIncludingPrimaryKey (table: Table) =
         match primaryKeyColumns table with
         | [] -> table.Indexes
         | columns ->
-            { Name = "PRIMARY"
-              KeyColumns = indexColumns columns
-              Unique = true
-              Visible = true
-              Kind = BTree } :: table.Indexes
+            primaryIndexDefinition (indexColumns columns) :: table.Indexes
 
 let private validateDroppedForeignKeyIndexes catalog address (candidate: Table) droppedIndexes =
     match droppedIndexes with

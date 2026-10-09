@@ -758,6 +758,7 @@ let tests =
 
               let index name unique columns =
                   { Name = name
+                    GeneratedForForeignKey = false
                     KeyColumns = indexColumns columns
                     Unique = unique
                     Visible = true

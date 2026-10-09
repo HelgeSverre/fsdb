@@ -22613,6 +22613,7 @@ let rec executeAs
         let db, table = splitQualified dbName table
         let index =
             { Name = name
+              GeneratedForForeignKey = false
               KeyColumns = columns
               Unique = unique
               Visible = visible

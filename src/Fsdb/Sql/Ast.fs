@@ -416,6 +416,8 @@ and IndexColumn =
 
 and IndexDef =
     { Name: string
+      /// Enables redundant-index removal until an explicit rename takes ownership.
+      GeneratedForForeignKey: bool
       KeyColumns: IndexColumn list
       Unique: bool
       Visible: bool

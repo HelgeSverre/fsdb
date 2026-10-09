@@ -2736,6 +2736,7 @@ let private indexItem: Parser<IndexDef, unit> =
         indexOptions kind
         |>> fun (kind, visible) ->
             { Name = name |> Option.defaultValue (List.head cols).Name
+              GeneratedForForeignKey = false
               KeyColumns = cols
               Unique = unique
               Visible = visible
@@ -2749,6 +2750,7 @@ let private namedUniqueConstraint: Parser<IndexDef, unit> =
      .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ",")))
     |>> fun (name, columns) ->
         { Name = name
+          GeneratedForForeignKey = false
           KeyColumns = columns
           Unique = true
           Visible = true
@@ -3083,6 +3085,7 @@ let private createTable: Parser<Statement, unit> =
             |> List.filter (fun c -> c.Unique)
             |> List.map (fun c ->
                 { Name = c.Name
+                  GeneratedForForeignKey = false
                   KeyColumns = indexColumns [ c.Name ]
                   Unique = true
                   Visible = true
@@ -3101,6 +3104,7 @@ let private createTable: Parser<Statement, unit> =
                 []
             else
                 [ { Name = "PRIMARY"
+                    GeneratedForForeignKey = false
                     KeyColumns = primaryColumns
                     Unique = true
                     Visible = true

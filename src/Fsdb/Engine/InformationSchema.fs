@@ -522,6 +522,7 @@ let private indexesIncludingPrimary (table: Table) =
         | [] -> table.Indexes
         | columns ->
             { Name = "PRIMARY"
+              GeneratedForForeignKey = false
               KeyColumns = indexColumns columns
               Unique = true
               Visible = true
@@ -562,6 +563,12 @@ let private indexTypeText = function
     | FullTextIndex _ -> "FULLTEXT"
     | SpatialIndex -> "SPATIAL"
 
+let private indexColumnNullability (table: Table) (keyColumn: IndexColumn) =
+    table.Columns
+    |> List.tryFind (fun column -> String.Equals(column.Name, keyColumn.Name, StringComparison.OrdinalIgnoreCase))
+    |> Option.map (fun column -> if column.PrimaryKey || not column.Nullable then "" else "YES")
+    |> Option.defaultValue ""
+
 /// One row per `(index, column)` pair.
 let private statisticsRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -572,11 +579,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
             |> List.mapi (fun i keyColumn ->
                 let expression = indexExpression keyColumn
                 let colName = if expression.IsSome then VNull else vs keyColumn.Name
-                let nullable =
-                    t.Columns
-                    |> List.tryFind (fun c -> c.Name = keyColumn.Name)
-                    |> Option.map (fun c -> if c.PrimaryKey || not c.Nullable then "" else "YES")
-                    |> Option.defaultValue ""
+                let nullable = indexColumnNullability t keyColumn
 
                 // A FULLTEXT entry reports no sort collation and type
                 // FULLTEXT, like real MySQL's STATISTICS rows.
@@ -4025,7 +4028,7 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       Some "0"
                       (effectivePrefixLength t keyColumn |> Option.map string)
                       None
-                      Some "YES"
+                      Some(if expression.IsSome then "YES" else indexColumnNullability t keyColumn)
                       Some(indexTypeText ix.Kind)
                       Some ""
                       Some ""

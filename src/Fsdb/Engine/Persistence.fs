@@ -36,10 +36,13 @@ let private fullTextWordLengthSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x49uy 
 let private namedPartitionSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Auy |] // "FSNJ" (format 19)
 let private partitionCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Buy |] // "FSNK" (format 20)
 let private partitionHintSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Cuy |] // "FSNL" (format 21)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Duy |] // "FSNM" (format 22)
+let private partitionTablespaceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Duy |] // "FSNM" (format 22)
+
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Euy |] // "FSNN" (format 23)
 
 type private SnapshotFormat =
-    { ColumnComments: bool
+    { GeneratedForeignKeyIndexes: bool
+      ColumnComments: bool
       TableComments: bool
       NumericDisplays: bool
       Partitions: bool
@@ -60,7 +63,8 @@ type private SnapshotFormat =
       FullTextStopwordSources: bool }
 
 let private legacySnapshotFormat =
-    { ColumnComments = false
+    { GeneratedForeignKeyIndexes = false
+      ColumnComments = false
       TableComments = false
       NumericDisplays = false
       Partitions = false
@@ -134,8 +138,11 @@ let private partitionCommentSnapshotFormat =
 let private partitionHintSnapshotFormat =
     { partitionCommentSnapshotFormat with PartitionHints = true }
 
-let private currentSnapshotFormat =
+let private partitionTablespaceSnapshotFormat =
     { partitionHintSnapshotFormat with PartitionTablespaces = true }
+
+let private currentSnapshotFormat =
+    { partitionTablespaceSnapshotFormat with GeneratedForeignKeyIndexes = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -144,6 +151,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = partitionTablespaceSnapshotMagic then
+        Some partitionTablespaceSnapshotFormat
     elif header = partitionHintSnapshotMagic then
         Some partitionHintSnapshotFormat
     elif header = partitionCommentSnapshotMagic then
@@ -805,6 +814,8 @@ let private encodeIndexDef (format: SnapshotFormat) (w: Writer) (ix: IndexDef) :
         writeBool w ix.Unique
         writeBool w (ix.Kind.IsFullText)
 
+    if format.GeneratedForeignKeyIndexes then writeBool w ix.GeneratedForForeignKey
+
 let private decodeIndexDef (format: SnapshotFormat) (columnNames: Set<string>) (r: #IReader) : IndexDef =
     if format.TaggedIndexColumns then
         let name = readStr r
@@ -821,6 +832,7 @@ let private decodeIndexDef (format: SnapshotFormat) (columnNames: Set<string>) (
             | _ -> failwith "Persistence: invalid index kind"
 
         { Name = name
+          GeneratedForForeignKey = format.GeneratedForeignKeyIndexes && readBool r
           KeyColumns = keyColumns
           Unique = unique
           Visible = visible
@@ -838,6 +850,7 @@ let private decodeIndexDef (format: SnapshotFormat) (columnNames: Set<string>) (
             | _ -> BTree, name
 
         { Name = name
+          GeneratedForForeignKey = false
           KeyColumns = readStrList r |> List.map (decodeIndexColumn format columnNames)
           Unique = readBool r
           Visible = visible
@@ -1165,6 +1178,8 @@ let private KindSchemaChangedV11 = 0x25uy
 let private KindSchemaChangedAtV11 = 0x26uy
 let private KindSchemaChangedV12 = 0x27uy
 let private KindSchemaChangedAtV12 = 0x28uy
+let private KindSchemaChangedV13 = 0x29uy
+let private KindSchemaChangedAtV13 = 0x2Auy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1340,11 +1355,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteLenEncString table
         w.WriteInt64LE nextId
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV12
+        w.WriteByte KindSchemaChangedV13
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV12
+        w.WriteByte KindSchemaChangedAtV13
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
@@ -1511,8 +1526,14 @@ let rec private decodeEventAt
         SchemaChangedAt(db, decodeStatement partitionHintSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV12 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement currentSnapshotFormat (columnsForTable db) r)
+        SchemaChanged(db, decodeStatement partitionTablespaceSnapshotFormat (columnsForTable db) r)
     | k when k = KindSchemaChangedAtV12 ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement partitionTablespaceSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
+    | k when k = KindSchemaChangedV13 ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement currentSnapshotFormat (columnsForTable db) r)
+    | k when k = KindSchemaChangedAtV13 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement currentSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindXaPrepared ->
