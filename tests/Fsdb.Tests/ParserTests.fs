@@ -1528,7 +1528,7 @@ let tests =
                             "CREATE TABLE posts (user_id BIGINT UNSIGNED, CONSTRAINT posts_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE RESTRICT)"
                     with
                     | CreateTable
-                        { Indexes = []
+                        { Indexes = [ { Name = "posts_user_id_foreign"; KeyColumns = [ { Name = "user_id"; PrefixLength = None; Transform = None } ]; Unique = false; Visible = true; Kind = BTree } ]
                           ForeignKeys = [ { Name = "posts_user_id_foreign";
                                 Columns = [ "user_id" ];
                                 RefDatabase = None;
@@ -1544,7 +1544,7 @@ let tests =
                 <| fun _ ->
                     match parseOk "CREATE TABLE posts (user_id INT, FOREIGN KEY (user_id) REFERENCES users (id))" with
                     | CreateTable
-                        { Indexes = []
+                        { Indexes = [ { Name = "user_id"; KeyColumns = [ { Name = "user_id"; PrefixLength = None; Transform = None } ]; Unique = false; Visible = true; Kind = BTree } ]
                           ForeignKeys = [ { Name = "posts_ibfk_1" } ]
                           Checks = []
                           IfNotExists = false } -> ()
@@ -1563,7 +1563,7 @@ let tests =
                 <| fun _ ->
                     match parseOk "CREATE TABLE posts (user_id INT, CONSTRAINT FOREIGN KEY (user_id) REFERENCES users (id))" with
                     | CreateTable
-                        { Indexes = []
+                        { Indexes = [ { Name = "user_id"; KeyColumns = [ { Name = "user_id"; PrefixLength = None; Transform = None } ]; Unique = false; Visible = true; Kind = BTree } ]
                           ForeignKeys = [ { Name = "posts_ibfk_1" } ]
                           Checks = []
                           IfNotExists = false } -> ()

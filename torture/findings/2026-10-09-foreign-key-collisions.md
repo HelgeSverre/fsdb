@@ -1,7 +1,8 @@
 # Foreign-key name collisions and error precedence
 
-Status: open. At `43d23f00`, ten of eleven audited scripts differ from native
-MySQL 8.4.11. Counts describe scripts, not independent defects. The
+Status: fixed for the eleven audited scripts. All now match native MySQL
+8.4.11; the baseline at `43d23f00` differed in ten. Counts describe scripts,
+not independent defects. The
 [native evidence](2026-10-09-foreign-key-collisions-native.json) and
 [fsdb replay](2026-10-09-foreign-key-collisions-current.json) retain complete
 SQL, result rows, errors, and SQLSTATE.
@@ -26,11 +27,10 @@ SQL, result rows, errors, and SQLSTATE.
 
 ## Implementation implications
 
-Name checking must follow native definition/index validation rather than run as
-a blanket parser check. ALTER name availability must consult the pre-statement
-catalog even when an earlier action drops the same constraint. CREATE and ALTER
-also need the backing-index rules described in the
-[constraint/index naming audit](2026-10-09-foreign-key-names.md).
+Name checking follows definition/index validation. ALTER name availability
+consults the pre-statement catalog even when an earlier action drops the same
+constraint. CREATE and ALTER share the backing-index rules in the
+[supporting-index audit](2026-10-09-foreign-key-indexes.md).
 
 ## Reproduction and evidence quality
 
@@ -45,4 +45,6 @@ retained matrix and require an isolated audit with preserved server logs before
 being used as an implementation oracle. The retained eleven-case rerun completed
 with every liveness check passing.
 
-No runtime changes or known-gap allowlist entries are included in this audit.
+The root gate passes 3,181 tests. Native wire validation passes 99 contracts
+and 14,972 steps with zero differences, including a permanent index/collision
+contract. No known-gap allowlist entries are added.

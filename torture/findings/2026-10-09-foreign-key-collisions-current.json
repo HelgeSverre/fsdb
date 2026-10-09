@@ -1,9 +1,14 @@
 [
   {
-    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\nshared\tother\n",
-    "errors": [],
+    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
-    "matches": false,
+    "matches": true,
     "name": "schema",
     "statements": [
       "USE probe",
@@ -13,14 +18,19 @@
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
       "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
-    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\nSHARED\tother\n",
-    "errors": [],
+    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
-    "matches": false,
+    "matches": true,
     "name": "case-insensitive",
     "statements": [
       "USE probe",
@@ -30,14 +40,19 @@
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
       "CREATE TABLE other(a INT,CONSTRAINT SHARED FOREIGN KEY(a) REFERENCES parent(n))",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
-    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\nshared\tother\n",
-    "errors": [],
+    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
-    "matches": false,
+    "matches": true,
     "name": "checks-disabled",
     "statements": [
       "USE probe",
@@ -49,14 +64,19 @@
       "SET foreign_key_checks=0",
       "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
       "SET foreign_key_checks=1",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
-    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_1\tchild\n",
-    "errors": [],
+    "actual": "",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "",
-    "matches": false,
+    "matches": true,
     "name": "generated-explicit",
     "statements": [
       "USE probe",
@@ -65,14 +85,19 @@
       "SET foreign_key_checks=1",
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT child_ibfk_1 FOREIGN KEY(b) REFERENCES parent(n))",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
-    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\nshared\tchild\n",
-    "errors": [],
+    "actual": "",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "",
-    "matches": false,
+    "matches": true,
     "name": "duplicate-explicit-shared-index",
     "statements": [
       "USE probe",
@@ -81,14 +106,19 @@
       "SET foreign_key_checks=1",
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,KEY a(a),CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
-    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\nshared\tchild\n",
-    "errors": [],
+    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
-    "matches": false,
+    "matches": true,
     "name": "alter-existing",
     "statements": [
       "USE probe",
@@ -98,14 +128,19 @@
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
       "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
-    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\nshared\tother\n",
-    "errors": [],
+    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
-    "matches": false,
+    "matches": true,
     "name": "alter-other",
     "statements": [
       "USE probe",
@@ -116,14 +151,19 @@
       "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
       "CREATE TABLE other(a INT)",
       "ALTER TABLE other ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
     "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
-    "errors": [],
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
-    "matches": false,
+    "matches": true,
     "name": "alter-drop-add",
     "statements": [
       "USE probe",
@@ -133,14 +173,19 @@
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
       "ALTER TABLE child DROP FOREIGN KEY shared,ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
-    "actual": "",
-    "errors": [],
+    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      }
+    ],
     "expected": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
-    "matches": false,
+    "matches": true,
     "name": "alter-add-drop",
     "statements": [
       "USE probe",
@@ -150,14 +195,19 @@
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
       "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),DROP FOREIGN KEY shared",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
-    "actual": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\nshared\tchild\n",
-    "errors": [],
+    "actual": "",
+    "errors": [
+      {
+        "Item1": 1061,
+        "Item2": "42000"
+      }
+    ],
     "expected": "",
-    "matches": false,
+    "matches": true,
     "name": "alter-two-adds",
     "statements": [
       "USE probe",
@@ -167,7 +217,7 @@
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,b INT)",
       "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),ADD CONSTRAINT shared FOREIGN KEY(b) REFERENCES parent(n)",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   },
   {
@@ -189,7 +239,7 @@
       "CREATE TABLE parent(n INT PRIMARY KEY)",
       "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
       "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES missing(n))",
-      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=\u0027probe\u0027 ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
     ]
   }
 ]

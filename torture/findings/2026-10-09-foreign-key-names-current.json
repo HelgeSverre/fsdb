@@ -22,10 +22,10 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\n",
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nTable\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tkey_label\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\n",
       "errors": [],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nTable\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tkey_label\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\n",
-      "matches": false,
+      "matches": true,
       "name": "key-name",
       "statements": [
         "USE probe",
@@ -55,10 +55,15 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_1\tchild\n",
-      "errors": [],
+      "actual": "",
+      "errors": [
+        {
+          "Item1": 1826,
+          "Item2": "HY000"
+        }
+      ],
       "expected": "",
-      "matches": false,
+      "matches": true,
       "name": "explicit-later",
       "statements": [
         "USE probe",
@@ -109,10 +114,15 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tchild\nchild_ibfk_1\tother\n",
-      "errors": [],
+      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tother\n",
+      "errors": [
+        {
+          "Item1": 1826,
+          "Item2": "HY000"
+        }
+      ],
       "expected": "CONSTRAINT_NAME\tTABLE_NAME\nchild_ibfk_1\tother\n",
-      "matches": false,
+      "matches": true,
       "name": "schema-collision",
       "statements": [
         "USE probe",
@@ -196,10 +206,15 @@
       ]
     },
     {
-      "actual": "CONSTRAINT_NAME\tTABLE_NAME\nsame\tchild\nsame\tchild\n",
-      "errors": [],
+      "actual": "",
+      "errors": [
+        {
+          "Item1": 1061,
+          "Item2": "42000"
+        }
+      ],
       "expected": "",
-      "matches": false,
+      "matches": true,
       "name": "duplicate-explicit",
       "statements": [
         "USE probe",
@@ -245,5 +260,6 @@
       ]
     }
   ],
-  "fsdb_base_revision": "23dfd3fa"
+  "fsdb_base_revision": "23dfd3fa",
+  "fsdb_base": "2190df57"
 }

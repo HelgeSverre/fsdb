@@ -1767,6 +1767,31 @@ let tests =
               let users = rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1])
               Expect.equal users [ VString "root" ] "bootstrap root row present"
 
+          testCase "Generated foreign-key indexes survive WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let mutable session = Fsdb.Session.create 1 store
+              for sql in
+                  [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child ADD FOREIGN KEY key_label(b) REFERENCES parent(n)" ] do
+                  let next, result = handle session sql
+                  session <- next
+                  Expect.isNone (errorInfo result) sql
+              let verify store =
+                  match tableSnapshot store defaultDatabase "child" with
+                  | Error error -> failtestf "expected recovered child table, got %A" error
+                  | Ok table ->
+                      Expect.equal (table.Indexes |> List.map _.Name) [ "a"; "key_label" ] "resolved backing indexes"
+                      Expect.equal (table.ForeignKeys |> List.map _.Name) [ "child_ibfk_1"; "child_ibfk_2" ] "independent constraint names"
+              verify store
+              let recovered = load dir
+              verify recovered
+              snapshotNow dir recovered
+              verify (load dir)
+
           testCase "UPDATE function writes recover with their invoking statement"
           <| fun _ ->
               for finish in [ None; Some "COMMIT"; Some "ROLLBACK" ] do

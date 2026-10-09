@@ -1,10 +1,11 @@
 # Foreign-key constraint and index names
 
-Status: partially resolved. Ten of fourteen scripts match, including the
-audited CREATE and ALTER numbering, suffix reuse, and rename behavior. The
-remaining differences are backing-index metadata, generated-name collisions,
-and duplicate explicit-name error precedence. The baseline at `83d96a0a`
-differed in all fourteen; these counts describe scripts, not independent defects.
+Status: resolved for the fourteen-script naming matrix. All scripts match,
+including CREATE and ALTER numbering, suffix reuse, rename behavior, generated
+collisions, and the backing-index metadata covered by these scripts. The
+[expanded supporting-index audit](2026-10-09-foreign-key-indexes.md) and
+[collision audit](2026-10-09-foreign-key-collisions.md) add independent coverage.
+Counts describe scripts, not independent defects.
 
 The [native evidence](2026-10-09-foreign-key-names-native.json) retains executable
 statement sequences, metadata, errors, and SQLSTATE. The
@@ -53,18 +54,17 @@ The [collision and error-precedence audit](2026-10-09-foreign-key-collisions.md)
 confirms schema-wide case-insensitive names, pre-statement ALTER name
 reservation, and the interaction with backing-index errors.
 
-Backing-index metadata and collision validation remain open, including
-schema-wide generated-name collisions and error precedence for duplicate
-explicit names. Broader combinations with a rename in the same ALTER and
-extreme numeric suffix limits remain unaudited. Do not infer whether a name was
-explicit by recognizing the old generated string pattern.
+Backing indexes and schema-wide name checks follow the audited native rules.
+Broader combinations with a rename in the same ALTER, rename collisions,
+generated-index replacement across later statements, and extreme numeric
+suffix limits remain unaudited. Do not infer whether a name was explicit by
+recognizing an old generated string pattern.
 
 ## Validation
 
-The CREATE and ALTER naming regressions failed before their fixes. WAL and
-snapshot recovery preserve the generated ALTER name for DROP-and-ADD in one
-statement. The root gate passes 3,172 tests without build warnings or errors.
-The full native wire run passes 97 contracts and 14,422 steps with zero
-differences at `torture/artifacts/runs/20261008T235740987-88809/contracts`.
-The original 35-script foreign-key diagnostics/validation matrix matches
-completely; this broader naming matrix retains the remaining limitations.
+The root gate passes 3,181 tests without build warnings or errors. WAL and
+snapshot recovery retain the resolved constraint and backing-index names.
+The full native wire run passes 99 contracts and 14,972 steps with zero
+differences at `torture/artifacts/runs/20261009T071530527-97190/contracts`.
+All fourteen naming scripts, fourteen backing-index scripts, and eleven
+collision scripts match their native evidence.

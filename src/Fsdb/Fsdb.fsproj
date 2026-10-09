@@ -32,6 +32,7 @@
     <Compile Include="Sql/Privileges.fs" />
     <Compile Include="Sql/FullText.fs" />
     <Compile Include="Sql/Ast.fs" />
+    <Compile Include="Sql/ForeignKeyIndexes.fs" />
     <Compile Include="Sql/SqlText.fs" />
     <Compile Include="Sql/Expression.fs" />
     <Compile Include="Sql/FunctionalIndex.fs" />

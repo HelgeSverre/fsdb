@@ -6139,18 +6139,144 @@ module ContractCatalog =
           Cleanup = [| "DROP VIEW IF EXISTS absent_view"; "DROP TABLE IF EXISTS copied" |]
           Coverage = [| "statement:select", [| "text-differential" |]; "statement:drop-table", [| "text-differential" |]; "statement:create-view", [| "text-differential" |] |] }
 
-    let private isolatedScriptSteps (cases: (string * (int * int * string) option * string list) list) =
-        [| for name, error, statements in cases do
+    let private isolatedScriptStepsWithErrors (cases: (string * (int * int * string) list * string list) list) =
+        [| for name, errors, statements in cases do
                for index, sql in List.indexed statements do
                    let label = sprintf "%s-%d" name index
                    let operation =
                        if sql.StartsWith("SHOW", StringComparison.Ordinal) || sql.StartsWith("SELECT", StringComparison.Ordinal) || sql.StartsWith("DESCRIBE", StringComparison.Ordinal) then Contract.query label sql
                        else Contract.execute label sql
                    let step =
-                       match error with
-                       | Some(failingIndex, code, state) when index = failingIndex -> operation |> Contract.fails code state
+                       match errors |> List.tryFind (fun (failingIndex, _, _) -> index = failingIndex) with
+                       | Some(_, code, state) -> operation |> Contract.fails code state
                        | _ -> operation
                    yield step |> Contract.on name |]
+
+    let private isolatedScriptSteps cases =
+        cases
+        |> List.map (fun (name, error, statements) -> name, Option.toList error, statements)
+        |> isolatedScriptStepsWithErrors
+
+    let private foreignKeyIndexesAndCollisions =
+        let reset =
+            [ "USE fk_index_probe"
+              "SET foreign_key_checks=0"
+              "DROP TABLE IF EXISTS child,parent,other,renamed"
+              "SET foreign_key_checks=1"
+              "CREATE TABLE parent(n INT PRIMARY KEY)" ]
+        let cases =
+            [
+              "index-create-bare", [],
+                  [ "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-constraint", [],
+                  [ "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-index", [],
+                  [ "CREATE TABLE child(a INT,b INT,FOREIGN KEY ix(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-both", [],
+                  [ "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY ix(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-existing", [],
+                  [ "CREATE TABLE child(a INT,b INT,KEY existing(a,b),CONSTRAINT fk FOREIGN KEY ix(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-invisible", [],
+                  [ "CREATE TABLE child(a INT,b INT,KEY existing(a) INVISIBLE,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-same-columns", [],
+                  [ "CREATE TABLE child(a INT,b INT,CONSTRAINT first_fk FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT second_fk FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-same-name-columns", [ (5, 1826, "HY000"); (6, 1146, "42S02") ],
+                  [ "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-same-index-name", [ (5, 1061, "42000"); (6, 1146, "42S02") ],
+                  [ "CREATE TABLE child(a INT,b INT,FOREIGN KEY ix(a) REFERENCES parent(n),FOREIGN KEY ix(b) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-create-occupied-name", [],
+                  [ "CREATE TABLE child(a INT,b INT,KEY a(b),FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-alter-bare", [],
+                  [ "CREATE TABLE child(a INT,b INT)"
+                    "ALTER TABLE child ADD FOREIGN KEY(a) REFERENCES parent(n)"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-alter-constraint", [],
+                  [ "CREATE TABLE child(a INT,b INT)"
+                    "ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n)"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-alter-index", [],
+                  [ "CREATE TABLE child(a INT,b INT)"
+                    "ALTER TABLE child ADD FOREIGN KEY ix(a) REFERENCES parent(n)"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "index-alter-both", [],
+                  [ "CREATE TABLE child(a INT,b INT)"
+                    "ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY ix(a) REFERENCES parent(n)"
+                    "SHOW INDEX FROM child"
+                    "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME" ]
+              "collision-schema", [ (6, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-case-insensitive", [ (6, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT,CONSTRAINT SHARED FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-checks-disabled", [ (7, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SET foreign_key_checks=0"
+                    "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SET foreign_key_checks=1"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-generated-explicit", [ (5, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT child_ibfk_1 FOREIGN KEY(b) REFERENCES parent(n))"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-duplicate-explicit-shared-index", [ (5, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,KEY a(a),CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-alter-existing", [ (6, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-alter-other", [ (7, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT)"
+                    "ALTER TABLE other ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-alter-drop-add", [ (6, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child DROP FOREIGN KEY shared,ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-alter-add-drop", [ (6, 1826, "HY000") ],
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),DROP FOREIGN KEY shared"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-alter-two-adds", [ (6, 1061, "42000") ],
+                  [ "CREATE TABLE child(a INT,b INT)"
+                    "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),ADD CONSTRAINT shared FOREIGN KEY(b) REFERENCES parent(n)"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+              "collision-missing-parent-precedence", [ (6, 1824, "HY000") ],
+                  [ "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES missing(n))"
+                    "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='fk_index_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME" ]
+            ]
+        { Name = "foreign-key-indexes-and-collisions"
+          Setup = [| "CREATE DATABASE fk_index_probe" |]
+          Steps = cases |> List.map (fun (name, errors, statements) -> name, errors, reset @ statements) |> isolatedScriptStepsWithErrors
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_index_probe" |]
+          Coverage = [| "statement:create-table", [| "text-differential" |]; "statement:alter-table", [| "text-differential" |] |] }
 
     let private foreignKeyNames =
         let cases =
@@ -7951,6 +8077,7 @@ module ContractCatalog =
            updateIgnoreConstraints
            routineUpdateWrites
            foreignKeyNames
+           foreignKeyIndexesAndCollisions
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings

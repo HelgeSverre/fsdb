@@ -5915,15 +5915,8 @@ let private checkFkParent
                     if found then Ok() else Error(ForeignKeyParentMissing(childDatabase, child.OriginalName, fk))
 
 let private foreignKeyIndexColumns (table: Table) (foreignKey: ForeignKeyDef) =
-    let supportsForeignKey (index: IndexDef) =
-        let prefix = index.KeyColumns |> List.truncate foreignKey.Columns.Length
-        index.Kind = BTree
-        && sameLength prefix foreignKey.Columns
-        && List.forall2 (fun (key: IndexColumn) name ->
-            key.PrefixLength.IsNone && key.Transform.IsNone
-            && String.Equals(key.Name, name, StringComparison.OrdinalIgnoreCase)) prefix foreignKey.Columns
     table.Indexes
-    |> List.tryFind supportsForeignKey
+    |> List.tryFind (ForeignKeyIndexes.supports foreignKey.Columns)
     |> Option.map _.Columns
     |> Option.defaultValue foreignKey.Columns
 
@@ -6417,6 +6410,26 @@ let prepareHashPartitioning tableEngine partitioning =
         |> validateHashPartitionDefinitions tableEngine
         |> Result.map (fun definitions -> Some { partitioning with Definitions = partitioning.Definitions |> Option.map (fun _ -> definitions) })
 
+let private tryDuplicateName existing names =
+    let rec check seen = function
+        | [] -> None
+        | (name: string) :: rest ->
+            let key = name.ToLowerInvariant()
+            if Set.contains key seen then Some name
+            else check (Set.add key seen) rest
+    check (existing |> Seq.map (fun (name: string) -> name.ToLowerInvariant()) |> Set.ofSeq) names
+
+let private validateIndexNames (indexes: IndexDef list) =
+    match tryDuplicateName [] (indexes |> List.map _.Name) with
+    | Some name -> Error(ExpressionError(1061, sprintf "Duplicate key name '%s'" name))
+    | None -> Ok()
+
+let private validateForeignKeyNames (database: Database) (foreignKeys: ForeignKeyDef list) =
+    let existing = database |> Map.values |> Seq.collect (fun table -> table.ForeignKeys |> Seq.map _.Name)
+    match tryDuplicateName existing (foreignKeys |> List.map _.Name) with
+    | Some name -> Error(ExpressionError(1826, sprintf "Duplicate foreign key constraint name '%s'" name))
+    | None -> Ok()
+
 let createTableSeeded
     (store: Store)
     (dbName: string)
@@ -6511,7 +6524,11 @@ let createTableSeeded
                             if Map.containsKey key db then
                                 Error(TableExists tableName)
                             else
-                                match foreignKeys |> traverse (validateForeignKeyDefinition store catalog dbName db tableName columns indexes) with
+                                match
+                                    validateIndexNames indexes
+                                    |> Result.bind (fun () -> foreignKeys |> traverse (validateForeignKeyDefinition store catalog dbName db tableName columns indexes))
+                                    |> Result.bind (fun _ -> validateForeignKeyNames db foreignKeys)
+                                with
                                 | Error error -> Error error
                                 | Ok _ ->
                                     match indexes |> List.tryPick (fun index -> match checkFullTextColumns columns index with Error error -> Some error | Ok() -> None) with
@@ -7505,7 +7522,7 @@ let private convertAlterRows mode (original: Table) (candidate: Table) actions c
                     checkUnique values |> Result.bind (fun values -> checkRow candidate values |> Result.map (fun () -> values)))
             |> Result.map (fun rows -> { candidate with RowsArray = rows })))
 
-let private resolveAlterForeignKeyNames (table: Table) actions =
+let private resolveAlterForeignKeys (table: Table) actions =
     let prefix = normalizeTableName table.OriginalName + "_ibfk_"
     let sequenceOf (foreignKey: ForeignKeyDef) =
         if foreignKey.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) then
@@ -7516,13 +7533,32 @@ let private resolveAlterForeignKeyNames (table: Table) actions =
         else None
     let nextSequence =
         table.ForeignKeys |> List.choose sequenceOf |> List.fold max 0I |> (+) 1I
-    actions
-    |> List.mapFold (fun sequence action ->
-        match action with
-        | AddUnnamedForeignKey foreignKey ->
-            AddForeignKey(foreignKey.WithName(prefix + string sequence)), sequence + 1I
-        | _ -> action, sequence) nextSequence
-    |> fst
+    let declarations =
+        actions |> List.choose (function
+            | AddForeignKey foreignKey -> Some(Some foreignKey.Name, foreignKey.Columns)
+            | AddUnnamedForeignKey foreignKey -> Some(foreignKey.Name, foreignKey.Columns)
+            | _ -> None)
+    let declaredIndexes =
+        actions |> List.fold (fun indexes action ->
+            match action with
+            | AddIndex index -> indexes @ [ index ]
+            | DropIndexAction name -> indexes |> List.filter (fun index -> not (String.Equals(index.Name, name, StringComparison.OrdinalIgnoreCase)))
+            | RenameIndex(oldName, newName) ->
+                indexes |> List.map (fun index ->
+                    if String.Equals(index.Name, oldName, StringComparison.OrdinalIgnoreCase) then { index with Name = newName }
+                    else index)
+            | _ -> indexes) table.Indexes
+    let indexes = ForeignKeyIndexes.complete declaredIndexes declarations
+    let generatedIndexes = indexes |> List.skip declaredIndexes.Length |> List.map AddIndex
+    let resolved =
+        actions
+        |> List.mapFold (fun sequence action ->
+            match action with
+            | AddUnnamedForeignKey foreignKey ->
+                AddForeignKey(foreignKey.WithName(prefix + string sequence)), sequence + 1I
+            | _ -> action, sequence) nextSequence
+        |> fst
+    resolved @ generatedIndexes, indexes
 
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
@@ -7536,7 +7572,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
-                let actions = resolveAlterForeignKeyNames table actions
+                let actions, indexes = resolveAlterForeignKeys table actions
                 let origKey = normalizeTableName tableName
                 let mode = temporalCoercionMode store
                 let convertsColumns = actions |> List.exists (function ModifyColumn _ | ChangeColumn _ -> true | _ -> false)
@@ -7590,8 +7626,9 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                         Error(ExpressionError(1075, "Incorrect table definition; there can be only one auto column and it must be defined as a key"))
                     | None -> Ok()
 
-                actions
-                |> List.fold step (Ok(origKey, definition, true))
+                validateIndexNames indexes
+                |> Result.bind (fun () -> actions |> List.fold step (Ok(origKey, definition, true)))
+                |> Result.bind (fun state -> validateForeignKeyNames db addedForeignKeys |> Result.map (fun () -> state))
                 |> Result.bind (fun state -> validateAutoIncrementKey state |> Result.map (fun () -> state))
                 |> Result.bind (fun (key, candidate, preserveFullText) ->
                     if not convertsColumns then Ok(key, candidate, preserveFullText)

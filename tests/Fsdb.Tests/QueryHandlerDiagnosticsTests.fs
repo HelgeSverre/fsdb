@@ -35,7 +35,52 @@ let private routineUpdateSetup functionSql =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "UPDATE observes and retains writes from assignment and predicate functions"
+        [ testCase "Foreign keys create or reuse native supporting indexes"
+          <| fun _ ->
+              for definition, expected in
+                  [ "FOREIGN KEY(a) REFERENCES parent(n)", [ "a" ]
+                    "CONSTRAINT fk FOREIGN KEY ix(a) REFERENCES parent(n)", [ "fk" ]
+                    "FOREIGN KEY ix(a) REFERENCES parent(n)", [ "ix" ]
+                    "KEY existing(a,b),CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n)", [ "existing" ]
+                    "CONSTRAINT first_fk FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT second_fk FOREIGN KEY(a) REFERENCES parent(n)", [ "second_fk" ]
+                    "KEY a(b),FOREIGN KEY(a) REFERENCES parent(n)", [ "a"; "a_2" ] ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE parent(n INT PRIMARY KEY)"
+                  let session, result = handle session ("CREATE TABLE child(a INT,b INT," + definition + ")")
+                  Expect.isNone (errorInfo result) "definition accepted"
+                  match handle session "SHOW INDEX FROM child" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal (rows |> List.map (List.item 2) |> List.distinct) (expected |> List.map Some) "supporting index names"
+                  | result -> failtestf "expected indexes, got %A" result
+
+          testCase "Duplicate foreign-key index names precede constraint collisions"
+          <| fun _ ->
+              for statement in
+                  [ "CREATE TABLE child(a INT,b INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT shared FOREIGN KEY(b) REFERENCES parent(n))"
+                    "ALTER TABLE other ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),ADD CONSTRAINT shared FOREIGN KEY(b) REFERENCES parent(n)" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE parent(n INT PRIMARY KEY)"
+                  let session, _ = handle session "CREATE TABLE other(a INT,b INT)"
+                  let _, result = handle session statement
+                  Expect.equal (errorInfo result |> Option.map (fun error -> error.Code, error.State, error.Message))
+                      (Some(1061, "42000", "Duplicate key name 'shared'")) "index diagnostics precede foreign-key name validation"
+
+          testCase "Foreign key names remain reserved across an ALTER and across tables"
+          <| fun _ ->
+              for sql in
+                  [ "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                    "CREATE TABLE other(a INT,CONSTRAINT SHARED FOREIGN KEY(a) REFERENCES parent(n))"
+                    "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)"
+                    "ALTER TABLE child DROP FOREIGN KEY shared,ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)"
+                    "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),DROP FOREIGN KEY shared" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE parent(n INT PRIMARY KEY)"
+                  let session, _ = handle session "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))"
+                  let session, _ = handle session "SET foreign_key_checks=0"
+                  let _, result = handle session sql
+                  Expect.equal (errorInfo result |> Option.map (fun error -> error.Code, error.State)) (Some(1826, "HY000")) sql
+
+          testCase "UPDATE observes and retains writes from assignment and predicate functions"
           <| fun _ ->
               for statement, affected, value in
                   [ "UPDATE child SET n=promote_parent()", 3UL, "3"

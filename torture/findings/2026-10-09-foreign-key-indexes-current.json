@@ -1,0 +1,262 @@
+[
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\ta\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\ta\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "matches": true,
+    "name": "create-bare",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "matches": true,
+    "name": "create-constraint",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tix\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tix\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "matches": true,
+    "name": "create-index",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,FOREIGN KEY ix(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "matches": true,
+    "name": "create-both",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY ix(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\texisting\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\texisting\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\texisting\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\texisting\t2\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "matches": true,
+    "name": "create-existing",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,KEY existing(a,b),CONSTRAINT fk FOREIGN KEY ix(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\texisting\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tNO\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\texisting\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tNO\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "matches": true,
+    "name": "create-invisible",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,KEY existing(a) INVISIBLE,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tsecond_fk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfirst_fk\nsecond_fk\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tsecond_fk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfirst_fk\nsecond_fk\n",
+    "matches": true,
+    "name": "create-same-columns",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT first_fk FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT second_fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "",
+    "errors": [
+      {
+        "Item1": 1826,
+        "Item2": "HY000"
+      },
+      {
+        "Item1": 1146,
+        "Item2": "42S02"
+      }
+    ],
+    "expected": "",
+    "matches": true,
+    "name": "create-same-name-columns",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "",
+    "errors": [
+      {
+        "Item1": 1061,
+        "Item2": "42000"
+      },
+      {
+        "Item1": 1146,
+        "Item2": "42S02"
+      }
+    ],
+    "expected": "",
+    "matches": true,
+    "name": "create-same-index-name",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,FOREIGN KEY ix(a) REFERENCES parent(n),FOREIGN KEY ix(b) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\ta\t1\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\ta_2\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\ta\t1\tb\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nchild\t1\ta_2\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "matches": true,
+    "name": "create-occupied-name",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,KEY a(b),FOREIGN KEY(a) REFERENCES parent(n))",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\ta\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\ta\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "matches": true,
+    "name": "alter-bare",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT)",
+      "ALTER TABLE child ADD FOREIGN KEY(a) REFERENCES parent(n)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "matches": true,
+    "name": "alter-constraint",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT)",
+      "ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tix\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tix\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nchild_ibfk_1\n",
+    "matches": true,
+    "name": "alter-index",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT)",
+      "ALTER TABLE child ADD FOREIGN KEY ix(a) REFERENCES parent(n)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  },
+  {
+    "actual": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "errors": [],
+    "expected": "Table\tNon_unique\tKey_name\tSeq_in_index\tColumn_name\tCollation\tCardinality\tSub_part\tPacked\tNull\tIndex_type\tComment\tIndex_comment\tVisible\tExpression\nchild\t1\tfk\t1\ta\tA\t0\tNULL\tNULL\tYES\tBTREE\t\t\tYES\tNULL\nCONSTRAINT_NAME\nfk\n",
+    "matches": true,
+    "name": "alter-both",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT)",
+      "ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY ix(a) REFERENCES parent(n)",
+      "SHOW INDEX FROM child",
+      "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' AND TABLE_NAME='child' ORDER BY CONSTRAINT_NAME"
+    ]
+  }
+]

@@ -3106,10 +3106,16 @@ let private createTable: Parser<Statement, unit> =
                     Visible = true
                     Kind = BTree } ]
 
+        let indexes =
+            declaredForeignKeys
+            |> List.map (fun foreignKey ->
+                foreignKey.Name.ConstraintName |> Option.orElse foreignKey.Name.IndexName, foreignKey.Columns)
+            |> ForeignKeyIndexes.complete (primaryIndex @ explicitIndexes @ uniqueColumnIndexes)
+
         CreateTable
             { Name = name
               Columns = columns
-              Indexes = primaryIndex @ explicitIndexes @ uniqueColumnIndexes
+              Indexes = indexes
               ForeignKeys = foreignKeys
               Checks = checks
               IfNotExists = ifNotExists
