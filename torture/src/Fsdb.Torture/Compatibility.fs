@@ -6673,6 +6673,31 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS year_value_input" |]
           Coverage = [| "statement:insert", [| "text-differential" |] |] }
 
+    let private yearByteForeignKeys =
+        { Name = "year-byte-foreign-keys"
+          Setup = [| "CREATE DATABASE fk_year_byte_probe" |]
+          Steps =
+            [| Contract.execute "select-database" "USE fk_year_byte_probe"
+               Contract.execute "create-year-parent" "CREATE TABLE year_parent(x YEAR PRIMARY KEY)"
+               Contract.execute "create-tiny-child" "CREATE TABLE tiny_child(x TINYINT UNSIGNED,CONSTRAINT fk_year_tiny FOREIGN KEY(x) REFERENCES year_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)"
+               Contract.execute "insert-year-parent" "INSERT INTO year_parent VALUES(2024),(0)"
+               Contract.execute "insert-tiny-child" "INSERT INTO tiny_child VALUES(124),(0)"
+               Contract.execute "update-year-parent" "UPDATE year_parent SET x=2025 WHERE x=2024"
+               Contract.query "tiny-child-after-update" "SELECT x FROM tiny_child ORDER BY x"
+               Contract.execute "delete-zero-year" "DELETE FROM year_parent WHERE x=0"
+               Contract.query "tiny-child-after-delete" "SELECT x FROM tiny_child ORDER BY x"
+               Contract.execute "create-tiny-parent" "CREATE TABLE tiny_parent(x TINYINT UNSIGNED PRIMARY KEY)"
+               Contract.execute "create-year-child" "CREATE TABLE year_child(x YEAR,CONSTRAINT fk_tiny_year FOREIGN KEY(x) REFERENCES tiny_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)"
+               Contract.execute "insert-tiny-parent" "INSERT INTO tiny_parent VALUES(124),(0)"
+               Contract.execute "insert-year-child" "INSERT INTO year_child VALUES(2024),(0)"
+               Contract.execute "update-tiny-parent" "UPDATE tiny_parent SET x=125 WHERE x=124"
+               Contract.query "year-child-after-update" "SELECT x FROM year_child ORDER BY x"
+               Contract.execute "delete-zero-tiny" "DELETE FROM tiny_parent WHERE x=0"
+               Contract.query "year-child-after-delete" "SELECT x FROM year_child ORDER BY x"
+               Contract.execute "reject-signed-tiny-child" "CREATE TABLE signed_tiny_child(x TINYINT,CONSTRAINT fk_signed FOREIGN KEY(x) REFERENCES year_parent(x))" |> Contract.fails 3780 "HY000" |]
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_year_byte_probe" |]
+          Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
+
     let private foreignKeyGeneratedActions =
         { Name = "foreign-key-generated-actions"
           Setup = [| "CREATE DATABASE fk_generated_action_probe" |]
@@ -8576,6 +8601,7 @@ module ContractCatalog =
            regexpPosixClasses
            mixedTypeJoinIn
            yearColumnValues
+           yearByteForeignKeys
            qualifiedDuplicateKeys
            alterCoercion
            alterRowOrder

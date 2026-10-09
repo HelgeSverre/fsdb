@@ -3443,6 +3443,43 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
             SecondaryOrder = secondaryOrder }
     |> mergeFullTextDocuments sourceRowIds baseTable batchTable
 
+let private foreignKeyStorageValue (column: ColumnDef) value =
+    match column.Type, value with
+    | TYear, VInt 0L -> VInt 0L
+    | TYear, VInt year when year >= 1901L && year <= 2155L -> VInt(year - 1900L)
+    | _ -> value
+
+let private foreignKeyValuesMatch (child: ColumnDef) childValue (parent: ColumnDef) parentValue =
+    compare (foreignKeyStorageValue child childValue) (foreignKeyStorageValue parent parentValue) = 0
+
+let private foreignKeyRowsMatch
+    (childColumns: ColumnDef list)
+    (parentColumns: ColumnDef list)
+    (columnPairs: (int * int) list)
+    (childRow: Value[])
+    (parentRow: Value[])
+    =
+    columnPairs
+    |> List.forall (fun (childIndex, parentIndex) ->
+        foreignKeyValuesMatch
+            childColumns.[childIndex]
+            childRow.[childIndex]
+            parentColumns.[parentIndex]
+            parentRow.[parentIndex])
+
+let private foreignKeyUsesYearByte (child: ColumnDef) (parent: ColumnDef) =
+    match child.Type, parent.Type with
+    | TYear, TTinyInt true
+    | TTinyInt true, TYear -> true
+    | _ -> false
+
+let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parentValue =
+    match child.Type, parent.Type, foreignKeyStorageValue parent parentValue with
+    | TYear, TTinyInt true, VInt 0L -> VInt 0L
+    | TYear, TTinyInt true, VInt yearByte -> VInt(yearByte + 1900L)
+    | TTinyInt true, TYear, VInt yearByte -> VInt yearByte
+    | _ -> parentValue
+
 let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
     let conflict () = raise (LockWaitTimeout dbName)
 
@@ -3456,15 +3493,14 @@ let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
                 | Some parent ->
                     match foreignKey.Columns |> traverse (resolveColumn table.Columns), foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
                     | Ok childIndices, Ok parentIndices ->
+                        let columnPairs = List.zip childIndices parentIndices
                         for row in table.RowsArray do
                             let childKey = childIndices |> List.map (fun index -> row.[index])
 
                             if childKey |> List.forall ((<>) VNull) then
                                 let parentExists =
                                     parent.RowsArray
-                                    |> Seq.exists (fun parentRow ->
-                                        let parentKey = parentIndices |> List.map (fun index -> parentRow.[index])
-                                        List.forall2 (fun left right -> compare left right = 0) childKey parentKey)
+                                    |> Seq.exists (foreignKeyRowsMatch table.Columns parent.Columns columnPairs row)
 
                                 if not parentExists then
                                     conflict ()
@@ -5941,6 +5977,12 @@ let private checkFkParent
                 match fk.RefColumns |> traverse (resolveColumn parent.Columns) with
                 | Error _ -> Ok()
                 | Ok refIdxs ->
+                    let columnPairs = List.zip idxs refIdxs
+                    let usesYearByte =
+                        columnPairs
+                        |> List.exists (fun (childIndex, parentIndex) ->
+                            foreignKeyUsesYearByte child.Columns.[childIndex] parent.Columns.[parentIndex])
+                    let matchesParent = foreignKeyRowsMatch child.Columns parent.Columns columnPairs row
                     // Key encoding uses absolute column positions, so the probe
                     // must have the parent's full row width.
                     let probeRow = Array.create parent.Columns.Length VNull
@@ -5948,12 +5990,14 @@ let private checkFkParent
                     let parentKey = encodeConstraintKey parent.Columns refIdxs probeRow
                     let referencesCandidate =
                         referencedTableAddress childDatabase fk = tableAddress childDatabase child.OriginalName
-                        && parentKey = encodeConstraintKey parent.Columns refIdxs row
+                        && (if usesYearByte then matchesParent row else parentKey = encodeConstraintKey parent.Columns refIdxs row)
                     let found =
                         referencesCandidate
-                        || match parentUniqueIndex parent refIdxs with
-                           | Some index -> parentKey |> Option.exists index.ContainsKey
-                           | None -> parent.RowsArray |> Seq.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
+                        || if usesYearByte then parent.RowsArray |> Seq.exists matchesParent
+                           else
+                               match parentUniqueIndex parent refIdxs with
+                               | Some index -> parentKey |> Option.exists index.ContainsKey
+                               | None -> parent.RowsArray |> Seq.exists matchesParent
 
                     if found then Ok() else Error(ForeignKeyParentMissing(childDatabase, child.OriginalName, fk))
 
@@ -6274,6 +6318,8 @@ let private foreignKeyColumnsCompatible (child: ColumnDef) (parent: ColumnDef) =
         | _ -> None
 
     match child.Type, parent.Type with
+    | TYear, TTinyInt true
+    | TTinyInt true, TYear -> true
     | TBool, TBool
     | TBool, TTinyInt false
     | TTinyInt false, TBool -> true
@@ -8521,7 +8567,12 @@ let private insertCore
                 with
                 | Ok childIndices, Some parent ->
                     match foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
-                    | Ok parentIndices ->
+                    | Ok parentIndices
+                        when not (
+                            List.zip childIndices parentIndices
+                            |> List.exists (fun (childIndex, parentIndex) ->
+                                foreignKeyUsesYearByte table.Columns.[childIndex] parent.Columns.[parentIndex])
+                        ) ->
                         let isSelf = isSelfReference foreignKey
                         let selfParentIndices = if isSelf then Some parentIndices else None
 
@@ -8534,7 +8585,7 @@ let private insertCore
                                 | None -> Mutable(constraintLookup parent.Columns parentIndices parent.RowsArray)
 
                         Some(foreignKey.Name, (childIndices, selfParentIndices, source))
-                    | Error _ -> None
+                    | _ -> None
                 | _ -> None)
             |> Map.ofList
 
@@ -9057,13 +9108,14 @@ and private cascadeUpdateVisitedFrom
                             match fk.Columns |> traverse (resolveColumn childTbl.Columns) with
                             | Error _ -> Ok(currentCatalog, visited, changes)
                             | Ok childIdxs ->
+                                let columnPairs = List.zip childIdxs refIdxs
                                 let alreadyVisited = visited |> Map.tryFind childAddress |> Option.defaultValue []
 
                                 let isChild (row: Value[]) =
                                     let key = childIdxs |> List.map (fun i -> row.[i])
 
                                     key |> List.forall ((<>) VNull)
-                                    && List.forall2 (fun a b -> compare a b = 0) key oldKey
+                                    && foreignKeyRowsMatch childTbl.Columns parentColumns columnPairs row oldRow
                                     && not (alreadyVisited |> List.exists ((=) row))
 
                                 let matching = childTbl.RowsArray |> Seq.filter isChild |> List.ofSeq
@@ -9091,7 +9143,13 @@ and private cascadeUpdateVisitedFrom
                                                 (fun (changes, index, secondaryIndex, secondaryOrder) (rowId, row) ->
                                                     if isChild row then
                                                         let row' = Array.copy row
-                                                        List.iter2 (fun i v -> row'.[i] <- v) childIdxs newKey
+                                                        columnPairs
+                                                        |> List.iter (fun (childIndex, parentIndex) ->
+                                                            row'.[childIndex] <-
+                                                                foreignKeyCascadeValue
+                                                                    childTbl.Columns.[childIndex]
+                                                                    parentColumns.[parentIndex]
+                                                                    newRow.[parentIndex])
                                                         rows.[rowId] <- row'
                                                         let index, secondaryIndex, secondaryOrder = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex secondaryOrder
                                                         { RowId = rowId
@@ -9557,13 +9615,12 @@ let rec private cascadeDeleteVisited
                     | Error _, _
                     | _, Error _ -> Ok(currentCatalog, visited, blanked) // stale FK metadata — see `checkFkParents`'s note.
                     | Ok childIdxs, Ok refIdxs ->
-                        let parentKeys = toDelete |> List.map (fun row -> refIdxs |> List.map (fun i -> row.[i]))
-
+                        let columnPairs = List.zip childIdxs refIdxs
                         let isChild (row: Value[]) =
                             let key = childIdxs |> List.map (fun i -> row.[i])
 
                             key |> List.forall ((<>) VNull)
-                            && parentKeys |> List.exists (List.forall2 (fun a b -> compare a b = 0) key)
+                            && (toDelete |> List.exists (foreignKeyRowsMatch childTbl.Columns table.Columns columnPairs row))
 
                         let matching = childTbl.RowsArray |> Seq.filter isChild |> List.ofSeq
 
@@ -9975,15 +10032,14 @@ let private validateCatalogForeignKeys (baseCatalog: Catalog) (catalog: Catalog)
                             foreignKey.RefColumns |> traverse (resolveColumn parent.Columns)
                         with
                         | Ok childIndices, Ok parentIndices when sameLength childIndices parentIndices ->
+                            let columnPairs = List.zip childIndices parentIndices
                             for row in table.RowsArray do
                                 let childKey = childIndices |> List.map (fun index -> row.[index])
 
                                 if childKey |> List.forall ((<>) VNull) then
                                     let parentExists =
                                         parent.RowsArray
-                                        |> Seq.exists (fun parentRow ->
-                                            let parentKey = parentIndices |> List.map (fun index -> parentRow.[index])
-                                            List.forall2 (fun childValue parentValue -> compare childValue parentValue = 0) childKey parentKey)
+                                        |> Seq.exists (foreignKeyRowsMatch table.Columns parent.Columns columnPairs row)
 
                                     if not parentExists then
                                         conflict databaseName

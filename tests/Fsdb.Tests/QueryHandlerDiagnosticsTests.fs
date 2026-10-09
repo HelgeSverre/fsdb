@@ -176,6 +176,31 @@ let tests =
                       expectedError
                       (sprintf "%s references %s" childType parentType)
 
+          testCase "YEAR and unsigned TINYINT foreign keys compare stored bytes"
+          <| fun _ ->
+              for parentType, childType, parentValue, childValue, newParentValue, expectedChild in
+                  [ "YEAR", "TINYINT UNSIGNED", "2024", "124", "2025", "125"
+                    "TINYINT UNSIGNED", "YEAR", "124", "2024", "125", "2025" ] do
+                  let store = Fsdb.Storage.create()
+                  let mutable session = create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in
+                      [ sprintf "CREATE TABLE parent(x %s PRIMARY KEY)" parentType
+                        sprintf "CREATE TABLE child(x %s,CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x) ON UPDATE CASCADE ON DELETE CASCADE)" childType
+                        sprintf "INSERT INTO parent VALUES(%s),(0)" parentValue
+                        sprintf "INSERT INTO child VALUES(%s),(0)" childValue
+                        sprintf "UPDATE parent SET x=%s WHERE x=%s" newParentValue parentValue ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  Expect.equal
+                      (run "SELECT x FROM child ORDER BY x")
+                      (ResultSet([ "x" ], [ [ Some "0" ]; [ Some expectedChild ] ]))
+                      "cascade maps the stored key"
+                  Expect.isNone (run "DELETE FROM parent WHERE x=0" |> errorInfo) "delete cascades across the type pair"
+                  Expect.equal (run "SELECT COUNT(*) FROM child") (ResultSet([ "COUNT(*)" ], [ [ Some "1" ] ])) "zero child removed"
+
           testCase "ENUM and SET foreign keys require matching storage widths"
           <| fun _ ->
               let declaration kind count =

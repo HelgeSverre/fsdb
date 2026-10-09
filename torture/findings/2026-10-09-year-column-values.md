@@ -13,9 +13,10 @@ Further creation probes found that MySQL accepts foreign keys pairing YEAR
 with `TINYINT UNSIGNED` in either direction. Its referential comparison uses
 the YEAR storage byte: YEAR 2024 matches tinyint 124, and YEAR 1924 matches
 tinyint 24. Update cascades map 2024 to 2025 and tinyint 124 to 125 in either
-direction; zero also matches zero. fsdb currently rejects this pair with 3780.
-Admitting the DDL requires a shared physical-key rule across parent probes,
-insert lookups, cascades, and transaction validation.
+direction; zero also matches zero. The `year-byte-foreign-keys` contract
+covers declarations, parent lookups, updates, deletes, and zero keys in both
+directions, plus rejection of signed tinyint. fsdb uses a shared physical-key
+rule across parent probes, insert lookups, cascades, and transaction validation.
 
 MySQL also accepts TIME paired with DATETIME or TIMESTAMP in either direction,
 including differing fractional precisions. DATE remains incompatible with
