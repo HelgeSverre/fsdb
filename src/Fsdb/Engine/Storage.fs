@@ -1965,17 +1965,41 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | (TInt _ | TBigInt false | TSmallInt _ | TMediumInt _ | TTinyInt _ | TBool) as integerType ->
             narrowInteger integerType v
         | TYear ->
+            let outOfYearRange () =
+                if strict then outOfRange ()
+                else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
+                    Ok(VInt 0L)
+
+            let finish number shortStringZero =
+                let year = roundInteger number
+                let normalized =
+                    if year = 0M then Some(if shortStringZero then 2000L else 0L)
+                    elif year >= 1M && year <= 69M then Some(int64 year + 2000L)
+                    elif year >= 70M && year <= 99M then Some(int64 year + 1900L)
+                    elif year >= 1901M && year <= 2155M then Some(int64 year)
+                    else None
+
+                match normalized with
+                | Some value -> Ok(VInt value)
+                | None -> outOfYearRange ()
+
             match v with
-            | VInt i -> Ok(VInt i)
-            | VUInt u -> Ok(VInt(int64 u))
-            | VBit(_, value) -> Ok(VInt(int64 value))
-            | VDouble d -> Ok(VInt(int64 d))
-            | VDecimal d -> Ok(VInt(int64 d))
+            | VInt i -> finish (decimal i) false
+            | VUInt u -> finish (decimal u) false
+            | VBit(_, value) -> finish (decimal value) false
+            | VDouble d when Double.IsFinite d && d >= 0.0 && d <= 2155.0 -> finish (decimal d) false
+            | VDouble _ -> outOfYearRange ()
+            | VDecimal d -> finish d false
             | VString s ->
                 match parseNumeric s with
-                | Some d -> Ok(VInt(int64 d))
-                | None -> numericFallback None (fun () -> VInt 0L)
-            | _ -> numericFallback None (fun () -> VInt 0L)
+                | Some d when Double.IsFinite d && d >= 0.0 && d <= 2155.0 ->
+                    let text = s.Trim()
+                    let shortStringZero = d = 0.0 && text.Length <= 2 && text.Length > 0 && (text |> Seq.forall ((=) '0'))
+                    finish (decimal d) shortStringZero
+                | Some _ -> outOfYearRange ()
+                | None -> numericFallback (Some "integer") (fun () -> VInt 0L)
+            | _ -> numericFallback (Some "integer") (fun () -> VInt 0L)
         | TDouble unsigned
         | TFloat unsigned ->
             let finish (value: float) =

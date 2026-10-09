@@ -796,9 +796,27 @@ let tests =
                     Expect.equal (coerceValue true (col "unsigned" (TBigInt true) true) value) (Ok(VUInt 5UL)) "unsigned"
                     Expect.equal (coerceValue true (col "decimal" (TDecimal(10, 0, false)) true) value) (Ok(VDecimal 5m)) "decimal"
                     Expect.equal (coerceValue true (col "double" (TDouble false) true) value) (Ok(VDouble 5.0)) "double"
-                    Expect.equal (coerceValue true (col "year" TYear true) value) (Ok(VInt 5L)) "year"
+                    Expect.equal (coerceValue true (col "year" TYear true) value) (Ok(VInt 2005L)) "year"
                     Expect.equal (coerceValue true (col "set" (TSet [ "a"; "b"; "c" ]) true) value) (Ok(VString "a,c")) "set bitmask"
                     Expect.equal (coerceValue true (col "enum" (TEnum [ "a"; "b"; "c" ]) true) (VBit(3, 2UL))) (Ok(VString "b")) "enum index" ]
+
+          testCase "YEAR values use MySQL's two-digit and zero rules"
+          <| fun _ ->
+              let year = col "year" TYear true
+              for input, expected in
+                  [ VInt 0L, 0L
+                    VInt 24L, 2024L
+                    VInt 69L, 2069L
+                    VInt 70L, 1970L
+                    VInt 99L, 1999L
+                    VInt 2024L, 2024L
+                    VString "0", 2000L
+                    VString "00", 2000L
+                    VString "0000", 0L ] do
+                  Expect.equal (coerceValue true year input) (Ok(VInt expected)) (sprintf "YEAR input %A" input)
+              match coerceValue true year (VInt 100L) with
+              | Error(OutOfRangeForColumn "year") -> ()
+              | other -> failtestf "expected YEAR range error, got %A" other
 
           testCase "unsigned decimal columns reject negative values"
           <| fun _ ->

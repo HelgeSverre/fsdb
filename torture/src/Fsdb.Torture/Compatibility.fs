@@ -6660,6 +6660,19 @@ module ContractCatalog =
           Cleanup = [| "DROP DATABASE IF EXISTS fk_column_storage_probe" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
+    let private yearColumnValues =
+        { Name = "year-column-values"
+          Setup = [| "CREATE TABLE year_value_input(id INT PRIMARY KEY,y YEAR)" |]
+          Steps =
+            [| Contract.execute "insert-numeric-years" "INSERT INTO year_value_input VALUES(1,0),(2,24),(3,70),(4,2024)"
+               Contract.execute "insert-string-years" "INSERT INTO year_value_input VALUES(5,'0'),(6,'0000')"
+               Contract.query "normalized-years" "SELECT id,y+0 FROM year_value_input ORDER BY id"
+               Contract.query "display-years" "SELECT id,y FROM year_value_input ORDER BY id"
+               Contract.execute "reject-out-of-range-year" "INSERT INTO year_value_input VALUES(7,100)" |> Contract.fails 1264 "22003"
+               Contract.query "unchanged-after-error" "SELECT COUNT(*) FROM year_value_input" |]
+          Cleanup = [| "DROP TABLE IF EXISTS year_value_input" |]
+          Coverage = [| "statement:insert", [| "text-differential" |] |] }
+
     let private foreignKeyGeneratedActions =
         { Name = "foreign-key-generated-actions"
           Setup = [| "CREATE DATABASE fk_generated_action_probe" |]
@@ -8562,6 +8575,7 @@ module ContractCatalog =
         [| missingTableDiagnostics
            regexpPosixClasses
            mixedTypeJoinIn
+           yearColumnValues
            qualifiedDuplicateKeys
            alterCoercion
            alterRowOrder
