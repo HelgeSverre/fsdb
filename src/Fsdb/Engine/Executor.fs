@@ -803,6 +803,15 @@ let private registryAccount (registry: Registry) =
     Functions.lookup "CURRENT_USER" registry
     |> Option.bind (fun currentUser -> currentUser [] |> toText |> Option.bind Auth.tryParseAccount)
 
+let private scalarExecutionStore = System.Threading.AsyncLocal<Store option>()
+
+let internal currentScalarExecutionStore () = scalarExecutionStore.Value
+
+let private updateCallsCustomFunction registry statement =
+    Expression.statementExists (function
+        | FuncCall(name, _) -> not (Functions.isUnmodifiedBuiltinScalar name registry)
+        | _ -> false) (Update statement)
+
 let private scalarExecutionAccount = System.Threading.AsyncLocal<Auth.Account option>()
 
 let currentScalarExecutionAccount () : Auth.Account option =
@@ -5398,6 +5407,10 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                                     normalizeNumericResult ctx expr value
                                 else value
                             descriptor |> Option.map (fun descriptor -> normalizeCompoundString descriptor value) |> Option.defaultValue value
+
+                        let invoke =
+                            if Functions.isUnmodifiedBuiltinScalar name ctx.Registry then invoke
+                            else fun () -> DynamicScope.withValue scalarExecutionStore (Some ctx.Store) invoke
 
                         match registryAccount ctx.Registry with
                         | Some account ->
@@ -21324,29 +21337,26 @@ let rec executeAs
     let applyUpdateRows (statement: UpdateStmt) (runStore: Store) db table candidates predicate updater
         (triggerRows: ResizeArray<Value[] option * Value[] option>) beforeTriggers afterTriggers =
         let ignoreErrors = statement.Ignore
-        let callsCustomFunction =
-            Expression.statementExists (function
-                | FuncCall(name, _) -> not (Functions.isUnmodifiedBuiltinScalar name registry)
-                | _ -> false)
+        let callsCustomFunction = updateCallsCustomFunction registry statement
         let write candidates predicate updater =
             Storage.withPermissiveIndexExpressions ignoreErrors (fun () ->
                 updateRows runStore db table candidates predicate updater)
         let fireAfter changed =
             triggerStorageResult (fireTriggers runStore db table After TriggerUpdate afterTriggers (List.ofSeq triggerRows))
             |> Result.map (fun () -> changed)
-        let updateIgnoredRow rowId row =
+        let updateOneRow rowId row =
             triggerRows.Clear()
-            // BEFORE effects survive rejected rows; trigger errors cannot be ignored.
+            // Evaluate routine and BEFORE writes before storage captures its validation catalog.
             updater row
             |> Result.bind (fun candidate ->
                 match write (Some [ rowId, row ]) (fun _ -> Ok true) (fun _ -> Ok candidate) with
-                | Error error when Storage.tryIgnoreUpdateConstraintError error -> Ok 0
+                | Error error when ignoreErrors && Storage.tryIgnoreUpdateConstraintError error -> Ok 0
                 | Error error -> Error error
                 | Ok changed -> fireAfter changed)
-        if not ignoreErrors then
+        if not ignoreErrors && not callsCustomFunction then
             write candidates predicate updater |> Result.bind fireAfter
         elif List.isEmpty beforeTriggers && List.isEmpty afterTriggers
-             && not (callsCustomFunction (Update statement))
+             && not callsCustomFunction
              && Storage.canBatchIgnoredUpdates runStore db table then
             Storage.withPermissiveIndexExpressions true (fun () ->
                 updateRowsIgnoringConstraints runStore db table candidates predicate updater)
@@ -21364,7 +21374,7 @@ let rec executeAs
                     | Some row ->
                         predicate row
                         |> Result.bind (fun selected ->
-                            if selected then updateIgnoredRow rowId row else Ok 0))))
+                            if selected then updateOneRow rowId row else Ok 0))))
             |> Result.map List.sum
 
     let deleteIgnoredRows (runStore: Store) db table candidates predicate =
@@ -23601,7 +23611,12 @@ let rec executeAs
             | Ok indexedAssignments ->
                 let qualifiers = singleQualifier tableAlias columns
 
-                let ctxFor = contextFactory store registry dbName columnIndex qualifiers None
+                let beforeTriggers = triggersFor store db table "BEFORE" "UPDATE"
+                let afterTriggers = triggersFor store db table "AFTER" "UPDATE"
+                let useSnapshot = updateStmt.Ignore || updateCallsCustomFunction registry updateStmt || not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
+                let baseCatalog, targetStore =
+                    if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
+                let ctxFor = contextFactory targetStore registry dbName columnIndex qualifiers None
 
                 let fullTextRowIds = Dictionary<Value[], RowId>(HashIdentity.Reference)
 
@@ -23645,11 +23660,6 @@ let rec executeAs
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetSet = targetRows |> List.map snd |> referenceSet
-                        let beforeTriggers = triggersFor store db table "BEFORE" "UPDATE"
-                        let afterTriggers = triggersFor store db table "AFTER" "UPDATE"
-                        let useSnapshot = updateStmt.Ignore || not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
-                        let baseCatalog, targetStore =
-                            if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
 
                         let changedRows = ResizeArray<Value[] option * Value[] option>()
 
@@ -23665,7 +23675,7 @@ let rec executeAs
 
                         let updater row =
                             let updated =
-                                applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
+                                applyAssignments targetStore registry dbName columnIndex qualifiers indexedAssignments row
                                 |> Result.map (applyOnUpdateTimestamps (temporalCoercionMode targetStore) columns assignedIdxs row)
                                 |> Result.bind (computeGeneratedRow targetStore registry db table columns)
 
@@ -23707,6 +23717,7 @@ let rec executeAs
     | Update updateStmt ->
         // Physical rows are claimed once even when multiple join rows reach them.
         (
+            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             let matchNodes =
                 (updateStmt.Assignments |> List.collect (_.Value >> collectMatchAgainst))
                 @ (updateStmt.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
@@ -23714,7 +23725,7 @@ let rec executeAs
                 |> List.distinct
 
             let prepared =
-                fullTextMutationSources store dbName updateStmt.From updateStmt.Joins matchNodes
+                fullTextMutationSources snapshot dbName updateStmt.From updateStmt.Joins matchNodes
                 |> Result.bind (fun (sourceOverrides, rewrite) ->
                     let rewritten =
                         { updateStmt with
@@ -23722,7 +23733,7 @@ let rec executeAs
                             Joins = updateStmt.Joins |> List.map (Join.mapConditions rewrite)
                             Where = updateStmt.Where |> Option.map rewrite }
 
-                    runMutationJoin store registry dbName sourceOverrides rewritten.From rewritten.Joins
+                    runMutationJoin snapshot registry dbName sourceOverrides rewritten.From rewritten.Joins
                     |> Result.map (fun joined -> rewritten, joined))
 
             match prepared with
@@ -23730,7 +23741,7 @@ let rec executeAs
             | Ok(updateStmt, (sources, joinedRows)) ->
                 let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
                 let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
-                let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
+                let ctxFor = contextFactory snapshot registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
 
                 let sourceOffsets = columnOffsets sources
 
@@ -23836,10 +23847,6 @@ let rec executeAs
                     match joinedRows |> traverse processRow with
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok _ ->
-                        // MySQL rolls back every target when any target or
-                        // trigger fails, so publication uses one catalog merge.
-                        let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-
                         let physicalColumns =
                             grouped.RepresentativeSources |> Array.map (fun source -> sources.[source].Columns)
 

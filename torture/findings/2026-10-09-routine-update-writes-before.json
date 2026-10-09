@@ -1,0 +1,583 @@
+[
+  {
+    "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1452,
+        "Item2": "23000"
+      }
+    ],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "plain",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "UPDATE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "ignore",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1452,
+        "Item2": "23000"
+      }
+    ],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "predicate",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "UPDATE child SET n=3 WHERE promote_parent()=3",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nError\t1442\tCan\u0027t update table \u0027parent\u0027 in stored function/trigger because it is already used by statement which invoked this stored function/trigger.\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1442,
+        "Item2": "HY000"
+      }
+    ],
+    "expected": "Level\tCode\tMessage\nError\t1442\tCan\u0027t update table \u0027parent\u0027 in stored function/trigger because it is already used by statement which invoked this stored function/trigger.\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": true,
+    "name": "joined",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "UPDATE child JOIN parent ON child.n=parent.n SET child.n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": false,
+    "name": "rollback",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "START TRANSACTION",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "ROLLBACK",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\nid\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "commit",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "START TRANSACTION",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "COMMIT",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1452,
+        "Item2": "23000"
+      }
+    ],
+    "expected": "Level\tCode\tMessage\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": false,
+    "name": "fatal-False",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent(input_id INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; IF input_id=2 THEN SIGNAL SQLSTATE \u002745000\u0027 SET MESSAGE_TEXT=\u0027stop\u0027; END IF; RETURN 3; END",
+      "UPDATE child SET n=promote_parent(id) ORDER BY id",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1644,
+        "Item2": "45000"
+      }
+    ],
+    "expected": "Level\tCode\tMessage\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": false,
+    "name": "fatal-True",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent(input_id INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; IF input_id=2 THEN SIGNAL SQLSTATE \u002745000\u0027 SET MESSAGE_TEXT=\u0027stop\u0027; END IF; RETURN 3; END",
+      "UPDATE IGNORE child SET n=promote_parent(id) ORDER BY id",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1452,
+        "Item2": "23000"
+      }
+    ],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "joined-independent",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "UPDATE child JOIN (SELECT 1 AS seed) AS one ON 1=1 SET child.n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "id\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t1\n2\t1\n3\t1\nn\n1\n3\n",
+    "matches": false,
+    "name": "predicate-no-match",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "UPDATE child SET n=3 WHERE promote_parent()=0",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1644,
+        "Item2": "45000"
+      }
+    ],
+    "expected": "Level\tCode\tMessage\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": true,
+    "name": "predicate-fatal",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent(input_id INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; IF input_id=2 THEN SIGNAL SQLSTATE \u002745000\u0027 SET MESSAGE_TEXT=\u0027stop\u0027; END IF; RETURN 3; END",
+      "UPDATE child SET n=3 WHERE promote_parent(id)=3",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1644,
+        "Item2": "45000"
+      }
+    ],
+    "expected": "Level\tCode\tMessage\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": true,
+    "name": "joined-fatal",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent(input_id INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; IF input_id=2 THEN SIGNAL SQLSTATE \u002745000\u0027 SET MESSAGE_TEXT=\u0027stop\u0027; END IF; RETURN 3; END",
+      "UPDATE child JOIN (SELECT 1 AS seed) AS one ON 1=1 SET child.n=promote_parent(id)",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\nid\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "read-committed-commit",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
+      "START TRANSACTION",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "COMMIT",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": false,
+    "name": "read-committed-rollback",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
+      "START TRANSACTION",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "ROLLBACK",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\nid\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "read-uncommitted-commit",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED",
+      "START TRANSACTION",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "COMMIT",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": false,
+    "name": "read-uncommitted-rollback",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED",
+      "START TRANSACTION",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "ROLLBACK",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\nid\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "serializable-commit",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+      "START TRANSACTION",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "COMMIT",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": false,
+    "name": "serializable-rollback",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+      "START TRANSACTION",
+      "UPDATE IGNORE child SET n=promote_parent()",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "ROLLBACK",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nError\t1452\tCannot add or update a child row: a foreign key constraint fails (\u0060probe\u0060.\u0060child\u0060, CONSTRAINT \u0060fk\u0060 FOREIGN KEY (\u0060n\u0060) REFERENCES \u0060parent\u0060 (\u0060n\u0060))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1452,
+        "Item2": "23000"
+      }
+    ],
+    "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+    "matches": false,
+    "name": "join-predicate",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+      "UPDATE child JOIN (SELECT 1 AS seed) AS one ON promote_parent()=3 SET child.n=3",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  },
+  {
+    "actual": "Level\tCode\tMessage\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "errors": [
+      {
+        "Item1": 1644,
+        "Item2": "45000"
+      }
+    ],
+    "expected": "Level\tCode\tMessage\nError\t1644\tstop\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+    "matches": true,
+    "name": "join-predicate-fatal-transaction",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent",
+      "SET foreign_key_checks=1",
+      "DROP FUNCTION IF EXISTS promote_parent",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "INSERT INTO parent VALUES(1),(2)",
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+      "CREATE FUNCTION promote_parent(input_id INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; IF input_id=2 THEN SIGNAL SQLSTATE \u002745000\u0027 SET MESSAGE_TEXT=\u0027stop\u0027; END IF; RETURN 3; END",
+      "START TRANSACTION",
+      "UPDATE child JOIN (SELECT 1 AS seed) AS one ON promote_parent(child.id)=3 SET child.n=3",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "COMMIT",
+      "SHOW WARNINGS",
+      "SELECT * FROM child ORDER BY id",
+      "SELECT * FROM parent ORDER BY n",
+      "DROP FUNCTION IF EXISTS promote_parent"
+    ]
+  }
+]

@@ -6399,6 +6399,55 @@ module ContractCatalog =
           Cleanup = [| "SET foreign_key_checks=0"; "DROP TABLE IF EXISTS child,parent,audit"; "SET foreign_key_checks=1" |]
           Coverage = [| "statement:update", [| "text-differential" |]; "statement:create-trigger", [| "text-differential" |] |] }
 
+    let private routineUpdateWrites =
+        let setup functionSql =
+            [ "SET foreign_key_checks=0"
+              "DROP TABLE IF EXISTS child,parent"
+              "SET foreign_key_checks=1"
+              "DROP FUNCTION IF EXISTS promote_parent"
+              "CREATE TABLE parent(n INT PRIMARY KEY)"
+              "INSERT INTO parent VALUES(1),(2)"
+              "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+              "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+              functionSql ]
+        let successful = setup "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END"
+        let failing = setup "CREATE FUNCTION promote_parent(input_id INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; IF input_id=2 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='stop'; END IF; RETURN 3; END"
+        let observe = [ "SHOW WARNINGS"; "SELECT * FROM child ORDER BY id"; "SELECT * FROM parent ORDER BY n" ]
+        let scenario name preparation statement error finish =
+            let expectedError = error |> Option.map (fun (code, state) -> List.length preparation, code, state)
+            name, expectedError, preparation @ [ statement ] @ observe @ finish
+        let cases =
+            [ for name, statement in
+                  [ "plain", "UPDATE child SET n=promote_parent()"
+                    "ignore", "UPDATE IGNORE child SET n=promote_parent()"
+                    "predicate", "UPDATE child SET n=3 WHERE promote_parent()=3"
+                    "predicate-no-match", "UPDATE child SET n=3 WHERE promote_parent()=0"
+                    "joined-independent", "UPDATE child JOIN (SELECT 1 AS seed) AS one ON 1=1 SET child.n=promote_parent()"
+                    "join-predicate", "UPDATE child JOIN (SELECT 1 AS seed) AS one ON promote_parent()=3 SET child.n=3" ] do
+                  yield scenario name successful statement None []
+              yield scenario "protected-parent" successful
+                  "UPDATE child JOIN parent ON child.n=parent.n SET child.n=promote_parent()"
+                  (Some(1442, "HY000")) []
+              for isolation in [ "REPEATABLE READ"; "READ COMMITTED"; "READ UNCOMMITTED"; "SERIALIZABLE" ] do
+                  for finish in [ "COMMIT"; "ROLLBACK" ] do
+                      let preparation = successful @ [ "SET SESSION TRANSACTION ISOLATION LEVEL " + isolation; "START TRANSACTION" ]
+                      yield scenario (isolation + "-" + finish) preparation
+                          "UPDATE IGNORE child SET n=promote_parent()" None ([ finish ] @ observe)
+              for name, statement in
+                  [ "fatal-plain", "UPDATE child SET n=promote_parent(id) ORDER BY id"
+                    "fatal-ignore", "UPDATE IGNORE child SET n=promote_parent(id) ORDER BY id"
+                    "fatal-predicate", "UPDATE child SET n=3 WHERE promote_parent(id)=3"
+                    "fatal-joined", "UPDATE child JOIN (SELECT 1 AS seed) AS one ON 1=1 SET child.n=promote_parent(id)" ] do
+                  yield scenario name failing statement (Some(1644, "45000")) []
+              yield scenario "fatal-join-predicate-transaction" (failing @ [ "START TRANSACTION" ])
+                  "UPDATE child JOIN (SELECT 1 AS seed) AS one ON promote_parent(child.id)=3 SET child.n=3"
+                  (Some(1644, "45000")) ([ "COMMIT" ] @ observe) ]
+        { Name = "routine-update-writes"
+          Setup = [||]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [| "DROP FUNCTION IF EXISTS promote_parent"; "SET foreign_key_checks=0"; "DROP TABLE IF EXISTS child,parent"; "SET foreign_key_checks=1" |]
+          Coverage = [| "statement:update", [| "text-differential" |] |] }
+
     let private foreignKeyRowValidation =
         let cases =
             [
@@ -7900,6 +7949,7 @@ module ContractCatalog =
            quotedTableNames
            foreignKeyRowValidation
            updateIgnoreConstraints
+           routineUpdateWrites
            foreignKeyNames
            alterCopyCounts
            alterDefaultBinlogSafety

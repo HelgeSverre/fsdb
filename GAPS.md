@@ -63,7 +63,7 @@ under `torture/findings/`.
 | [Transactions](#7-transactions-and-concurrency) | Supported isolation levels, row ownership, optimistic merge, and XA | Remaining coarse write shapes |
 | [Persistence](#8-persistence-and-durability) | Opt-in WAL, snapshots, recovery, rotation, and group commit | Foreground rather than background row reclamation |
 | [Views and triggers](#9-views-and-triggers) | Single-table, nested, and restricted join views; ordered compound triggers | Complex updatable views |
-| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | Writes by functions called from UPDATE |
+| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | No confirmed gap currently recorded |
 | [Full-text](#11-full-text-search) | Maintained inverted indexes and MySQL-shaped scoring | CJK parsing and remaining plan combinations |
 | [Wire protocol](#12-wire-protocol-and-prepared-statements) | Prepared statements, TLS, compression, LOCAL INFILE, and multi-results | GTID state tracking and live TLS certificate reload |
 | [Authentication](#13-authentication-and-privileges) | Host accounts, caching-SHA2/SHA-256/native credentials, grants, roles, proxy grants, and account policy | Pluggable identity and proxy-user selection |
@@ -501,9 +501,11 @@ alteration metadata, and persisted definitions. Current routine diagnostics and
 connection-local timeout-hint loading warnings follow the audited native lifecycle
 ([oracle](torture/findings/2026-10-08-select-timeout.md#audited-routine-lifecycle-and-alter-support)).
 
-| Gap | MySQL 8.4 | fsdb | Impact | Class |
-|---|---|---|---|---|
-| Writes by functions called from UPDATE | function writes are visible to subsequent foreign-key checks and retained | [audited UPDATE IGNORE](torture/findings/2026-10-09-update-ignore.md#routine-writes-during-update) loses a function's parent-key update and incorrectly rejects outer child candidates; the difference predates batching | high | divergence |
+[Audited stored-function writes during UPDATE](torture/findings/2026-10-09-routine-update-writes.md)
+share the invoking statement's snapshot. Assignment, WHERE, and JOIN calls
+retain their writes on success and roll them back on statement failure.
+COMMIT, ROLLBACK, isolation-level visibility, and durable recovery are covered.
+No additional confirmed gaps are currently recorded for this area.
 
 ## 11. Full-text search
 

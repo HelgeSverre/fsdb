@@ -1767,6 +1767,40 @@ let tests =
               let users = rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1])
               Expect.equal users [ VString "root" ] "bootstrap root row present"
 
+          testCase "UPDATE function writes recover with their invoking statement"
+          <| fun _ ->
+              for finish in [ None; Some "COMMIT"; Some "ROLLBACK" ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let mutable session = Fsdb.Session.create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                        "INSERT INTO parent VALUES(1),(2)"
+                        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                        "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                        "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END" ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  if finish.IsSome then Expect.equal (run "START TRANSACTION") (Affected 0UL) "begin"
+                  Expect.equal (run "UPDATE IGNORE child SET n=promote_parent()") (Affected 3UL) "update"
+                  finish |> Option.iter (fun sql -> Expect.equal (run sql) (Affected 0UL) "finish")
+                  let parent, child = if finish = Some "ROLLBACK" then "2", "1" else "3", "3"
+                  let verify recovered =
+                      let reader = Fsdb.Session.create 2 recovered
+                      Expect.equal (handle reader "SELECT * FROM parent ORDER BY n" |> snd)
+                          (ResultSet([ "n" ], [ [ Some "1" ]; [ Some parent ] ])) "function write recovers"
+                      Expect.equal (handle reader "SELECT n FROM child ORDER BY id" |> snd)
+                          (ResultSet([ "n" ], List.replicate 3 [ Some child ])) "outer writes recover"
+                  verify store
+                  let reloaded = load dir
+                  verify reloaded
+                  snapshotNow dir reloaded
+                  verify (load dir)
+
           testCase "stored routines and events survive WAL and snapshot recovery"
           <| fun _ ->
               let dir = tempDataDir ()

@@ -22,10 +22,100 @@ let private expectAffectedWithConditions context expected (session, result) =
     Expect.equal (conditionTriples session) expected (context + " diagnostics")
     session
 
+let private promoteParent =
+    "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END"
+
+let private routineUpdateSetup functionSql =
+    [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+      "INSERT INTO parent VALUES(1),(2)"
+      "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+      "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+      functionSql ]
+
 let tests =
     testList
         "Diagnostics"
-        [ testCase "UPDATE IGNORE evaluates rejected candidates only once"
+        [ testCase "UPDATE observes and retains writes from assignment and predicate functions"
+          <| fun _ ->
+              for statement, affected, value in
+                  [ "UPDATE child SET n=promote_parent()", 3UL, "3"
+                    "UPDATE IGNORE child SET n=promote_parent()", 3UL, "3"
+                    "UPDATE child SET n=3 WHERE promote_parent()=3", 3UL, "3"
+                    "UPDATE child SET n=3 WHERE promote_parent()=0", 0UL, "1"
+                    "UPDATE child JOIN (SELECT 1 AS seed) AS one ON 1=1 SET child.n=promote_parent()", 3UL, "3"
+                    "UPDATE child JOIN (SELECT 1 AS seed) AS one ON promote_parent()=3 SET child.n=3", 3UL, "3" ] do
+                  let mutable session = create 1 (Fsdb.Storage.create ())
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in routineUpdateSetup promoteParent do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  Expect.equal (run statement) (Affected affected) "function writes precede the constraint checks"
+                  Expect.isEmpty session.Diagnostics "all references are valid"
+                  Expect.equal (run "SELECT * FROM parent ORDER BY n")
+                      (ResultSet([ "n" ], [ [ Some "1" ]; [ Some "3" ] ])) "function write survives publication"
+                  Expect.equal (run "SELECT n FROM child ORDER BY id")
+                      (ResultSet([ "n" ], List.replicate 3 [ Some value ])) "outer writes survive publication"
+
+          testCase "UPDATE rolls back earlier function writes when a later invocation fails"
+          <| fun _ ->
+              for explicitTransaction in [ false; true ] do
+                  for statement in
+                      [ "UPDATE child SET n=promote_parent(id) ORDER BY id"
+                        "UPDATE IGNORE child SET n=promote_parent(id) ORDER BY id"
+                        "UPDATE child SET n=3 WHERE promote_parent(id)=3"
+                        "UPDATE child JOIN (SELECT 1 AS seed) AS one ON 1=1 SET child.n=promote_parent(id)"
+                        "UPDATE child JOIN (SELECT 1 AS seed) AS one ON promote_parent(child.id)=3 SET child.n=3" ] do
+                      let mutable session = create 1 (Fsdb.Storage.create ())
+                      let run sql =
+                          let next, result = handle session sql
+                          session <- next
+                          result
+                      let functionSql = "CREATE FUNCTION promote_parent(input_id INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; IF input_id=2 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='stop'; END IF; RETURN 3; END"
+                      for sql in routineUpdateSetup functionSql do
+                          Expect.isNone (run sql |> errorInfo) sql
+                      if explicitTransaction then Expect.equal (run "START TRANSACTION") (Affected 0UL) "begin"
+                      let result = run statement
+                      Expect.equal (errorInfo result |> Option.map (fun error -> error.Code, error.State)) (Some(1644, "45000")) "function error aborts the outer statement"
+                      let expectOriginalRows () =
+                          Expect.equal (run "SELECT * FROM parent ORDER BY n")
+                              (ResultSet([ "n" ], [ [ Some "1" ]; [ Some "2" ] ])) "function writes roll back"
+                          Expect.equal (run "SELECT n FROM child ORDER BY id")
+                              (ResultSet([ "n" ], List.replicate 3 [ Some "1" ])) "earlier outer writes roll back"
+                      expectOriginalRows ()
+                      if explicitTransaction then
+                          Expect.equal (run "COMMIT") (Affected 0UL) "transaction remains usable"
+                          expectOriginalRows ()
+
+          testCase "UPDATE function writes remain private until commit and obey rollback at every isolation level"
+          <| fun _ ->
+              for isolation in [ "REPEATABLE READ"; "READ COMMITTED"; "READ UNCOMMITTED"; "SERIALIZABLE" ] do
+                  for finish in [ "COMMIT"; "ROLLBACK" ] do
+                      let store = Fsdb.Storage.create ()
+                      let mutable session = create 1 store
+                      let run sql =
+                          let next, result = handle session sql
+                          session <- next
+                          result
+                      for sql in routineUpdateSetup promoteParent do
+                          Expect.isNone (run sql |> errorInfo) sql
+                      Expect.equal (run ("SET SESSION TRANSACTION ISOLATION LEVEL " + isolation)) (Affected 0UL) "isolation"
+                      Expect.equal (run "START TRANSACTION") (Affected 0UL) "begin"
+                      Expect.equal (run "UPDATE IGNORE child SET n=promote_parent()") (Affected 3UL) "nested writes succeed"
+                      let observe sql = handle (create 2 store) sql |> snd
+                      Expect.equal (observe "SELECT * FROM parent ORDER BY n")
+                          (ResultSet([ "n" ], [ [ Some "1" ]; [ Some "2" ] ])) "function writes are private"
+                      Expect.equal (observe "SELECT n FROM child ORDER BY id")
+                          (ResultSet([ "n" ], List.replicate 3 [ Some "1" ])) "outer writes are private"
+                      Expect.equal (run finish) (Affected 0UL) "finish"
+                      let parent, child = if finish = "COMMIT" then "3", "3" else "2", "1"
+                      Expect.equal (observe "SELECT * FROM parent ORDER BY n")
+                          (ResultSet([ "n" ], [ [ Some "1" ]; [ Some parent ] ])) "function write follows the transaction"
+                      Expect.equal (observe "SELECT n FROM child ORDER BY id")
+                          (ResultSet([ "n" ], List.replicate 3 [ Some child ])) "outer writes follow the transaction"
+
+          testCase "UPDATE IGNORE evaluates rejected candidates only once"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               let run sql =

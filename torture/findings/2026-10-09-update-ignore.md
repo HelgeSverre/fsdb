@@ -1,9 +1,9 @@
 # UPDATE IGNORE constraint failures
 
 Native MySQL 8.4.11 with a disposable 64 MiB buffer pool and redo capacity is
-the oracle. The [native results](2026-10-09-update-ignore-native.json) and
+the oracle. At the batching baseline, the [native results](2026-10-09-update-ignore-native.json) and
 [fsdb replay](2026-10-09-update-ignore-current.json) match across ten of eleven
-scripts. The remaining routine-write case also fails on the
+scripts. That routine-write case also fails on the
 [pre-batching baseline](2026-10-09-update-ignore-before-batching.json).
 
 ## Behavior
@@ -34,22 +34,22 @@ records the measured improvement and its limits.
 
 ## Routine writes during UPDATE
 
-Status: open. In `function-parent-write`, a stored function changes an
-unreferenced parent key from 2 to 3 and returns 3 to the outer UPDATE IGNORE.
-MySQL retains the new parent key and accepts all three child updates. Fsdb
-instead emits three 1452 warnings, leaves the children unchanged, and retains
-the old parent key. This reproduces both before and after batching. Stored
-function calls stay on the per-row path; batching does not claim to fix their
-write visibility or publication.
+Status: fixed by the [routine UPDATE snapshot correction](2026-10-09-routine-update-writes.md).
+In `function-parent-write`, a stored function changes an unreferenced parent
+key from 2 to 3 and returns 3 to the outer UPDATE IGNORE. Both engines retain
+the new parent key and accept all three child updates. The baseline evidence
+above retains the original failure, which predates batching. The expanded
+routine audit covers statement rollback, JOIN predicates, and transaction
+completion as well as this original case.
 
-## Verification
+## Batching baseline verification
 
 The root gate passes 3,173 tests without build warnings or errors. The full
 native wire run passes 97 contracts and 14,454 steps with zero differences:
 `torture/artifacts/runs/20261009T001705713-89878/contracts`.
 
 The ten matching scripts cover ignored constraints, warning order, trigger
-order, single evaluation, and retained rows. The unresolved routine-write case
-remains in both native and fsdb evidence; it is not enrolled into a passing
-wire contract or a known-gap allowlist. Broader multi-target joined-update
+order, single evaluation, and retained rows. The original routine-write failure
+remains in the baseline evidence. Its correction has a separate permanent
+wire contract and is not enrolled into a known-gap allowlist. Broader multi-target joined-update
 orderings, SQL-mode coercions, and trigger interactions remain unaudited.

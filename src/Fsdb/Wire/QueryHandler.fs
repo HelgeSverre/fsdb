@@ -2694,19 +2694,22 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                 table
                 targets.RowIds
                 targets.Keys
-            let baseCatalog, snapshot =
-                if transaction.Isolation = ReadUncommitted then
-                    rebaseReadUncommittedSnapshot session transaction
-                else
-                    rebaseTransactionSnapshot session transaction
+            // Functions share the invoking statement's private view and publication boundary.
+            if insideFunctionOrTrigger session then session
+            else
+                let baseCatalog, snapshot =
+                    if transaction.Isolation = ReadUncommitted then
+                        rebaseReadUncommittedSnapshot session transaction
+                    else
+                        rebaseTransactionSnapshot session transaction
 
-            { session with
-                Tx =
-                    Some
-                        { transaction with
-                            Snapshot = snapshot
-                            BaseCatalog = baseCatalog
-                            Seeded = true } }
+                { session with
+                    Tx =
+                        Some
+                            { transaction with
+                                Snapshot = snapshot
+                                BaseCatalog = baseCatalog
+                                Seeded = true } }
 
 /// Rolls an abandoned connection's transaction back.
 let closeSession (session: Session) : unit =
@@ -3237,8 +3240,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             match access with
             | Error _ -> execute session
             | Ok() ->
-                session
-                |> startTransactionStatement
+                (if insideFunctionOrTrigger session then session else startTransactionStatement session)
                 |> prepareTransactionWrite stmt
                 |> syncTransactionView
                 |> execute
@@ -6625,6 +6627,11 @@ let rec private invokeStoredFunction
     =
     let callerVariables = Executor.currentUserVariables ()
     let caller = storedFunctionSession.Value |> Option.defaultValue declaredSession
+    let caller =
+        match Executor.currentScalarExecutionStore (), caller.Tx with
+        | Some store, Some transaction -> { caller with Tx = Some { transaction with Snapshot = store } }
+        | Some store, None -> { caller with Store = store }
+        | None, _ -> caller
     let caller =
         match callerVariables with
         | Some variables -> { caller with UserVariables = variables.Value }
