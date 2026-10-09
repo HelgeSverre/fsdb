@@ -6,7 +6,8 @@ Status: audited dotted table-name counterexample closed.
 
 The [native fixture](2026-10-09-quoted-table-names-native.json) records 15 scripts
 on disposable MySQL 8.4.11 with a 64 MiB buffer pool and redo capacity. The
-[fsdb replay](2026-10-09-quoted-table-names-current.json) matches every script.
+[fsdb replay](2026-10-09-quoted-table-names-current.json) matches every script
+under the case-insensitive `lower_case_table_names=2` policy fsdb advertises.
 Reproduce the native fixture with:
 
 ```sh
@@ -23,8 +24,11 @@ The parser retains necessary component quoting in statement target strings.
 A shared formatter and splitter preserve it through catalog resolution and
 internally generated view-write and rename targets. Ordinary table references
 continue to carry database and table separately. CREATE TABLE checks the actual
-catalog key rather than lowercasing only the lookup; CHECK OPTION diagnostics
-use the normalized view name.
+catalog key rather than lowercasing only the lookup. CHECK OPTION diagnostics
+use the normalized view name. A later wire run against digest-pinned Linux
+MySQL (`lower_case_table_names=0`) showed different casing for duplicate-key
+and CHECK OPTION diagnostics; a native MySQL 8.4.11 probe with
+`lower_case_table_names=2` confirmed fsdb's lowercase rendering.
 
 This matrix does not establish general database-name case folding or every
 stored-program identifier context.

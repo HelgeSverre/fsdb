@@ -30,6 +30,12 @@ writes, schema operations, and SHOW metadata share its formatter. F# callers
 matching this error now receive two fields instead of one. DROP and TRUNCATE
 keep their statement-specific error classifications.
 
+A later mixed-case wire probe on digest-pinned Linux MySQL, whose
+`lower_case_table_names` is 0, retained `AbSeNt` in both the 1146 packet and
+`SHOW WARNINGS`. A native MySQL 8.4.11 probe with
+`lower_case_table_names=2` returned `absent` in both, matching fsdb's
+advertised policy and the focused query-handler regression.
+
 The existence checks exposed empty-database loss in temporary catalog overlays.
 Hiding and restoring a shadowed table now preserve an existing database even
 when it contains no permanent tables. Repeated temporary creation, reads, and

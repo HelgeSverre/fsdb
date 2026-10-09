@@ -124,6 +124,7 @@ refuses it through the prepared-statement protocol.
 
 | Area | Remaining difference | Impact | Class |
 |---|---|---|---|
+| Identifier case policy | fsdb implements and advertises MySQL's `lower_case_table_names=2` behavior for table lookup, hint aliases, generated foreign-key prefixes, and audited diagnostics; the [mode-matched full wire run](torture/findings/2026-10-09-identifier-case-policy.md) passes. MySQL fixes this setting at initialization; fsdb cannot select modes 0 or 1, so the pinned Linux server's default mode 0 differs. | low | subset |
 | Server-side files | `IMPORT TABLE` is unsupported | low | refusal |
 | Table maintenance | `CHECKSUM TABLE` uses a stable fsdb row checksum rather than MySQL's engine-specific value; supported `FLUSH` forms operate on fsdb state rather than InnoDB internals | low | divergence |
 | ALTER execution | Accepted changes publish one immutable root; [audited algorithm selection and COPY affected-row counts](torture/findings/2026-10-08-alter-copy-counts.md) match, including populated foreign-key additions, charset conversions, and length-prefix changes; InnoDB physical algorithms and lock durations do not exist, while [audited expression-default binlog conditions](torture/findings/2026-10-08-alter-defaults.md) match | low | divergence |
@@ -156,8 +157,11 @@ The expression grammar includes:
 Equi-joins use collation-folded hash keys; other joins use lazy nested loops.
 Physical join targets can use single-column keys, complete composite keys, or
 ordered composite-key prefixes. Qualified inner-join ordering recognizes those
-access paths. Full-result plans compare the prefix's observed candidate count
-with one hash build, while remaining equality conditions stay residual
+access paths. An indexed join whose runtime probe cannot be represented by the
+index scans and checks its full `ON` condition before returning or padding rows,
+including `USING` and `NATURAL` joins. Full-result plans compare the prefix's
+observed candidate count with one hash build, while remaining equality
+conditions stay residual
 predicates. `ORDER BY ... LIMIT` uses a bounded top-N sort.
 
 Direct single-table equality predicates likewise use complete keys or safe
@@ -191,7 +195,8 @@ Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,
 statement-atomic multi-table DML, and exact ODKU affected-row counts. Row
 comparisons retain null-safe behavior and MySQL's 1241 error for invalid
-multi-column subqueries; empty-group bit aggregates retain their identities.
+multi-column subqueries, including empty row-IN results; empty-group bit
+aggregates retain their identities.
 
 Row-local recursive CTE members prepare their invariant predicate, projection,
 and type coercions once; members needing joins, grouping, windows, full-text,
@@ -270,7 +275,18 @@ Temporal values cover DATE, YEAR, and microsecond-precision DATETIME,
 TIMESTAMP, and signed TIME durations. Fractional values round half-up unless
 `TIME_TRUNCATE_FRACTIONAL` applies. SQL modes control zero-date acceptance and
 bounded invalid day-of-month combinations; TIMESTAMP always retains full
-calendar validation.
+calendar validation. Temporal scalar functions apply the session's six-digit
+rounding or truncation policy to string inputs, including TIME hour carry,
+range clamping, and one warning per clamped argument; trigger and stored-routine
+scalar parsing uses the object's captured SQL mode
+([native oracle](torture/findings/2026-10-09-time-part-fractional.md)).
+`SEC_TO_TIME` and `MAKETIME` overflow warnings retain the source value and
+seconds precision ([native oracle](torture/findings/2026-10-09-time-constructor-warnings.md)).
+`ADDTIME`, `SUBTIME`, and `TIMEDIFF` report overflowing TIME results with
+their function-specific warning precision and clamp invalid TIME operands
+before arithmetic in the audited combinations; an invalid second `ADDTIME`
+operand can still produce one extra warning when its overflow text repeats
+([native oracle](torture/findings/2026-10-09-time-arithmetic-warnings.md)).
 
 Numeric offsets appended to DATETIME and TIMESTAMP inputs are converted into
 the session `time_zone`. TIMESTAMP values then retain the UTC instant and
@@ -330,7 +346,9 @@ Native audits cover [ignored updates](torture/findings/2026-10-09-update-ignore.
 [generated-index lifecycle](torture/findings/2026-10-09-foreign-key-index-origin.md),
 [rename collisions](torture/findings/2026-10-09-foreign-key-rename.md), and
 [combined definition changes](torture/findings/2026-10-09-foreign-key-alter.md)
-also match the tested cases.
+also match the tested cases. [Column-change probes](torture/findings/2026-10-09-foreign-key-column-changes.md)
+cover compatible type families, incompatible type and collation changes, and
+drop/re-add actions.
 
 Named CHECK constraints support enforcement state
 and `ALTER` validation, and ENUM or SET values enforce membership. Adding a
@@ -338,7 +356,7 @@ unique key over colliding data returns 1062 without publishing a corrupt index.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Remaining foreign-key column changes | preserves constraint validity through column changes | type/nullability changes and dropping/re-adding a column under the same name still need native coverage | low | unverified |
+| Remaining foreign-key column changes | preserves constraint validity through column changes | tested compatible type and nullability changes, rejected incompatible changes, disabled-checks behavior, [combined ADD/DROP FOREIGN KEY with MODIFY or CHANGE in both orders, including atomic rejection and final-column renames](torture/findings/2026-10-09-foreign-key-column-changes.md), and virtual generated-column FK rejection now match; broader rare type and ALTER-action combinations remain unverified | low | unverified |
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality and ordered structures cover common complete-key and left-prefix probes, joins, ranges, ordering, grouping, and supported unary functional compositions; unsupported expression orderings and grouping shapes retain scan/sort fallback | high (scale) | divergence |
 | Expression indexes | functional key parts participate in physical access and uniqueness | the [supported functional keys](README.md#indexes-and-joins), including compatible unary compositions, have physical equality, uniqueness, ordering, and grouping paths; other non-unique expressions retain DDL and metadata but scan, while unsupported unique expressions are refused | low | divergence/refusal |
 
@@ -360,7 +378,7 @@ JSON without maintaining a second builtin-name list.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | `Collation` uses ICU CLDR tailoring; tie-break order among primary-equal strings, uncommon substring expansions, and `WEIGHT_STRING()` textual bytes can differ | low | divergence |
-| Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with common POSIX character classes and mapped malformed patterns; remaining ICU-only grammar and error-code distinctions can differ | low | divergence |
+| Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with all fourteen POSIX class names, negated forms, positive and mixed-negated class combinations, [audited Unicode categories, `\w`/`\W`, bracket-local `\b`/`\B`, horizontal/vertical/`\R` line breaks, and `\Q...\E` literal quoting with quoted-interval diagnostics](torture/findings/2026-10-09-regexp-posix-classes.md), plus mapped malformed patterns; ICU script/binary properties, supplementary-scalar matching, broader word boundaries, other grammar, and error-code distinctions can differ | low | divergence |
 | Remaining charset catalog | every bundled charset and collation | eucjpms remains refused because its Microsoft EUC-JP extensions differ from the standard .NET codecs; expanded families register their default and binary collations rather than every legacy language collation | low | refusal |
 
 ## 7. Transactions and concurrency
@@ -420,6 +438,9 @@ before-images, falling back to the image only when a concurrent transaction
 rebase has reassigned a private row identity. Replay applies the ordered
 changes without re-entering checked write paths and maintains derived indexes
 incrementally. Older image-only WAL and snapshot formats remain readable.
+New DDL WAL records retain the originating `ALLOW_INVALID_DATES` setting so
+replay preserves both accepted invalid calendar dates and intentional
+non-strict coercion ([recovery regression](torture/findings/2026-10-09-invalid-date-ddl-replay.md)).
 
 Group commit, ordered checkpoint barriers, lock-step rotation, shutdown
 rotation, decode-depth limits, generated-expression codecs, and durable XA
@@ -435,6 +456,7 @@ sets before and after a graceful snapshot restart.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Durability default | durable unless configured otherwise | in-memory unless `--data-dir` passed; process death loses everything | medium (deployment) | divergence |
+| Legacy invalid-date DDL WAL | DDL recovery retains accepted temporal values | older WAL records without the originating `ALLOW_INVALID_DATES` flag remain readable but can replay ambiguous invalid-date defaults or ALTER coercions differently; a snapshot taken before upgrading avoids this ambiguity | low (legacy recovery) | subset |
 | Prepared XA ngram recovery | MySQL 8.4.11 can commit a recovered row without restoring its pending ngram posting | fsdb preserves recorded document tokenizers and postings through live commit, WAL replay, and snapshots ([oracle and regression](torture/findings/2026-10-07-ngram-xa-recovery.md)) | low (edge-case parity) | divergence |
 | Space reclamation | purge threads reclaim deleted rows | Delete-heavy tables compact immutable row roots after at least 256 tombstones occupy one quarter of physical slots; reclamation is foreground and occasionally scans one table root | low | divergence |
 
@@ -625,7 +647,7 @@ NULL marker's original expression context.
 | Literal and expression charset identity | literals retain their charset, collation, coercibility, and binding context | broader stored-program binding, quoted-string conversion, non-Unicode/UCS-2 byte handling, definition rendering, and expression charset inference remain incomplete; introduced UTF-8/16/32 and audited SJIS/CP932/Big5/GBK/EUC/GB2312/GB18030 hex/bit validation, fixed-width padding, audited ASCII/UCS-2/UTF8MB3 byte preservation, audited encoded reversal, slicing and CONCAT, derived-prefix and audited text-storage conversions (including UCS-2 surrogate code units, length limits, and ASCII diagnostics), and preparation warning lifetimes are [native-verified](torture/findings/2026-10-08-introduced-encoding.md); source-expression collations and coercibility now survive the audited view, derived, join, UNION, and ROLLUP paths ([native contracts and boundaries](torture/findings/2026-10-08-text-literal-charsets.md)) | low | divergence |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
-| Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index, numeric-aggregate, and [audited Boolean-context conversion conditions](torture/findings/2026-10-08-predicate-conversion.md), conditional DDL, ignored physical-directory options, unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; [trigger warning lifetimes and RESIGNAL condition order](torture/findings/2026-10-08-trigger-warnings.md) are covered; [audited integer CAST and conditional warning behavior](torture/findings/2026-10-08-integer-casts.md) is covered; [audited duplicate-key messages](torture/findings/2026-10-08-key-diagnostics.md) retain the base table and key; [audited missing-object diagnostics](torture/findings/2026-10-08-missing-table.md) preserve database/table identity and distinguish 1049/1051/1146; [single-column ALTER coercion conditions](torture/findings/2026-10-08-alter-coercion.md) preserve live row ordinals and stop at the first duplicate; [audited multi-column ALTER conditions](torture/findings/2026-10-09-alter-row-order.md) follow final-column order and preserve every error from the first failing row; [audited expression-assignment deprecation warnings](torture/findings/2026-10-09-assignment-deprecation.md) preserve syntax counts and preparation timing; [audited foreign-key failure messages](torture/findings/2026-10-09-foreign-key-validation.md) include constraint details; [audited foreign-key name/index collision diagnostics](torture/findings/2026-10-09-foreign-key-collisions.md) are covered; ALTER temporary-table identities, missing-function diagnostics without a selected database, broader conversion contexts, and other warning producers remain divergent | low | divergence |
+| Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index, numeric-aggregate, and [audited Boolean-context conversion conditions](torture/findings/2026-10-08-predicate-conversion.md), conditional DDL, ignored physical-directory options, unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; [trigger warning lifetimes and RESIGNAL condition order](torture/findings/2026-10-08-trigger-warnings.md) are covered; [audited integer CAST and conditional warning behavior](torture/findings/2026-10-08-integer-casts.md) is covered; [audited duplicate-key messages](torture/findings/2026-10-08-key-diagnostics.md) retain the base table and key; [audited missing-object diagnostics](torture/findings/2026-10-08-missing-table.md) preserve database/table identity and distinguish 1049/1051/1146; [single-column ALTER coercion conditions](torture/findings/2026-10-08-alter-coercion.md) preserve live row ordinals and stop at the first duplicate; [audited multi-column ALTER conditions](torture/findings/2026-10-09-alter-row-order.md) follow final-column order and preserve every error from the first failing row; [audited expression-assignment deprecation warnings](torture/findings/2026-10-09-assignment-deprecation.md) preserve syntax counts and preparation timing; [audited foreign-key failure messages](torture/findings/2026-10-09-foreign-key-validation.md) include constraint details; [audited foreign-key name/index collision diagnostics](torture/findings/2026-10-09-foreign-key-collisions.md) are covered; ALTER temporary-table identities, broader conversion contexts, and other warning producers remain divergent | low | divergence |
 | System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset, `SYSTEM`, and catalog-backed named time-zone variables are live; most others are inert or absent, `div_precision_increment` controls division and AVG and is retained by prepared statements ([oracle](torture/findings/2026-10-06-prepared-parameter-repreparation.md#division-precision-increment)), `max_execution_time` settings, audited SELECT deadlines, scalar interruption, and transaction preservation work; audited timeout-hint precedence, preparation diagnostics, and routine-loading warning lifetimes work, while broader hint contexts and extreme-duration parity remain open ([native timeout contract](torture/findings/2026-10-08-select-timeout.md)), and `system_time_zone` retains its static bootstrap label | medium | divergence |
 
 ## 13. Authentication and privileges
@@ -817,6 +839,10 @@ The engine already avoids several earlier cliffs:
 - mutation scans retain matched targets only, and unordered limits stop early;
 - eligible direct-column predicates bind comparison metadata once per
   statement, including literals and leaves inside `AND` and `OR` trees.
+- already-materialized string operands skip output-format inference during
+  text predicate evaluation ([same-host measurement](benchmarks/results/2026-10-09-regexp-wire-latency.md)).
+- REGEXP expressions reuse a compiled pattern within a statement while the
+  pattern, match type, and collation stay the same ([scan measurement](benchmarks/results/2026-10-09-regexp-wire-latency.md)).
 
 Shared statement setup, computed scan predicates, phrase/proximity matching,
 and broader join-shaped full-text plans remain input-sensitive. Immutable

@@ -10,6 +10,9 @@ verifies 16 scripts on disposable native MySQL 8.4.11 with a 64 MiB buffer pool
 and redo capacity. The fixtures preserve statements, rendered diagnostics,
 error codes, and SQLSTATEs. The fsdb replay matches all 16 scripts; results are retained in
 `2026-10-08-key-diagnostics-current.json`.
+Those retained results use the case-insensitive `lower_case_table_names=2`
+policy fsdb advertises. Digest-pinned Linux MySQL defaults to a different
+identifier policy.
 
 ## Established behavior
 
@@ -32,7 +35,9 @@ passing trigger wire contract. Its replay now matches all 34 scripts, including
 ## Dotted identifiers and ALTER conversion
 
 The `odd-name` case preserves the literal dot in `Odd.Table` and reports
-`odd.table.Odd.Key`. The [expanded quoted-name audit](2026-10-09-quoted-table-names.md)
+`odd.table.Odd.Key` under `lower_case_table_names=2`. A pinned Linux server
+with `lower_case_table_names=0` instead reports `Odd.Table.Odd.Key`. The
+[expanded quoted-name audit](2026-10-09-quoted-table-names.md)
 covers resolution, generated view writes, and cross-database renames.
 
 The `narrow-column` case matches both truncation warnings before error 1062.
