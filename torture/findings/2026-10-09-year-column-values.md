@@ -25,8 +25,10 @@ MySQL also accepts TIME paired with DATETIME or TIMESTAMP in either direction,
 including differing fractional precisions, and DATETIME paired with TIMESTAMP
 in either direction. DATE remains incompatible with them. Ordinary
 matching-clock-field inserts and zero-value inserts in the native TIME probes
-returned 1452; equal displayed DATETIME/TIMESTAMP values also returned 1452.
+returned 1452; equal displayed DATETIME/TIMESTAMP values and zero values
+under `NO_ENGINE_SUBSTITUTION` also returned 1452.
 The `time-date-foreign-keys` contract covers declaration and nonmatching
-ordinary inserts in both directions for these pairs; fsdb accepts those
-declarations and keeps their referential comparisons distinct.
+ordinary and zero-value inserts in both directions for these pairs. fsdb
+accepts those declarations and compares their distinct physical key domains
+rather than equating zero date-time values across DATETIME and TIMESTAMP.
 Other physical-key combinations and referential actions remain unverified.

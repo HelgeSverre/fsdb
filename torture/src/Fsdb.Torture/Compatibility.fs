@@ -6714,10 +6714,14 @@ module ContractCatalog =
                      3, "TIMESTAMP(2)", "TIME(4)", "2024-01-01 12:34:56.12", "12:34:56.1200"
                      4, "TIME(4)", "TIMESTAMP(2)", "12:34:56.1200", "2024-01-01 12:34:56.12"
                      5, "DATETIME", "TIMESTAMP", "2024-01-01 12:34:56", "2024-01-01 12:34:56"
-                     6, "TIMESTAMP", "DATETIME", "2024-01-01 12:34:56", "2024-01-01 12:34:56" ] do
+                     6, "TIMESTAMP", "DATETIME", "2024-01-01 12:34:56", "2024-01-01 12:34:56"
+                     7, "DATETIME", "TIMESTAMP", "0000-00-00 00:00:00", "0000-00-00 00:00:00"
+                     8, "TIMESTAMP", "DATETIME", "0000-00-00 00:00:00", "0000-00-00 00:00:00" ] do
                    let parent = sprintf "time_parent_%d" index
                    let child = sprintf "time_child_%d" index
                    let foreignKey = sprintf "fk_time_%d" index
+                   if index = 7 then
+                       Contract.execute "allow-zero-dates" "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
                    Contract.execute (sprintf "create-parent-%d" index) (sprintf "CREATE TABLE %s(x %s PRIMARY KEY)" parent parentType)
                    Contract.execute (sprintf "create-child-%d" index) (sprintf "CREATE TABLE %s(x %s,CONSTRAINT %s FOREIGN KEY(x) REFERENCES %s(x))" child childType foreignKey parent)
                    Contract.execute (sprintf "insert-parent-%d" index) (sprintf "INSERT INTO %s VALUES('%s')" parent parentValue)

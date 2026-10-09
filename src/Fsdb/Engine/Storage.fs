@@ -3456,16 +3456,18 @@ let private foreignKeyStorageValue (column: ColumnDef) value =
     | TYear, VInt year when year >= 1901L && year <= 2155L -> VInt(year - 1900L)
     | _ -> value
 
-let private foreignKeyHasTimeDatePair (child: ColumnDef) (parent: ColumnDef) =
+let private foreignKeyHasDistinctTemporalStorage (child: ColumnDef) (parent: ColumnDef) =
     match child.Type, parent.Type with
     | TTime _, TDateTime _
     | TTime _, TTimestamp _
     | TDateTime _, TTime _
-    | TTimestamp _, TTime _ -> true
+    | TTimestamp _, TTime _
+    | TDateTime _, TTimestamp _
+    | TTimestamp _, TDateTime _ -> true
     | _ -> false
 
 let private foreignKeyValuesMatch (child: ColumnDef) childValue (parent: ColumnDef) parentValue =
-    not (foreignKeyHasTimeDatePair child parent)
+    not (foreignKeyHasDistinctTemporalStorage child parent)
     && compare (foreignKeyStorageValue child childValue) (foreignKeyStorageValue parent parentValue) = 0
 
 let private foreignKeyRowsMatch
@@ -3490,7 +3492,7 @@ let private foreignKeyUsesYearByte (child: ColumnDef) (parent: ColumnDef) =
     | _ -> false
 
 let private foreignKeyNeedsRowComparison child parent =
-    foreignKeyUsesYearByte child parent || foreignKeyHasTimeDatePair child parent
+    foreignKeyUsesYearByte child parent || foreignKeyHasDistinctTemporalStorage child parent
 
 let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parentValue =
     match child.Type, parent.Type, foreignKeyStorageValue parent parentValue with
@@ -6337,7 +6339,7 @@ let private foreignKeyColumnsCompatible (child: ColumnDef) (parent: ColumnDef) =
         | _ -> None
 
     match child.Type, parent.Type with
-    | _ when foreignKeyHasTimeDatePair child parent -> true
+    | _ when foreignKeyHasDistinctTemporalStorage child parent -> true
     | TYear, TTinyInt true
     | TTinyInt true, TYear -> true
     | TBool, TBool
