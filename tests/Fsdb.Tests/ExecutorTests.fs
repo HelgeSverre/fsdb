@@ -11120,6 +11120,48 @@ let tests =
                                 | Err(1452, _) -> ()
                                 | other -> failtestf "expected 1452 for %s(%d) to %s(%d), got %A" kind parentPrecision kind childPrecision other
 
+                testCase "DECIMAL foreign keys compare packed storage bytes"
+                <| fun _ ->
+                    for parentType, childType, parentValue, childValue, matches in
+                        [ "DECIMAL(5,2)", "DECIMAL(5,2)", "1.20", "1.20", true
+                          "DECIMAL(5,2)", "DECIMAL(6,2)", "1.20", "1.20", true
+                          "DECIMAL(5,2)", "DECIMAL(7,2)", "1.20", "1.20", false
+                          "DECIMAL(5,2)", "DECIMAL(7,2)", "0.00", "0.00", false
+                          "DECIMAL(5,2)", "DECIMAL(5,1)", "1.00", "1.0", true
+                          "DECIMAL(5,2)", "DECIMAL(5,1)", "1.02", "1.2", true
+                          "DECIMAL(5,2)", "DECIMAL(5,1)", "-1.02", "-1.2", true
+                          "DECIMAL(5,2)", "DECIMAL(5,1)", "1.20", "1.2", false
+                          "DECIMAL(5,2)", "DECIMAL(5,3)", "1.00", "1.000", false
+                          "DECIMAL(14,4)", "DECIMAL(15,4)", "1234567890.1234", "1234567890.1234", true
+                          "DECIMAL(14,4)", "DECIMAL(16,4)", "1234567890.1234", "1234567890.1234", false
+                          "DECIMAL(14,4)", "DECIMAL(14,3)", "1234567890.0123", "1234567890.123", true
+                          "DECIMAL(14,4)", "DECIMAL(14,3)", "-1234567890.0123", "-1234567890.123", true ] do
+                        let store = newStore ()
+                        runDefault store $"CREATE TABLE decimal_parent(k {parentType} PRIMARY KEY)" |> ignore
+                        runDefault store $"CREATE TABLE decimal_child(k {childType},CONSTRAINT fk_decimal FOREIGN KEY(k) REFERENCES decimal_parent(k))" |> ignore
+                        runDefault store $"INSERT INTO decimal_parent VALUES({parentValue})" |> ignore
+                        let actual = runDefault store $"INSERT INTO decimal_child VALUES({childValue})"
+                        if matches then
+                            Expect.equal actual (Affected 1UL) $"{parentType} {parentValue} to {childType} {childValue}"
+                        else
+                            match actual with
+                            | Err(1452, _) -> ()
+                            | other -> failtestf "expected 1452 for %s %s to %s %s, got %A" parentType parentValue childType childValue other
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE decimal_parent(k DECIMAL(5,2) PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE decimal_child(k DECIMAL(5,1),CONSTRAINT fk_decimal FOREIGN KEY(k) REFERENCES decimal_parent(k) ON UPDATE CASCADE ON DELETE CASCADE)" |> ignore
+                    runDefault store "INSERT INTO decimal_parent VALUES(1.02)" |> ignore
+                    Expect.equal (runDefault store "INSERT INTO decimal_child VALUES(1.2)") (Affected 1UL) "packed parent key matches"
+                    Expect.equal (runDefault store "UPDATE decimal_parent SET k=1.03 WHERE k=1.02") (Affected 1UL) "packed update cascades"
+                    match runDefault store "SELECT k FROM decimal_child" with
+                    | ResultSet(_, [ [ Some "1.3" ] ]) -> ()
+                    | other -> failtestf "expected cascaded decimal bytes to render at child scale, got %A" other
+                    Expect.equal (runDefault store "DELETE FROM decimal_parent WHERE k=1.03") (Affected 1UL) "packed delete cascades"
+                    match runDefault store "SELECT COUNT(*) FROM decimal_child" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected packed decimal child to cascade-delete, got %A" other
+
                 testCase "ADD FOREIGN KEY validates the final column type in a combined ALTER"
                 <| fun _ ->
                     let store = newStore ()

@@ -6843,6 +6843,46 @@ module ContractCatalog =
           Cleanup = [| "DROP DATABASE IF EXISTS fk_time_date_probe" |]
           Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
 
+    let private decimalForeignKeyBytes =
+        let cases =
+            [ "DECIMAL(5,2)", "DECIMAL(5,2)", "1.20", "1.20", true
+              "DECIMAL(5,2)", "DECIMAL(6,2)", "1.20", "1.20", true
+              "DECIMAL(5,2)", "DECIMAL(7,2)", "1.20", "1.20", false
+              "DECIMAL(5,2)", "DECIMAL(7,2)", "0.00", "0.00", false
+              "DECIMAL(5,2)", "DECIMAL(5,1)", "1.00", "1.0", true
+              "DECIMAL(5,2)", "DECIMAL(5,1)", "1.02", "1.2", true
+              "DECIMAL(5,2)", "DECIMAL(5,1)", "-1.02", "-1.2", true
+              "DECIMAL(5,2)", "DECIMAL(5,1)", "1.20", "1.2", false
+              "DECIMAL(5,2)", "DECIMAL(5,3)", "1.00", "1.000", false
+              "DECIMAL(14,4)", "DECIMAL(15,4)", "1234567890.1234", "1234567890.1234", true
+              "DECIMAL(14,4)", "DECIMAL(16,4)", "1234567890.1234", "1234567890.1234", false
+              "DECIMAL(14,4)", "DECIMAL(14,3)", "1234567890.0123", "1234567890.123", true
+              "DECIMAL(14,4)", "DECIMAL(14,3)", "-1234567890.0123", "-1234567890.123", true ]
+        { Name = "decimal-foreign-key-bytes"
+          Setup = [| "CREATE DATABASE fk_decimal_bytes_probe" |]
+          Steps =
+            [| Contract.execute "select-database" "USE fk_decimal_bytes_probe"
+               for index, (parentType, childType, parentValue, childValue, matches) in List.indexed cases do
+                   let parent = sprintf "decimal_parent_%d" index
+                   let child = sprintf "decimal_child_%d" index
+                   let foreignKey = sprintf "fk_decimal_%d" index
+                   Contract.execute (sprintf "create-parent-%d" index) (sprintf "CREATE TABLE %s(k %s PRIMARY KEY)" parent parentType)
+                   Contract.execute (sprintf "create-child-%d" index) (sprintf "CREATE TABLE %s(k %s,CONSTRAINT %s FOREIGN KEY(k) REFERENCES %s(k))" child childType foreignKey parent)
+                   Contract.execute (sprintf "insert-parent-%d" index) (sprintf "INSERT INTO %s VALUES(%s)" parent parentValue)
+                   let insertion = Contract.execute (sprintf "insert-child-%d" index) (sprintf "INSERT INTO %s VALUES(%s)" child childValue)
+                   if matches then insertion else insertion |> Contract.fails 1452 "23000"
+                   Contract.query (sprintf "child-rows-%d" index) (sprintf "SELECT k FROM %s" child)
+               Contract.execute "create-cascade-parent" "CREATE TABLE decimal_cascade_parent(k DECIMAL(5,2) PRIMARY KEY)"
+               Contract.execute "create-cascade-child" "CREATE TABLE decimal_cascade_child(k DECIMAL(5,1),CONSTRAINT fk_decimal_cascade FOREIGN KEY(k) REFERENCES decimal_cascade_parent(k) ON UPDATE CASCADE ON DELETE CASCADE)"
+               Contract.execute "insert-cascade-parent" "INSERT INTO decimal_cascade_parent VALUES(1.02)"
+               Contract.execute "insert-cascade-child" "INSERT INTO decimal_cascade_child VALUES(1.2)"
+               Contract.execute "update-cascade-parent" "UPDATE decimal_cascade_parent SET k=1.03 WHERE k=1.02"
+               Contract.query "child-after-update" "SELECT k FROM decimal_cascade_child"
+               Contract.execute "delete-cascade-parent" "DELETE FROM decimal_cascade_parent WHERE k=1.03"
+               Contract.query "child-after-delete" "SELECT COUNT(*) FROM decimal_cascade_child" |]
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_decimal_bytes_probe" |]
+          Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
+
     let private foreignKeyGeneratedActions =
         { Name = "foreign-key-generated-actions"
           Setup = [| "CREATE DATABASE fk_generated_action_probe" |]
@@ -8772,6 +8812,7 @@ module ContractCatalog =
            yearColumnValues
            enumSetForeignKeyBytes
            bitBinaryForeignKeyBytes
+           decimalForeignKeyBytes
            yearByteForeignKeys
            timeDateForeignKeys
            qualifiedDuplicateKeys

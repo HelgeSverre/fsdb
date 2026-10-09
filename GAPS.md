@@ -357,7 +357,10 @@ actions. Stored BIT values and bit literals retain MySQL's distinct `HEX()`
 formatting. [Temporal FK probes](torture/findings/2026-10-09-year-column-values.md)
 now distinguish the fractional storage-byte tiers within `TIME`, `DATETIME`,
 and `TIMESTAMP`, including equal displayed values that must not match across
-tiers.
+tiers. [DECIMAL FK probes](torture/findings/2026-10-09-foreign-key-column-changes.md)
+compare packed groups across different precisions and scales, including
+byte-equal keys whose numeric values differ; invalid packed cascade groups
+still need a row representation that retains their raw bytes.
 
 Named CHECK constraints support enforcement state
 and `ALTER` validation, and ENUM or SET values enforce membership. Adding a

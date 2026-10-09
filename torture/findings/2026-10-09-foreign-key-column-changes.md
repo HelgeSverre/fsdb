@@ -40,6 +40,24 @@ collations match. Different implicit character sets are incompatible. These
 boundaries now inform foreign-key creation and column-change validation. The
 checks happen before publishing the altered catalog.
 
+DECIMAL references use MySQL's packed storage bytes, not numeric equality.
+`DECIMAL(5,2)` value `1.02` matches a `DECIMAL(5,1)` child value `1.2`, while
+numerically equal `1.20` and `1.2` do not match. The integer and fractional
+digits occupy separate packed groups, with nine digits per four bytes
+([MySQL 8.4 format](https://dev.mysql.com/doc/refman/8.4/en/precision-math-decimal-characteristics.html)).
+The root regression and `decimal-foreign-key-bytes` contract check matching,
+rejection, signs, nine-digit group boundaries, and a cascade that reinterprets
+parent `1.03` as child `1.3`. Fsdb now encodes and compares those bytes and
+decodes a matched cascade through the child declaration. An out-of-domain
+packed cascade remains open: MySQL can write a parent fractional byte that
+the narrower child's declared group cannot decode, displaying zero while
+retaining the physical FK action. Fsdb's decimal value type does not retain
+that invalid raw group.
+The `decimal-foreign-key-bytes` contract passed all 74 steps against pinned
+MySQL 8.4.11 at `torture/artifacts/runs/20261009T234246826-70638/contracts`.
+`just check` passed all 3,251 tests. The full 112-case run retained only the
+nine identifier-case differences from the pinned server's different case mode.
+
 Additional fresh-server creation probes accepted `BINARY` to `VARBINARY`,
 different `TIME` precisions, different `BIT` lengths, `FLOAT` with different
 precision, signed versus unsigned `DECIMAL`, and `YEAR` to `YEAR`. A

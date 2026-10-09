@@ -3472,6 +3472,111 @@ let private foreignKeyStorageValue (column: ColumnDef) value =
         |> VUInt
     | _ -> value
 
+// InnoDB foreign keys compare packed DECIMAL key bytes, even across declarations
+// whose numeric values or decimal scales differ. Each full nine-digit group uses
+// four bytes; the remaining digits use the smallest fixed-width group.
+let private decimalPartialBytes digits =
+    match digits with
+    | 0 -> 0
+    | 1 | 2 -> 1
+    | 3 | 4 -> 2
+    | 5 | 6 -> 3
+    | _ -> 4
+
+let private decimalPartBytes digits =
+    digits / 9 * 4 + decimalPartialBytes (digits % 9)
+
+let private foreignKeyDecimalBytes (column: ColumnDef) value =
+    match column.Type, value with
+    | TDecimal(precision, scale, _), VDecimal number ->
+        let negative = number < 0m
+        let text = number.ToString("F" + string scale, CultureInfo.InvariantCulture)
+        let parts = (if negative then text.Substring(1) else text).Split('.')
+        let integerDigits = precision - scale
+        let significantInteger = parts.[0].TrimStart([| '0' |])
+
+        if significantInteger.Length > integerDigits then
+            None
+        else
+            let integer = if integerDigits = 0 then "" else parts.[0].PadLeft(integerDigits, '0')
+            let fraction = if scale = 0 then "" else parts.[1]
+            let bytes = ResizeArray<byte>()
+            let writeGroup (digits: string) width =
+                let group = UInt32.Parse(digits, CultureInfo.InvariantCulture)
+                for index in width - 1 .. -1 .. 0 do
+                    bytes.Add(byte (group >>> (8 * index)))
+
+            let integerPartial = integerDigits % 9
+            if integerPartial > 0 then
+                writeGroup (integer.Substring(0, integerPartial)) (decimalPartialBytes integerPartial)
+            for group in 0 .. integerDigits / 9 - 1 do
+                writeGroup (integer.Substring(integerPartial + group * 9, 9)) 4
+            for group in 0 .. scale / 9 - 1 do
+                writeGroup (fraction.Substring(group * 9, 9)) 4
+            let fractionalPartial = scale % 9
+            if fractionalPartial > 0 then
+                writeGroup (fraction.Substring(scale - fractionalPartial)) (decimalPartialBytes fractionalPartial)
+
+            let packed = bytes.ToArray()
+            if negative then
+                for index in 0 .. packed.Length - 1 do
+                    packed.[index] <- ~~~packed.[index]
+            packed.[0] <- packed.[0] ^^^ 0x80uy
+            Some packed
+    | _ -> None
+
+let private foreignKeyDecimalValue (column: ColumnDef) (packed: byte[]) =
+    match column.Type with
+    | TDecimal(precision, scale, _) when packed.Length = decimalPartBytes (precision - scale) + decimalPartBytes scale ->
+        let bytes = Array.copy packed
+        let negative = bytes.[0] &&& 0x80uy = 0uy
+        bytes.[0] <- bytes.[0] ^^^ 0x80uy
+        if negative then
+            for index in 0 .. bytes.Length - 1 do
+                bytes.[index] <- ~~~bytes.[index]
+
+        let mutable offset = 0
+        let mutable valid = true
+        let readGroup digits width =
+            let mutable group = 0UL
+            for _ in 1 .. width do
+                group <- (group <<< 8) ||| uint64 bytes.[offset]
+                offset <- offset + 1
+            if group >= pown 10UL digits then valid <- false
+            group.ToString("D" + string digits, CultureInfo.InvariantCulture)
+
+        let integerDigits = precision - scale
+        let integer = StringBuilder()
+        let integerPartial = integerDigits % 9
+        if integerPartial > 0 then
+            integer.Append(readGroup integerPartial (decimalPartialBytes integerPartial)) |> ignore
+        for _ in 1 .. integerDigits / 9 do
+            integer.Append(readGroup 9 4) |> ignore
+
+        let fraction = StringBuilder()
+        for _ in 1 .. scale / 9 do
+            fraction.Append(readGroup 9 4) |> ignore
+        let fractionalPartial = scale % 9
+        if fractionalPartial > 0 then
+            fraction.Append(readGroup fractionalPartial (decimalPartialBytes fractionalPartial)) |> ignore
+
+        let integerText = integer.ToString().TrimStart([| '0' |])
+        let integerText = if integerText.Length = 0 then "0" else integerText
+        let sign = if negative then "-" else ""
+        let text = sign + integerText + (if scale = 0 then "" else "." + fraction.ToString())
+        if valid then
+            match Decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture) with
+            | true, number -> Some(VDecimal number)
+            | _ -> None
+        else
+            None
+    | _ -> None
+
+let private foreignKeyUsesDecimalBytes (child: ColumnDef) (parent: ColumnDef) =
+    match child.Type, parent.Type with
+    | TDecimal _, TDecimal _ -> true
+    | _ -> false
+
 let private foreignKeyHasDistinctTemporalStorage (child: ColumnDef) (parent: ColumnDef) =
     let fractionalBytes precision = (precision + 1) / 2
     match child.Type, parent.Type with
@@ -3506,6 +3611,10 @@ let private foreignKeyBitBinaryBytes (column: ColumnDef) value =
 
 let private foreignKeyValuesMatch (child: ColumnDef) childValue (parent: ColumnDef) parentValue =
     if foreignKeyHasDistinctTemporalStorage child parent then false
+    elif foreignKeyUsesDecimalBytes child parent then
+        match foreignKeyDecimalBytes child childValue, foreignKeyDecimalBytes parent parentValue with
+        | Some childBytes, Some parentBytes -> childBytes = parentBytes
+        | _ -> false
     elif foreignKeyUsesBitBinaryBytes child parent || foreignKeyUsesDifferentBitWidths child parent then
         match foreignKeyBitBinaryBytes child childValue, foreignKeyBitBinaryBytes parent parentValue with
         | Some childBytes, Some parentBytes -> childBytes = parentBytes
@@ -3539,9 +3648,17 @@ let private foreignKeyUsesEnumSetBytes (child: ColumnDef) (parent: ColumnDef) =
     | (TEnum _ | TSet _), (TEnum _ | TSet _) -> true
     | _ -> false
 
+let private foreignKeyNeedsDecimalRowComparison (child: ColumnDef) (parent: ColumnDef) =
+    match child.Type, parent.Type with
+    | TDecimal(childPrecision, childScale, _), TDecimal(parentPrecision, parentScale, _) ->
+        childScale <> parentScale
+        || decimalPartBytes (childPrecision - childScale) <> decimalPartBytes (parentPrecision - parentScale)
+    | _ -> false
+
 let private foreignKeyNeedsRowComparison child parent =
     foreignKeyUsesYearByte child parent
     || foreignKeyUsesEnumSetBytes child parent
+    || foreignKeyNeedsDecimalRowComparison child parent
     || foreignKeyUsesBitBinaryBytes child parent
     || foreignKeyUsesDifferentBitWidths child parent
     || foreignKeyHasDistinctTemporalStorage child parent
@@ -3551,6 +3668,10 @@ let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parent
     | TYear, TTinyInt true, VInt 0L -> VInt 0L
     | TYear, TTinyInt true, VInt yearByte -> VInt(yearByte + 1900L)
     | TTinyInt true, TYear, VInt yearByte -> VInt yearByte
+    | TDecimal _, TDecimal _, VDecimal _ ->
+        foreignKeyDecimalBytes parent parentValue
+        |> Option.bind (foreignKeyDecimalValue child)
+        |> Option.defaultValue parentValue
     | (TBinary _ | TVarBinary _), TBit width, VBit(_, bits) -> VBytes(bitBytes width bits)
     | TBit width, (TBinary _ | TVarBinary _), VBytes bytes ->
         VBit(width, bytes |> Array.fold (fun bits value -> (bits <<< 8) ||| uint64 value) 0UL)
