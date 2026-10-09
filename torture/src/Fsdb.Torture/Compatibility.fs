@@ -8543,6 +8543,11 @@ module ContractCatalog =
             [ "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT)"
               "CREATE TRIGGER before_parent BEFORE DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('before',OLD.id)"
               "CREATE TRIGGER after_parent AFTER DELETE ON parent FOR EACH ROW INSERT INTO audit(phase,id) VALUES('after',OLD.id)" ]
+        let childAudit =
+            [ "INSERT INTO child VALUES(2,2)"
+              "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT,pid INT)"
+              "CREATE TRIGGER before_child BEFORE DELETE ON child FOR EACH ROW INSERT INTO audit(phase,id,pid) VALUES('before',OLD.id,OLD.pid)"
+              "CREATE TRIGGER after_child AFTER DELETE ON child FOR EACH ROW INSERT INTO audit(phase,id,pid) VALUES('after',OLD.id,OLD.pid)" ]
         let cases =
             [ "ordered", "", [], "DELETE IGNORE FROM parent ORDER BY id"
               "limit-one", "", [], "DELETE IGNORE FROM parent ORDER BY id LIMIT 1"
@@ -8559,6 +8564,10 @@ module ContractCatalog =
               "subset-cascade-child-first", " ON DELETE CASCADE", [ "INSERT INTO child VALUES(2,2)" ], "DELETE IGNORE c,p FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
               "subset-set-null-parent-first", " ON DELETE SET NULL", [ "INSERT INTO child VALUES(2,2)" ], "DELETE IGNORE p,c FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
               "subset-set-null-child-first", " ON DELETE SET NULL", [ "INSERT INTO child VALUES(2,2)" ], "DELETE IGNORE c,p FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
+              "trigger-cascade", " ON DELETE CASCADE", childAudit, "DELETE IGNORE p,c FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
+              "trigger-set-null", " ON DELETE SET NULL", childAudit, "DELETE IGNORE p,c FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
+              "trigger-cascade-plain", " ON DELETE CASCADE", childAudit, "DELETE p,c FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
+              "trigger-set-null-plain", " ON DELETE SET NULL", childAudit, "DELETE p,c FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
               "cascade", " ON DELETE CASCADE", [], "DELETE IGNORE FROM parent"
               "update-action", " ON UPDATE CASCADE", [], "DELETE IGNORE FROM parent"
               "audit", "", audit, "DELETE IGNORE FROM parent ORDER BY id"
@@ -8580,6 +8589,8 @@ module ContractCatalog =
                    if additions = audit || name = "rollback" || name = "fatal-after" then
                        let order = if name = "audit-joined" then "id,seq" else "seq"
                        Contract.query (name + "-audit") ("SELECT phase,id FROM audit ORDER BY " + order)
+                   if additions = childAudit then
+                       Contract.query (name + "-audit") "SELECT phase,id,pid FROM audit ORDER BY seq"
                    if name = "rollback" then
                        Contract.execute "rollback-transaction" "ROLLBACK"
                        Contract.query "rollback-warnings" "SHOW WARNINGS"

@@ -82,7 +82,8 @@ The application-facing DML surface includes `INSERT`/`REPLACE ... SET`, ODKU,
 and foreign-key row skipping with ordered LIMIT, single-target joined deletion,
 and trigger rollback. The [audited delete cases](torture/findings/2026-10-08-delete-ignore.md)
 include local trigger-warning lifetimes, multi-target foreign-key blocking,
-and selected-child identity through CASCADE and SET NULL in either target order;
+selected-child identity through CASCADE and SET NULL in either target order,
+and the original selected child image in DELETE triggers after those actions;
 other ignored-delete error classes and combinations
 require further native coverage. `SELECT` covers joins, derived and lateral
 sources, `JSON_TABLE`, expression subqueries, set operations, windows, rollups,

@@ -21720,11 +21720,11 @@ let rec executeAs
                             if selected then updateOneRow rowId row else Ok 0))))
             |> Result.map List.sum
 
-    let deleteIgnoredRows (runStore: Store) db table candidates predicate initialRestriction =
+    let deleteIgnoredRows (runStore: Store) db table candidates predicate initialRestriction originalImage =
         let before = triggersFor runStore db table "BEFORE" "DELETE"
         let after = triggersFor runStore db table "AFTER" "DELETE"
-        let deleteRow rowId row =
-            let deleted = [ Some row, None ]
+        let deleteRow rowId row oldRow =
+            let deleted = [ Some oldRow, None ]
             triggerResult (fireTriggers runStore db table Before TriggerDelete before deleted)
             |> Result.bind (fun () ->
                 // Only the attempted deletion can be ignored; BEFORE effects survive a rejected row.
@@ -21748,12 +21748,20 @@ let rec executeAs
             |> Result.mapError storageErr
             |> Result.bind (fun current ->
                 match current.RowsArray.TryFind rowId with
-                | None -> Ok 0
+                | None ->
+                    match originalImage rowId with
+                    | None -> Ok 0
+                    | Some oldRow ->
+                        let deleted = [ Some oldRow, None ]
+                        triggerResult (fireTriggers runStore db table Before TriggerDelete before deleted)
+                        |> Result.bind (fun () ->
+                            triggerResult (fireTriggers runStore db table After TriggerDelete after deleted)
+                            |> Result.map (fun () -> 1))
                 | Some row ->
                     let selected =
                         if obj.ReferenceEquals(row, selectedRow) then Ok true else predicate row
                     selected |> Result.mapError storageErr |> Result.bind (fun selected ->
-                        if selected then deleteRow rowId row else Ok 0)))
+                        if selected then deleteRow rowId row (originalImage rowId |> Option.defaultValue row) else Ok 0)))
         |> Result.map List.sum
 
     let validateViewCandidate (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
@@ -24402,7 +24410,7 @@ let rec executeAs
 
                     let apply =
                         if deleteStmt.Ignore then
-                            deleteIgnoredRows targetStore db table targetRows predicate (fun _ -> None)
+                            deleteIgnoredRows targetStore db table targetRows predicate (fun _ -> None) (fun _ -> None)
                         else
                             triggerResult (fireTriggers targetStore db table Before TriggerDelete beforeTriggers deletedRows)
                             |> Result.bind (fun () -> deleteRowsCandidates targetStore db table targetRows predicate |> Result.mapError storageErr)
@@ -24500,18 +24508,18 @@ let rec executeAs
                                     let rowIds = Dictionary<Value[], RowId>(HashIdentity.Reference)
                                     for rowId, row in original.RowsArray.Indexed do
                                         rowIds.[row] <- rowId
-                                    let selectedRowIds =
+                                    let selectedRows =
                                         claimedRows.[index]
                                         |> Seq.choose (fun selected ->
                                             match rowIds.TryGetValue selected with
-                                            | true, rowId -> Some rowId
+                                            | true, rowId -> Some(rowId, selected)
                                             | _ -> None)
                                         |> List.ofSeq
                                     let candidates =
-                                        selectedRowIds
-                                        |> List.choose (fun rowId -> current.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                                        selectedRows
+                                        |> List.choose (fun (rowId, _) -> current.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
                                     // MySQL counts selected targets already removed by an earlier cascade.
-                                    let removedEarlier = selectedRowIds.Length - candidates.Length
+                                    let removedEarlier = selectedRows.Length - candidates.Length
                                     let deleteSelected =
                                         if deleteStmt.Ignore then
                                             let initialRestriction =
@@ -24519,9 +24527,10 @@ let rec executeAs
                                                     Storage.foreignKeyDeleteRestriction baseCatalog tdb tname
                                                 else
                                                     fun _ -> None
-                                            deleteIgnoredRows snapshot tdb tname candidates (fun _ -> Ok true) initialRestriction
+                                            let originalByRowId = selectedRows |> Map.ofList
+                                            deleteIgnoredRows snapshot tdb tname selectedRows (fun _ -> Ok true) initialRestriction (fun rowId -> Map.tryFind rowId originalByRowId)
                                         else
-                                            let deletedRows = candidates |> List.map (fun (_, row) -> Some row, None)
+                                            let deletedRows = selectedRows |> List.map (fun (_, row) -> Some row, None)
                                             let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "DELETE"
                                             let afterTriggers = triggersFor snapshot tdb tname "AFTER" "DELETE"
                                             triggerResult (fireTriggers snapshot tdb tname Before TriggerDelete beforeTriggers deletedRows)
@@ -24531,7 +24540,7 @@ let rec executeAs
                                                 | Ok count ->
                                                     triggerResult (fireTriggers snapshot tdb tname After TriggerDelete afterTriggers deletedRows)
                                                     |> Result.map (fun () -> count))
-                                    deleteSelected |> Result.map ((+) removedEarlier)))
+                                    deleteSelected |> Result.map ((+) (if deleteStmt.Ignore then 0 else removedEarlier))))
 
                     let apply =
                         withTriggerInvocationTables invocationTables (fun () ->

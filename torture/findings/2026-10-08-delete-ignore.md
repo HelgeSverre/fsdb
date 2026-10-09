@@ -38,7 +38,11 @@ differences before row skipping was implemented.
   the other child with a NULL reference. This holds in both target orders.
   A parent-first cascade still counts the selected child as affected even
   though the cascade removes it before the child target is processed. Plain
-  multi-target deletion has the same SET NULL and CASCADE behavior.
+  multi-target deletion has the same SET NULL and CASCADE behavior. In both
+  forms, the selected child's DELETE triggers fire with the originally selected
+  `OLD` row, even after an earlier parent action sets its reference to NULL or
+  cascades its deletion. Cascaded deletion of an unselected child does not fire
+  its DELETE triggers.
 - An explicit transaction can roll back successful deletions after the warning.
 - ON DELETE CASCADE still deletes the child.
 - A trigger's explicit SIGNAL SQLSTATE 45000 remains error 1644; IGNORE does
@@ -58,10 +62,12 @@ before attempting each deletion against the working snapshot. This preserves
 MySQL's parent blocker when a targeted child was removed earlier in the same
 statement; the working-snapshot check still catches new blockers.
 Multi-target deletes resolve selected rows to stable row IDs from the original
-catalog, then use their current row images when each table is processed. A
+catalog, then use their current row images for storage deletion and their
+original row images for DELETE triggers. A
 preceding parent SET NULL can replace a child row image without dropping that
 child from the selected deletion set. A child already removed by an earlier
-cascade still contributes to the affected count if it was selected as a target.
+cascade still contributes to the affected count and fires its selected-target
+DELETE triggers.
 A fatal error prevents publication of the statement snapshot. Explicit transaction
 rollback restores both successful deletions and trigger writes.
 
@@ -108,3 +114,9 @@ No failure is enrolled in the known-gap allowlist.
   same contract, including affected-row counts in both target orders. The full
   111-case run retained only those nine identifier-case differences. Artifact:
   `torture/artifacts/runs/20261009T223215702-27095/contracts`.
+- The selected-child trigger follow-up passed all 340 steps in the same contract,
+  including original `OLD` images after SET NULL and trigger firing after
+  CASCADE for plain and ignored multi-target deletes. `just check` passed all
+  3,248 tests. The full 111-case run retained only the nine identifier-case
+  differences. Artifact:
+  `torture/artifacts/runs/20261009T224401889-74458/contracts`.

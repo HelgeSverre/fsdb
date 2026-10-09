@@ -159,6 +159,21 @@ let tests =
                   Expect.equal (handle next "SELECT id,pid FROM child ORDER BY id" |> snd)
                       (ResultSet([ "id"; "pid" ], [])) "cascade removes both children"
 
+          testCase "multi-target child DELETE triggers see the originally selected row" <| fun _ ->
+              for action in [ "SET NULL"; "CASCADE" ] do
+                  for modifier in [ ""; " IGNORE" ] do
+                      let session =
+                          multiTargetSession action
+                          |> fun session -> step session "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),child_id INT,pid INT)"
+                          |> fun session -> step session "CREATE TRIGGER before_child BEFORE DELETE ON child FOR EACH ROW INSERT INTO audit(phase,child_id,pid) VALUES('before',OLD.id,OLD.pid)"
+                          |> fun session -> step session "CREATE TRIGGER after_child AFTER DELETE ON child FOR EACH ROW INSERT INTO audit(phase,child_id,pid) VALUES('after',OLD.id,OLD.pid)"
+                      let next, result = handle session $"DELETE{modifier} p,c FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
+                      Expect.equal result (Affected 2UL) "selected parent and child count"
+                      Expect.equal (handle next "SELECT phase,child_id,pid FROM audit ORDER BY seq" |> snd)
+                          (ResultSet([ "phase"; "child_id"; "pid" ],
+                              [ [ Some "before"; Some "1"; Some "2" ]; [ Some "after"; Some "1"; Some "2" ] ]))
+                          "both trigger images retain the selected child key"
+
           testCase "DELETE IGNORE rolls back earlier deletions after a fatal AFTER trigger" <| fun _ ->
               let session =
                   [ "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT)"
