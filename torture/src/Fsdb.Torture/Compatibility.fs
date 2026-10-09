@@ -6648,7 +6648,15 @@ module ContractCatalog =
                Contract.execute "extend-set-members" "ALTER TABLE set_child MODIFY COLUMN x SET('a','b','c')"
                Contract.execute "reject-set-member-replacement" "ALTER TABLE set_child MODIFY COLUMN x SET('a','c')" |> Contract.fails 1832 "HY000"
                Contract.execute "create-new-bit-child" "CREATE TABLE new_bit_child(x BIT(8))"
-               Contract.execute "add-fk-with-width-change" "ALTER TABLE new_bit_child MODIFY COLUMN x BIT(9),ADD CONSTRAINT fk_new_bit FOREIGN KEY(x) REFERENCES bit_parent(x)" |]
+               Contract.execute "add-fk-with-width-change" "ALTER TABLE new_bit_child MODIFY COLUMN x BIT(9),ADD CONSTRAINT fk_new_bit FOREIGN KEY(x) REFERENCES bit_parent(x)"
+               Contract.execute "create-null-action-parent" "CREATE TABLE null_action_parent(id INT PRIMARY KEY)"
+               Contract.execute "create-delete-null-child" "CREATE TABLE delete_null_child(x INT,CONSTRAINT fk_delete_null FOREIGN KEY(x) REFERENCES null_action_parent(id) ON DELETE SET NULL)"
+               Contract.execute "reject-delete-null-not-null" "ALTER TABLE delete_null_child MODIFY x INT NOT NULL" |> Contract.fails 1830 "HY000"
+               Contract.execute "reject-delete-null-width-and-nullability" "ALTER TABLE delete_null_child MODIFY x BIGINT NOT NULL" |> Contract.fails 1830 "HY000"
+               Contract.execute "drop-delete-null-and-require" "ALTER TABLE delete_null_child DROP FOREIGN KEY fk_delete_null,MODIFY x INT NOT NULL"
+               Contract.execute "reject-add-delete-null" "ALTER TABLE delete_null_child ADD CONSTRAINT fk_delete_null FOREIGN KEY(x) REFERENCES null_action_parent(id) ON DELETE SET NULL" |> Contract.fails 1830 "HY000"
+               Contract.execute "create-update-null-child" "CREATE TABLE update_null_child(x INT,CONSTRAINT fk_update_null FOREIGN KEY(x) REFERENCES null_action_parent(id) ON UPDATE SET NULL)"
+               Contract.execute "reject-update-null-not-null" "ALTER TABLE update_null_child MODIFY x INT NOT NULL" |> Contract.fails 1830 "HY000" |]
           Cleanup = [| "DROP DATABASE IF EXISTS fk_column_storage_probe" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 

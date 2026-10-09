@@ -6332,6 +6332,25 @@ let private incompatibleForeignKeyError (foreignKey: ForeignKeyDef) (childName, 
             foreignKey.Name
     )
 
+let private foreignKeySetNullError (childColumns: ColumnDef list) (foreignKey: ForeignKeyDef) =
+    let setNull action =
+        action |> Option.exists (fun value -> String.Equals(value, "SET NULL", StringComparison.OrdinalIgnoreCase))
+
+    if setNull foreignKey.OnDelete || setNull foreignKey.OnUpdate then
+        foreignKey.Columns
+        |> List.tryPick (fun name ->
+            tryFindForeignKeyColumn name childColumns
+            |> Option.filter (fun column -> not column.Nullable)
+            |> Option.map (fun column ->
+                ExpressionError(
+                    1830,
+                    sprintf
+                        "Column '%s' cannot be NOT NULL: needed in a foreign key constraint '%s' SET NULL"
+                        column.Name
+                        foreignKey.Name
+                )))
+    else None
+
 let private validateForeignKeyDefinition
     (store: Store)
     (catalog: Catalog)
@@ -6355,13 +6374,6 @@ let private validateForeignKeyDefinition
             )
         )
 
-    let nonNullableChild =
-        foreignKey.Columns
-        |> List.tryPick (fun name ->
-            tryFindForeignKeyColumn name childColumns
-            |> Option.filter (fun column -> not column.Nullable)
-            |> Option.map _.Name)
-
     let generatedChild =
         foreignKey.Columns
         |> List.exists (fun name ->
@@ -6377,21 +6389,12 @@ let private validateForeignKeyDefinition
 
     let missingChild = foreignKey.Columns |> List.tryFind (fun name -> tryFindForeignKeyColumn name childColumns |> Option.isNone)
 
-    match missingChild, sameLength foreignKey.Columns foreignKey.RefColumns, restrictedGeneratedAction, nonNullableChild with
+    match missingChild, sameLength foreignKey.Columns foreignKey.RefColumns, restrictedGeneratedAction, foreignKeySetNullError childColumns foreignKey with
     | Some column, _, _, _ -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column))
     | None, false, _, _ -> invalidDefinition ()
     | None, true, Some action, _ ->
         Error(ExpressionError(3104, sprintf "Cannot define foreign key with %s clause on a generated column." action))
-    | None, true, None, Some column when setNull foreignKey.OnDelete || setNull foreignKey.OnUpdate ->
-        Error(
-            ExpressionError(
-                1830,
-                sprintf
-                    "Column '%s' cannot be NOT NULL: needed in a foreign key constraint '%s' SET NULL"
-                    column
-                    foreignKey.Name
-            )
-        )
+    | None, true, None, Some error -> Error error
     | None, true, None, _ ->
         let parentDatabase = foreignKeyDatabase databaseName foreignKey
         let parent =
@@ -7742,6 +7745,10 @@ let private retargetAlterForeignKeyColumns
             incompatibleForeignKeyColumns childColumns parentColumns foreignKey
             |> Option.map (incompatibleForeignKeyError foreignKey)
 
+        let nullabilityError =
+            candidate.ForeignKeys
+            |> List.tryPick (foreignKeySetNullError candidate.Columns)
+
         let childErrors =
             candidate.ForeignKeys
             |> List.tryPick (fun foreignKey ->
@@ -7755,7 +7762,7 @@ let private retargetAlterForeignKeyColumns
                 tryCatalogTable childAddress updated
                 |> Option.bind (fun child -> check child.Columns candidate.Columns foreignKey))
 
-        match childErrors |> Option.orElseWith parentErrors with
+        match nullabilityError |> Option.orElseWith (fun () -> childErrors |> Option.orElseWith parentErrors) with
         | Some error -> Error error
         | None ->
             let original = tryCatalogTable address catalog |> Option.get

@@ -131,6 +131,31 @@ let tests =
                   handle session "CREATE TABLE child(x INT,CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(g) ON UPDATE CASCADE)"
               Expect.isNone (errorInfo childResult) "stored generated parent accepts update action"
 
+          testCase "ALTER keeps SET NULL child columns nullable"
+          <| fun _ ->
+              for action in [ "ON DELETE SET NULL"; "ON UPDATE SET NULL" ] do
+                  let store = Fsdb.Storage.create()
+                  let mutable session = create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in
+                      [ "CREATE TABLE parent(id INT PRIMARY KEY)"
+                        sprintf "CREATE TABLE child(id INT PRIMARY KEY,p_id INT,CONSTRAINT fk_cp FOREIGN KEY(p_id) REFERENCES parent(id) %s)" action ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+
+                  let reject = "ALTER TABLE child MODIFY p_id INT NOT NULL"
+                  Expect.equal
+                      (run reject |> errorInfo |> Option.map (fun error -> error.Code, error.State, error.Message))
+                      (Some(1830, "HY000", "Column 'p_id' cannot be NOT NULL: needed in a foreign key constraint 'fk_cp' SET NULL"))
+                      action
+                  Expect.isTrue (store.Catalog.[Fsdb.Storage.defaultDatabase].["child"].Columns.[1].Nullable) "failed ALTER is atomic"
+
+                  let removeAction = "ALTER TABLE child DROP FOREIGN KEY fk_cp,MODIFY p_id INT NOT NULL"
+                  Expect.isNone (run removeAction |> errorInfo) removeAction
+                  Expect.isFalse (store.Catalog.[Fsdb.Storage.defaultDatabase].["child"].Columns.[1].Nullable) "column becomes required"
+
           testCase "BIT and binary foreign-key columns follow the MySQL type family"
           <| fun _ ->
               for childType, parentType, expectedError in

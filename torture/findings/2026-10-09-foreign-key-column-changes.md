@@ -96,6 +96,13 @@ deletes dependent rows; `RESTRICT` and `NO ACTION` declarations work. A stored
 generated parent column can use the audited actions. The root regression and
 `foreign-key-generated-actions` wire contract cover these boundaries.
 
+Changing a nullable child column to `NOT NULL` under an existing `ON DELETE
+SET NULL` or `ON UPDATE SET NULL` constraint returns 1830 (`HY000`) and leaves
+the column nullable. Dropping that constraint in the same ALTER permits the
+change; trying to add the SET NULL constraint afterward returns 1830. MySQL
+8.4.11 and fsdb now agree on the final column and constraint state, including
+the error when a type change and the nullability change occur together.
+
 The expanded `foreign-key-alter-definitions` wire contract passes these
 additional steps against MySQL 8.4.11 in
 `torture/artifacts/runs/20261009T163829499-91044/contracts`. Earlier coverage
