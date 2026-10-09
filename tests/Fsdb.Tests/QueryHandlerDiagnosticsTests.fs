@@ -201,6 +201,29 @@ let tests =
                   Expect.isNone (run "DELETE FROM parent WHERE x=0" |> errorInfo) "delete cascades across the type pair"
                   Expect.equal (run "SELECT COUNT(*) FROM child") (ResultSet([ "COUNT(*)" ], [ [ Some "1" ] ])) "zero child removed"
 
+          testCase "TIME foreign keys accept date-time types without matching clock fields"
+          <| fun _ ->
+              for parentType, childType, parentValue, childValue in
+                  [ "DATETIME", "TIME", "2024-01-01 12:34:56", "12:34:56"
+                    "TIME", "DATETIME", "12:34:56", "2024-01-01 12:34:56"
+                    "TIMESTAMP(2)", "TIME(4)", "2024-01-01 12:34:56.12", "12:34:56.1200"
+                    "TIME(4)", "TIMESTAMP(2)", "12:34:56.1200", "2024-01-01 12:34:56.12" ] do
+                  let store = Fsdb.Storage.create()
+                  let mutable session = create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  let parentSql = sprintf "CREATE TABLE parent(x %s PRIMARY KEY)" parentType
+                  let childSql = sprintf "CREATE TABLE child(x %s,CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x))" childType
+                  Expect.isNone (run parentSql |> errorInfo) parentSql
+                  Expect.isNone (run childSql |> errorInfo) childSql
+                  Expect.isNone (run (sprintf "INSERT INTO parent VALUES('%s')" parentValue) |> errorInfo) "parent value"
+                  Expect.equal
+                      (run (sprintf "INSERT INTO child VALUES('%s')" childValue) |> errorInfo |> Option.map _.Code)
+                      (Some 1452)
+                      "clock fields do not form a foreign-key match"
+
           testCase "ENUM and SET foreign keys require matching storage widths"
           <| fun _ ->
               let declaration kind count =

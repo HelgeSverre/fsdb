@@ -20,7 +20,8 @@ rule across parent probes, insert lookups, cascades, and transaction validation.
 
 MySQL also accepts TIME paired with DATETIME or TIMESTAMP in either direction,
 including differing fractional precisions. DATE remains incompatible with
-them. Ordinary cross-family row inserts in the probe returned 1452; fsdb
-currently rejects these definitions with 3780. Their physical-key and
-referential-action behavior remains unverified, so these declarations remain
-an open compatibility gap.
+them. Ordinary matching-clock-field inserts and zero-value inserts in the
+native probe returned 1452. The `time-date-foreign-keys` contract covers
+declaration and nonmatching ordinary inserts in both directions; fsdb now
+accepts those declarations and keeps their referential comparisons distinct.
+Other physical-key combinations and referential actions remain unverified.

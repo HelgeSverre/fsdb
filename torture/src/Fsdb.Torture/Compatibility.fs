@@ -6698,6 +6698,27 @@ module ContractCatalog =
           Cleanup = [| "DROP DATABASE IF EXISTS fk_year_byte_probe" |]
           Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
 
+    let private timeDateForeignKeys =
+        { Name = "time-date-foreign-keys"
+          Setup = [| "CREATE DATABASE fk_time_date_probe" |]
+          Steps =
+            [| Contract.execute "select-database" "USE fk_time_date_probe"
+               for index, parentType, childType, parentValue, childValue in
+                   [ 1, "DATETIME", "TIME", "2024-01-01 12:34:56", "12:34:56"
+                     2, "TIME", "DATETIME", "12:34:56", "2024-01-01 12:34:56"
+                     3, "TIMESTAMP(2)", "TIME(4)", "2024-01-01 12:34:56.12", "12:34:56.1200"
+                     4, "TIME(4)", "TIMESTAMP(2)", "12:34:56.1200", "2024-01-01 12:34:56.12" ] do
+                   let parent = sprintf "time_parent_%d" index
+                   let child = sprintf "time_child_%d" index
+                   let foreignKey = sprintf "fk_time_%d" index
+                   Contract.execute (sprintf "create-parent-%d" index) (sprintf "CREATE TABLE %s(x %s PRIMARY KEY)" parent parentType)
+                   Contract.execute (sprintf "create-child-%d" index) (sprintf "CREATE TABLE %s(x %s,CONSTRAINT %s FOREIGN KEY(x) REFERENCES %s(x))" child childType foreignKey parent)
+                   Contract.execute (sprintf "insert-parent-%d" index) (sprintf "INSERT INTO %s VALUES('%s')" parent parentValue)
+                   Contract.execute (sprintf "reject-child-%d" index) (sprintf "INSERT INTO %s VALUES('%s')" child childValue) |> Contract.fails 1452 "23000"
+                   Contract.query (sprintf "empty-child-%d" index) (sprintf "SELECT COUNT(*) FROM %s" child) |]
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_time_date_probe" |]
+          Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
+
     let private foreignKeyGeneratedActions =
         { Name = "foreign-key-generated-actions"
           Setup = [| "CREATE DATABASE fk_generated_action_probe" |]
@@ -8602,6 +8623,7 @@ module ContractCatalog =
            mixedTypeJoinIn
            yearColumnValues
            yearByteForeignKeys
+           timeDateForeignKeys
            qualifiedDuplicateKeys
            alterCoercion
            alterRowOrder

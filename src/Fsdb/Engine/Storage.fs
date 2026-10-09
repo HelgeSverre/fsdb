@@ -3449,8 +3449,17 @@ let private foreignKeyStorageValue (column: ColumnDef) value =
     | TYear, VInt year when year >= 1901L && year <= 2155L -> VInt(year - 1900L)
     | _ -> value
 
+let private foreignKeyHasTimeDatePair (child: ColumnDef) (parent: ColumnDef) =
+    match child.Type, parent.Type with
+    | TTime _, TDateTime _
+    | TTime _, TTimestamp _
+    | TDateTime _, TTime _
+    | TTimestamp _, TTime _ -> true
+    | _ -> false
+
 let private foreignKeyValuesMatch (child: ColumnDef) childValue (parent: ColumnDef) parentValue =
-    compare (foreignKeyStorageValue child childValue) (foreignKeyStorageValue parent parentValue) = 0
+    not (foreignKeyHasTimeDatePair child parent)
+    && compare (foreignKeyStorageValue child childValue) (foreignKeyStorageValue parent parentValue) = 0
 
 let private foreignKeyRowsMatch
     (childColumns: ColumnDef list)
@@ -3472,6 +3481,9 @@ let private foreignKeyUsesYearByte (child: ColumnDef) (parent: ColumnDef) =
     | TYear, TTinyInt true
     | TTinyInt true, TYear -> true
     | _ -> false
+
+let private foreignKeyNeedsRowComparison child parent =
+    foreignKeyUsesYearByte child parent || foreignKeyHasTimeDatePair child parent
 
 let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parentValue =
     match child.Type, parent.Type, foreignKeyStorageValue parent parentValue with
@@ -5978,10 +5990,10 @@ let private checkFkParent
                 | Error _ -> Ok()
                 | Ok refIdxs ->
                     let columnPairs = List.zip idxs refIdxs
-                    let usesYearByte =
+                    let needsRowComparison =
                         columnPairs
                         |> List.exists (fun (childIndex, parentIndex) ->
-                            foreignKeyUsesYearByte child.Columns.[childIndex] parent.Columns.[parentIndex])
+                            foreignKeyNeedsRowComparison child.Columns.[childIndex] parent.Columns.[parentIndex])
                     let matchesParent = foreignKeyRowsMatch child.Columns parent.Columns columnPairs row
                     // Key encoding uses absolute column positions, so the probe
                     // must have the parent's full row width.
@@ -5990,10 +6002,10 @@ let private checkFkParent
                     let parentKey = encodeConstraintKey parent.Columns refIdxs probeRow
                     let referencesCandidate =
                         referencedTableAddress childDatabase fk = tableAddress childDatabase child.OriginalName
-                        && (if usesYearByte then matchesParent row else parentKey = encodeConstraintKey parent.Columns refIdxs row)
+                        && (if needsRowComparison then matchesParent row else parentKey = encodeConstraintKey parent.Columns refIdxs row)
                     let found =
                         referencesCandidate
-                        || if usesYearByte then parent.RowsArray |> Seq.exists matchesParent
+                        || if needsRowComparison then parent.RowsArray |> Seq.exists matchesParent
                            else
                                match parentUniqueIndex parent refIdxs with
                                | Some index -> parentKey |> Option.exists index.ContainsKey
@@ -6318,6 +6330,7 @@ let private foreignKeyColumnsCompatible (child: ColumnDef) (parent: ColumnDef) =
         | _ -> None
 
     match child.Type, parent.Type with
+    | _ when foreignKeyHasTimeDatePair child parent -> true
     | TYear, TTinyInt true
     | TTinyInt true, TYear -> true
     | TBool, TBool
@@ -8571,7 +8584,7 @@ let private insertCore
                         when not (
                             List.zip childIndices parentIndices
                             |> List.exists (fun (childIndex, parentIndex) ->
-                                foreignKeyUsesYearByte table.Columns.[childIndex] parent.Columns.[parentIndex])
+                                foreignKeyNeedsRowComparison table.Columns.[childIndex] parent.Columns.[parentIndex])
                         ) ->
                         let isSelf = isSelfReference foreignKey
                         let selfParentIndices = if isSelf then Some parentIndices else None
