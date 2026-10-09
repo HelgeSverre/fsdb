@@ -6790,6 +6790,13 @@ let private insertAt (idx: int) (x: 'a) (xs: 'a list) : 'a list =
     let before, after = xs |> List.splitAt (min idx (List.length xs))
     before @ [ x ] @ after
 
+let private renameForeignKeyColumn oldName newName name =
+    if String.Equals(name, oldName, StringComparison.OrdinalIgnoreCase) then newName else name
+
+let private renameChildForeignKeyColumns oldName newName (foreignKeys: ForeignKeyDef list) =
+    foreignKeys |> List.map (fun foreignKey ->
+        { foreignKey with Columns = foreignKey.Columns |> List.map (renameForeignKeyColumn oldName newName) })
+
 let private renameIndexColumn oldName newName (indexes: IndexDef list) =
     let rename (column: IndexColumn) =
         if String.Equals(column.Name, oldName, StringComparison.OrdinalIgnoreCase) then
@@ -7060,7 +7067,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                 let candidate =
                     { table with
                         Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                        Indexes = renameIndexColumn oldName newDef.Name table.Indexes }
+                        Indexes = renameIndexColumn oldName newDef.Name table.Indexes
+                        ForeignKeys = renameChildForeignKeyColumns oldName newDef.Name table.ForeignKeys }
 
                 let checkUnique = alterUniqueRowValidator candidate
 
@@ -7080,7 +7088,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         |> Result.map (fun idx ->
             { table with
                 Columns = table.Columns |> List.mapi (fun i c -> if i = idx then { c with Name = newName } else c)
-                Indexes = renameIndexColumn oldName newName table.Indexes },
+                Indexes = renameIndexColumn oldName newName table.Indexes
+                ForeignKeys = renameChildForeignKeyColumns oldName newName table.ForeignKeys },
             None)
     | AddIndex ix when ix.Unique ->
         // `CREATE UNIQUE INDEX`/`ALTER TABLE ... ADD UNIQUE` over rows that
@@ -7538,6 +7547,51 @@ let private convertAlterRows mode (original: Table) (candidate: Table) actions c
                     checkUnique values |> Result.bind (fun values -> checkRow candidate values |> Result.map (fun () -> values)))
             |> Result.map (fun rows -> { candidate with RowsArray = rows })))
 
+let private validateForeignKeyDrops (table: Table) actions =
+    let names = table.ForeignKeys |> List.map (fun foreignKey -> foreignKey.Name.ToLowerInvariant()) |> Set.ofList
+    actions
+    |> List.fold (fun state action ->
+        state |> Result.bind (fun remaining ->
+            match action with
+            | DropForeignKey name ->
+                let key = name.ToLowerInvariant()
+                if Set.contains key remaining then Ok(Set.remove key remaining)
+                else Error(ExpressionError(1091, sprintf "Can't DROP '%s'; check that column/key exists" name))
+            | _ -> Ok remaining)) (Ok names)
+    |> Result.map ignore
+
+let private retargetAlterForeignKeyColumns catalog address (candidate: Table) actions =
+    let renames = actions |> List.choose (function
+        | RenameColumnTo(oldName, newName) -> Some(oldName, newName)
+        | ChangeColumn(oldName, column, _) -> Some(oldName, column.Name)
+        | _ -> None)
+    let updated =
+        renames |> List.fold (fun catalog (oldName, newName) ->
+            catalog |> Map.map (fun database tables ->
+                tables |> Map.map (fun _ table ->
+                    let foreignKeys = table.ForeignKeys |> List.map (fun foreignKey ->
+                        if referencedTableAddress database foreignKey = address then
+                            { foreignKey with RefColumns = foreignKey.RefColumns |> List.map (renameForeignKeyColumn oldName newName) }
+                        else foreignKey)
+                    if foreignKeys = table.ForeignKeys then table
+                    else { table with ForeignKeys = foreignKeys; SchemaRevision = table.SchemaRevision + 1L }))) (setCatalogTable address candidate catalog)
+    let candidate = tryCatalogTable address updated |> Option.get
+    let validateColumns () =
+        let missing columns =
+            columns |> List.tryFind (fun name -> candidate.Columns |> List.exists (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)) |> not)
+        let childError = candidate.ForeignKeys |> List.tryPick (fun foreignKey ->
+            missing foreignKey.Columns |> Option.map (fun name ->
+                ExpressionError(1828, sprintf "Cannot drop column '%s': needed in a foreign key constraint '%s'" name foreignKey.Name)))
+        let parentError () = referencingForeignKeys updated address |> List.tryPick (fun (childAddress, foreignKey) ->
+            missing foreignKey.RefColumns |> Option.map (fun name ->
+                let _, table = catalogTableIdentity updated childAddress
+                ExpressionError(1829, sprintf "Cannot drop column '%s': needed in a foreign key constraint '%s' of table '%s'" name foreignKey.Name table)))
+        childError |> Option.orElseWith parentError |> Option.map Error |> Option.defaultValue (Ok())
+    let validation =
+        if actions |> List.exists (function DropColumn _ -> true | _ -> false) then validateColumns ()
+        else Ok()
+    validation |> Result.map (fun () -> updated, candidate)
+
 let private resolveAlterForeignKeys (table: Table) actions =
     let prefix = normalizeTableName table.OriginalName + "_ibfk_"
     let sequenceOf (foreignKey: ForeignKeyDef) =
@@ -7593,7 +7647,13 @@ let private resolveAlterForeignKeys (table: Table) actions =
         |> List.collect (function
             | AddIndex index when replacesGenerated index -> [ DropIndexAction index.Name; AddIndex index ]
             | action -> [ action ])
-    resolved @ generatedIndexes @ removalsAfterActions, indexes
+    let drops, remaining = resolved @ generatedIndexes @ removalsAfterActions |> List.partition (function DropForeignKey _ -> true | _ -> false)
+    let additions, definitions = remaining |> List.partition (function AddForeignKey _ -> true | _ -> false)
+    let finalName = actions |> List.choose (function RenameTo name -> Some name | _ -> None) |> List.tryLast |> Option.defaultValue table.OriginalName
+    let additions = additions |> List.map (function
+        | AddForeignKey foreignKey -> AddForeignKey(foreignKey.WithName(renamedForeignKeyName table.OriginalName finalName foreignKey))
+        | action -> action)
+    drops @ definitions @ additions, indexes
 
 let private indexesIncludingPrimaryKey (table: Table) =
     if table.Indexes |> List.exists isPrimaryIndex then table.Indexes
@@ -7635,6 +7695,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
+                let requestedActions = actions
                 let actions, indexes = resolveAlterForeignKeys table actions
                 let origKey = normalizeTableName tableName
                 let mode = temporalCoercionMode store
@@ -7694,7 +7755,8 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                         Error(ExpressionError(1075, "Incorrect table definition; there can be only one auto column and it must be defined as a key"))
                     | None -> Ok()
 
-                validateIndexNames indexes
+                validateForeignKeyDrops table requestedActions
+                |> Result.bind (fun () -> validateIndexNames indexes)
                 |> Result.bind (fun () -> actions |> List.fold step (Ok(origKey, definition, true, [])))
                 |> Result.bind (fun state -> validateForeignKeyNames db addedForeignKeys |> Result.map (fun () -> state))
                 |> Result.bind (fun ((_, candidate, _, _) as state) ->
@@ -7717,17 +7779,20 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                                 | SetAutoIncrement _ -> state |> Result.bind (fun table -> applyAlterAction mode table action |> Result.map fst)
                                 | _ -> state) (Ok converted))
                         |> Result.map (fun converted -> key, converted, preserveFullText))
-                |> Result.map (fun (finalKey, finalTable, preserveFullText) ->
-                    let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
-                    let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) actions preserveFullText table finalTable)
-                    let updatedCatalog = setCatalogDatabase dbName database catalog
-                    invalidateAutoIncrementCounter store dbName origKey
-                    invalidateAutoIncrementCounter store dbName finalKey
+                |> Result.bind (fun (finalKey, finalTable, preserveFullText) ->
+                    retargetAlterForeignKeyColumns catalog (tableAddress dbName origKey) finalTable actions
+                    |> Result.map (fun (catalog, finalTable) ->
+                        let db = tryCatalogDatabase dbName catalog |> Option.get
+                        let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
+                        let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) actions preserveFullText table finalTable)
+                        let updatedCatalog = setCatalogDatabase dbName database catalog
+                        invalidateAutoIncrementCounter store dbName origKey
+                        invalidateAutoIncrementCounter store dbName finalKey
 
-                    if finalKey = origKey then
-                        updatedCatalog, actions
-                    else
-                        retargetForeignKeys (tableAddress dbName origKey) dbName finalTable.OriginalName updatedCatalog, actions)))
+                        if finalKey = origKey then
+                            updatedCatalog, actions
+                        else
+                            retargetForeignKeys (tableAddress dbName origKey) dbName finalTable.OriginalName updatedCatalog, actions))))
 
     |> Result.map ignore
 

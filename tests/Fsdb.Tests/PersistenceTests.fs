@@ -290,7 +290,47 @@ let private rowsOf (store: Store) (dbName: string) (table: string) : Value[] lis
 let tests =
     testList
         "persistence"
-        [ testCase "foreign-key rename collisions and names survive recovery"
+        [ testCase "renamed foreign-key columns retain enforcement across schemas and recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let directory = tempDataDir()
+                  let store = load directory
+                  attach directory store
+                  let mutable session = Fsdb.Session.create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                        "CREATE TABLE child(a INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                        "CREATE DATABASE related"
+                        "CREATE TABLE related.other_child(a INT,CONSTRAINT ext FOREIGN KEY(a) REFERENCES fsdb.parent(n))"
+                        "INSERT INTO parent VALUES(1)"
+                        "INSERT INTO child VALUES(1)"
+                        "INSERT INTO related.other_child VALUES(1)" ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  if checkpoint then snapshotNow directory store
+                  let recovered = load directory
+                  attach directory recovered
+                  session <- Fsdb.Session.create 2 recovered
+                  for sql in [ "ALTER TABLE parent RENAME COLUMN n TO id"; "ALTER TABLE child RENAME COLUMN a TO parent_id" ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  let verify (store: Store) =
+                      session <- Fsdb.Session.create 3 store
+                      let foreignKey = store.Catalog.[defaultDatabase].["child"].ForeignKeys.Head
+                      Expect.equal foreignKey.Columns [ "parent_id" ] "child column is retargeted"
+                      Expect.equal foreignKey.RefColumns [ "id" ] "parent column is retargeted"
+                      Expect.equal store.Catalog.["related"].["other_child"].ForeignKeys.Head.RefColumns [ "id" ] "cross-schema reference is retargeted"
+                      for sql in [ "INSERT INTO child VALUES(2)"; "INSERT INTO related.other_child VALUES(2)" ] do
+                          Expect.equal (run sql |> errorInfo |> Option.map _.Code) (Some 1452) sql
+                      Expect.equal (run "UPDATE parent SET id=2 WHERE id=1" |> errorInfo |> Option.map _.Code) (Some 1451) "parent remains protected"
+                  verify recovered
+                  verify (load directory)
+                  snapshotNow directory recovered
+                  verify (load directory)
+
+          testCase "foreign-key rename collisions and names survive recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do
                   let directory = tempDataDir()

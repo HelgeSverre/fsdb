@@ -328,8 +328,9 @@ Native audits cover [ignored updates](torture/findings/2026-10-09-update-ignore.
 [collision diagnostics](torture/findings/2026-10-09-foreign-key-collisions.md).
 [Required-index protection](torture/findings/2026-10-09-foreign-key-lifecycle.md),
 [generated-index lifecycle](torture/findings/2026-10-09-foreign-key-index-origin.md),
-and [rename collisions](torture/findings/2026-10-09-foreign-key-rename.md) also
-match the tested cases.
+[rename collisions](torture/findings/2026-10-09-foreign-key-rename.md), and
+[combined definition changes](torture/findings/2026-10-09-foreign-key-alter.md)
+also match the tested cases.
 
 Named CHECK constraints support enforcement state
 and `ALTER` validation, and ENUM or SET values enforce membership. Adding a
@@ -337,7 +338,7 @@ unique key over colliding data returns 1062 without publishing a corrupt index.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Combined foreign-key ALTER actions | validates the final schema atomically | remaining action-order and error-precedence combinations lack native coverage | low | unverified |
+| Remaining foreign-key column changes | preserves constraint validity through column changes | type/nullability changes and dropping/re-adding a column under the same name still need native coverage | low | unverified |
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality and ordered structures cover common complete-key and left-prefix probes, joins, ranges, ordering, grouping, and supported unary functional compositions; unsupported expression orderings and grouping shapes retain scan/sort fallback | high (scale) | divergence |
 | Expression indexes | functional key parts participate in physical access and uniqueness | the [supported functional keys](README.md#indexes-and-joins), including compatible unary compositions, have physical equality, uniqueness, ordering, and grouping paths; other non-unique expressions retain DDL and metadata but scan, while unsupported unique expressions are refused | low | divergence/refusal |
 

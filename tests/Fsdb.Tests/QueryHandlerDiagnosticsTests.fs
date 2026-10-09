@@ -35,7 +35,51 @@ let private routineUpdateSetup functionSql =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "Foreign-key rename collisions reject the complete statement atomically"
+        [ testCase "Foreign-key ALTER rejects missing drops and required column drops atomically"
+          <| fun _ ->
+              for sql, code, state in
+                  [ "ALTER TABLE child DROP FOREIGN KEY missing", 1091, "42000"
+                    "ALTER TABLE child DROP FOREIGN KEY fk,DROP FOREIGN KEY fk", 1091, "42000"
+                    "ALTER TABLE child ADD CONSTRAINT new_fk FOREIGN KEY(b) REFERENCES parent(n),DROP FOREIGN KEY new_fk", 1091, "42000"
+                    "ALTER TABLE child DROP COLUMN a", 1828, "HY000"
+                    "ALTER TABLE parent DROP COLUMN n", 1829, "HY000" ] do
+                  let store = Fsdb.Storage.create()
+                  let mutable session = create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for setup in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY,m INT)"
+                        "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))" ] do
+                      Expect.isNone (run setup |> errorInfo) setup
+                  Expect.equal (run sql |> errorInfo |> Option.map (fun error -> error.Code, error.State)) (Some(code, state)) sql
+                  let database = store.Catalog.[Fsdb.Storage.defaultDatabase]
+                  Expect.equal (database.["child"].Columns |> List.map _.Name) [ "a"; "b" ] "child columns survive"
+                  Expect.equal (database.["parent"].Columns |> List.map _.Name) [ "n"; "m" ] "parent columns survive"
+                  Expect.equal (database.["child"].ForeignKeys |> List.map _.Name) [ "fk" ] "constraint survives"
+
+          testCase "Foreign-key additions bind to the final column definition"
+          <| fun _ ->
+              for sql in
+                  [ "ALTER TABLE child ADD CONSTRAINT added FOREIGN KEY(c) REFERENCES parent(n),ADD COLUMN c INT"
+                    "ALTER TABLE child ADD COLUMN c INT,ADD CONSTRAINT added FOREIGN KEY(c) REFERENCES parent(n)"
+                    "ALTER TABLE child ADD CONSTRAINT added FOREIGN KEY(c) REFERENCES parent(n),RENAME COLUMN b TO c" ] do
+                  let mutable session = create 1 (Fsdb.Storage.create())
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for setup in
+                      [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                        "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                        "INSERT INTO parent VALUES(1)" ] do
+                      Expect.isNone (run setup |> errorInfo) setup
+                  Expect.isNone (run sql |> errorInfo) sql
+                  Expect.isNone (run "INSERT INTO child(a,c) VALUES(1,1)" |> errorInfo) "valid final-column reference"
+                  Expect.equal (run "INSERT INTO child(a,c) VALUES(1,2)" |> errorInfo |> Option.map _.Code) (Some 1452) "new constraint enforces the final column"
+
+          testCase "Foreign-key rename collisions reject the complete statement atomically"
           <| fun _ ->
               for sql in
                   [ "RENAME TABLE child TO renamed"

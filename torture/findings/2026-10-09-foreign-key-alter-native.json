@@ -1,0 +1,337 @@
+[
+  {
+    "name": "drop-missing",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY missing",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1091 (42000) at line 4: Can't DROP 'missing'; check that column/key exists\n",
+    "errors": [
+      [
+        1091,
+        "42000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-twice",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY fk,DROP FOREIGN KEY fk",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1091 (42000) at line 4: Can't DROP 'fk'; check that column/key exists\n",
+    "errors": [
+      [
+        1091,
+        "42000"
+      ]
+    ]
+  },
+  {
+    "name": "add-drop-new",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD CONSTRAINT new_fk FOREIGN KEY(b) REFERENCES parent(n),DROP FOREIGN KEY new_fk",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1091 (42000) at line 4: Can't DROP 'new_fk'; check that column/key exists\n",
+    "errors": [
+      [
+        1091,
+        "42000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-add-same",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY fk,ADD CONSTRAINT fk FOREIGN KEY(b) REFERENCES parent(n)",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1061 (42000) at line 4: Duplicate key name 'fk'\n",
+    "errors": [
+      [
+        1061,
+        "42000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-child-column",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP COLUMN a",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1828 (HY000) at line 4: Cannot drop column 'a': needed in a foreign key constraint 'fk'\n",
+    "errors": [
+      [
+        1828,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-parent-column",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE parent DROP COLUMN n",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1829 (HY000) at line 4: Cannot drop column 'n': needed in a foreign key constraint 'fk' of table 'child'\n",
+    "errors": [
+      [
+        1829,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-fk-column",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY fk,DROP COLUMN a",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "drop-column-fk",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP COLUMN a,DROP FOREIGN KEY fk",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "add-fk-column",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD CONSTRAINT new_fk FOREIGN KEY(c) REFERENCES parent(n),ADD COLUMN c INT",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nchild\tc\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nchild\tnew_fk\tc\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "add-column-fk",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD COLUMN c INT,ADD CONSTRAINT new_fk FOREIGN KEY(c) REFERENCES parent(n)",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nchild\tc\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nchild\tnew_fk\tc\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "rename-child-column",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child RENAME COLUMN a TO renamed",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\trenamed\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\trenamed\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "rename-parent-column",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE parent RENAME COLUMN n TO renamed",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\trenamed\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\trenamed\nparent\tPRIMARY\trenamed\tNULL\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "drop-child-off",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "SET foreign_key_checks=0",
+      "ALTER TABLE child DROP COLUMN a",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1828 (HY000) at line 5: Cannot drop column 'a': needed in a foreign key constraint 'fk'\n",
+    "errors": [
+      [
+        1828,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "drop-parent-off",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "SET foreign_key_checks=0",
+      "ALTER TABLE parent DROP COLUMN n",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1829 (HY000) at line 5: Cannot drop column 'n': needed in a foreign key constraint 'fk' of table 'child'\n",
+    "errors": [
+      [
+        1829,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "add-rename-table",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD FOREIGN KEY(b) REFERENCES parent(n),RENAME TO renamed",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nrenamed\ta\tint\tYES\nrenamed\tb\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nparent\tPRIMARY\tn\tNULL\tNULL\nrenamed\tfk\ta\tparent\tn\nrenamed\trenamed_ibfk_1\tb\tparent\tn\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "rename-table-add",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child RENAME TO renamed,ADD FOREIGN KEY(b) REFERENCES parent(n)",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nrenamed\ta\tint\tYES\nrenamed\tb\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nparent\tPRIMARY\tn\tNULL\tNULL\nrenamed\tfk\ta\tparent\tn\nrenamed\trenamed_ibfk_1\tb\tparent\tn\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "explicit-add-rename-table",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD CONSTRAINT child_ibfk_9 FOREIGN KEY(b) REFERENCES parent(n),RENAME TO renamed",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nrenamed\ta\tint\tYES\nrenamed\tb\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nparent\tPRIMARY\tn\tNULL\tNULL\nrenamed\tfk\ta\tparent\tn\nrenamed\trenamed_ibfk_9\tb\tparent\tn\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "add-old-rename-column",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD FOREIGN KEY(b) REFERENCES parent(n),RENAME COLUMN b TO c",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1072 (42000) at line 4: Key column 'b' doesn't exist in table\n",
+    "errors": [
+      [
+        1072,
+        "42000"
+      ]
+    ]
+  },
+  {
+    "name": "add-new-rename-column",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD FOREIGN KEY(c) REFERENCES parent(n),RENAME COLUMN b TO c",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tc\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nchild\tchild_ibfk_1\tc\tparent\tn\nchild\tfk\ta\tparent\tn\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "",
+    "errors": []
+  },
+  {
+    "name": "drop-parent-cross-schema",
+    "statements": [
+      "USE probe",
+      "CREATE TABLE parent(n INT PRIMARY KEY,m INT)",
+      "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY fk",
+      "CREATE DATABASE other",
+      "CREATE TABLE other.external_child(a INT,CONSTRAINT external_fk FOREIGN KEY(a) REFERENCES probe.parent(n))",
+      "ALTER TABLE parent DROP COLUMN n",
+      "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,ORDINAL_POSITION",
+      "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION"
+    ],
+    "stdout": "TABLE_NAME\tCOLUMN_NAME\tCOLUMN_TYPE\tIS_NULLABLE\nchild\ta\tint\tYES\nchild\tb\tint\tYES\nparent\tn\tint\tNO\nparent\tm\tint\tYES\nTABLE_NAME\tCONSTRAINT_NAME\tCOLUMN_NAME\tREFERENCED_TABLE_NAME\tREFERENCED_COLUMN_NAME\nparent\tPRIMARY\tn\tNULL\tNULL\n",
+    "stderr": "ERROR 1829 (HY000) at line 7: Cannot drop column 'n': needed in a foreign key constraint 'external_fk' of table 'external_child'\n",
+    "errors": [
+      [
+        1829,
+        "HY000"
+      ]
+    ]
+  }
+]

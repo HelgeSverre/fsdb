@@ -6434,6 +6434,97 @@ module ContractCatalog =
           Cleanup = [| "SET foreign_key_checks=0"; "DROP DATABASE IF EXISTS fk_rename_probe"; "DROP DATABASE IF EXISTS fk_rename_target"; "SET foreign_key_checks=1" |]
           Coverage = [| "statement:rename-table", [| "text-differential" |]; "statement:alter-table", [| "text-differential" |] |] }
 
+    let private foreignKeyAlterDefinitions =
+        let reset =
+            [ "USE fk_alter_probe"
+              "SET foreign_key_checks=0"
+              "DROP TABLE IF EXISTS child,parent,renamed"
+              "SET foreign_key_checks=1"
+              "CREATE TABLE parent(n INT PRIMARY KEY,m INT)"
+              "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))" ]
+        let observe =
+            [ "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fk_alter_probe' ORDER BY TABLE_NAME,ORDINAL_POSITION"
+              "SELECT TABLE_NAME,CONSTRAINT_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='fk_alter_probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME,ORDINAL_POSITION" ]
+        let cases =
+            [
+              "drop-missing", Some(6, 1091, "42000"),
+                  [ "ALTER TABLE child DROP FOREIGN KEY missing" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-twice", Some(6, 1091, "42000"),
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk,DROP FOREIGN KEY fk" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "add-drop-new", Some(6, 1091, "42000"),
+                  [ "ALTER TABLE child ADD CONSTRAINT new_fk FOREIGN KEY(b) REFERENCES parent(n),DROP FOREIGN KEY new_fk" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-add-same", Some(6, 1061, "42000"),
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk,ADD CONSTRAINT fk FOREIGN KEY(b) REFERENCES parent(n)" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-child-column", Some(6, 1828, "HY000"),
+                  [ "ALTER TABLE child DROP COLUMN a" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-parent-column", Some(6, 1829, "HY000"),
+                  [ "ALTER TABLE parent DROP COLUMN n" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-fk-column", None,
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk,DROP COLUMN a" ],
+                  [  ]
+              "drop-column-fk", None,
+                  [ "ALTER TABLE child DROP COLUMN a,DROP FOREIGN KEY fk" ],
+                  [  ]
+              "add-fk-column", None,
+                  [ "ALTER TABLE child ADD CONSTRAINT new_fk FOREIGN KEY(c) REFERENCES parent(n),ADD COLUMN c INT" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY new_fk" ]
+              "add-column-fk", None,
+                  [ "ALTER TABLE child ADD COLUMN c INT,ADD CONSTRAINT new_fk FOREIGN KEY(c) REFERENCES parent(n)" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY new_fk" ]
+              "rename-child-column", None,
+                  [ "ALTER TABLE child RENAME COLUMN a TO renamed" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "rename-parent-column", None,
+                  [ "ALTER TABLE parent RENAME COLUMN n TO renamed" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-child-off", Some(7, 1828, "HY000"),
+                  [ "SET foreign_key_checks=0"
+                    "ALTER TABLE child DROP COLUMN a" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-parent-off", Some(7, 1829, "HY000"),
+                  [ "SET foreign_key_checks=0"
+                    "ALTER TABLE parent DROP COLUMN n" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "add-rename-table", None,
+                  [ "ALTER TABLE child ADD FOREIGN KEY(b) REFERENCES parent(n),RENAME TO renamed" ],
+                  [ "ALTER TABLE fk_alter_probe.renamed DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.renamed DROP FOREIGN KEY renamed_ibfk_1" ]
+              "rename-table-add", None,
+                  [ "ALTER TABLE child RENAME TO renamed,ADD FOREIGN KEY(b) REFERENCES parent(n)" ],
+                  [ "ALTER TABLE fk_alter_probe.renamed DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.renamed DROP FOREIGN KEY renamed_ibfk_1" ]
+              "explicit-add-rename-table", None,
+                  [ "ALTER TABLE child ADD CONSTRAINT child_ibfk_9 FOREIGN KEY(b) REFERENCES parent(n),RENAME TO renamed" ],
+                  [ "ALTER TABLE fk_alter_probe.renamed DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.renamed DROP FOREIGN KEY renamed_ibfk_9" ]
+              "add-old-rename-column", Some(6, 1072, "42000"),
+                  [ "ALTER TABLE child ADD FOREIGN KEY(b) REFERENCES parent(n),RENAME COLUMN b TO c" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "add-new-rename-column", None,
+                  [ "ALTER TABLE child ADD FOREIGN KEY(c) REFERENCES parent(n),RENAME COLUMN b TO c" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY child_ibfk_1"
+                    "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-parent-cross-schema", Some(9, 1829, "HY000"),
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk"
+                    "CREATE DATABASE fk_alter_other"
+                    "CREATE TABLE fk_alter_other.external_child(a INT,CONSTRAINT external_fk FOREIGN KEY(a) REFERENCES fk_alter_probe.parent(n))"
+                    "ALTER TABLE parent DROP COLUMN n" ],
+                  [  ]
+            ]
+        { Name = "foreign-key-alter-definitions"
+          Setup = [| "CREATE DATABASE fk_alter_probe" |]
+          Steps = cases |> List.map (fun (name, error, statements, teardown) -> name, error, reset @ statements @ observe @ teardown) |> isolatedScriptSteps
+          Cleanup = [| "SET foreign_key_checks=0"; "DROP DATABASE IF EXISTS fk_alter_other"; "DROP DATABASE IF EXISTS fk_alter_probe"; "SET foreign_key_checks=1" |]
+          Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
+
     let private foreignKeyNames =
         let cases =
             [
@@ -8236,6 +8327,7 @@ module ContractCatalog =
            foreignKeyIndexesAndCollisions
            foreignKeyIndexLifecycle
            foreignKeyRenameCollisions
+           foreignKeyAlterDefinitions
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings
