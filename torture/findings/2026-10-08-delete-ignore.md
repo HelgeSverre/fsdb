@@ -40,9 +40,9 @@ differences before row skipping was implemented.
   though the cascade removes it before the child target is processed. Plain
   multi-target deletion has the same SET NULL and CASCADE behavior. In both
   forms, the selected child's DELETE triggers fire with the originally selected
-  `OLD` row, even after an earlier parent action sets its reference to NULL or
-  cascades its deletion. Cascaded deletion of an unselected child does not fire
-  its DELETE triggers.
+  `OLD` row in either target order, even after an earlier parent action sets
+  its reference to NULL or cascades its deletion. Cascaded deletion of an
+  unselected child does not fire its DELETE triggers.
 - An explicit transaction can roll back successful deletions after the warning.
 - ON DELETE CASCADE still deletes the child.
 - A trigger's explicit SIGNAL SQLSTATE 45000 remains error 1644; IGNORE does
@@ -120,3 +120,7 @@ No failure is enrolled in the known-gap allowlist.
   3,248 tests. The full 111-case run retained only the nine identifier-case
   differences. Artifact:
   `torture/artifacts/runs/20261009T224401889-74458/contracts`.
+- The child-first target-order follow-up passed all 404 steps in that contract.
+  The full run retained the same nine identifier-case differences. `just check`
+  passed all 3,248 tests. Artifact:
+  `torture/artifacts/runs/20261009T225444565-51703/contracts`.
