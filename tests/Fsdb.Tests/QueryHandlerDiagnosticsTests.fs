@@ -79,6 +79,58 @@ let tests =
                       (store.Catalog.[Fsdb.Storage.defaultDatabase].ContainsKey "child")
                       "rejected table stays absent"
 
+          testCase "stored generated child columns restrict foreign-key actions"
+          <| fun _ ->
+              for action, expectedError in
+                  [ "ON DELETE CASCADE", None
+                    "ON UPDATE RESTRICT", None
+                    "ON UPDATE CASCADE", Some 3104
+                    "ON DELETE SET NULL", Some 3104
+                    "ON UPDATE SET NULL", Some 3104 ] do
+                  let store = Fsdb.Storage.create()
+                  let session = create 1 store
+                  let session, parentResult = handle session "CREATE TABLE parent(id INT PRIMARY KEY)"
+                  Expect.isNone (errorInfo parentResult) "parent setup"
+                  let childSql =
+                      sprintf
+                          "CREATE TABLE child(id INT,g INT AS(id+1) STORED,KEY(g),CONSTRAINT fk FOREIGN KEY(g) REFERENCES parent(id) %s)"
+                          action
+                  let session, childResult = handle session childSql
+                  Expect.equal
+                      (errorInfo childResult |> Option.map (fun error -> error.Code, error.State, error.Message))
+                      (expectedError
+                       |> Option.map (fun code ->
+                           code, "HY000", sprintf "Cannot define foreign key with %s clause on a generated column." action))
+                      action
+                  Expect.equal
+                      (store.Catalog.[Fsdb.Storage.defaultDatabase].ContainsKey "child")
+                      expectedError.IsNone
+                      "rejected table stays absent"
+                  if action = "ON DELETE CASCADE" then
+                      let session, parentInsert = handle session "INSERT INTO parent VALUES(2)"
+                      Expect.isNone (errorInfo parentInsert) "referenced row setup"
+                      let session, childInsert = handle session "INSERT INTO child(id) VALUES(1)"
+                      Expect.isNone (errorInfo childInsert) "generated child row setup"
+                      let session, deletion = handle session "DELETE FROM parent WHERE id=2"
+                      Expect.isNone (errorInfo deletion) "cascade delete"
+                      let _, remaining = handle session "SELECT COUNT(*) FROM child"
+                      Expect.equal remaining (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) "stored generated child cascades"
+
+              let session = create 1 (Fsdb.Storage.create())
+              let session, _ = handle session "CREATE TABLE parent(id INT PRIMARY KEY)"
+              let _, virtualResult =
+                  handle session
+                      "CREATE TABLE child(id INT,g INT AS(id+1) VIRTUAL,KEY(g),CONSTRAINT fk FOREIGN KEY(g) REFERENCES parent(id) ON UPDATE CASCADE)"
+              Expect.equal (errorInfo virtualResult |> Option.map _.Code) (Some 3104) "action error precedes virtual-column error"
+
+              let session = create 1 (Fsdb.Storage.create())
+              let session, parentResult =
+                  handle session "CREATE TABLE parent(id INT PRIMARY KEY,g INT AS(id+1) STORED,UNIQUE KEY(g))"
+              Expect.isNone (errorInfo parentResult) "generated parent setup"
+              let _, childResult =
+                  handle session "CREATE TABLE child(x INT,CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(g) ON UPDATE CASCADE)"
+              Expect.isNone (errorInfo childResult) "stored generated parent accepts update action"
+
           testCase "BIT and binary foreign-key columns follow the MySQL type family"
           <| fun _ ->
               for childType, parentType, expectedError in

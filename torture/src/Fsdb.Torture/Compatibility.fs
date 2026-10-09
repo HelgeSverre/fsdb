@@ -6652,6 +6652,26 @@ module ContractCatalog =
           Cleanup = [| "DROP DATABASE IF EXISTS fk_column_storage_probe" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
+    let private foreignKeyGeneratedActions =
+        { Name = "foreign-key-generated-actions"
+          Setup = [| "CREATE DATABASE fk_generated_action_probe" |]
+          Steps =
+            [| Contract.execute "select-database" "USE fk_generated_action_probe"
+               Contract.execute "create-parent" "CREATE TABLE parent(id INT PRIMARY KEY)"
+               Contract.execute "reject-update-cascade" "CREATE TABLE child(id INT,g INT AS(id+1) STORED,KEY(g),CONSTRAINT fk FOREIGN KEY(g) REFERENCES parent(id) ON UPDATE CASCADE)" |> Contract.fails 3104 "HY000"
+               Contract.execute "reject-delete-set-null" "CREATE TABLE child(id INT,g INT AS(id+1) STORED,KEY(g),CONSTRAINT fk FOREIGN KEY(g) REFERENCES parent(id) ON DELETE SET NULL)" |> Contract.fails 3104 "HY000"
+               Contract.execute "reject-update-set-null" "CREATE TABLE child(id INT,g INT AS(id+1) STORED,KEY(g),CONSTRAINT fk FOREIGN KEY(g) REFERENCES parent(id) ON UPDATE SET NULL)" |> Contract.fails 3104 "HY000"
+               Contract.execute "reject-virtual-action-first" "CREATE TABLE child(id INT,g INT AS(id+1) VIRTUAL,KEY(g),CONSTRAINT fk FOREIGN KEY(g) REFERENCES parent(id) ON UPDATE CASCADE)" |> Contract.fails 3104 "HY000"
+               Contract.execute "create-child-cascade" "CREATE TABLE child(id INT,g INT AS(id+1) STORED,KEY(g),CONSTRAINT fk FOREIGN KEY(g) REFERENCES parent(id) ON DELETE CASCADE)"
+               Contract.execute "insert-parent" "INSERT INTO parent VALUES(2)"
+               Contract.execute "insert-child" "INSERT INTO child(id) VALUES(1)"
+               Contract.execute "cascade-delete" "DELETE FROM parent WHERE id=2"
+               Contract.query "remaining-children" "SELECT COUNT(*) FROM child"
+               Contract.execute "create-generated-parent" "CREATE TABLE generated_parent(id INT PRIMARY KEY,g INT AS(id+1) STORED,UNIQUE KEY(g))"
+               Contract.execute "create-ordinary-child" "CREATE TABLE ordinary_child(x INT,CONSTRAINT fk_ordinary FOREIGN KEY(x) REFERENCES generated_parent(g) ON UPDATE CASCADE)" |]
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_generated_action_probe" |]
+          Coverage = [| "statement:create-table", [| "text-differential" |] |] }
+
     let private foreignKeyNames =
         let cases =
             [
@@ -8510,6 +8530,7 @@ module ContractCatalog =
            foreignKeyRenameCollisions
            foreignKeyAlterDefinitions
            foreignKeyColumnStorage
+           foreignKeyGeneratedActions
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings

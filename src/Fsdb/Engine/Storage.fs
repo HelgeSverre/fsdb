@@ -6285,19 +6285,20 @@ let private foreignKeyColumnsCompatible (child: ColumnDef) (parent: ColumnDef) =
     | TTime _, TTime _ -> true
     | _ -> child.Type = parent.Type
 
+let private tryFindForeignKeyColumn name (columns: ColumnDef list) =
+    columns
+    |> List.tryFind (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
+
 let private incompatibleForeignKeyColumns
     (childColumns: ColumnDef list)
     (parentColumns: ColumnDef list)
     (foreignKey: ForeignKeyDef)
     =
-    let findColumn name (columns: ColumnDef list) =
-        columns |> List.tryFind (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
-
     if not (sameLength foreignKey.Columns foreignKey.RefColumns) then None
     else
         List.zip foreignKey.Columns foreignKey.RefColumns
         |> List.tryFind (fun (childName, parentName) ->
-            match findColumn childName childColumns, findColumn parentName parentColumns with
+            match tryFindForeignKeyColumn childName childColumns, tryFindForeignKeyColumn parentName parentColumns with
             | Some child, Some parent -> not (foreignKeyColumnsCompatible child parent)
             | _ -> false)
 
@@ -6306,13 +6307,12 @@ let private virtualForeignKeyColumn
     (parentColumns: ColumnDef list)
     (foreignKey: ForeignKeyDef)
     =
-    let findVirtual name (columns: ColumnDef list) =
-        columns
-        |> List.tryFind (fun column ->
-            String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)
-            && (match column.Generated with
-                | Some(_, Virtual) -> true
-                | _ -> false))
+    let findVirtual name columns =
+        tryFindForeignKeyColumn name columns
+        |> Option.filter (fun column ->
+            match column.Generated with
+            | Some(_, Virtual) -> true
+            | _ -> false)
 
     List.zip foreignKey.Columns foreignKey.RefColumns
     |> List.tryPick (fun (childName, parentName) ->
@@ -6345,9 +6345,6 @@ let private validateForeignKeyDefinition
     let equal (left: string) (right: string) = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
     let setNull action = action |> Option.exists (fun value -> equal value "SET NULL")
 
-    let findColumn (name: string) (columns: ColumnDef list) =
-        columns |> List.tryFind (fun column -> equal column.Name name)
-
     let invalidDefinition () =
         Error(
             ExpressionError(
@@ -6361,16 +6358,31 @@ let private validateForeignKeyDefinition
     let nonNullableChild =
         foreignKey.Columns
         |> List.tryPick (fun name ->
-            findColumn name childColumns
+            tryFindForeignKeyColumn name childColumns
             |> Option.filter (fun column -> not column.Nullable)
             |> Option.map _.Name)
 
-    let missingChild = foreignKey.Columns |> List.tryFind (fun name -> findColumn name childColumns |> Option.isNone)
+    let generatedChild =
+        foreignKey.Columns
+        |> List.exists (fun name ->
+            tryFindForeignKeyColumn name childColumns
+            |> Option.exists (fun column -> column.Generated.IsSome))
 
-    match missingChild, sameLength foreignKey.Columns foreignKey.RefColumns, nonNullableChild with
-    | Some column, _, _ -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column))
-    | None, false, _ -> invalidDefinition ()
-    | None, true, Some column when setNull foreignKey.OnDelete || setNull foreignKey.OnUpdate ->
+    let restrictedGeneratedAction =
+        if not generatedChild then None
+        elif setNull foreignKey.OnDelete then Some "ON DELETE SET NULL"
+        elif setNull foreignKey.OnUpdate then Some "ON UPDATE SET NULL"
+        elif foreignKey.OnUpdate |> Option.exists (fun action -> equal action "CASCADE") then Some "ON UPDATE CASCADE"
+        else None
+
+    let missingChild = foreignKey.Columns |> List.tryFind (fun name -> tryFindForeignKeyColumn name childColumns |> Option.isNone)
+
+    match missingChild, sameLength foreignKey.Columns foreignKey.RefColumns, restrictedGeneratedAction, nonNullableChild with
+    | Some column, _, _, _ -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column))
+    | None, false, _, _ -> invalidDefinition ()
+    | None, true, Some action, _ ->
+        Error(ExpressionError(3104, sprintf "Cannot define foreign key with %s clause on a generated column." action))
+    | None, true, None, Some column when setNull foreignKey.OnDelete || setNull foreignKey.OnUpdate ->
         Error(
             ExpressionError(
                 1830,
@@ -6380,7 +6392,7 @@ let private validateForeignKeyDefinition
                     foreignKey.Name
             )
         )
-    | None, true, _ ->
+    | None, true, None, _ ->
         let parentDatabase = foreignKeyDatabase databaseName foreignKey
         let parent =
             if equal databaseName parentDatabase && equal tableName foreignKey.RefTable then
@@ -6398,7 +6410,7 @@ let private validateForeignKeyDefinition
         | None when not store.ForeignKeyChecks -> Ok()
         | None -> Error(ExpressionError(1824, sprintf "Failed to open the referenced table '%s'" foreignKey.RefTable))
         | Some(parentColumns, parentIndexes) ->
-            match foreignKey.RefColumns |> List.tryFind (fun name -> findColumn name parentColumns |> Option.isNone) with
+            match foreignKey.RefColumns |> List.tryFind (fun name -> tryFindForeignKeyColumn name parentColumns |> Option.isNone) with
             | Some column ->
                 Error(
                     ExpressionError(

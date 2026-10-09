@@ -88,6 +88,14 @@ table is not published. Changing an existing foreign-key column into a virtual
 generated column instead returned 3106 (`HY000`, changing the generated-column
 storage status is unsupported); it does not reach foreign-key validation.
 
+Stored generated columns can participate in foreign keys, but a generated
+child column cannot use `ON UPDATE CASCADE`, `ON DELETE SET NULL`, or
+`ON UPDATE SET NULL`: MySQL returns 3104 (`HY000`) before checking whether the
+parent exists or whether the column is virtual. `ON DELETE CASCADE` works and
+deletes dependent rows; `RESTRICT` and `NO ACTION` declarations work. A stored
+generated parent column can use the audited actions. The root regression and
+`foreign-key-generated-actions` wire contract cover these boundaries.
+
 The expanded `foreign-key-alter-definitions` wire contract passes these
 additional steps against MySQL 8.4.11 in
 `torture/artifacts/runs/20261009T163829499-91044/contracts`. Earlier coverage
