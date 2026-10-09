@@ -6678,6 +6678,30 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS year_value_input" |]
           Coverage = [| "statement:insert", [| "text-differential" |] |] }
 
+    let private enumSetForeignKeyBytes =
+        { Name = "enum-set-foreign-key-bytes"
+          Setup = [| "CREATE DATABASE fk_enum_set_bytes_probe" |]
+          Steps =
+            [| Contract.execute "select-database" "USE fk_enum_set_bytes_probe"
+               for index, parentType, childType in
+                   [ 1, "ENUM('a','b')", "ENUM('x','y')"
+                     2, "ENUM('a','b')", "SET('x','y')"
+                     3, "SET('a','b')", "ENUM('x','y')"
+                     4, "SET('a','b')", "SET('x','y')" ] do
+                   let parent = sprintf "enum_parent_%d" index
+                   let child = sprintf "enum_child_%d" index
+                   Contract.execute (sprintf "create-parent-%d" index) (sprintf "CREATE TABLE %s(x %s PRIMARY KEY)" parent parentType)
+                   Contract.execute (sprintf "create-child-%d" index) (sprintf "CREATE TABLE %s(x %s,CONSTRAINT fk_enum_%d FOREIGN KEY(x) REFERENCES %s(x) ON UPDATE CASCADE ON DELETE CASCADE)" child childType index parent)
+                   Contract.execute (sprintf "insert-parent-%d" index) (sprintf "INSERT INTO %s VALUES('a')" parent)
+                   Contract.execute (sprintf "insert-child-%d" index) (sprintf "INSERT INTO %s VALUES('x')" child)
+                   Contract.execute (sprintf "reject-other-byte-%d" index) (sprintf "INSERT INTO %s VALUES('y')" child) |> Contract.fails 1452 "23000"
+                   Contract.execute (sprintf "cascade-update-%d" index) (sprintf "UPDATE %s SET x='b' WHERE x='a'" parent)
+                   Contract.query (sprintf "child-after-update-%d" index) (sprintf "SELECT x FROM %s" child)
+                   Contract.execute (sprintf "cascade-delete-%d" index) (sprintf "DELETE FROM %s WHERE x='b'" parent)
+                   Contract.query (sprintf "child-after-delete-%d" index) (sprintf "SELECT COUNT(*) FROM %s" child) |]
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_enum_set_bytes_probe" |]
+          Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
+
     let private yearByteForeignKeys =
         { Name = "year-byte-foreign-keys"
           Setup = [| "CREATE DATABASE fk_year_byte_probe" |]
@@ -8633,6 +8657,7 @@ module ContractCatalog =
            regexpPosixClasses
            mixedTypeJoinIn
            yearColumnValues
+           enumSetForeignKeyBytes
            yearByteForeignKeys
            timeDateForeignKeys
            qualifiedDuplicateKeys

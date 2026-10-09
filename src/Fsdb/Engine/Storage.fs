@@ -3454,6 +3454,18 @@ let private foreignKeyStorageValue (column: ColumnDef) value =
     match column.Type, value with
     | TYear, VInt 0L -> VInt 0L
     | TYear, VInt year when year >= 1901L && year <= 2155L -> VInt(year - 1900L)
+    | TEnum members, VString label ->
+        members
+        |> List.tryFindIndex (fun memberName -> String.Equals(memberName, label, StringComparison.OrdinalIgnoreCase))
+        |> Option.map (fun index -> uint64 (index + 1))
+        |> Option.defaultValue 0UL
+        |> VUInt
+    | TSet members, VString labels ->
+        let selected = labels.Split(',') |> Set.ofArray
+        members
+        |> List.indexed
+        |> List.fold (fun bits (index, memberName) -> if selected.Contains memberName then bits ||| (1UL <<< index) else bits) 0UL
+        |> VUInt
     | _ -> value
 
 let private foreignKeyHasDistinctTemporalStorage (child: ColumnDef) (parent: ColumnDef) =
@@ -3491,14 +3503,29 @@ let private foreignKeyUsesYearByte (child: ColumnDef) (parent: ColumnDef) =
     | TTinyInt true, TYear -> true
     | _ -> false
 
+let private foreignKeyUsesEnumSetBytes (child: ColumnDef) (parent: ColumnDef) =
+    match child.Type, parent.Type with
+    | (TEnum _ | TSet _), (TEnum _ | TSet _) -> true
+    | _ -> false
+
 let private foreignKeyNeedsRowComparison child parent =
-    foreignKeyUsesYearByte child parent || foreignKeyHasDistinctTemporalStorage child parent
+    foreignKeyUsesYearByte child parent
+    || foreignKeyUsesEnumSetBytes child parent
+    || foreignKeyHasDistinctTemporalStorage child parent
 
 let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parentValue =
     match child.Type, parent.Type, foreignKeyStorageValue parent parentValue with
     | TYear, TTinyInt true, VInt 0L -> VInt 0L
     | TYear, TTinyInt true, VInt yearByte -> VInt(yearByte + 1900L)
     | TTinyInt true, TYear, VInt yearByte -> VInt yearByte
+    | TEnum members, (TEnum _ | TSet _), VUInt key when key > 0UL && key <= uint64 members.Length ->
+        VString members.[int key - 1]
+    | TSet members, (TEnum _ | TSet _), VUInt key ->
+        members
+        |> List.indexed
+        |> List.choose (fun (index, memberName) -> if key &&& (1UL <<< index) <> 0UL then Some memberName else None)
+        |> String.concat ","
+        |> VString
     | _ -> parentValue
 
 let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =

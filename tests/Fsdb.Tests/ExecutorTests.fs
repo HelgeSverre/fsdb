@@ -10978,6 +10978,23 @@ let tests =
                     | Err(3780, _) -> ()
                     | other -> failtestf "conversion to a different referenced collation fails with 3780, got %A" other
 
+                testCase "ENUM and SET foreign keys compare storage bytes and cascade child labels"
+                <| fun _ ->
+                    for parentType, childType in
+                        [ "ENUM('a','b')", "ENUM('x','y')"
+                          "ENUM('a','b')", "SET('x','y')"
+                          "SET('a','b')", "ENUM('x','y')"
+                          "SET('a','b')", "SET('x','y')" ] do
+                        let store = newStore ()
+                        runDefault store (sprintf "CREATE TABLE parent (x %s PRIMARY KEY)" parentType) |> ignore
+                        runDefault store (sprintf "CREATE TABLE child (x %s,CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x) ON UPDATE CASCADE)" childType) |> ignore
+                        runDefault store "INSERT INTO parent VALUES('a')" |> ignore
+                        Expect.equal (runDefault store "INSERT INTO child VALUES('x')") (Affected 1UL) (sprintf "%s to %s lookup" parentType childType)
+                        Expect.equal (runDefault store "UPDATE parent SET x='b' WHERE x='a'") (Affected 1UL) (sprintf "%s to %s cascade" parentType childType)
+                        match runDefault store "SELECT x FROM child" with
+                        | ResultSet(_, [ [ Some "y" ] ]) -> ()
+                        | other -> failtestf "expected child storage byte 2 to render as y for %s to %s, got %A" parentType childType other
+
                 testCase "ADD FOREIGN KEY validates the final column type in a combined ALTER"
                 <| fun _ ->
                     let store = newStore ()

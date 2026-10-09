@@ -47,6 +47,18 @@ precision, signed versus unsigned `DECIMAL`, and `YEAR` to `YEAR`. A
 accepted `SET`↔`ENUM` pair was checked in both directions; the regression
 covers both directions and the implicit-character-set rejection.
 
+MySQL compares ENUM and SET foreign keys by their encoded storage values,
+even when the parent and child labels differ. An ENUM parent containing
+`'a'` accepts an ENUM or SET child containing `'x'` when both encode as 1;
+an update to encoded value 2 cascades to the child's own `'y'` label. This
+holds in all four ENUM/SET parent-child combinations, and mismatched encoded
+values return 1452. The `enum-set-foreign-key-bytes` contract checks lookup,
+rejection, update cascade, and delete cascade. fsdb now uses the encoded
+values for these FK operations. A rarer case remains: MySQL can cascade an
+encoded value outside a child ENUM's declared member count and retain its
+ordinal while displaying an empty label; fsdb's ENUM value representation
+does not yet retain that invalid ordinal.
+
 Further MySQL 8.4.11 probes accepted `BIT` paired with `BINARY` or `VARBINARY`
 in either direction, regardless of declared lengths, but rejected `BIT` paired
 with character `CHAR` or integer types. `ENUM` and `SET` member lists may differ
