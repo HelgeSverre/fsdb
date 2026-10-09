@@ -129,3 +129,14 @@ model can identify the owner reliably. In particular, when `d.k IN (1,NULL)`
 is written on an ordinary `names d JOIN labels o` and MySQL drives from `o`,
 fsdb still returns only ID 2 where MySQL returns IDs 1 and 2. Broader join
 graphs are likewise open.
+
+A second MySQL 8.4.11 probe isolates why this cannot be decided from the
+written predicate alone. With `names` containing `(1,'①'), (2,'1'),
+(3,'other')` and `labels` initially containing just `'1'`, the ordinary
+`names d JOIN labels o ON o.k=d.k` returns IDs 1 and 2 for either
+`d.k IN (1,NULL)` or `o.k IN (1,NULL)`. Adding `'other'` to `labels` changes
+the `d.k` predicate result to ID 2, while the `o.k` predicate still returns
+IDs 1 and 2. These are row-membership differences, not only EXPLAIN or cost
+differences. The next fix must couple the chosen driving source, its filter
+ownership, and physical execution; a row-count-based WHERE rewrite is not
+sufficient.
