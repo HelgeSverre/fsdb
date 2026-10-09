@@ -330,6 +330,32 @@ let tests =
                   snapshotNow directory recovered
                   verify (load directory)
 
+          testCase "out-of-domain ENUM cascade ordinals survive WAL and snapshots"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  let directory = tempDataDir ()
+                  let store = load directory
+                  attach directory store
+                  let mutable session = Fsdb.Session.create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  for sql in
+                      [ "CREATE TABLE enum_parent(x SET('a','b') PRIMARY KEY)"
+                        "CREATE TABLE enum_child(x ENUM('x','y'),CONSTRAINT fk FOREIGN KEY(x) REFERENCES enum_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)"
+                        "INSERT INTO enum_parent VALUES('a')"
+                        "INSERT INTO enum_child VALUES('x')"
+                        "UPDATE enum_parent SET x='a,b' WHERE x='a'" ] do
+                      Expect.isNone (run sql |> errorInfo) sql
+                  if checkpoint then snapshotNow directory store
+                  let recovered = load directory
+                  Expect.equal (rowsOf recovered defaultDatabase "enum_child") [ [| VEnumOrdinal 3UL |] ] "encoded ordinal survives reload"
+                  attach directory recovered
+                  session <- Fsdb.Session.create 2 recovered
+                  Expect.isNone (run "DELETE FROM enum_parent WHERE x='a,b'" |> errorInfo) "recovered FK still cascades"
+                  Expect.equal (rowsOf recovered defaultDatabase "enum_child") [] "recovered child is deleted"
+
           testCase "foreign-key rename collisions and names survive recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do

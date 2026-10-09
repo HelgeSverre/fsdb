@@ -57,9 +57,10 @@ rejection, update cascade, and delete cascade. fsdb now uses the encoded
 values for these FK operations. MySQL can also cascade an encoded value
 outside a child ENUM's declared member count and retain its ordinal while
 displaying an empty label. fsdb now preserves that internal ordinal through
-referential lookup, display, numeric expressions, and persistence. The
+referential lookup, display, numeric expressions, WAL replay, and snapshots. The
 contract checks an out-of-domain cascade, scan-based comparisons, and
-subsequent delete. MySQL's FK support index misses the cascaded row for
+subsequent delete; the recovery regression also checks that the restored
+foreign key can cascade-delete it. MySQL's FK support index misses the cascaded row for
 equality predicates on either its old or new ordinal, even though an
 `IGNORE INDEX` scan sees it. fsdb keeps its index consistent with the stored
 row; indexed lookups of this invalid ordinal remain a deliberate divergence.
