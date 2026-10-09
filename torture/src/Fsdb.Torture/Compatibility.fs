@@ -6200,7 +6200,11 @@ module ContractCatalog =
                        match error with
                        | Some(code, state) -> operation |> Contract.fails code state
                        | None -> operation
-                   yield Contract.query (name + "-warnings") "SHOW WARNINGS" |]
+                   yield Contract.query (name + "-warnings") "SHOW WARNINGS"
+               yield Contract.query "checksum-missing" "CHECKSUM TABLE absent, nowhere.absent EXTENDED" |> Contract.comparingValues
+               yield Contract.query "checksum-missing-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "checksum-quick-missing" "CHECKSUM TABLE absent, nowhere.absent QUICK" |> Contract.comparingValues
+               yield Contract.query "checksum-quick-missing-warnings" "SHOW WARNINGS" |> Contract.comparingValues |]
           Cleanup = [| "DROP VIEW IF EXISTS absent_view"; "DROP TABLE IF EXISTS copied" |]
           Coverage = [| "statement:select", [| "text-differential" |]; "statement:drop-table", [| "text-differential" |]; "statement:create-view", [| "text-differential" |] |] }
 

@@ -3168,7 +3168,13 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                         withExecutionLimits (fun () ->
                             Executor.executeAs store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows (accountOf session) stmt)
 
-                    lastInsertId, lastGeneratedId, result, [], None)
+                    let metadata =
+                        match stmt, result with
+                        | ChecksumTables _, ResultSet _ ->
+                            [ textResultMetadata session; ColumnWire.metadataOfType(TBigInt true) ]
+                        | _ -> []
+
+                    lastInsertId, lastGeneratedId, result, metadata, None)
 
         let withSelectDeadline body =
             let eligible =

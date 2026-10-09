@@ -12,6 +12,7 @@ open Fsdb.QueryHandler
 
 let private note code message = Fsdb.Diagnostics.Note, code, message
 let private warning code message = Fsdb.Diagnostics.Warning, code, message
+let private error code message = Fsdb.Diagnostics.Error, code, message
 
 let private conditionTriples session =
     session.Diagnostics
@@ -35,7 +36,29 @@ let private routineUpdateSetup functionSql =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "Foreign-key ALTER rejects missing drops and required column drops atomically"
+        [ testCase "CHECKSUM TABLE reports each missing object while retaining result rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE present (id INT)"
+              for suffix in [ ""; " QUICK" ] do
+                  let session, result = handle session ("CHECKSUM TABLE absent, missing_db.other, present" + suffix)
+                  let presentChecksum = if suffix = "" then Some "0" else None
+                  Expect.equal
+                      result
+                      (ResultSet(
+                          [ "Table"; "Checksum" ],
+                          [ [ Some "fsdb.absent"; None ]
+                            [ Some "missing_db.other"; None ]
+                            [ Some "fsdb.present"; presentChecksum ] ]
+                      ))
+                      "checksum rows remain aligned with the requested tables"
+                  Expect.equal
+                      (conditionTriples session)
+                      [ error 1146 "Table 'fsdb.absent' doesn't exist"
+                        error 1049 "Unknown database 'missing_db'" ]
+                      "missing objects emit ordered conditions in both modes"
+
+          testCase "Foreign-key ALTER rejects missing drops and required column drops atomically"
           <| fun _ ->
               for sql, code, state in
                   [ "ALTER TABLE child DROP FOREIGN KEY missing", 1091, "42000"

@@ -19375,22 +19375,23 @@ let private checksumTables (store: Store) (dbName: string) (tables: string list)
         let database, table = splitQualified dbName tableName
         let label = database + "." + table
 
-        if quick then
+        match scan store database table with
+        | Error missing ->
+            let code, message = Storage.toMySqlError missing
+            Diagnostics.error code message
             [ Some label; None ]
-        else
-            match scan store database table with
-            | Error _ -> [ Some label; None ]
-            | Ok(_, rows) ->
-                let checksum = Fsdb.Binary.Crc32()
+        | Ok _ when quick -> [ Some label; None ]
+        | Ok(_, rows) ->
+            let checksum = Fsdb.Binary.Crc32()
 
-                rows
-                |> Seq.iteri (fun index row ->
-                    Limits.checkQueryCancellation index
-                    let writer = Fsdb.Binary.Writer()
-                    row |> Array.iter (encodeValue writer)
-                    checksum.Append(writer.ToArray()))
+            rows
+            |> Seq.iteri (fun index row ->
+                Limits.checkQueryCancellation index
+                let writer = Fsdb.Binary.Writer()
+                row |> Array.iter (encodeValue writer)
+                checksum.Append(writer.ToArray()))
 
-                [ Some label; Some(string checksum.Value) ]
+            [ Some label; Some(string checksum.Value) ]
 
     ResultSet([ "Table"; "Checksum" ], tables |> List.map checksum)
 
