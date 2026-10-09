@@ -81,8 +81,9 @@ The application-facing DML surface includes `INSERT`/`REPLACE ... SET`, ODKU,
 [audited conversion-warning policy](torture/findings/2026-10-08-mutation-conversion.md)
 and foreign-key row skipping with ordered LIMIT, single-target joined deletion,
 and trigger rollback. The [audited delete cases](torture/findings/2026-10-08-delete-ignore.md)
-include local trigger-warning lifetimes; other ignored-delete error classes and
-multi-target combinations require further native coverage. `SELECT` covers joins, derived and lateral
+include local trigger-warning lifetimes and multi-target foreign-key blocking
+in either target order; other ignored-delete error classes and combinations
+require further native coverage. `SELECT` covers joins, derived and lateral
 sources, `JSON_TABLE`, expression subqueries, set operations, windows, rollups,
 and ordinary or recursive query-scoped CTEs. CTEs can lead UPDATE or DELETE and
 appear within set-operation branches.

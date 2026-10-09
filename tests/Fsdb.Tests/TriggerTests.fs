@@ -121,6 +121,16 @@ let tests =
                       [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ] "rollback restores successful deletions"
                   Expect.equal (query "SELECT phase,id FROM audit ORDER BY seq") [] "rollback restores trigger writes"
 
+          testCase "multi-target DELETE IGNORE retains the parent blocked at statement start" <| fun _ ->
+              let session = deleteIgnoreSession ()
+              let next, result = handle session "DELETE IGNORE c,p FROM parent p LEFT JOIN child c ON c.pid=p.id"
+              Expect.equal result (Affected 3UL) "MySQL deletes the child and two unreferenced parents"
+              Expect.equal (next.Diagnostics |> List.map _.Code) [ 1451 ] "the referenced parent is skipped"
+              Expect.equal (handle next "SELECT id FROM parent ORDER BY id" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "2" ] ])) "referenced parent remains"
+              Expect.equal (handle next "SELECT id,pid FROM child ORDER BY id" |> snd)
+                  (ResultSet([ "id"; "pid" ], [])) "selected child is removed"
+
           testCase "DELETE IGNORE rolls back earlier deletions after a fatal AFTER trigger" <| fun _ ->
               let session =
                   [ "CREATE TABLE audit(seq INT AUTO_INCREMENT PRIMARY KEY,phase VARCHAR(10),id INT)"

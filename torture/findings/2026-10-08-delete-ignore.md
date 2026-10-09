@@ -26,6 +26,12 @@ differences before row skipping was implemented.
 - LIMIT counts selected rows, including an ignored blocker. Descending LIMIT 2
   selects parents 3 and 2, deletes 3, warns for 2, and leaves parent 1 untouched.
 - Named-target and USING joined deletes apply the same row-skipping behavior.
+- Multi-target joined deletes keep a referenced parent blocked against the
+  statement's original child rows even if another target deletes those children
+  first. Both `p,c` and `c,p` target orders leave parent 2, delete selected
+  children and unreferenced parents, and report warning 1451. The one-child
+  case reports three affected rows; two children in the reverse target order
+  likewise leave parent 2.
 - An explicit transaction can roll back successful deletions after the warning.
 - ON DELETE CASCADE still deletes the child.
 - A trigger's explicit SIGNAL SQLSTATE 45000 remains error 1644; IGNORE does
@@ -40,6 +46,10 @@ executor. Stable row identities are resolved against the statement snapshot;
 a row removed by an earlier cascade is skipped. Each selected row runs BEFORE,
 attempts deletion, and runs AFTER only when deletion succeeds. Ignoring a storage
 foreign-key restriction retains its BEFORE effects and continues to the next row.
+A multi-target ignored delete also checks the original catalog for restrictions
+before attempting each deletion against the working snapshot. This preserves
+MySQL's parent blocker when a targeted child was removed earlier in the same
+statement; the working-snapshot check still catches new blockers.
 A fatal error prevents publication of the statement snapshot. Explicit transaction
 rollback restores both successful deletions and trigger writes.
 
@@ -62,8 +72,8 @@ Successful triggers keep warning-class SIGNAL conditions local, preserving the
 outer statement's warnings. Local GET DIAGNOSTICS remains able to inspect the
 warning. [Expanded trigger diagnostics probes](2026-10-08-trigger-warnings.md)
 cover failing statements, handlers, RESIGNAL, and INSERT/UPDATE controls.
-Other ignored-error classes and multi-target joined combinations need further
-native coverage; these results do not establish complete IGNORE parity.
+Other ignored-error classes and broader multi-target joined combinations need
+further native coverage; these results do not establish complete IGNORE parity.
 
 The wire fixture also exposed an independent
 [ALTER ADD FOREIGN KEY affected-row count](2026-10-08-alter-foreign-key-count.md)
@@ -78,3 +88,7 @@ No failure is enrolled in the known-gap allowlist.
   contract covers affected counts, exact warning text, LIMIT, both joined forms,
   cascades, trigger ordering, explicit rollback, and a late fatal AFTER trigger.
   Artifact: `torture/artifacts/runs/20261008T195250417-70218/contracts`.
+- The multi-target follow-up passed all 204 `delete-ignore-foreign-keys` contract
+  steps against the pinned MySQL 8.4.11 oracle. The full 111-case run had nine
+  previously recorded identifier-case differences elsewhere; none was in this
+  contract. Artifact: `torture/artifacts/runs/20261009T220505258-43853/contracts`.

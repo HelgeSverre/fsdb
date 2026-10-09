@@ -9762,6 +9762,18 @@ let private cascadeDelete
     else
         cascadeDeleteVisited checkFks catalog Map.empty Map.empty address toDelete
 
+/// A multi-target ignored delete checks restrictions against the statement's
+/// original row set, even when another target deletes the child first.
+let foreignKeyDeleteRestriction (catalog: Catalog) dbName tableName : Value[] -> StorageError option =
+    let address = tableAddress dbName tableName
+    if referencingForeignKeys catalog address |> List.isEmpty then
+        fun _ -> None
+    else
+        fun row ->
+            match cascadeDelete true catalog address [ row ] with
+            | Error(ForeignKeyRestrict _ as error) -> Some error
+            | _ -> None
+
 /// `REPLACE` inserts each candidate after deleting every row that conflicts
 /// with it on a primary or unique key. A candidate can therefore affect more
 /// than two rows when separate unique keys point at separate stored rows.

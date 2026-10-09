@@ -21720,7 +21720,7 @@ let rec executeAs
                             if selected then updateOneRow rowId row else Ok 0))))
             |> Result.map List.sum
 
-    let deleteIgnoredRows (runStore: Store) db table candidates predicate =
+    let deleteIgnoredRows (runStore: Store) db table candidates predicate initialRestriction =
         let before = triggersFor runStore db table "BEFORE" "DELETE"
         let after = triggersFor runStore db table "AFTER" "DELETE"
         let deleteRow rowId row =
@@ -21728,7 +21728,11 @@ let rec executeAs
             triggerResult (fireTriggers runStore db table Before TriggerDelete before deleted)
             |> Result.bind (fun () ->
                 // Only the attempted deletion can be ignored; BEFORE effects survive a rejected row.
-                match deleteRowsCandidates runStore db table [ rowId, row ] (fun _ -> Ok true) with
+                let deletion =
+                    match initialRestriction row with
+                    | Some error -> Error error
+                    | None -> deleteRowsCandidates runStore db table [ rowId, row ] (fun _ -> Ok true)
+                match deletion with
                 | Error(ForeignKeyRestrict _ as error) ->
                     let code, message = Storage.toMySqlError error
                     Diagnostics.warning code message
@@ -24398,7 +24402,7 @@ let rec executeAs
 
                     let apply =
                         if deleteStmt.Ignore then
-                            deleteIgnoredRows targetStore db table targetRows predicate
+                            deleteIgnoredRows targetStore db table targetRows predicate (fun _ -> None)
                         else
                             triggerResult (fireTriggers targetStore db table Before TriggerDelete beforeTriggers deletedRows)
                             |> Result.bind (fun () -> deleteRowsCandidates targetStore db table targetRows predicate |> Result.mapError storageErr)
@@ -24501,7 +24505,12 @@ let rec executeAs
                                                     match identities.TryGetValue row with
                                                     | true, rowId -> Some(rowId, row)
                                                     | _ -> None) |> List.ofSeq
-                                            deleteIgnoredRows snapshot tdb tname candidates (fun _ -> Ok true))
+                                            let initialRestriction =
+                                                if targetIndices.Length > 1 && snapshot.ForeignKeyChecks then
+                                                    Storage.foreignKeyDeleteRestriction baseCatalog tdb tname
+                                                else
+                                                    fun _ -> None
+                                            deleteIgnoredRows snapshot tdb tname candidates (fun _ -> Ok true) initialRestriction)
                                     else
                                         let deletedRows = claimedRows.[index] |> Seq.map (fun row -> Some row, None) |> List.ofSeq
                                         let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "DELETE"
