@@ -548,7 +548,7 @@ let private indexExpression (keyColumn: IndexColumn) =
     | Some transform ->
         FunctionalIndex.tryBuiltinName transform
         |> Option.map (fun name ->
-            sprintf "%s(`%s`)" (name.ToLowerInvariant()) (keyColumn.Name.Replace("`", "``")))
+            sprintf "%s(%s)" (name.ToLowerInvariant()) (SqlText.quoteIdentifier keyColumn.Name))
     | None -> None
 
 let private indexDirectionText (keyColumn: IndexColumn) =
@@ -3729,14 +3729,12 @@ let showTemporaryColumns catalog full dbName tableName likeOpt =
 
     showColumnsWithExtra extra catalog None full dbName tableName likeOpt
 
-let private backtick (s: string) = "`" + s.Replace("`", "``") + "`"
-
 let private showCreateString (s: string) =
     s.Replace("\\", "\\\\").Replace("'", "''").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\000", "\\0").Replace("\x1A", "\\Z")
 
 // Joined with a bare comma — byte-for-byte what MySQL's own SHOW CREATE
 // TABLE emits for multi-column key lists.
-let private backtickCols = List.map backtick >> String.concat ","
+let private backtickCols = List.map SqlText.quoteIdentifier >> String.concat ","
 
 /// Reconstructs plausible `CREATE TABLE` DDL from a table's stored metadata
 /// for `SHOW CREATE TABLE` — not the original DDL text (nothing keeps that
@@ -3812,7 +3810,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
 
         let srid = c.Srid |> Option.map (sprintf "/*!80003 SRID %u */") |> Option.defaultValue ""
 
-        [ backtick c.Name; columnTypeTextOfColumn c ]
+        [ SqlText.quoteIdentifier c.Name; columnTypeTextOfColumn c ]
         @ charsetCollate
         @ [ srid; generatedPart; notNull; defaultPart; onUpdatePart; extra; if c.Comment = "" then "" else sprintf "COMMENT '%s'" (showCreateString c.Comment) ]
         |> List.filter ((<>) "")
@@ -3826,7 +3824,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                 | Some expression -> "(" + expression + ")"
                 | None ->
                     let length = column.PrefixLength |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
-                    backtick column.Name + length
+                    SqlText.quoteIdentifier column.Name + length
 
             if column.Direction = Desc then key + " DESC" else key)
         |> String.concat ","
@@ -3849,10 +3847,10 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
 
             let parser =
                 match ix.Kind with
-                | FullTextIndex(Some name) -> sprintf " /*!50100 WITH PARSER %s */ " (backtick name)
+                | FullTextIndex(Some name) -> sprintf " /*!50100 WITH PARSER %s */ " (SqlText.quoteIdentifier name)
                 | _ -> ""
 
-            sprintf "%sKEY %s (%s)%s%s" prefix (backtick ix.Name) (indexColumnsText ix) parser (if ix.Visible then "" else " /*!80000 INVISIBLE */"))
+            sprintf "%sKEY %s (%s)%s%s" prefix (SqlText.quoteIdentifier ix.Name) (indexColumnsText ix) parser (if ix.Visible then "" else " /*!80000 INVISIBLE */"))
 
     // The table's own declared defaults (server defaults when unset) —
     // MySQL renders these in the table options even when a column carries
@@ -3867,12 +3865,12 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
             let onUpdate = fk.OnUpdate |> Option.map (sprintf " ON UPDATE %s") |> Option.defaultValue ""
             let referencedTable =
                 match fk.RefDatabase with
-                | Some database -> sprintf "%s.%s" (backtick database) (backtick fk.RefTable)
-                | None -> backtick fk.RefTable
+                | Some database -> sprintf "%s.%s" (SqlText.quoteIdentifier database) (SqlText.quoteIdentifier fk.RefTable)
+                | None -> SqlText.quoteIdentifier fk.RefTable
 
             sprintf
                 "CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s%s"
-                (backtick fk.Name)
+                (SqlText.quoteIdentifier fk.Name)
                 (backtickCols fk.Columns)
                 referencedTable
                 (backtickCols fk.RefColumns)
@@ -3885,7 +3883,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
         |> List.sortBy (fun check -> check.Name.ToLowerInvariant())
         |> List.map (fun check ->
             let enforcement = if check.Enforced then "" else " /*!80016 NOT ENFORCED */"
-            sprintf "CONSTRAINT %s CHECK (%s)%s" (backtick check.Name) check.Clause enforcement)
+            sprintf "CONSTRAINT %s CHECK (%s)%s" (SqlText.quoteIdentifier check.Name) check.Clause enforcement)
 
     let lines = (t.Columns |> List.map columnLine) @ pkLine @ indexLines @ fkLines @ checkLines
     let tableComment =
@@ -3911,7 +3909,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                          let nodeGroup = definition.NodeGroup |> Option.map (sprintf " NODEGROUP = %d") |> Option.defaultValue ""
                          let maxRows = if definition.MaxRows = 0L then "" else sprintf " MAX_ROWS = %d" definition.MaxRows
                          let minRows = if definition.MinRows = 0L then "" else sprintf " MIN_ROWS = %d" definition.MinRows
-                         "PARTITION " + backtick definition.Name + tablespace + nodeGroup + maxRows + minRows + comment)
+                         "PARTITION " + SqlText.quoteIdentifier definition.Name + tablespace + nodeGroup + maxRows + minRows + comment)
                      |> String.concat ", "
                      |> sprintf "(%s)"))
         |> Option.defaultValue ""
@@ -3919,7 +3917,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
     sprintf
         "CREATE %sTABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s%s%s"
         (if temporary then "TEMPORARY " else "")
-        (backtick t.OriginalName)
+        (SqlText.quoteIdentifier t.OriginalName)
         (String.concat ",\n  " lines)
         tableCharset
         tableCollation
@@ -3937,7 +3935,7 @@ let showCreateTemporaryTable (catalog: Catalog) (dbName: string) (tableName: str
 
 let private quotedDefiner (definer: string) =
     let account = Auth.tryParseAccount definer |> Option.defaultValue (Auth.account "" "%")
-    sprintf "%s@%s" (backtick account.Name) (backtick account.Host)
+    sprintf "%s@%s" (SqlText.quoteIdentifier account.Name) (SqlText.quoteIdentifier account.Host)
 
 let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : ShowResult =
     viewCatalogEntries catalog
@@ -3958,7 +3956,7 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
             let columns =
                 match storedViewColumns view.ColumnNames with
                 | [] -> ""
-                | names -> sprintf " (%s)" (names |> List.map backtick |> String.concat ", ")
+                | names -> sprintf " (%s)" (names |> List.map SqlText.quoteIdentifier |> String.concat ", ")
 
             let ddl =
                 let definition = canonicalViewDefinition catalog view.Schema false view.Definition
@@ -3968,7 +3966,7 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
                     view.Algorithm
                     (quotedDefiner view.Definer)
                     security
-                    (backtick view.Name)
+                    (SqlText.quoteIdentifier view.Name)
                     columns
                     definition
                     checkOption
@@ -3991,12 +3989,12 @@ let showCreateTrigger (catalog: Catalog) (dbName: string) (triggerName: string) 
         | Some trigger ->
             let ddl =
                 sprintf
-                    "CREATE DEFINER=%s TRIGGER `%s` %s %s ON `%s` FOR EACH ROW %s"
+                    "CREATE DEFINER=%s TRIGGER %s %s %s ON %s FOR EACH ROW %s"
                     (quotedDefiner trigger.Definer)
-                    (trigger.Name.Replace("`", "``"))
+                    (SqlText.quoteIdentifier trigger.Name)
                     trigger.Timing
                     trigger.Event
-                    (trigger.Table.Replace("`", "``"))
+                    (SqlText.quoteIdentifier trigger.Table)
                     trigger.Body
 
             Ok(

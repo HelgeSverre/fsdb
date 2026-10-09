@@ -98,9 +98,8 @@ type StorageError =
     | VirtualTableReadOnly of name: string
 
 let private foreignKeyFailureDetails (database: string) (table: string) (foreignKey: ForeignKeyDef) =
-    let quote (name: string) = "`" + name.Replace("`", "``") + "`"
-    let objectName (name: string) = quote (name.ToLowerInvariant())
-    let columns = List.map quote >> String.concat ", "
+    let objectName (name: string) = SqlText.quoteIdentifier (name.ToLowerInvariant())
+    let columns = List.map SqlText.quoteIdentifier >> String.concat ", "
     let parent =
         match foreignKey.RefDatabase with
         | Some parentDatabase when not (parentDatabase.Equals(database, StringComparison.OrdinalIgnoreCase)) ->
@@ -111,7 +110,7 @@ let private foreignKeyFailureDetails (database: string) (table: string) (foreign
         >> Option.map (fun action -> " " + clause + " " + action)
         >> Option.defaultValue ""
     sprintf "(%s.%s, CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s%s)"
-        (objectName database) (objectName table) (quote foreignKey.Name) (columns foreignKey.Columns)
+        (objectName database) (objectName table) (SqlText.quoteIdentifier foreignKey.Name) (columns foreignKey.Columns)
         parent (columns foreignKey.RefColumns) (action "ON DELETE" foreignKey.OnDelete) (action "ON UPDATE" foreignKey.OnUpdate)
 
 /// MySQL error code + message for a `StorageError`, ready for the wire
@@ -2850,7 +2849,7 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
                 transform
                 |> Option.bind FunctionalIndex.tryBuiltinName
                 |> Option.defaultValue "expression"
-                |> fun name -> sprintf "%s(`%s`)" (name.ToLowerInvariant()) (column.Name.Replace("`", "``"))
+                |> fun name -> sprintf "%s(%s)" (name.ToLowerInvariant()) (SqlText.quoteIdentifier column.Name)
 
             raise (IndexExpressionError(1690, sprintf "BIGINT value is out of range in '%s'" expression))
 
@@ -6791,6 +6790,20 @@ let private formatDuplicateKeyValue indices (row: Value[]) =
     |> List.map (fun index -> row.[index] |> toText |> Option.defaultValue "NULL")
     |> String.concat "-"
 
+// A replacement may retain its own key; only another row can conflict.
+let private validateUpdatedUniqueKeys (table: Table) groups index rowId candidate =
+    groups
+    |> List.tryPick (fun group ->
+        encodeUniqueKey table.Columns group candidate
+        |> Option.bind (fun key ->
+            match Map.tryFind key (Map.find group.Name index) with
+            | Some otherRowId when otherRowId <> rowId ->
+                Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices candidate))
+            | _ -> None))
+    |> function
+        | Some error -> Error error
+        | None -> Ok candidate
+
 let private tryDuplicateConstraintValue (columns: ColumnDef list) (indices: int list) (rows: Value[] seq) =
     let rec loop seen remaining =
         match remaining with
@@ -8868,21 +8881,7 @@ and private upsertRowsInTable
                                             | candidate, Some(pos, existing) ->
                                                 applyUpdate ordinal existing candidate
                                                 |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
-                                                |> Result.bind (fun applied ->
-                                                    let collision =
-                                                        uniqueGroups
-                                                        |> List.tryPick (fun group ->
-                                                            match encodeUniqueKey table.Columns group applied with
-                                                            | Some key ->
-                                                                match Map.tryFind key (Map.find group.Name state.UniqueIndex) with
-                                                                | Some otherPos when otherPos <> pos ->
-                                                                    Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices applied))
-                                                                | _ -> None
-                                                            | None -> None)
-
-                                                    match collision with
-                                                    | Some error -> Error error
-                                                    | None -> Ok applied)
+                                                |> Result.bind (validateUpdatedUniqueKeys table uniqueGroups state.UniqueIndex pos)
                                                 |> Result.bind (fun applied ->
                                                     // ODKU validates child references and applies
                                                     // parent-side cascades before reindexing.
@@ -10131,30 +10130,10 @@ let private updateRowsCore
                                         updater row
                                         |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
                                         |> Result.bind (fun newRow ->
-                                            // A group's key only collides against
-                                            // some *other* row still holding it —
-                                            // `row`'s own identity (about to be
-                                            // rekeyed below) doesn't count.
-                                            let collision =
-                                                uniqueGroups
-                                                |> List.tryPick (fun group ->
-                                                    match encodeUniqueKey table.Columns group newRow with
-                                                    | Some k ->
-                                                        match Map.tryFind k (Map.find group.Name index) with
-                                                        | Some otherRowId when otherRowId <> rowId ->
-                                                            Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices newRow))
-                                                        | _ -> None
-                                                    | None -> None)
-
-                                            match collision with
-                                            | Some e -> Error e
-                                            | None ->
-                                                // `ON UPDATE CASCADE`/`SET NULL` rewrite/blank
-                                                // any child row this rewrite would otherwise
-                                                // orphan; anything else fails 1451.
+                                            validateUpdatedUniqueKeys table uniqueGroups index rowId newRow
+                                            |> Result.bind (fun newRow ->
                                                 (if checkFks then
                                                      let currentDatabase = tryCatalogDatabase address.Database cascadeCatalog |> Option.get
-
                                                      checkFkParents cascadeCatalog dbName currentDatabase table (Some row) newRow
                                                      |> Result.bind (fun () ->
                                                          cascadeUpdateVisited true cascadeCatalog visited cascaded address table.Columns row newRow)
@@ -10162,7 +10141,7 @@ let private updateRowsCore
                                                      Ok(cascadeCatalog, visited, cascaded))
                                                 |> Result.map (fun (cascadeCatalog', visited', cascaded') ->
                                                     let index, secondaryIndex, secondaryOrder = reindexRow table.Columns uniqueGroups secondaryGroups (Some(rowId, row)) (Some(rowId, newRow)) index secondaryIndex secondaryOrder
-                                                    newRow, index, secondaryIndex, secondaryOrder, cascadeCatalog', visited', cascaded')
+                                                    newRow, index, secondaryIndex, secondaryOrder, cascadeCatalog', visited', cascaded'))
                                             |> function
                                                 | Ok accepted -> Ok(Some accepted)
                                                 | Error error when onConstraintError error -> Ok None
@@ -10193,42 +10172,31 @@ let private updateRowsCore
                 setCatalogTable address updated cascadeCatalog, (List.rev changesRev, cascaded, catalog)))
 
     let publish () =
-        match candidates, catalogHasQualifiedForeignKeys store.Catalog with
-        | None, _ -> withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None)
-        | Some rows, true ->
+        match candidates with
+        | None -> withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None)
+        | Some rows ->
             let rowIds = rows |> List.map fst
+            let refreshCandidates (db: Database) =
+                db
+                |> Map.tryFind (normalizeTableName tableName)
+                |> Option.map (fun table ->
+                    rowIds
+                    |> List.distinct
+                    |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
+                |> Option.defaultValue []
+            let applyRefreshed catalog db = apply (Some(refreshCandidates db)) catalog db
 
+            // Refresh only inside publication locks, retaining the requested row order.
+            let qualifiedForeignKeys = catalogHasQualifiedForeignKeys store.Catalog
             withRowLocks store dbName tableName rowIds (fun () ->
-                withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
-                    let refreshed =
-                        db
-                        |> Map.tryFind (normalizeTableName tableName)
-                        |> Option.map (fun table ->
-                            rowIds
-                            |> List.distinct
-                            |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
-                        |> Option.defaultValue []
-
-                    apply (Some refreshed) catalog db))
-        | Some rows, false ->
-            let rowIds = rows |> List.map fst
-
-            withRowLocks store dbName tableName rowIds (fun () ->
-                let operation db =
-                    let catalog = setCatalogDatabase dbName db store.Catalog
-                    let refreshed =
-                        db
-                        |> Map.tryFind (normalizeTableName tableName)
-                        |> Option.map (fun table ->
-                            rowIds
-                            |> List.distinct
-                            |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
-                        |> Option.defaultValue []
-
-                    apply (Some refreshed) catalog db
-                    |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result)
-
-                withPointUpdateDatabase store dbName tableName rowIds eventsOf operation)
+                if qualifiedForeignKeys then
+                    withReferentialCatalogPublishing store dbName SharedAccess eventsOf applyRefreshed
+                else
+                    let operation db =
+                        let catalog = setCatalogDatabase dbName db store.Catalog
+                        applyRefreshed catalog db
+                        |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result)
+                    withPointUpdateDatabase store dbName tableName rowIds eventsOf operation)
 
     let result = captureIndexExpressionError (fun () -> withIndexExpressionDiagnostics store publish)
 

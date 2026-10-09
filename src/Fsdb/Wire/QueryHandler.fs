@@ -4651,13 +4651,13 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         elif not (canSessionSeeDatabase session store name) then
             session, Err(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" session.User session.AccountHost name)
         else
-            let quotedName = name.Replace("`", "``")
+            let quotedName = SqlText.quoteIdentifier name
 
             session,
             ResultSet(
                 [ "Database"; "Create Database" ],
                 [ [ Some name
-                    Some(sprintf "CREATE DATABASE `%s` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */" quotedName) ] ]
+                    Some(sprintf "CREATE DATABASE %s /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */" quotedName) ] ]
             )
     | ShowCharset -> session, InformationSchema.showCharacterSet (likeSuffix sql) |> showResult
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
@@ -4937,10 +4937,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
                     let ddl =
                         sprintf
-                            "CREATE DEFINER=`%s`@`%s` EVENT `%s` ON SCHEDULE %s ON COMPLETION %s %s%s DO %s"
-                            (definer.Name.Replace("`", "``"))
-                            (definer.Host.Replace("`", "``"))
-                            (name.Replace("`", "``"))
+                            "CREATE DEFINER=%s@%s EVENT %s ON SCHEDULE %s ON COMPLETION %s %s%s DO %s"
+                            (SqlText.quoteIdentifier definer.Name)
+                            (SqlText.quoteIdentifier definer.Host)
+                            (SqlText.quoteIdentifier name)
                             schedule
                             event.OnCompletion
                             status

@@ -96,13 +96,14 @@ type private ViewContext =
       Ctes: (string * string list) list }
 
 let private sameName (left: string) (right: string) = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
-let private identifier (value: string) = "`" + value.Replace("`", "``") + "`"
-let private identifiers (values: string list) = values |> List.map identifier |> String.concat ","
+/// Quotes one identifier, preserving embedded backticks.
+let quoteIdentifier (value: string) = "`" + value.Replace("`", "``") + "`"
+let private identifiers (values: string list) = values |> List.map quoteIdentifier |> String.concat ","
 
 /// Quotes components whose spelling would otherwise be mistaken for qualification.
 let objectName database (name: string) =
     let render (value: string) =
-        if value.Contains('.') || value.Contains('`') || value.Contains('"') || value.Trim() <> value then identifier value
+        if value.Contains('.') || value.Contains('`') || value.Contains('"') || value.Trim() <> value then quoteIdentifier value
         else value
     let prefix = database |> Option.map (fun schema -> render schema + ".") |> Option.defaultValue ""
     prefix + render name
@@ -196,11 +197,11 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
     | AssignUserVariable(variable, value) -> sprintf "%s := %s" variable.Sql (render value)
     | Col name ->
         tryColumnSource name context
-        |> Option.map (fun source -> sprintf "%s.%s" source.Reference (identifier name))
-        |> Option.defaultWith (fun () -> identifier name)
+        |> Option.map (fun source -> sprintf "%s.%s" source.Reference (quoteIdentifier name))
+        |> Option.defaultWith (fun () -> quoteIdentifier name)
     | QualifiedCol(table, column) ->
-        let qualifier = tryNamedSource table context |> Option.map _.Reference |> Option.defaultWith (fun () -> identifier table)
-        sprintf "%s.%s" qualifier (identifier column)
+        let qualifier = tryNamedSource table context |> Option.map _.Reference |> Option.defaultWith (fun () -> quoteIdentifier table)
+        sprintf "%s.%s" qualifier (quoteIdentifier column)
     | Row values -> sprintf "(%s)" (values |> List.map render |> String.concat ",")
     | BinOp(operator, left, right) -> sprintf "(%s %s %s)" (render left) (operatorText operator) (render right)
     | RuntimeExpression value -> render value
@@ -247,7 +248,7 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
     | Cast(value, target) -> sprintf "cast(%s as %s)" (render value) (columnType target)
     | BinaryCast value -> sprintf "binary (%s)" (render value)
     | Collate(value, collation) -> sprintf "(%s collate %s)" (render value) collation
-    | Star qualifier -> (qualifier |> Option.map (identifier >> fun value -> value + ".") |> Option.defaultValue "") + "*"
+    | Star qualifier -> (qualifier |> Option.map (quoteIdentifier >> fun value -> value + ".") |> Option.defaultValue "") + "*"
     | Exists select ->
         let sql, _ = renderSelect options (nestedContext context) select
         sprintf "exists(%s)" sql
@@ -292,7 +293,7 @@ and private renderWindowFunction (options: ViewRenderOptions) (context: ViewCont
 
 and private renderOverClause (options: ViewRenderOptions) (context: ViewContext) (over: OverClause) : string =
     match over with
-    | OverName name -> identifier name
+    | OverName name -> quoteIdentifier name
     | OverSpec spec -> sprintf "(%s)" (renderWindowSpec options context spec)
 
 and private renderWindowSpec (options: ViewRenderOptions) (context: ViewContext) (spec: WindowSpec) : string =
@@ -306,7 +307,7 @@ and private renderWindowSpec (options: ViewRenderOptions) (context: ViewContext)
         | BoundFollowing value -> render value + " following"
         | UnboundedFollowing -> "unbounded following"
 
-    [ spec.Inherit |> Option.map identifier
+    [ spec.Inherit |> Option.map quoteIdentifier
       if spec.PartitionBy.IsEmpty then None else Some("partition by " + (spec.PartitionBy |> List.map render |> String.concat ","))
       if spec.OrderBy.IsEmpty then None else Some("order by " + (spec.OrderBy |> List.map (fun (value, direction) -> render value + directionSuffix direction) |> String.concat ","))
       spec.Frame
@@ -325,17 +326,17 @@ and private renderJsonColumns (_options: ViewRenderOptions) (_context: ViewConte
 
     let rec renderColumn =
         function
-        | ForOrdinality name -> sprintf "%s for ordinality" (identifier name)
+        | ForOrdinality name -> sprintf "%s for ordinality" (quoteIdentifier name)
         | PathColumn(name, target, path, onEmpty, onError) ->
             sprintf
                 "%s %s path %s %s on empty %s on error"
-                (identifier name)
+                (quoteIdentifier name)
                 (columnType target)
                 (jsonString path)
                 (actionText onEmpty)
                 (actionText onError)
         | ExistsColumn(name, target, path) ->
-            sprintf "%s %s exists path %s" (identifier name) (columnType target) (jsonString path)
+            sprintf "%s %s exists path %s" (quoteIdentifier name) (columnType target) (jsonString path)
         | NestedColumns(path, nested) ->
             sprintf "nested path %s columns (%s)" (jsonString path) (nested |> List.map renderColumn |> String.concat ",")
 
@@ -364,32 +365,32 @@ and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (
 
         let tableText =
             match cteColumns, options.IncludeSchema, table.Database with
-            | Some _, _, _ -> identifier table.Table
-            | None, true, _ -> sprintf "%s.%s" (identifier schema) (identifier table.Table)
+            | Some _, _, _ -> quoteIdentifier table.Table
+            | None, true, _ -> sprintf "%s.%s" (quoteIdentifier schema) (quoteIdentifier table.Table)
             | None, false, Some explicitSchema when not (sameName explicitSchema options.DefaultSchema) ->
-                sprintf "%s.%s" (identifier explicitSchema) (identifier table.Table)
-            | _ -> identifier table.Table
+                sprintf "%s.%s" (quoteIdentifier explicitSchema) (quoteIdentifier table.Table)
+            | _ -> quoteIdentifier table.Table
 
-        let aliasText = table.Alias |> Option.map (fun alias -> " " + identifier alias) |> Option.defaultValue ""
+        let aliasText = table.Alias |> Option.map (fun alias -> " " + quoteIdentifier alias) |> Option.defaultValue ""
 
         let partitionText =
             if table.Partitions.IsEmpty then "" else sprintf " partition (%s)" (identifiers table.Partitions)
 
         tableText + aliasText + partitionText,
         [ { Qualifier = qualifier
-            Reference = table.Alias |> Option.map identifier |> Option.defaultValue tableText
+            Reference = table.Alias |> Option.map quoteIdentifier |> Option.defaultValue tableText
             Columns = columns } ]
     | FromSubquery(query, alias) ->
         let sql, columns = renderSelectOrUnion options (nestedContext context) query
-        sprintf "(%s) %s" sql (identifier alias),
+        sprintf "(%s) %s" sql (quoteIdentifier alias),
         [ { Qualifier = alias
-            Reference = identifier alias
+            Reference = quoteIdentifier alias
             Columns = columns } ]
     | FromLateral(query, alias) ->
         let sql, columns = renderSelectOrUnion options (nestedContext context) query
-        sprintf "lateral (%s) %s" sql (identifier alias),
+        sprintf "lateral (%s) %s" sql (quoteIdentifier alias),
         [ { Qualifier = alias
-            Reference = identifier alias
+            Reference = quoteIdentifier alias
             Columns = columns } ]
     | FromJsonTable(source, path, columns, alias) ->
         let sql =
@@ -398,11 +399,11 @@ and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (
                 (renderViewExpression options context source)
                 (jsonString path)
                 (renderJsonColumns options context columns)
-                (identifier alias)
+                (quoteIdentifier alias)
 
         sql,
         [ { Qualifier = alias
-            Reference = identifier alias
+            Reference = quoteIdentifier alias
             Columns = jsonColumnNames columns } ]
 
 and private renderJoinChain options context source sourceJoins =
@@ -454,7 +455,7 @@ and private renderProjection (options: ViewRenderOptions) (context: ViewContext)
     | Star _, None -> rendered, "*"
     | _ ->
         let name = Projection.name (fun expression -> expressionName expression rendered) projection
-        rendered + " AS " + identifier name, name
+        rendered + " AS " + quoteIdentifier name, name
 
 and private expandProjections (context: ViewContext) (projections: Projection list) : Projection list =
     let expand qualifier =
@@ -529,7 +530,7 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
                 let bodySql, inferredColumns = renderSelectOrUnion options bodyContext cte.Body
                 let columns = if cte.CteColumns.IsEmpty then inferredColumns else cte.CteColumns
                 let heading = if cte.CteColumns.IsEmpty then "" else sprintf " (%s)" (identifiers cte.CteColumns)
-                let sql = sprintf "%s%s as (%s)" (identifier cte.CteName) heading bodySql
+                let sql = sprintf "%s%s as (%s)" (quoteIdentifier cte.CteName) heading bodySql
 
                 { context with
                     Ctes = context.Ctes @ [ cte.CteName, columns ] },
@@ -569,7 +570,7 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
         match select.IntoFile with
         | Some(Dumpfile fileName) -> " into dumpfile " + jsonString fileName
         | Some(Outfile(fileName, export)) ->
-            let charset = export.CharacterSet |> Option.map (fun value -> " character set " + identifier value) |> Option.defaultValue ""
+            let charset = export.CharacterSet |> Option.map (fun value -> " character set " + quoteIdentifier value) |> Option.defaultValue ""
             let enclosed =
                 export.EnclosedBy
                 |> Option.map (fun value ->
@@ -612,7 +613,7 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
         else
             " window "
             + (select.Windows
-               |> List.map (fun (name, spec) -> sprintf "%s as (%s)" (identifier name) (renderWindowSpec options context spec))
+               |> List.map (fun (name, spec) -> sprintf "%s as (%s)" (quoteIdentifier name) (renderWindowSpec options context spec))
                |> String.concat ",")
 
     let orderText = if select.OrderBy.IsEmpty then "" else " order by " + renderOrderKeys options context select.OrderBy

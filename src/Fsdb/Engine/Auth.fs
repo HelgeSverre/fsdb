@@ -2099,8 +2099,7 @@ let private revokeTablePrivilegesFromColumns store wanted database table (privil
                     |> Result.map ignore)
             |> Result.bind (fun _ -> syncTableColumnPrivileges store None wanted database table false)
 
-let private quoteAccountPart (value: string) = "`" + value.Replace("`", "``") + "`"
-let private quotedAccount account = quoteAccountPart account.Name + "@" + quoteAccountPart account.Host
+let private quotedAccount account = SqlText.quoteIdentifier account.Name + "@" + SqlText.quoteIdentifier account.Host
 
 let private distinctAccounts references =
     references
@@ -3551,7 +3550,7 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
             | "Y" -> "PASSWORD REQUIRE CURRENT"
             | "N" -> "PASSWORD REQUIRE CURRENT OPTIONAL"
             | _ -> "PASSWORD REQUIRE CURRENT DEFAULT"
-        let account = sprintf "`%s`@`%s`" (name.Replace("`", "``")) (host.Replace("`", "``"))
+        let account = sprintf "%s@%s" (SqlText.quoteIdentifier name) (SqlText.quoteIdentifier host)
         let attributes =
             match accountAttributeText cols row with
             | None -> ""
@@ -3809,7 +3808,7 @@ let renderGrantsForAccountUsing
                             if columns.IsEmpty then
                                 None
                             else
-                                let rendered = columns |> List.map (fun column -> "`" + column.Replace("`", "``") + "`")
+                                let rendered = columns |> List.map SqlText.quoteIdentifier
                                 Some(sprintf "%s (%s)" privilege.Sql (String.concat ", " rendered)))
 
                     let privileges = tablePrivileges @ columnPrivileges
