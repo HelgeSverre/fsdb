@@ -2,8 +2,15 @@
   "mysql_version": "8.4.11",
   "innodb_buffer_pool_size": "64M",
   "innodb_redo_log_capacity": "64M",
+  "fsdb_base_revision": "4ebf5f82",
+  "fsdb_dirty": false,
+  "comparison": "Errors, SQLSTATE, warning order, retained rows, and trigger/routine effects. Wire contracts separately compare affected rows for matching cases.",
   "cases": [
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "matches": true,
       "name": "mixed",
       "statements": [
         "USE probe",
@@ -21,12 +28,13 @@
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id",
         "SELECT * FROM audit"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t3\nafter\t3\nbefore\t2\nbefore\t1\nafter\t1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t3\nafter\t3\nbefore\t2\nbefore\t1\nafter\t1\n",
+      "matches": true,
       "name": "reverse",
       "statements": [
         "USE probe",
@@ -44,12 +52,13 @@
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id",
         "SELECT * FROM audit"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t3\nafter\t3\nbefore\t2\nbefore\t1\nafter\t1\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nbefore\t2\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nbefore\t2\n",
+      "matches": true,
       "name": "limit",
       "statements": [
         "USE probe",
@@ -67,12 +76,13 @@
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id",
         "SELECT * FROM audit"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nbefore\t2\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
+      "matches": true,
       "name": "joined",
       "statements": [
         "USE probe",
@@ -90,12 +100,13 @@
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id",
         "SELECT * FROM audit"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nn\n1\n13\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nn\n1\n13\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "matches": true,
       "name": "parent",
       "statements": [
         "USE probe",
@@ -110,12 +121,13 @@
         "SHOW WARNINGS",
         "SELECT * FROM parent ORDER BY n",
         "SELECT * FROM child ORDER BY id"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1451\tCannot delete or update a parent row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nn\n1\n13\nid\tn\n1\t1\n2\t1\n3\t1\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\n",
+      "matches": true,
       "name": "duplicate",
       "statements": [
         "USE probe",
@@ -133,12 +145,18 @@
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id",
         "SELECT * FROM audit"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nError\t1452\ttrigger failure\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "errors": [
+        {
+          "Item1": 1452,
+          "Item2": "23000"
+        }
+      ],
+      "expected": "Level\tCode\tMessage\nError\t1452\ttrigger failure\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "matches": true,
       "name": "trigger-error",
       "statements": [
         "USE probe",
@@ -153,17 +171,13 @@
         "UPDATE IGNORE child SET n=3",
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id"
-      ],
-      "stdout": "Level\tCode\tMessage\nError\t1452\ttrigger failure\nid\tn\n1\t1\n2\t1\n3\t1\n",
-      "stderr": "ERROR 1452 (23000) at line 10: trigger failure\n",
-      "errors": [
-        [
-          1452,
-          "23000"
-        ]
       ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\n",
+      "matches": true,
       "name": "mixed-no-triggers",
       "statements": [
         "USE probe",
@@ -177,12 +191,13 @@
         "UPDATE IGNORE child SET n=id ORDER BY id",
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n@calls\n3\nid\tn\n1\t1\n2\t1\n3\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n@calls\n3\nid\tn\n1\t1\n2\t1\n3\t3\n",
+      "matches": true,
       "name": "single-evaluation",
       "statements": [
         "USE probe",
@@ -198,12 +213,13 @@
         "SHOW WARNINGS",
         "SELECT @calls",
         "SELECT * FROM child ORDER BY id"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n@calls\n3\nid\tn\n1\t1\n2\t1\n3\t3\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "matches": true,
       "name": "duplicate-no-triggers",
       "statements": [
         "USE probe",
@@ -217,12 +233,13 @@
         "UPDATE IGNORE child SET id=1",
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id"
-      ],
-      "stdout": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\n",
-      "stderr": "",
-      "errors": []
+      ]
     },
     {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+      "errors": [],
+      "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+      "matches": false,
       "name": "function-parent-write",
       "statements": [
         "USE probe",
@@ -240,10 +257,7 @@
         "SELECT * FROM child ORDER BY id",
         "SELECT * FROM parent ORDER BY n",
         "DROP FUNCTION promote_parent"
-      ],
-      "stdout": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
-      "stderr": "",
-      "errors": []
+      ]
     }
   ]
 }

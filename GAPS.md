@@ -63,7 +63,7 @@ under `torture/findings/`.
 | [Transactions](#7-transactions-and-concurrency) | Supported isolation levels, row ownership, optimistic merge, and XA | Remaining coarse write shapes |
 | [Persistence](#8-persistence-and-durability) | Opt-in WAL, snapshots, recovery, rotation, and group commit | Foreground rather than background row reclamation |
 | [Views and triggers](#9-views-and-triggers) | Single-table, nested, and restricted join views; ordered compound triggers | Complex updatable views |
-| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | No open gap recorded |
+| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | Writes by functions called from UPDATE |
 | [Full-text](#11-full-text-search) | Maintained inverted indexes and MySQL-shaped scoring | CJK parsing and remaining plan combinations |
 | [Wire protocol](#12-wire-protocol-and-prepared-statements) | Prepared statements, TLS, compression, LOCAL INFILE, and multi-results | GTID state tracking and live TLS certificate reload |
 | [Authentication](#13-authentication-and-privileges) | Host accounts, caching-SHA2/SHA-256/native credentials, grants, roles, proxy grants, and account policy | Pluggable identity and proxy-user selection |
@@ -501,6 +501,10 @@ alteration metadata, and persisted definitions. Current routine diagnostics and
 connection-local timeout-hint loading warnings follow the audited native lifecycle
 ([oracle](torture/findings/2026-10-08-select-timeout.md#audited-routine-lifecycle-and-alter-support)).
 
+| Gap | MySQL 8.4 | fsdb | Impact | Class |
+|---|---|---|---|---|
+| Writes by functions called from UPDATE | function writes are visible to subsequent foreign-key checks and retained | [audited UPDATE IGNORE](torture/findings/2026-10-09-update-ignore.md#routine-writes-during-update) loses a function's parent-key update and incorrectly rejects outer child candidates; the difference predates batching | high | divergence |
+
 ## 11. Full-text search
 
 Natural-language, boolean, and query-expansion modes use MySQL 8.4's
@@ -678,13 +682,12 @@ routines, events, and administrative probes.
 
 ## 15. Differential-testing and performance tails
 
-The [UPDATE IGNORE comparison](benchmarks/results/0504f672-update-ignore.md)
-identifies a measured regression after correct per-row rejection handling:
-valid 5,000-row updates without triggers take 3.6–3.9 times longer and allocate
-about 2.3 times as much as the prior implementation, while plain UPDATE
-controls remain stable. Repeated per-row publication is a profiling target;
-any batched replacement must retain warning order, accepted rows, trigger
-semantics, and single evaluation of assignments.
+The [UPDATE IGNORE batching comparison](benchmarks/results/4ebf5f82-update-ignore-batching.md)
+removes the measured per-row publication regression for updates without
+triggers, incoming foreign keys, or custom-function calls. The valid 5,000-row
+workloads take 73–74% less time and allocate 56–57% fewer bytes, with stable
+plain-UPDATE controls. The excluded execution paths retain per-row publication
+and are not claimed improved.
 
 The remaining campaigns include planner and numeric-expression overhead.
 Indexed joins, equality/`IN`, and secondary ranges retain measurable fixed

@@ -2,9 +2,9 @@
   "mysql_version": "8.4.11",
   "innodb_buffer_pool_size": "64M",
   "innodb_redo_log_capacity": "64M",
-  "fsdb_base_revision": "53e1d2e6",
+  "fsdb_base_revision": "4ebf5f82",
   "fsdb_dirty": true,
-  "comparison": "Errors, SQLSTATE, warning order, retained rows, and trigger effects. Wire contracts also compare affected-row metadata.",
+  "comparison": "Errors, SQLSTATE, warning order, retained rows, and trigger/routine effects. Wire contracts separately compare affected rows for matching cases.",
   "cases": [
     {
       "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\nphase\tid\nbefore\t1\nafter\t1\nbefore\t2\nbefore\t3\nafter\t3\n",
@@ -171,6 +171,92 @@
         "UPDATE IGNORE child SET n=3",
         "SHOW WARNINGS",
         "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t3\n",
+      "matches": true,
+      "name": "mixed-no-triggers",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "UPDATE IGNORE child SET n=id ORDER BY id",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n@calls\n3\nid\tn\n1\t1\n2\t1\n3\t3\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\n@calls\n3\nid\tn\n1\t1\n2\t1\n3\t3\n",
+      "matches": true,
+      "name": "single-evaluation",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "SET @calls=0",
+        "UPDATE IGNORE child SET n=(@calls:=@calls+1) ORDER BY id",
+        "SHOW WARNINGS",
+        "SELECT @calls",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "errors": [],
+      "expected": "Level\tCode\tMessage\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nWarning\t1062\tDuplicate entry '1' for key 'child.PRIMARY'\nid\tn\n1\t1\n2\t1\n3\t1\n",
+      "matches": true,
+      "name": "duplicate-no-triggers",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO parent VALUES(1),(3)",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "UPDATE IGNORE child SET id=1",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id"
+      ]
+    },
+    {
+      "actual": "Level\tCode\tMessage\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nWarning\t1452\tCannot add or update a child row: a foreign key constraint fails (`probe`.`child`, CONSTRAINT `fk` FOREIGN KEY (`n`) REFERENCES `parent` (`n`))\nid\tn\n1\t1\n2\t1\n3\t1\nn\n1\n2\n",
+      "errors": [],
+      "expected": "id\tn\n1\t3\n2\t3\n3\t3\nn\n1\n3\n",
+      "matches": false,
+      "name": "function-parent-write",
+      "statements": [
+        "USE probe",
+        "SET foreign_key_checks=0",
+        "DROP TABLE IF EXISTS child,parent,audit",
+        "SET foreign_key_checks=1",
+        "DROP FUNCTION IF EXISTS promote_parent",
+        "CREATE TABLE parent(n INT PRIMARY KEY)",
+        "INSERT INTO parent VALUES(1),(2)",
+        "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))",
+        "INSERT INTO child VALUES(1,1),(2,1),(3,1)",
+        "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END",
+        "UPDATE IGNORE child SET n=promote_parent()",
+        "SHOW WARNINGS",
+        "SELECT * FROM child ORDER BY id",
+        "SELECT * FROM parent ORDER BY n",
+        "DROP FUNCTION promote_parent"
       ]
     }
   ]

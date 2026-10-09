@@ -25,7 +25,27 @@ let private expectAffectedWithConditions context expected (session, result) =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "ALTER foreign key numbering uses the original table definition"
+        [ testCase "UPDATE IGNORE evaluates rejected candidates only once"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "SET @calls=0" ] do
+                  Expect.isNone (run sql |> errorInfo) sql
+              Expect.equal (run "UPDATE IGNORE child SET n=(@calls:=@calls+1) ORDER BY id") (Affected 1UL) "valid changed row survives rejection"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1287; 1452 ] "syntax warning precedes the rejected row"
+              Expect.equal (run "SELECT @calls") (ResultSet([ "@calls" ], [ [ Some "3" ] ])) "one evaluation per selected row"
+              Expect.equal (run "SELECT * FROM child ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "3" ] ])) "only rejected candidate is skipped"
+
+          testCase "ALTER foreign key numbering uses the original table definition"
           <| fun _ ->
               for initial, alter, expected in
                   [ "CONSTRAINT child_ibfk_7 FOREIGN KEY(a) REFERENCES parent(n)", "ADD FOREIGN KEY(b) REFERENCES parent(n)", [ "child_ibfk_7"; "child_ibfk_8" ]

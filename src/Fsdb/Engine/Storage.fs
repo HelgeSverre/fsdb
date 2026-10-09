@@ -10056,29 +10056,21 @@ let private withPointUpdateDatabase
                 acknowledge ()
                 result))
 
-/// Replaces every row matching `predicate` with `updater row`, coercing the
-/// result back to the table's column types, then checking it against the
-/// table's unique keys (error 1062, against every *other* row — a no-op
-/// `UPDATE` that leaves a row's own unique value unchanged doesn't collide
-/// with itself) and, when `store.ForeignKeyChecks` is set, its foreign
-/// keys' parents (error 1452). Returns the number of rows actually
-/// *changed* — matching but no-op writes (`SET v = v`) don't count, matching
-/// MySQL's "Changed: n" rather than "Rows matched: n" — via `Value[]`'s
-/// structural equality (F# arrays compare structurally, element by
-/// element). As with `deleteRows`, `predicate` and `updater` both return
-/// `Result` rather than defaulting a failure away.
-///
-/// `candidates`, when given, is the exact `(RowId, row)` set to visit —
-/// `Executor`'s point-lookup narrowing (`tryPointLookup`) already resolved
-/// these via the PK/UNIQUE index, so this fold doesn't re-scan `table.RowsArray`
-/// at all to find them; `predicate` still re-checks each one for
-/// correctness (this is a pure narrowing to a superset of the real WHERE
-/// match, same discipline `tryPointLookup` documents), so it never pays for
-/// rows that weren't candidates. `None` (a WHERE that didn't narrow, or
-/// none at all) falls back to visiting every row of `table.RowsArray`,
-/// `predicate` deciding which ones qualify. The private builder copies only
-/// pages containing changed rows.
-let updateRows
+let internal tryIgnoreUpdateConstraintError = function
+    | (ForeignKeyParentMissing _ | ForeignKeyRestrict _ | DuplicateKey _) as error ->
+        let code, message = toMySqlError error
+        Diagnostics.warning code message
+        true
+    | _ -> false
+
+let internal canBatchIgnoredUpdates (store: Store) database table =
+    // Referential actions retain per-row publication so later rows see preceding cascades.
+    referencingForeignKeys store.Catalog (tableAddress database table) |> List.isEmpty
+
+// Constraint rejection precedes any change to the private builder or indexes.
+// Candidate IDs are refreshed under publication locks; fatal failures discard the builder.
+let private updateRowsCore
+    (onConstraintError: StorageError -> bool)
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -10170,8 +10162,14 @@ let updateRows
                                                      Ok(cascadeCatalog, visited, cascaded))
                                                 |> Result.map (fun (cascadeCatalog', visited', cascaded') ->
                                                     let index, secondaryIndex, secondaryOrder = reindexRow table.Columns uniqueGroups secondaryGroups (Some(rowId, row)) (Some(rowId, newRow)) index secondaryIndex secondaryOrder
-                                                    newRow, index, secondaryIndex, secondaryOrder, cascadeCatalog', visited', cascaded'))
-                                        |> Result.map (fun (newRow, index', secondaryIndex', secondaryOrder', cascadeCatalog', visited', cascaded') ->
+                                                    newRow, index, secondaryIndex, secondaryOrder, cascadeCatalog', visited', cascaded')
+                                            |> function
+                                                | Ok accepted -> Ok(Some accepted)
+                                                | Error error when onConstraintError error -> Ok None
+                                                | Error error -> Error error)
+                                        |> Result.map (function
+                                        | None -> changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, visited, cascaded
+                                        | Some(newRow, index', secondaryIndex', secondaryOrder', cascadeCatalog', visited', cascaded') ->
                                             builder.[rowId] <- newRow
                                             (if newRow <> row then
                                                  { RowId = rowId
@@ -10237,6 +10235,14 @@ let updateRows
     match result with
     | Ok(changes, _, _) -> Ok changes.Length
     | Error e -> Error e
+
+/// Updates matching rows atomically, failing the statement on a constraint violation.
+let updateRows store database table candidates predicate updater =
+    updateRowsCore (fun _ -> false) store database table candidates predicate updater
+
+/// Skips ignorable constraint failures while retaining accepted rows in one publication.
+let internal updateRowsIgnoringConstraints store database table candidates predicate updater =
+    updateRowsCore tryIgnoreUpdateConstraintError store database table candidates predicate updater
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the
 /// `Table` instance itself: `Executor`'s row pipeline is list-based and

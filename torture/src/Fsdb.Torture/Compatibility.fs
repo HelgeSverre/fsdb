@@ -6357,6 +6357,41 @@ module ContractCatalog =
                     "UPDATE IGNORE child SET n=3"
                     "SHOW WARNINGS"
                     "SELECT * FROM child ORDER BY id" ]
+              "mixed-no-triggers", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "UPDATE IGNORE child SET n=id ORDER BY id"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id" ]
+              "single-evaluation", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "SET @calls=0"
+                    "UPDATE IGNORE child SET n=(@calls:=@calls+1) ORDER BY id"
+                    "SHOW WARNINGS"
+                    "SELECT @calls"
+                    "SELECT * FROM child ORDER BY id" ]
+              "duplicate-no-triggers", None,
+                  [ "SET foreign_key_checks=0"
+                    "DROP TABLE IF EXISTS child,parent,audit"
+                    "SET foreign_key_checks=1"
+                    "CREATE TABLE parent(n INT PRIMARY KEY)"
+                    "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
+                    "INSERT INTO parent VALUES(1),(3)"
+                    "INSERT INTO child VALUES(1,1),(2,1),(3,1)"
+                    "UPDATE IGNORE child SET id=1"
+                    "SHOW WARNINGS"
+                    "SELECT * FROM child ORDER BY id" ]
             ]
         { Name = "update-ignore-constraints"
           Setup = [||]

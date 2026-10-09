@@ -2,8 +2,9 @@
 
 Native MySQL 8.4.11 with a disposable 64 MiB buffer pool and redo capacity is
 the oracle. The [native results](2026-10-09-update-ignore-native.json) and
-[fsdb replay](2026-10-09-update-ignore-current.json) match across all seven
-scripts.
+[fsdb replay](2026-10-09-update-ignore-current.json) match across ten of eleven
+scripts. The remaining routine-write case also fails on the
+[pre-batching baseline](2026-10-09-update-ignore-before-batching.json).
 
 ## Behavior
 
@@ -21,14 +22,34 @@ Only the storage update is inside the ignorable-error match. Assignment,
 BEFORE-trigger, and AFTER-trigger failures are outside it. Existing CHECK and
 view CHECK OPTION handling retains its separate validation rules.
 
+## Batched writes
+
+Updates without triggers, incoming foreign keys, or custom-function calls can
+skip rejected rows inside one private storage fold and publish accepted rows
+once. Assignment errors remain outside the ignorable-constraint match. A
+counter assignment confirms that accepted and rejected candidates are each
+evaluated once. Triggered and referential-action paths retain per-row execution.
+[The performance comparison](../../benchmarks/results/4ebf5f82-update-ignore-batching.md)
+records the measured improvement and its limits.
+
+## Routine writes during UPDATE
+
+Status: open. In `function-parent-write`, a stored function changes an
+unreferenced parent key from 2 to 3 and returns 3 to the outer UPDATE IGNORE.
+MySQL retains the new parent key and accepts all three child updates. Fsdb
+instead emits three 1452 warnings, leaves the children unchanged, and retains
+the old parent key. This reproduces both before and after batching. Stored
+function calls stay on the per-row path; batching does not claim to fix their
+write visibility or publication.
+
 ## Verification
 
-The mixed-row Expecto regression failed with error 1452 before the fix. The
-root gate passes 3,169 tests without build warnings or errors. The full native
-wire run passes 96 contracts and 14,339 steps with zero differences:
-`torture/artifacts/runs/20261008T233824254-87173/contracts`.
+The root gate passes 3,173 tests without build warnings or errors. The full
+native wire run passes 97 contracts and 14,454 steps with zero differences:
+`torture/artifacts/runs/20261009T001705713-89878/contracts`.
 
-The broader foreign-key replay now matches 34 of 35 cases. Generated names
-for unnamed constraints remain different. This audit does not establish all
-multi-target joined-update orderings, every SQL-mode coercion, or every possible
-trigger interaction.
+The ten matching scripts cover ignored constraints, warning order, trigger
+order, single evaluation, and retained rows. The unresolved routine-write case
+remains in both native and fsdb evidence; it is not enrolled into a passing
+wire contract or a known-gap allowlist. Broader multi-target joined-update
+orderings, SQL-mode coercions, and trigger interactions remain unaudited.

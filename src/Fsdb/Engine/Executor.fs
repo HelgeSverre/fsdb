@@ -21321,8 +21321,13 @@ let rec executeAs
         | Some(Err(code, message)) -> Error(ExpressionError(code, message))
         | Some _ -> Error(ExpressionError(1105, "Trigger execution failed"))
 
-    let applyUpdateRows ignoreErrors (runStore: Store) db table candidates predicate updater
-        (triggerRows: ResizeArray<Value[] option * Value[] option>) afterTriggers =
+    let applyUpdateRows (statement: UpdateStmt) (runStore: Store) db table candidates predicate updater
+        (triggerRows: ResizeArray<Value[] option * Value[] option>) beforeTriggers afterTriggers =
+        let ignoreErrors = statement.Ignore
+        let callsCustomFunction =
+            Expression.statementExists (function
+                | FuncCall(name, _) -> not (Functions.isUnmodifiedBuiltinScalar name registry)
+                | _ -> false)
         let write candidates predicate updater =
             Storage.withPermissiveIndexExpressions ignoreErrors (fun () ->
                 updateRows runStore db table candidates predicate updater)
@@ -21335,16 +21340,16 @@ let rec executeAs
             updater row
             |> Result.bind (fun candidate ->
                 match write (Some [ rowId, row ]) (fun _ -> Ok true) (fun _ -> Ok candidate) with
-                | Error(ForeignKeyParentMissing _ as error)
-                | Error(ForeignKeyRestrict _ as error)
-                | Error(DuplicateKey _ as error) ->
-                    let code, message = Storage.toMySqlError error
-                    Diagnostics.warning code message
-                    Ok 0
+                | Error error when Storage.tryIgnoreUpdateConstraintError error -> Ok 0
                 | Error error -> Error error
                 | Ok changed -> fireAfter changed)
         if not ignoreErrors then
             write candidates predicate updater |> Result.bind fireAfter
+        elif List.isEmpty beforeTriggers && List.isEmpty afterTriggers
+             && not (callsCustomFunction (Update statement))
+             && Storage.canBatchIgnoredUpdates runStore db table then
+            Storage.withPermissiveIndexExpressions true (fun () ->
+                updateRowsIgnoringConstraints runStore db table candidates predicate updater)
         else
             let selected =
                 match candidates with
@@ -23690,7 +23695,7 @@ let rec executeAs
                             | Error error -> Error error
 
                         match
-                            applyUpdateRows updateStmt.Ignore targetStore db table (Some targetRows) predicate updater changedRows afterTriggers
+                            applyUpdateRows updateStmt targetStore db table (Some targetRows) predicate updater changedRows beforeTriggers afterTriggers
                         with
                         | Ok changed ->
                             if useSnapshot then
@@ -23916,7 +23921,7 @@ let rec executeAs
                                                         changedRows.Add(Some(Array.copy row), Some candidate)
                                                         Ok candidate)
 
-                                        applyUpdateRows updateStmt.Ignore snapshot tdb tname None predicate updater changedRows afterTriggers)
+                                        applyUpdateRows updateStmt snapshot tdb tname None predicate updater changedRows beforeTriggers afterTriggers)
                                 |> Array.toList
                                 |> traverse id)
 
