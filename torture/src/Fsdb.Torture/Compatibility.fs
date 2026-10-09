@@ -6713,6 +6713,30 @@ module ContractCatalog =
           Cleanup = [| "DROP DATABASE IF EXISTS fk_enum_set_bytes_probe" |]
           Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
 
+    let private bitBinaryForeignKeyBytes =
+        { Name = "bit-binary-foreign-key-bytes"
+          Setup = [| "CREATE DATABASE fk_bit_binary_bytes_probe" |]
+          Steps =
+            [| Contract.execute "select-database" "USE fk_bit_binary_bytes_probe"
+               Contract.execute "create-bit-parent" "CREATE TABLE bit_parent(x BIT(9) PRIMARY KEY)"
+               Contract.execute "create-binary-child" "CREATE TABLE binary_child(x VARBINARY(2),CONSTRAINT fk_binary FOREIGN KEY(x) REFERENCES bit_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)"
+               Contract.execute "create-short-child" "CREATE TABLE short_child(x VARBINARY(1),CONSTRAINT fk_short FOREIGN KEY(x) REFERENCES bit_parent(x))"
+               Contract.execute "insert-bit-parent" "INSERT INTO bit_parent VALUES(b'000000001')"
+               Contract.execute "insert-equal-bytes" "INSERT INTO binary_child VALUES(X'0001')"
+               Contract.execute "reject-shorter-bytes" "INSERT INTO short_child VALUES(X'01')" |> Contract.fails 1452 "23000"
+               Contract.execute "cascade-bit-update" "UPDATE bit_parent SET x=b'000000010' WHERE x=b'000000001'"
+               Contract.query "binary-child-after-update" "SELECT HEX(x) FROM binary_child"
+               Contract.execute "create-binary-parent" "CREATE TABLE binary_parent(x BINARY(2) PRIMARY KEY)"
+               Contract.execute "create-bit-child" "CREATE TABLE bit_child(x BIT(9),CONSTRAINT fk_bit FOREIGN KEY(x) REFERENCES binary_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)"
+               Contract.execute "insert-binary-parent" "INSERT INTO binary_parent VALUES(X'0001')"
+               Contract.execute "insert-bit-child" "INSERT INTO bit_child VALUES(b'000000001')"
+               Contract.execute "cascade-binary-update" "UPDATE binary_parent SET x=X'0002' WHERE x=X'0001'"
+               Contract.query "bit-child-after-update" "SELECT x+0 FROM bit_child"
+               Contract.execute "cascade-binary-delete" "DELETE FROM binary_parent WHERE x=X'0002'"
+               Contract.query "bit-child-after-delete" "SELECT COUNT(*) FROM bit_child" |]
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_bit_binary_bytes_probe" |]
+          Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
+
     let private yearByteForeignKeys =
         { Name = "year-byte-foreign-keys"
           Setup = [| "CREATE DATABASE fk_year_byte_probe" |]
@@ -8669,6 +8693,7 @@ module ContractCatalog =
            mixedTypeJoinIn
            yearColumnValues
            enumSetForeignKeyBytes
+           bitBinaryForeignKeyBytes
            yearByteForeignKeys
            timeDateForeignKeys
            qualifiedDuplicateKeys

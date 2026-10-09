@@ -11013,6 +11013,34 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected the out-of-domain child to cascade-delete, got %A" other
 
+                testCase "BIT and binary foreign keys compare exact storage bytes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE bit_parent (x BIT(9) PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE binary_child (x VARBINARY(2),CONSTRAINT fk_binary FOREIGN KEY(x) REFERENCES bit_parent(x) ON UPDATE CASCADE)" |> ignore
+                    runDefault store "CREATE TABLE short_child (x VARBINARY(1),CONSTRAINT fk_short FOREIGN KEY(x) REFERENCES bit_parent(x))" |> ignore
+                    runDefault store "INSERT INTO bit_parent VALUES(b'000000001')" |> ignore
+                    Expect.equal (runDefault store "INSERT INTO binary_child VALUES(X'0001')") (Affected 1UL) "equal bytes match"
+                    match runDefault store "INSERT INTO short_child VALUES(X'01')" with
+                    | Err(1452, _) -> ()
+                    | other -> failtestf "a shorter binary key must not match BIT(9), got %A" other
+                    Expect.equal (runDefault store "UPDATE bit_parent SET x=b'000000010' WHERE x=b'000000001'") (Affected 1UL) "BIT parent cascade"
+                    match runDefault store "SELECT HEX(x) FROM binary_child" with
+                    | ResultSet(_, [ [ Some "0002" ] ]) -> ()
+                    | other -> failtestf "expected the child to retain BIT storage bytes, got %A" other
+                    runDefault store "CREATE TABLE binary_parent (x BINARY(2) PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE bit_child (x BIT(9),CONSTRAINT fk_bit FOREIGN KEY(x) REFERENCES binary_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)" |> ignore
+                    runDefault store "INSERT INTO binary_parent VALUES(X'0001')" |> ignore
+                    Expect.equal (runDefault store "INSERT INTO bit_child VALUES(b'000000001')") (Affected 1UL) "binary parent lookup"
+                    Expect.equal (runDefault store "UPDATE binary_parent SET x=X'0002' WHERE x=X'0001'") (Affected 1UL) "binary parent cascade"
+                    match runDefault store "SELECT x+0 FROM bit_child" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected the BIT child to retain the updated bytes, got %A" other
+                    Expect.equal (runDefault store "DELETE FROM binary_parent WHERE x=X'0002'") (Affected 1UL) "binary parent delete cascade"
+                    match runDefault store "SELECT COUNT(*) FROM bit_child" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the BIT child to cascade-delete, got %A" other
+
                 testCase "ADD FOREIGN KEY validates the final column type in a combined ALTER"
                 <| fun _ ->
                     let store = newStore ()

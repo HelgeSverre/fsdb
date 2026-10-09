@@ -73,6 +73,13 @@ or the 255-member `ENUM` boundary returned 3780, including cross-family pairs.
 while `DATE` remained incompatible with both. Creation now applies these
 same type-family and width rules.
 
+The `bit-binary-foreign-key-bytes` contract checks the runtime key rule:
+`BIT(9)` value 1 matches binary bytes `X'0001'`, but not the shorter
+`X'01'`. Updates cascade the exact bytes from BIT to VARBINARY and from
+BINARY to BIT, and the latter delete cascades too. fsdb now compares the
+stored byte sequence for these cross-family keys and converts cascaded values
+to the child column's representation.
+
 An existing foreign-key column has a stricter ALTER boundary than creation.
 Changing `BIT`, `BINARY`, `CHAR`, `TIME`, `DATETIME`, `TIMESTAMP`, or `DECIMAL`
 representation returned 1832 for a child column and 1833 for a referenced

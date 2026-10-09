@@ -3482,9 +3482,26 @@ let private foreignKeyHasDistinctTemporalStorage (child: ColumnDef) (parent: Col
     | TTimestamp _, TDateTime _ -> true
     | _ -> false
 
+let private foreignKeyUsesBitBinaryBytes (child: ColumnDef) (parent: ColumnDef) =
+    match child.Type, parent.Type with
+    | TBit _, (TBinary _ | TVarBinary _)
+    | (TBinary _ | TVarBinary _), TBit _ -> true
+    | _ -> false
+
+let private foreignKeyBitBinaryBytes (column: ColumnDef) value =
+    match column.Type, value with
+    | TBit width, VBit(_, bits) -> Some(bitBytes width bits)
+    | (TBinary _ | TVarBinary _), VBytes bytes -> Some bytes
+    | _ -> None
+
 let private foreignKeyValuesMatch (child: ColumnDef) childValue (parent: ColumnDef) parentValue =
-    not (foreignKeyHasDistinctTemporalStorage child parent)
-    && compare (foreignKeyStorageValue child childValue) (foreignKeyStorageValue parent parentValue) = 0
+    if foreignKeyHasDistinctTemporalStorage child parent then false
+    elif foreignKeyUsesBitBinaryBytes child parent then
+        match foreignKeyBitBinaryBytes child childValue, foreignKeyBitBinaryBytes parent parentValue with
+        | Some childBytes, Some parentBytes -> childBytes = parentBytes
+        | _ -> false
+    else
+        compare (foreignKeyStorageValue child childValue) (foreignKeyStorageValue parent parentValue) = 0
 
 let private foreignKeyRowsMatch
     (childColumns: ColumnDef list)
@@ -3515,6 +3532,7 @@ let private foreignKeyUsesEnumSetBytes (child: ColumnDef) (parent: ColumnDef) =
 let private foreignKeyNeedsRowComparison child parent =
     foreignKeyUsesYearByte child parent
     || foreignKeyUsesEnumSetBytes child parent
+    || foreignKeyUsesBitBinaryBytes child parent
     || foreignKeyHasDistinctTemporalStorage child parent
 
 let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parentValue =
@@ -3522,6 +3540,9 @@ let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parent
     | TYear, TTinyInt true, VInt 0L -> VInt 0L
     | TYear, TTinyInt true, VInt yearByte -> VInt(yearByte + 1900L)
     | TTinyInt true, TYear, VInt yearByte -> VInt yearByte
+    | (TBinary _ | TVarBinary _), TBit width, VBit(_, bits) -> VBytes(bitBytes width bits)
+    | TBit width, (TBinary _ | TVarBinary _), VBytes bytes ->
+        VBit(width, bytes |> Array.fold (fun bits value -> (bits <<< 8) ||| uint64 value) 0UL)
     | TEnum members, (TEnum _ | TSet _), VUInt key ->
         if key > 0UL && key <= uint64 members.Length then VString members.[int key - 1]
         else VEnumOrdinal key
