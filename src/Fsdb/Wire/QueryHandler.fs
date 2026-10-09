@@ -155,7 +155,8 @@ let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql
     while i < n do
         match sql.[i] with
         | ('\'' | '"' | '`') as quote ->
-            let allowBackslashEscape = quote <> '`' && not options.NoBackslashEscapes
+            let allowBackslashEscape =
+                quote <> '`' && not options.NoBackslashEscapes && not (quote = '"' && options.AnsiQuotes)
             i <- i + 1
             let mutable closed = false
 
@@ -308,11 +309,7 @@ let private globalOnlyVariables =
               "net_write_timeout" ])
 
 let private conditionCount errorsOnly (session: Session) =
-    if errorsOnly then
-        session.Diagnostics
-        |> List.sumBy (fun condition -> if condition.Level = Diagnostics.Error then 1 else 0)
-    else
-        session.Diagnostics.Length
+    if errorsOnly then session.DiagnosticsErrorCount else session.DiagnosticsCount
 
 /// The outer option preserves error 1193 for unknown system variables while
 /// the inner option represents SQL NULL.
@@ -369,6 +366,7 @@ let private numericSystemVariables =
           "local_infile"
           "lower_case_table_names"
           "max_allowed_packet"
+          "max_error_count"
           "max_connections"
           "max_heap_table_size"
           "max_points_in_geometry"
@@ -1097,6 +1095,7 @@ let private bareSetIdentifier = Regex("^\\w+$")
 let private boundedIntegerVariables =
     Map.ofList
         [ "max_sp_recursion_depth", 255UL
+          "max_error_count", 65535UL
           "div_precision_increment", 30UL
           "max_execution_time", UInt64.MaxValue ]
 
@@ -1243,18 +1242,25 @@ let private normalizeGeometryPointLimit =
     | VUInt value -> bounded (int64 value)
     | _ -> Error(Err(1232, "Incorrect argument type to variable 'max_points_in_geometry'"))
 
+let private boundedHintMessage (message: string) =
+    if message.Length > 511 then message.Substring(0, 511) else message
+
+let private boundedHintPart (value: string) =
+    if value.Length > 511 then value.Substring(0, 511) else value
+
 let private statementGeometryAssignment (hints: OptimizerHints.Hint list) =
     let mutable assignment = None
     let diagnostics = ResizeArray<int * int * string>()
     for hint in hints do
         match hint.Value with
         | OptimizerHints.SetVariable(rawName, value) ->
-            let name = rawName.ToLowerInvariant()
-            if name <> "max_points_in_geometry" then
-                diagnostics.Add(OptimizerHints.contextOrder hint, 3128, sprintf "Unresolved name '%s' for SET_VAR hint" name)
+            if not (rawName.Equals("max_points_in_geometry", StringComparison.OrdinalIgnoreCase)) then
+                let name = boundedHintPart rawName |> fun name -> name.ToLowerInvariant()
+                diagnostics.Add(OptimizerHints.contextOrder hint, 3128,
+                    boundedHintMessage (sprintf "Unresolved name '%s' for SET_VAR hint" name))
             elif assignment.IsSome then
                 diagnostics.Add(OptimizerHints.contextOrder hint, 3126,
-                    sprintf "Hint SET_VAR(max_points_in_geometry=%s)  is ignored as conflicting/duplicated" value)
+                    boundedHintMessage (sprintf "Hint SET_VAR(max_points_in_geometry=%s)  is ignored as conflicting/duplicated" (boundedHintPart value)))
             else assignment <- Some value
         | _ -> ()
     assignment, List.ofSeq diagnostics
@@ -1285,7 +1291,7 @@ let private statementGeometryPointLimit assignment =
             if bounded <> parsed then
                 Diagnostics.warning
                     1292
-                    (sprintf "Truncated incorrect max_points_in_geometry value: '%s'" value)
+                    (boundedHintMessage (sprintf "Truncated incorrect max_points_in_geometry value: '%s'" (boundedHintPart value)))
 
             Some bounded
         else
@@ -1297,9 +1303,10 @@ let private parsedStatementHints emitWarnings options (sql: string) =
         Parser.optimizerHintLocationsWithOptions options sql
         |> List.map (OptimizerHints.parse options)
     if emitWarnings then
+        let formatDiagnostic = OptimizerHints.diagnosticFormatter sql
         for _, diagnostics in parsed do
             for diagnostic in diagnostics do
-                Diagnostics.warning 1064 (OptimizerHints.formatDiagnostic sql diagnostic)
+                Diagnostics.warning 1064 (formatDiagnostic diagnostic)
     parsed |> List.collect fst, parsed |> List.exists (snd >> List.isEmpty >> not)
 
 type private TimeoutHintScope = StandaloneStatement | StoredRoutine
@@ -3578,6 +3585,8 @@ let rec private filterTemporaryEvent keys event =
     let isTemporary db table = Set.contains (CatalogOverlay.tableKey db table) keys
 
     match event with
+    | WithDdlAllowInvalidDates(enabled, inner) ->
+        filterTemporaryEvent keys inner |> Option.map (fun retained -> WithDdlAllowInvalidDates(enabled, retained))
     | WithFullTextWordLengths(lengths, inner) ->
         filterTemporaryEvent keys inner |> Option.map (fun retained -> WithFullTextWordLengths(lengths, retained))
     | WithNgramTokenSize(size, inner) ->
@@ -4221,7 +4230,12 @@ let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe
         Some(ShowEvents(tryCapture 1 matched |> Option.map stripIdentifierQuotes))
     | RegexMatch showRoutineStatusRe matched, _ -> Some(ShowRoutineStatus((capture 1 matched).ToUpperInvariant()))
     | RegexMatch killRe matched, _ ->
-        Some(Kill((capture 1 matched).ToUpperInvariant() = "QUERY", int64 (capture 2 matched)))
+        let id =
+            match Int64.TryParse(capture 2 matched) with
+            | true, value -> value
+            | false, _ -> Int64.MaxValue
+
+        Some(Kill((capture 1 matched).ToUpperInvariant() = "QUERY", id))
     | RegexMatch alterKeysRe matched, _ -> Some(AlterKeysNoop(stripIdentifierQuotes (capture 1 matched)))
     | RegexMatch showCountWarningsRe _, _ -> Some(ShowMessageCount false)
     | RegexMatch showCountErrorsRe _, _ -> Some(ShowMessageCount true)
@@ -5278,9 +5292,18 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
 
 /// Binary preparation starts a new diagnostics area, just as COM_QUERY does.
 let prepareStatementWithDiagnostics (session: Session) sql =
-    let result, captured = Diagnostics.captureStatement (fun () -> prepareStatementForSession session sql)
+    let limit =
+        sessionValue session "max_error_count"
+        |> Option.bind (fun value -> match Int32.TryParse value with true, number -> Some number | _ -> None)
+        |> Option.defaultValue 1024
+    let result, captured =
+        Diagnostics.withRetainedLimit limit (fun () ->
+            Diagnostics.captureStatement (fun () -> prepareStatementForSession session sql))
     let error = result |> function Ok _ -> None | Error(code, message) -> Some(SqlState.create code message)
-    { session with Diagnostics = Diagnostics.complete error captured }, result
+    { session with
+        Diagnostics = Diagnostics.complete error captured
+        DiagnosticsCount = captured.Count + (if error.IsSome then 1 else 0)
+        DiagnosticsErrorCount = captured.ErrorCount + (if error.IsSome then 1 else 0) }, result
 
 let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
     let ast = ast |> Option.map (PreparedVariables.capture session.UserVariables)
@@ -6053,7 +6076,13 @@ let private runRoutineStatements
                 ||> continueAfterSql scope locals results affectedRows rest
             | StoredProgram.TextSql sql ->
                 let routineState = ref locals
-                let current = { current with Diagnostics = currentDiagnostics.Value.Conditions }
+                let current =
+                    { current with
+                        Diagnostics = currentDiagnostics.Value.Conditions
+                        DiagnosticsCount = currentDiagnostics.Value.Conditions.Length
+                        DiagnosticsErrorCount =
+                            currentDiagnostics.Value.Conditions
+                            |> List.sumBy (fun condition -> if condition.Level = Diagnostics.Error then 1 else 0) }
                 let preserve = preservesDiagnostics (parserOptionsForSession current) sql
 
                 let next, result =
@@ -6137,7 +6166,7 @@ let private runRoutineStatements
                     handleQueryResult scope current locals results affectedRows rest (ErrInfo error)
                 | Ok nextCursors ->
                     cursors.Value <- nextCursors
-                    updateDiagnostics { BeforeError = []; AfterError = [] } (Affected 0UL)
+                    updateDiagnostics { BeforeError = []; AfterError = []; Count = 0; ErrorCount = 0; Limit = 1024 } (Affected 0UL)
                     run scope current locals results affectedRows rest
             | StoredProgram.GetDiagnostics diagnostics ->
                 runDiagnostics scope diagnostics current locals results affectedRows rest
@@ -6501,7 +6530,10 @@ let private mergeRoutineExecutionSettings original changed result =
       TimeZone = result.TimeZone }
 
 let private invalidDiagnosticsCondition session =
-    { session with Diagnostics = [ Diagnostics.invalidConditionNumber ] }, Affected 0UL
+    { session with
+        Diagnostics = [ Diagnostics.invalidConditionNumber ]
+        DiagnosticsCount = 1
+        DiagnosticsErrorCount = 1 }, Affected 0UL
 
 let private runTextDiagnostics session (diagnostics: StoredProgram.DiagnosticsStatement) =
     match diagnostics.Area with
@@ -7711,11 +7743,27 @@ let private recordDiagnostics
     (execute: unit -> Session * QueryResult)
     : Session * QueryResult =
     let previous = session
-    let session = if preserve then session else { session with Diagnostics = [] }
-    let (session, result), captured = Diagnostics.captureStatement execute
+    let session =
+        if preserve then session
+        else { session with Diagnostics = []; DiagnosticsCount = 0; DiagnosticsErrorCount = 0 }
+    let limit =
+        sessionValue session "max_error_count"
+        |> Option.bind (fun value -> match Int32.TryParse value with true, number -> Some number | _ -> None)
+        |> Option.defaultValue 1024
+    let (session, result), captured =
+        Fsdb.Temporal.withTimeTruncateFractional
+            (Session.currentStore session).ExecutionSettings.SqlMode.TimeTruncateFractional
+            (fun () -> Diagnostics.withRetainedLimit limit (fun () -> Diagnostics.captureStatement execute))
     let generated = Diagnostics.complete (terminalErrorInfo result) captured
 
-    let session = if preserve then session else { session with Diagnostics = generated }
+    let session =
+        if preserve then session
+        else
+            let hasError = terminalErrorInfo result |> Option.isSome
+            { session with
+                Diagnostics = generated
+                DiagnosticsCount = captured.Count + (if hasError then 1 else 0)
+                DiagnosticsErrorCount = captured.ErrorCount + (if hasError then 1 else 0) }
     let session, result = recordResult (session, result)
     Session.finalizeTransactionTracking previous session, result
 
@@ -7868,6 +7916,22 @@ let private accountUpdateIsAuthorized session = function
     | ProbedAccountStatement _ -> false
     | UnknownAccountStatement -> false
 
+let private resolveMissingFunctionWithoutDatabase parserOptions sql result =
+    let prefix, suffix = "FUNCTION ", " does not exist"
+    match result with
+    | Err(1305, message) when
+        message.StartsWith(prefix, StringComparison.Ordinal)
+        && message.EndsWith(suffix, StringComparison.Ordinal) ->
+        let name = message.Substring(prefix.Length, message.Length - prefix.Length - suffix.Length)
+        match parseStatement parserOptions sql with
+        | Ok(Select _ | Union _) when not (name.Contains('.')) ->
+            // MySQL resolves an unqualified routine against the current database.
+            // It records one condition during resolution and one terminal error.
+            Diagnostics.error 1046 "No database selected"
+            Err(1046, "No database selected")
+        | _ -> result
+    | _ -> result
+
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
     let parserOptions = parserOptionsForSession session
@@ -7903,6 +7967,9 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                             withSessionStatementHints session parserOptions rawSql sql (fun () ->
                                 withTriggerSessionExecution session (fun () ->
                                     dispatchNormalized session rawSql parserOptions sql))
+                        let result =
+                            if session.Database.IsNone then resolveMissingFunctionWithoutDatabase parserOptions sql result
+                            else result
                         let executed =
                             if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                 { executed with PasswordExpired = false }

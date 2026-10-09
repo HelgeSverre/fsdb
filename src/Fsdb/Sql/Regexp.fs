@@ -38,21 +38,133 @@ let private optionsFor (collation: Collation.Collation) (matchType: string optio
 
     error |> Option.map Error |> Option.defaultValue (Ok options)
 
-let private posixClasses =
-    [ "[[:alpha:]]", "[\\p{L}]"
-      "[[:digit:]]", "[\\p{Nd}]"
-      "[[:alnum:]]", "[\\p{L}\\p{Nd}]"
-      "[[:space:]]", "[\\s]"
-      "[[:word:]]", "[\\p{L}\\p{Nd}_]" ]
+let private horizontalClass = "[\\p{Zs}\\t]"
+let private verticalClass = "[\\n\\r\\v\\f\\x85\\u2028\\u2029]"
+let private wordClass = "[\\p{L}\\p{M}\\p{Nl}\\p{Nd}\\p{Pc}\\u200c\\u200d]"
 
-let private posixClassAt (pattern: string) (index: int) =
+let private negateClass (target: string) =
+    if target[1] = '^' then "[" + target.Substring(2)
+    else "[^" + target.Substring(1)
+
+let private characterEscape = function
+    | 'h' -> Some horizontalClass
+    | 'H' -> Some(negateClass horizontalClass)
+    | 'v' -> Some verticalClass
+    | 'V' -> Some(negateClass verticalClass)
+    | 'w' -> Some wordClass
+    | 'W' -> Some(negateClass wordClass)
+    | _ -> None
+
+let private posixPositiveClasses =
+    [ "[[:ascii:]]", "[\\x00-\\x7F]"
+      "[[:alpha:]]", "[\\p{L}\\p{Nl}]"
+      "[[:lower:]]", "[\\p{Ll}]"
+      "[[:upper:]]", "[\\p{Lu}]"
+      "[[:digit:]]", "[\\p{Nd}]"
+      "[[:xdigit:]]", "[\\p{Nd}A-Fa-f]"
+      "[[:alnum:]]", "[\\p{L}\\p{Nl}\\p{Nd}]"
+      "[[:space:]]", "[\\s]"
+      "[[:blank:]]", horizontalClass
+      "[[:cntrl:]]", "[\\p{Cc}]"
+      "[[:punct:]]", "[\\p{P}]"
+      // ICU graph/print admit format and private-use characters, but not
+      // controls, surrogates, or unassigned code points.
+      "[[:graph:]]", "[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Cf}\\p{Co}]"
+      "[[:print:]]", "[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Cf}\\p{Co}\\p{Zs}]"
+      // Unicode word characters also include combining marks and join controls.
+      "[[:word:]]", wordClass ]
+
+let private posixClasses =
+    let negated =
+        posixPositiveClasses |> List.map (fun (source: string, target: string) ->
+            source.Replace("[[:", "[[:^"), negateClass target)
+    posixPositiveClasses @ negated
+
+let private posixMembers =
     posixClasses
-    |> List.tryFind (fun (source, _) -> pattern.AsSpan(index).StartsWith(source, StringComparison.Ordinal))
+    |> List.map (fun (source: string, target) -> source.Substring(1, source.Length - 2), target)
+
+let private posixClassAt inClass (pattern: string) (index: int) =
+    if pattern[index] <> '[' then None
+    elif not inClass then
+        posixClasses
+        |> List.tryFind (fun (source, _) -> pattern.AsSpan(index).StartsWith(source, StringComparison.Ordinal))
+    else
+        posixPositiveClasses
+        |> List.tryPick (fun (source: string, target: string) ->
+            let memberSyntax = source.Substring(1, source.Length - 2)
+            if pattern.AsSpan(index).StartsWith(memberSyntax, StringComparison.Ordinal) then
+                Some(memberSyntax, target.Substring(1, target.Length - 2))
+            else None)
+
+let private quotedLiteralAt inClass (pattern: string) index =
+    let contentStart = index + 2
+    let closing = pattern.IndexOf("\\E", contentStart, StringComparison.Ordinal)
+    let contentEnd = if closing < 0 then pattern.Length else closing
+    let escaped = Regex.Escape(pattern.Substring(contentStart, contentEnd - contentStart))
+    let escaped = if inClass then escaped.Replace("]", "\\]").Replace("-", "\\-") else escaped
+    (if closing < 0 then contentEnd else contentEnd + 2), escaped
+
+let private mixedNegatedClassAt (pattern: string) start =
+    let outerNegated = start + 1 < pattern.Length && pattern[start + 1] = '^'
+    let ordinary = StringBuilder()
+    let alternatives = ResizeArray<string>()
+    let mutable index = start + (if outerNegated then 2 else 1)
+    let mutable closed = false
+    let mutable invalidMember = false
+
+    while index < pattern.Length && not closed do
+        if pattern[index] = '\\' && index + 1 < pattern.Length && pattern[index + 1] = 'Q' then
+            let nextIndex, literal = quotedLiteralAt true pattern index
+            ordinary.Append literal |> ignore
+            index <- nextIndex
+        elif pattern[index] = '\\' && index + 1 < pattern.Length then
+            match characterEscape pattern[index + 1] with
+            | Some target when target[1] = '^' -> alternatives.Add target
+            | Some target -> ordinary.Append(target, 1, target.Length - 2) |> ignore
+            | None when pattern[index + 1] = 'b' || pattern[index + 1] = 'B' ->
+                ordinary.Append pattern[index + 1] |> ignore
+            | None -> ordinary.Append(pattern, index, 2) |> ignore
+            index <- index + 2
+        elif pattern[index] = ']' then
+            closed <- true
+            index <- index + 1
+        else
+            let posixMember =
+                if pattern[index] = '[' then
+                    posixMembers
+                    |> List.tryFind (fun (syntax, _) -> pattern.AsSpan(index).StartsWith(syntax, StringComparison.Ordinal))
+                else None
+            match posixMember with
+            | Some(syntax, target) ->
+                if target[1] = '^' then alternatives.Add target
+                else ordinary.Append(target, 1, target.Length - 2) |> ignore
+                index <- index + syntax.Length
+            | None ->
+                if pattern.AsSpan(index).StartsWith("[:", StringComparison.Ordinal)
+                   && pattern.IndexOf(":]", index + 2, StringComparison.Ordinal) >= 0 then
+                    invalidMember <- true
+                ordinary.Append pattern[index] |> ignore
+                index <- index + 1
+
+    if not closed || alternatives.Count = 0 then None
+    elif invalidMember then Some(Error(index - start))
+    else
+        if ordinary.Length > 0 then alternatives.Insert(0, "[" + ordinary.ToString() + "]")
+        let union = String.concat "|" alternatives
+        // A bracket expression is one atom, so keep quantifiers attached to
+        // the whole union. The outer ^ complements that one-character union.
+        let rewritten =
+            if outerNegated then "(?:(?!(?:" + union + "))[\\s\\S])"
+            else "(?:" + union + ")"
+        Some(Ok(index - start, rewritten))
 
 let private normalizePosixClasses (pattern: string) =
     let builder = StringBuilder(pattern.Length)
     let mutable index = 0
     let mutable escaped = false
+    let mutable inClass = false
+    let mutable invalid = false
 
     while index < pattern.Length do
         if escaped then
@@ -60,23 +172,59 @@ let private normalizePosixClasses (pattern: string) =
             escaped <- false
             index <- index + 1
         elif pattern[index] = '\\' then
-            builder.Append '\\' |> ignore
-            escaped <- true
-            index <- index + 1
+            if index + 1 < pattern.Length && pattern[index + 1] = 'Q' then
+                let nextIndex, literal = quotedLiteralAt inClass pattern index
+                builder.Append literal |> ignore
+                index <- nextIndex
+            elif index + 1 < pattern.Length && pattern[index + 1] = 'E' then
+                builder.Append 'E' |> ignore
+                index <- index + 2
+            elif inClass && index + 1 < pattern.Length && (pattern[index + 1] = 'b' || pattern[index + 1] = 'B') then
+                builder.Append pattern[index + 1] |> ignore
+                index <- index + 2
+            elif not inClass && index + 1 < pattern.Length && pattern[index + 1] = 'R' then
+                builder.Append("(?:\\r\\n|" + verticalClass + ")") |> ignore
+                index <- index + 2
+            else
+                match if index + 1 < pattern.Length then characterEscape pattern[index + 1] else None with
+                | Some target when not inClass ->
+                    builder.Append target |> ignore
+                    index <- index + 2
+                | Some target when target[1] <> '^' ->
+                    builder.Append(target, 1, target.Length - 2) |> ignore
+                    index <- index + 2
+                | _ ->
+                    builder.Append '\\' |> ignore
+                    escaped <- true
+                    index <- index + 1
         else
-            match posixClassAt pattern index with
+            match posixClassAt inClass pattern index with
             | Some(source, target) ->
                 builder.Append target |> ignore
                 index <- index + source.Length
             | None ->
-                builder.Append pattern[index] |> ignore
-                index <- index + 1
+                match if not inClass && pattern[index] = '[' then mixedNegatedClassAt pattern index else None with
+                | Some(Ok(length, rewritten)) ->
+                    builder.Append rewritten |> ignore
+                    index <- index + length
+                | Some(Error length) ->
+                    invalid <- true
+                    index <- index + length
+                | None ->
+                    if inClass && pattern.AsSpan(index).StartsWith("[:", StringComparison.Ordinal) then
+                        let closing = pattern.IndexOf(":]", index + 2, StringComparison.Ordinal)
+                        if closing >= 0 then
+                            let memberSyntax = pattern.Substring(index, closing + 2 - index)
+                            invalid <- invalid || not (posixMembers |> List.exists (fun (syntax, _) -> syntax = memberSyntax))
+                    let character = pattern[index]
+                    builder.Append character |> ignore
+                    if character = '[' then inClass <- true
+                    elif character = ']' then inClass <- false
+                    index <- index + 1
 
-    builder.ToString()
+    builder.ToString(), invalid
 
-let private normalizePattern (options: RegexOptions) (pattern: string) : string =
-    let posix = normalizePosixClasses pattern
-
+let private normalizePattern (options: RegexOptions) (posix: string) : string =
     if not (options.HasFlag RegexOptions.IgnoreCase) then posix
     else
         let builder = StringBuilder(posix.Length)
@@ -243,32 +391,6 @@ let scalarAtUtf16Offset (text: string) utf16Offset =
 
     count
 
-let private hasInvalidPosixClass (pattern: string) =
-    let mutable index = 0
-    let mutable escaped = false
-    let mutable invalid = false
-
-    while index < pattern.Length && not invalid do
-        if escaped then
-            escaped <- false
-            index <- index + 1
-        elif pattern[index] = '\\' then
-            escaped <- true
-            index <- index + 1
-        elif pattern.AsSpan(index).StartsWith("[[:", StringComparison.Ordinal) then
-            let closing = pattern.IndexOf(":]]", index + 3, StringComparison.Ordinal)
-
-            if closing < 0 then
-                index <- pattern.Length
-            else
-                let source = pattern.Substring(index, closing + 3 - index)
-                invalid <- posixClasses |> List.exists (fun (known, _) -> known = source) |> not
-                index <- closing + 3
-        else
-            index <- index + 1
-
-    invalid
-
 let private invalidPattern (pattern: string) =
     let interval = Regex.Match(pattern, @"(?<!\\)\{(?<minimum>\d+),(?<maximum>\d+)\}")
 
@@ -280,8 +402,6 @@ let private invalidPattern (pattern: string) =
         | (true, minimum), (true, maximum) when maximum < minimum ->
             Some(3693, "The maximum is less than the minumum in a {min,max} interval.")
         | _ -> None
-    elif hasInvalidPosixClass pattern then
-        Some(3685, "Illegal argument to a regular expression.")
     elif pattern = "{" then
         Some(3688, "Syntax error in regular expression on line 1, character 1.")
     else
@@ -297,13 +417,16 @@ let private parseError (error: RegexParseException) =
     | _ -> InvalidPattern(3691, "Invalid regular expression.")
 
 let compile (collation: Collation.Collation) (matchType: string option) (pattern: string) : Result<Regex, RegexError> =
-    match invalidPattern pattern with
+    let posix, invalidPosix = normalizePosixClasses pattern
+    match invalidPattern posix with
     | Some(code, message) -> Error(InvalidPattern(code, message))
     | None ->
-        optionsFor collation matchType
-        |> Result.bind (fun options ->
-            try
-                Ok(Regex(normalizePattern options pattern, options, Limits.regexpMatchTimeout))
-            with
-            | :? RegexParseException as error -> Error(parseError error)
-            | :? ArgumentException -> Error(InvalidPattern(3691, "Invalid regular expression.")))
+        if invalidPosix then Error(InvalidPattern(3685, "Illegal argument to a regular expression."))
+        else
+            optionsFor collation matchType
+            |> Result.bind (fun options ->
+                try
+                    Ok(Regex(normalizePattern options posix, options, Limits.regexpMatchTimeout))
+                with
+                | :? RegexParseException as error -> Error(parseError error)
+                | :? ArgumentException -> Error(InvalidPattern(3691, "Invalid regular expression.")))

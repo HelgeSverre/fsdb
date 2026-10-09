@@ -752,7 +752,7 @@ let private statusFlagsFor (session: Session) : int =
 let private statusFlagsForMore (session: Session) = statusFlagsFor session ||| StatusMoreResultsExists
 
 let private warningCountFor (session: Session) =
-    min (int UInt16.MaxValue) session.Diagnostics.Length
+    min (int UInt16.MaxValue) session.DiagnosticsCount
 
 let private localInfileRequestPayload (fileName: string) =
     Array.append [| 0xfbuy |] (Encoding.UTF8.GetBytes fileName)
@@ -1882,7 +1882,11 @@ let private handleConnection
                                         return! loop session
                                 else
                                     let statements =
-                                        match Parser.splitStatementsPreservingSource sql with
+                                        match
+                                            Parser.splitStatementsPreservingSourceWithOptions
+                                                (Fsdb.Sql.SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText)
+                                                sql
+                                        with
                                         | Result.Ok statements -> Result.Ok statements
                                         | Result.Error _ -> Result.Error(1064, "You have an error in your SQL syntax")
 

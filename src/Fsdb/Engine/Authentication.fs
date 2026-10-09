@@ -100,16 +100,15 @@ let private sha256Crypt (password: byte[]) (salt: byte[]) rounds =
     let saltDigest = sha256 (Array.concat (List.replicate (16 + int first.[0]) salt))
     let repeatedSalt = repeatToLength salt.Length saltDigest
 
-    let final =
-        [ 0 .. rounds - 1 ]
-        |> List.fold
-            (fun previous round ->
-                sha256Parts
-                    [ if round &&& 1 = 1 then repeatedPassword else previous
-                      if round % 3 <> 0 then repeatedSalt
-                      if round % 7 <> 0 then repeatedPassword
-                      if round &&& 1 = 1 then previous else repeatedPassword ])
-            first
+    let mutable final = first
+
+    for round in 0 .. rounds - 1 do
+        final <-
+            sha256Parts
+                [ if round &&& 1 = 1 then repeatedPassword else final
+                  if round % 3 <> 0 then repeatedSalt
+                  if round % 7 <> 0 then repeatedPassword
+                  if round &&& 1 = 1 then final else repeatedPassword ]
 
     [ 0, 10, 20, 4
       21, 1, 11, 4

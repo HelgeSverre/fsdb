@@ -84,6 +84,7 @@ let defaultVariables: Map<string, string option> =
           "init_connect", ""
           "license", "GPL"
           "group_concat_max_len", "1024"
+          "max_error_count", "1024"
           "max_sp_recursion_depth", "0"
           "max_execution_time", "0"
           "div_precision_increment", "4"
@@ -371,6 +372,9 @@ type Session =
       PendingFoundRows: uint64 option
       /// Conditions from the most recently executed statement.
       Diagnostics: Condition list
+      /// Counts include conditions discarded after max_error_count is reached.
+      DiagnosticsCount: int
+      DiagnosticsErrorCount: int
       /// Session changes encoded in the successful command's final OK packet.
       SessionStateChanges: SessionStateChange list
       TransactionTracking: TransactionTracking
@@ -446,6 +450,8 @@ let create (connectionId: int) (store: Store) : Session =
       FoundRows = 0UL
       PendingFoundRows = None
       Diagnostics = []
+      DiagnosticsCount = 0
+      DiagnosticsErrorCount = 0
       SessionStateChanges = []
       TransactionTracking = emptyTransactionTracking
       LastResultColumnMetadata = []

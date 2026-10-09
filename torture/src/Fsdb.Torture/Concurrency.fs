@@ -443,7 +443,7 @@ module ConcurrencyRunner =
             return "prepared SELECT writes waited on generated unique keys and rebased before publication"
         }
 
-    let private catalogChurnCase connectionString timeoutSeconds () =
+    let private catalogChurnCase runDatabase connectionString timeoutSeconds () =
         task {
             use! setup = Database.openConnection connectionString
             let! _ = executeFaultSql timeoutSeconds setup None "DROP TABLE IF EXISTS concurrency_catalog_anchor"
@@ -451,11 +451,8 @@ module ConcurrencyRunner =
             let! _ = executeFaultSql timeoutSeconds setup None "INSERT INTO concurrency_catalog_anchor VALUES (1, 0)"
 
             let databaseNames =
-                [| for index in 1 .. catalogChurnDatabases -> sprintf "concurrency_catalog_%d" index |]
-
-            for databaseName in databaseNames do
-                let! _ = executeFaultSql timeoutSeconds setup None (sprintf "DROP DATABASE IF EXISTS %s" (Database.quoteIdentifier databaseName))
-                ()
+                [| for index in 1 .. catalogChurnDatabases -> sprintf "%s_catalog_%d" runDatabase index |]
+            let createdDatabases = ResizeArray<string>()
 
             use ready = new CountdownEvent(3)
             let start = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
@@ -478,9 +475,11 @@ module ConcurrencyRunner =
                     for databaseName in databaseNames do
                         let quoted = Database.quoteIdentifier databaseName
                         let! _ = executeFaultSql timeoutSeconds connection None (sprintf "CREATE DATABASE %s" quoted)
+                        createdDatabases.Add databaseName
                         let! _ = executeFaultSql timeoutSeconds connection None (sprintf "CREATE TABLE %s.probe (id INT PRIMARY KEY)" quoted)
                         let! _ = executeFaultSql timeoutSeconds connection None (sprintf "INSERT INTO %s.probe VALUES (1)" quoted)
                         let! _ = executeFaultSql timeoutSeconds connection None (sprintf "DROP DATABASE %s" quoted)
+                        createdDatabases.Remove databaseName |> ignore
                         ()
                 }
 
@@ -492,7 +491,11 @@ module ConcurrencyRunner =
 
                     for _ in 1 .. catalogChurnReads do
                         let! value = readFaultInt64 timeoutSeconds connection "SELECT value FROM concurrency_catalog_anchor WHERE id = 1"
-                        let! _ = readFaultInt64 timeoutSeconds connection "SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE 'concurrency_catalog_%'"
+                        let! _ =
+                            readFaultInt64
+                                timeoutSeconds
+                                connection
+                                (sprintf "SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE '%s_catalog_%%'" runDatabase)
 
                         if value < 0L || value > int64 catalogChurnTransactions then
                             raise (InvalidOperationException(sprintf "catalog query observed invalid anchor value %d" value))
@@ -524,7 +527,7 @@ module ConcurrencyRunner =
             start.SetResult()
             let! failures = Task.WhenAll pending
 
-            for databaseName in databaseNames do
+            for databaseName in createdDatabases do
                 let! _ = executeFaultSql timeoutSeconds setup None (sprintf "DROP DATABASE IF EXISTS %s" (Database.quoteIdentifier databaseName))
                 ()
 
@@ -548,7 +551,7 @@ module ConcurrencyRunner =
             return "database churn preserved concurrent catalog reads and transaction commits"
         }
 
-    let private runFaultSchedule target connectionString timeoutSeconds =
+    let private runFaultSchedule target runDatabase connectionString timeoutSeconds =
         task {
             let connectionString = connectionStringWithoutPooling connectionString timeoutSeconds
             let! queuedCancellation = runFaultCase "queued_cancellation" (queuedCancellationCase connectionString timeoutSeconds)
@@ -556,7 +559,7 @@ module ConcurrencyRunner =
             let! connectionChurn = runFaultCase "connection_churn" (connectionChurnCase connectionString timeoutSeconds)
             let! isolationContention = runFaultCase "isolation_contention" (isolationContentionCase connectionString timeoutSeconds)
             let! preparedKeyContention = runFaultCase "prepared_key_contention" (preparedKeyContentionCase connectionString timeoutSeconds)
-            let! catalogChurn = runFaultCase "catalog_churn" (catalogChurnCase connectionString timeoutSeconds)
+            let! catalogChurn = runFaultCase "catalog_churn" (catalogChurnCase runDatabase connectionString timeoutSeconds)
             let cases =
                 [| queuedCancellation
                    savepointContention
@@ -976,8 +979,8 @@ module ConcurrencyRunner =
                 let! mysqlVersion = Database.scalarString mysqlVersionConnection options.TimeoutSeconds "SELECT VERSION()"
                 let! mysql = runTarget "mysql" oracleConnectionString options
                 let! fsdb = runTarget "fsdb" (Runner.fsdbConnectionString subject.Port) options
-                let! mysqlFaults = runFaultSchedule "mysql" oracleConnectionString options.TimeoutSeconds
-                let! fsdbFaults = runFaultSchedule "fsdb" (Runner.fsdbConnectionString subject.Port) options.TimeoutSeconds
+                let! mysqlFaults = runFaultSchedule "mysql" databaseName oracleConnectionString options.TimeoutSeconds
+                let! fsdbFaults = runFaultSchedule "fsdb" databaseName (Runner.fsdbConnectionString subject.Port) options.TimeoutSeconds
                 let invariantErrors = Invariants.validate subject.Store
 
                 let classification, detail =

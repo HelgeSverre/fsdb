@@ -1384,6 +1384,26 @@ let tests =
               | Err(3102, msg) -> Expect.stringContains msg "BOOM" "fire-time backstop fired"
               | other -> failtestf "expected 3102 at fire time, got %A" other
 
+          testCase "trigger user-variable assignment cannot call a late DirectOnly extension"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+              let session = step session "CREATE TABLE t (n INT)"
+              let session = step session "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW SET @seen = boom(NEW.n)"
+              let mutable calls = 0
+              let boom =
+                  ScalarFunction.create "boom" (fun _ _ ->
+                      calls <- calls + 1
+                      VInt 1L)
+                  |> ScalarFunction.effectful
+              let session = { session with CustomFunctions = empty |> registerExtension boom }
+
+              match handle session "INSERT INTO t VALUES (1)" |> snd with
+              | Err(3102, message) -> Expect.stringContains message "BOOM" "DirectOnly error"
+              | other -> failtestf "expected 3102, got %A" other
+
+              Expect.equal calls 0 "extension was not called"
+
           testCase "trigger effects join the transaction and roll back with it"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -1471,6 +1491,20 @@ let tests =
 
               Expect.equal (rows store "SELECT n FROM strict_source") [] "the source insert remains atomic"
               Expect.equal (rows store "SELECT n FROM strict_log") [] "the failed body leaves no effects"
+
+          testCase "triggers use their captured fractional TIME mode in scalar functions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+              let session = step session "CREATE TABLE precision_source (n INT)"
+              let session = step session "CREATE TABLE precision_log (n INT)"
+              let session = step session "SET SESSION sql_mode='TIME_TRUNCATE_FRACTIONAL'"
+              let session =
+                  step session
+                      "CREATE TRIGGER precision_trigger AFTER INSERT ON precision_source FOR EACH ROW INSERT INTO precision_log VALUES (MICROSECOND('12:34:56.1234567'))"
+              let session = step session "SET SESSION sql_mode=''"
+              let _ = step session "INSERT INTO precision_source VALUES (1)"
+              Expect.equal (rows store "SELECT n FROM precision_log") [ [ Some "123456" ] ] "creation-time precision mode"
 
           testCase "triggers retain their parser and collation context"
           <| fun _ ->

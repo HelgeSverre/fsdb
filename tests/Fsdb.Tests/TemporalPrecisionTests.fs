@@ -137,7 +137,36 @@ let tests =
 
           testList
               "TIME_TRUNCATE_FRACTIONAL sql mode"
-              [ testCase "storage, casts, defaults, and ALTER use the session rounding policy"
+              [ testCase "stored functions retain their creation-time fractional mode"
+                <| fun _ ->
+                    let store = Fsdb.Storage.create ()
+                    let session, _ = handle (create 1 store) "USE fsdb"
+                    let session, _ = handle session "SET sql_mode='TIME_TRUNCATE_FRACTIONAL'"
+                    let session, created =
+                        handle session
+                            "CREATE FUNCTION precision_mode_fn() RETURNS INT DETERMINISTIC NO SQL RETURN MICROSECOND('12:34:56.1234567')"
+                    Expect.equal created (Fsdb.Executor.Affected 0UL) "function created"
+                    let session, _ = handle session "SET sql_mode=''"
+                    expectRow session "SELECT precision_mode_fn()" [ Some "123456" ] "captured routine mode"
+                    |> ignore
+
+                testCase "TIME scalar functions use the session precision policy"
+                <| fun _ ->
+                    let store = Fsdb.Storage.create ()
+                    let normal = create 1 store
+                    let truncated, _ = handle (create 2 store) "SET sql_mode = 'TIME_TRUNCATE_FRACTIONAL'"
+                    let sql =
+                        "SELECT TIME('12:34:56.1234567'), MICROSECOND('12:34:56.1234567'), TIME('34:59:59.9999995'), HOUR('34:59:59.9999995'), TIME_FORMAT('12:34:56.1234567','%f'), EXTRACT(MICROSECOND FROM '12:34:56.1234567'), MICROSECOND('2024-01-01 12:34:56.1234567'), EXTRACT(MICROSECOND FROM '2024-01-01 12:34:56.1234567'), DATE('2024-01-01 23:59:59.9999995')"
+                    expectRow normal sql
+                        [ Some "12:34:56.123457"; Some "123457"; Some "35:00:00.000000"; Some "35"; Some "123457"; Some "123457"; Some "123457"; Some "123457"; Some "2024-01-02" ]
+                        "default rounding"
+                    |> ignore
+                    expectRow truncated sql
+                        [ Some "12:34:56.123456"; Some "123456"; Some "34:59:59.999999"; Some "34"; Some "123456"; Some "123456"; Some "123456"; Some "123456"; Some "2024-01-01" ]
+                        "fractional truncation"
+                    |> ignore
+
+                testCase "storage, casts, defaults, and ALTER use the session rounding policy"
                 <| fun _ ->
                     let store = Fsdb.Storage.create ()
                     let rounded = create 1 store

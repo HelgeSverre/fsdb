@@ -2607,7 +2607,10 @@ let private requirementsForReferences privilege localSources outerSources refere
             |> List.choose _.Target
             |> List.map (fun target -> targetRequirement privilege target name)
         | QualifiedColumn(qualifier, column) ->
-            let find sources = sources |> List.filter (fun source -> eqI source.Qualifier qualifier)
+            let find sources =
+                sources
+                |> List.filter (fun source ->
+                    eqI source.Qualifier qualifier && (source.Columns |> List.exists (eqI column)))
             let local = find localSources
             let resolved = if local.IsEmpty then find outerSources else local
 
@@ -2677,7 +2680,11 @@ let rec private selectColumnRequirements store defaultDb outerSources inheritedC
                 let visibleSources = leftSources @ right
 
                 let nested =
-                    fromItemColumnRequirements store defaultDb outerSources ctes leftSources join.Table
+                    let preceding =
+                        match join.Kind with
+                        | RightJoin | NaturalRightJoin -> []
+                        | _ -> leftSources
+                    fromItemColumnRequirements store defaultDb outerSources ctes preceding join.Table
 
                 let onRequirements =
                     expressionColumnRequirements store defaultDb visibleSources outerSources ctes Set.empty join.On
@@ -2712,11 +2719,14 @@ let rec private selectColumnRequirements store defaultDb outerSources inheritedC
 
         requirementsForReferences "SELECT" sources outerSources references @ plain expression
 
-    let withAliases expression =
-        expressionColumnRequirements store defaultDb sources outerSources ctes aliases expression
-
     let withGroupAliases expression =
         expressionColumnRequirements store defaultDb sources outerSources ctes groupAliases expression
+
+    let withOrderAliases expression =
+        match expression with
+        | Col name when Set.contains (name.ToLowerInvariant()) aliases ->
+            expressionColumnRequirements store defaultDb sources outerSources ctes aliases expression
+        | _ -> withGroupAliases expression
 
     cteRequirements
     @ fromRequirements
@@ -2724,8 +2734,10 @@ let rec private selectColumnRequirements store defaultDb outerSources inheritedC
     @ (select.Projections |> List.collect projectionRequirements)
     @ (select.Where |> Option.map plain |> Option.defaultValue [])
     @ (select.GroupBy |> List.collect withGroupAliases)
-    @ (select.Having |> Option.map withAliases |> Option.defaultValue [])
-    @ (select.OrderBy |> List.collect (fst >> withAliases))
+    @ (select.Having
+       |> Option.map (expressionColumnRequirements store defaultDb sources outerSources ctes aliases)
+       |> Option.defaultValue [])
+    @ (select.OrderBy |> List.collect (fst >> withOrderAliases))
     @ (select.Windows
        |> List.collect (snd >> OverSpec >> Expression.overExpressions)
        |> List.collect plain)
@@ -2755,17 +2767,18 @@ and private fromItemColumnRequirements store defaultDb outerSources ctes leftSou
     function
     | FromJoinGroup(source, joins) ->
         let initial = sourcesForItem store defaultDb ctes source
-        let initialRequirements = fromItemColumnRequirements store defaultDb outerSources ctes [] source
+        let initialRequirements = fromItemColumnRequirements store defaultDb outerSources ctes leftSources source
         joins
         |> List.fold (fun (visible, requirements) join ->
             let right = sourcesForItem store defaultDb ctes join.Table
-            let nested = fromItemColumnRequirements store defaultDb outerSources ctes visible join.Table
-            let predicate = expressionColumnRequirements store defaultDb (visible @ right) outerSources ctes Set.empty join.On
-            let keys = joinKeyRequirements outerSources visible right join
+            let preceding = leftSources @ visible
+            let nested = fromItemColumnRequirements store defaultDb outerSources ctes preceding join.Table
+            let predicate = expressionColumnRequirements store defaultDb (preceding @ right) outerSources ctes Set.empty join.On
+            let keys = joinKeyRequirements outerSources preceding right join
             visible @ right, requirements @ nested @ predicate @ keys) (initial, initialRequirements)
         |> snd
     | FromTable _ -> []
-    | FromSubquery(body, _) -> selectOrUnionColumnRequirements store defaultDb [] ctes body
+    | FromSubquery(body, _) -> selectOrUnionColumnRequirements store defaultDb outerSources ctes body
     | FromLateral(body, _) -> selectOrUnionColumnRequirements store defaultDb (leftSources @ outerSources) ctes body
     | FromJsonTable(source, _, _, _) ->
         expressionColumnRequirements store defaultDb leftSources outerSources ctes Set.empty source
@@ -2781,7 +2794,11 @@ let private mutationJoinScope store defaultDb ctes (initial: PrivilegeSource) (j
         (fun (leftSources, requirements) (join: Join) ->
             let right = sourcesForItem store defaultDb ctes join.Table
             let sources = leftSources @ right
-            let nested = fromItemColumnRequirements store defaultDb [] ctes leftSources join.Table
+            let preceding =
+                match join.Kind with
+                | RightJoin | NaturalRightJoin -> []
+                | _ -> leftSources
+            let nested = fromItemColumnRequirements store defaultDb [] ctes preceding join.Table
             let predicate = expressionColumnRequirements store defaultDb sources [] ctes Set.empty join.On
             let keys = joinKeyRequirements [] leftSources right join
             sources, requirements @ nested @ predicate @ keys)

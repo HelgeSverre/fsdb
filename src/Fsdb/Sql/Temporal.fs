@@ -4,6 +4,7 @@ module Fsdb.Temporal
 open System
 open System.Globalization
 open System.Text.RegularExpressions
+open System.Threading
 
 /// Immutable rules loaded from MySQL's time-zone catalog.
 type NamedTimeZone =
@@ -163,6 +164,17 @@ let truncateTicksToFsp (fsp: int) (ticks: int64) : int64 =
     let precision = max 0 (min 6 fsp)
     let unit = pown 10L (7 - precision)
     ticks - ticks % unit
+
+// Stored objects temporarily restore their creation-time SQL mode. Keep scalar
+// parsing in the same dynamic scope as the store's execution settings.
+let private timeTruncateFractional = AsyncLocal<bool>()
+
+let internal withTimeTruncateFractional truncateFractional body =
+    DynamicScope.withValue timeTruncateFractional truncateFractional body
+
+let internal timeTicksAtSessionPrecision ticks =
+    if timeTruncateFractional.Value then truncateTicksToFsp 6 ticks
+    else roundTimeTicksToFsp 6 ticks
 
 let private timePattern =
     Regex(

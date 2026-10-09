@@ -4,6 +4,7 @@
 module Fsdb.Persistence
 
 open System
+open System.Collections.Generic
 open System.IO
 open System.Runtime.InteropServices
 open Fsdb.Ast
@@ -38,7 +39,8 @@ let private partitionCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Buy |]
 let private partitionHintSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Cuy |] // "FSNL" (format 21)
 let private partitionTablespaceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Duy |] // "FSNM" (format 22)
 
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Euy |] // "FSNN" (format 23)
+let private generatedForeignKeySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Euy |] // "FSNN" (format 23)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Fuy |] // "FSNO" (format 24)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -54,6 +56,7 @@ type private SnapshotFormat =
       ProxyPrivileges: bool
       SpatialReferences: bool
       PreparedXas: bool
+      PreparedXaCatalogRefs: bool
       TaggedIndexColumns: bool
       StableRowIds: bool
       PreparedXaLocks: bool
@@ -76,6 +79,7 @@ let private legacySnapshotFormat =
       ProxyPrivileges = false
       SpatialReferences = false
       PreparedXas = false
+      PreparedXaCatalogRefs = false
       TaggedIndexColumns = false
       StableRowIds = false
       PreparedXaLocks = false
@@ -141,8 +145,11 @@ let private partitionHintSnapshotFormat =
 let private partitionTablespaceSnapshotFormat =
     { partitionHintSnapshotFormat with PartitionTablespaces = true }
 
-let private currentSnapshotFormat =
+let private generatedForeignKeySnapshotFormat =
     { partitionTablespaceSnapshotFormat with GeneratedForeignKeyIndexes = true }
+
+let private currentSnapshotFormat =
+    { generatedForeignKeySnapshotFormat with PreparedXaCatalogRefs = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -151,6 +158,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = generatedForeignKeySnapshotMagic then
+        Some generatedForeignKeySnapshotFormat
     elif header = partitionTablespaceSnapshotMagic then
         Some partitionTablespaceSnapshotFormat
     elif header = partitionHintSnapshotMagic then
@@ -1180,6 +1189,7 @@ let private KindSchemaChangedV12 = 0x27uy
 let private KindSchemaChangedAtV12 = 0x28uy
 let private KindSchemaChangedV13 = 0x29uy
 let private KindSchemaChangedAtV13 = 0x2Auy
+let private KindWithDdlAllowInvalidDates = 0x2Buy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1278,6 +1288,10 @@ let private decodeStopwordPolicy (r: #IReader) =
 
 let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
     match event with
+    | WithDdlAllowInvalidDates(enabled, event) ->
+        w.WriteByte KindWithDdlAllowInvalidDates
+        writeBool w enabled
+        encodeEvent w event
     | WithFullTextStopwordSettings(settings, event) ->
         w.WriteByte KindWithFullTextStopwordSettings
         writeOptStr w settings.Source
@@ -1402,6 +1416,9 @@ let rec private decodeEventAt
     let str () = r.ReadLenEncString() |> Option.defaultValue ""
 
     match r.ReadByte() with
+    | k when k = KindWithDdlAllowInvalidDates ->
+        let enabled = readBool r
+        WithDdlAllowInvalidDates(enabled, decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
     | k when k = KindWithFullTextStopwordSettings ->
         let source = readOptStr r
         let policy = decodeStopwordPolicy r
@@ -1595,7 +1612,7 @@ let encodeWalRecord (event: CommitEvent) : byte[] =
 let private warn (context: string) (result: Result<'a, StorageError>) : unit =
     match result with
     | Ok _ -> ()
-    | Error e -> Log.diagnostic "fsdb: WAL replay warning (%s): %A" context e
+    | Error e -> raise (InvalidDataException(sprintf "Persistence: WAL DDL replay failed (%s): %A" context e))
 
 let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     match stmt with
@@ -1636,8 +1653,10 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
         // reject (and silently skip) an ALTER that clamped values.
         let saved = store.ExecutionSettings.SqlMode.Strict
         setStrictMode store false
-        warn "AlterTable" (alterTable store db table actions)
-        setStrictMode store saved
+        try
+            warn "AlterTable" (alterTable store db table actions)
+        finally
+            setStrictMode store saved
     | RenameTable pairs -> warn "RenameTable" (renameTables store db pairs)
     | Truncate table -> warn "Truncate" (truncate store db table)
     | other -> Log.diagnostic "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other
@@ -1647,6 +1666,12 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         failwith "Persistence: transaction nesting exceeds the apply limit"
 
     match event with
+    | WithDdlAllowInvalidDates(enabled, event) ->
+        let settings = executionSettings store
+        let replaySettings =
+            { settings with
+                SqlMode = { settings.SqlMode with AllowInvalidDates = enabled } }
+        withExecutionSettings store replaySettings (fun () -> applyEventAt (depth + 1) store event)
     | WithFullTextStopwordSettings(settings, event) ->
         applyEventAt (depth + 1)
             { store with FullTextStopwordSettings = lazy settings; FullTextStopwordsEnabled = settings.Policy <> FullText.StopwordPolicy.Disabled } event
@@ -1731,12 +1756,17 @@ let private replayWal (store: Store) (walPath: string) : int64 =
                 if crc32 payload <> crc then
                     stopped <- true
                 else
-                    try
-                        applyEvent store (decodeWalPayload store payload)
+                    let decoded =
+                        try Some(decodeWalPayload store payload)
+                        with ex ->
+                            Log.diagnostic "fsdb: WAL replay stopped at an unreadable record (%s): %s" walPath ex.Message
+                            None
+
+                    match decoded with
+                    | Some event ->
+                        applyEvent store event
                         offset <- offset + int64 (8 + recLen)
-                    with ex ->
-                        Log.diagnostic "fsdb: WAL replay stopped at an unreadable record (%s): %s" walPath ex.Message
-                        stopped <- true
+                    | None -> stopped <- true
 
         offset
 
@@ -1861,16 +1891,37 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                     if w.Count >= (1 <<< 20) then
                         flush ()))
 
-    writeCatalogPayload store.Catalog
+    let liveCatalog = store.Catalog
+    writeCatalogPayload liveCatalog
 
     let prepared = preparedXas store
     w.WriteInt32LE prepared.Length
+    // Catalog roots are rebuilt from the database cells for each transaction.
+    // Their immutable database maps still identify the same snapshot cheaply.
+    let catalogRootComparer =
+        { new IEqualityComparer<Catalog> with
+            member _.Equals(left, right) =
+                Map.count left = Map.count right
+                && (left |> Map.forall (fun name database ->
+                    right |> Map.tryFind name |> Option.exists (fun other -> Object.ReferenceEquals(database, other))))
+            member _.GetHashCode(catalog) =
+                catalog |> Map.fold (fun hash name database ->
+                    HashCode.Combine(hash, name, System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode database)) 17 }
+    let baseCatalogIds = Dictionary<Catalog, int>(catalogRootComparer)
 
     for xid, branch in prepared do
         encodeXid w xid
         writeBool w branch.ValidateWholeSnapshot
         encodeTransactionLockClaims w branch.LockClaims
-        writeCatalogPayload branch.BaseCatalog
+        if catalogRootComparer.Equals(branch.BaseCatalog, liveCatalog) then
+            w.WriteInt32LE -1
+        else
+            match baseCatalogIds.TryGetValue branch.BaseCatalog with
+            | true, index -> w.WriteInt32LE index
+            | false, _ ->
+                w.WriteInt32LE -2
+                baseCatalogIds.Add(branch.BaseCatalog, baseCatalogIds.Count)
+                writeCatalogPayload branch.BaseCatalog
         w.WriteInt32LE branch.Events.Length
 
         for event in branch.Events do
@@ -2035,6 +2086,7 @@ let private decodeCatalog (format: SnapshotFormat) (r: #IReader) : Catalog =
 
 let private decodeSnapshot (format: SnapshotFormat) (r: #IReader) =
     let catalog = decodeCatalog format r
+    let baseCatalogs = ResizeArray<Catalog>()
 
     let prepared =
         if format.PreparedXas then
@@ -2042,7 +2094,17 @@ let private decodeSnapshot (format: SnapshotFormat) (r: #IReader) =
                   let xid = decodeXid r
                   let validateWholeSnapshot = readBool r
                   let lockClaims = if format.PreparedXaLocks then decodeTransactionLockClaims r else []
-                  let baseCatalog = decodeCatalog format r
+                  let baseCatalog =
+                      if format.PreparedXaCatalogRefs then
+                          match r.ReadInt32LE() with
+                          | -1 -> catalog
+                          | -2 ->
+                              let decoded = decodeCatalog format r
+                              baseCatalogs.Add decoded
+                              decoded
+                          | index when index >= 0 && index < baseCatalogs.Count -> baseCatalogs.[index]
+                          | _ -> failwith "invalid prepared XA catalog reference"
+                      else decodeCatalog format r
                   let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEvent baseCatalog r)
                   let branchStore = Storage.create ()
                   setCatalog branchStore baseCatalog

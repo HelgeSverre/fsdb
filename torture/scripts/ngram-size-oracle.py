@@ -8,10 +8,12 @@ import time
 
 
 def run():
-    data = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-ngram-size-"))
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-ngram-size-"))
+    data = workspace / "data"
+    data.mkdir()
     socket = str(data / "mysql.sock")
     server = None
-    log_path = data.with_suffix(".log")
+    log_path = workspace / "server.log"
 
     def sql(statement):
         return subprocess.check_output(
@@ -119,8 +121,7 @@ def run():
         raise
     finally:
         stop()
-        shutil.rmtree(data)
-        log_path.unlink(missing_ok=True)
+        shutil.rmtree(workspace)
         print("Disposed native MySQL", flush=True)
 
 

@@ -4,7 +4,6 @@ open System
 open System.Globalization
 open System.Numerics
 open System.Text
-open System.Text.RegularExpressions
 open Fsdb.Ast
 open Fsdb.Value
 
@@ -34,10 +33,23 @@ let capture variables statement =
         | _ -> None)
         statement
 
-let private integerPrefix = Regex(@"^\s*[+-]?[0-9]+")
 let private minimumInteger = bigint Int64.MinValue
 let private maximumInteger = bigint UInt64.MaxValue
 let private integerModulus = maximumInteger + 1I
+
+let private boundedIntegerPrefix (text: string) =
+    let mutable index = 0
+    while index < text.Length && Char.IsWhiteSpace text.[index] do index <- index + 1
+    let negative = index < text.Length && text.[index] = '-'
+    if index < text.Length && (text.[index] = '-' || text.[index] = '+') then index <- index + 1
+    let firstDigit = index
+    let limit = if negative then -minimumInteger else maximumInteger
+    let mutable number = 0I
+    while index < text.Length && text.[index] >= '0' && text.[index] <= '9' do
+        if number < limit then
+            number <- min limit (number * 10I + bigint (int text.[index] - int '0'))
+        index <- index + 1
+    if index = firstDigit then 0I elif negative then -number else number
 
 let private integerBits value =
     let integer =
@@ -48,8 +60,7 @@ let private integerBits value =
         | VDouble number when Double.IsFinite number -> BigInteger(Math.Truncate number)
         | VDouble _ -> 0I
         | _ ->
-            let matched = integerPrefix.Match(toText value |> Option.defaultValue "")
-            if matched.Success then BigInteger.Parse(matched.Value, CultureInfo.InvariantCulture) else 0I
+            boundedIntegerPrefix (toText value |> Option.defaultValue "")
     let bounded = max minimumInteger (min maximumInteger integer)
     uint64 (if bounded < 0I then bounded + integerModulus else bounded)
 

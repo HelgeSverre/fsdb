@@ -2933,6 +2933,8 @@ let tests =
                           expects 3697 "The regular expression contains an [x-y] character range where x comes after y." [ VString "abc"; VString "[z-a]" ]
                           expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[[:bogus:]]" ]
                           expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[[:alpha:]][[:bogus:]]" ]
+                          expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[a[:bogus:]]" ]
+                          expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[x[:^alpha:][:bogus:]]" ]
                           expects 3691 "Mismatched parenthesis in regular expression." [ VString "abc"; VString ")" ]
 
                       testCase "REGEXP functions propagate every supplied optional NULL"
@@ -2999,6 +3001,219 @@ let tests =
                               (function
                               | Fsdb.Functions.SqlError(3686, "Index out of bounds in regular expression search.") -> ()
                               | other -> failtestf "expected 3686, got %A" other)
+
+                      testCase "REGEXP POSIX lower upper xdigit and blank classes match MySQL"
+                      <| fun _ ->
+                          let check pattern value mode expected =
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString mode ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A with %s" pattern value mode)
+                          for pattern, lower, upper in [ "[[:lower:]]", 1L, 0L; "[[:upper:]]", 0L, 1L ] do
+                              for small, capital in [ "a", "A"; "α", "Α" ] do
+                                  check pattern small "c" lower
+                                  check pattern capital "c" upper
+                                  check pattern small "i" 1L
+                                  check pattern capital "i" 1L
+                          for value, expected in [ "A", 1L; "f", 1L; "9", 1L; "５", 1L; "Ｇ", 0L; "g", 0L ] do
+                              check "[[:xdigit:]]" value "c" expected
+                          for value, expected in [ " ", 1L; "\t", 1L; "\u00a0", 1L; "\n", 0L ] do
+                              check "[[:blank:]]" value "c" expected
+
+                      testCase "REGEXP POSIX Unicode and character-boundary classes match MySQL"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "[[:alpha:]]", "Ⅳ", 1L
+                                "[[:alnum:]]", "Ⅳ", 1L
+                                "[[:word:]]", "\u0301", 1L
+                                "[[:word:]]", "\u200d", 1L
+                                "[[:word:]]", "²", 0L
+                                "[[:ascii:]]", "A", 1L
+                                "[[:ascii:]]", "é", 0L
+                                "[[:cntrl:]]", "\t", 1L
+                                "[[:cntrl:]]", " ", 0L
+                                "[[:punct:]]", "_", 1L
+                                "[[:punct:]]", "+", 0L
+                                "[[:graph:]]", "\u200d", 1L
+                                "[[:graph:]]", " ", 0L
+                                "[[:print:]]", "\u00a0", 1L
+                                "[[:print:]]", "\n", 0L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+                      testCase "REGEXP negated POSIX classes include line terminators"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "[[:^alpha:]]", "A", 0L
+                                "[[:^alpha:]]", "1", 1L
+                                "[[:^alpha:]]", "\n", 1L
+                                "[[:^word:]]", "\u0301", 0L
+                                "[[:^word:]]", "!", 1L
+                                "[[:^graph:]]", " ", 1L
+                                "[[:^graph:]]", "\n", 1L
+                                "[[:^print:]]", " ", 0L
+                                "[[:^print:]]", "\n", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+
+                      testCase "REGEXP combines POSIX members with literals and other classes"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "[a[:digit:]]", "a", 1L
+                                "[a[:digit:]]", "7", 1L
+                                "[a[:digit:]]", "b", 0L
+                                "[[:alpha:][:digit:]]", "A", 1L
+                                "[[:alpha:][:digit:]]", "7", 1L
+                                "[[:alpha:][:digit:]]", "!", 0L
+                                "^[a[:digit:]]+$", "a7", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+
+                      testCase "REGEXP combines negated POSIX members with literals"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "[x[:^alpha:]]", "x", 1L
+                                "[x[:^alpha:]]", "7", 1L
+                                "[x[:^alpha:]]", "A", 0L
+                                "[x[:^alpha:]]", "\n", 1L
+                                "^[x[:^alpha:]]+$", "x7", 1L
+                                "[[:^alpha:][:digit:]]", "7", 1L
+                                "[[:^alpha:][:digit:]]", "A", 0L
+                                "[^x[:^alpha:]]", "7", 0L
+                                "[^x[:^alpha:]]", "A", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+
+                      testCase "REGEXP horizontal and vertical whitespace escapes match MySQL"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "\\h", " ", 1L
+                                "\\h", "\t", 1L
+                                "\\h", "\u00a0", 1L
+                                "\\h", "\n", 0L
+                                "\\H", "A", 1L
+                                "\\H", " ", 0L
+                                "\\v", "\n", 1L
+                                "\\v", "\r", 1L
+                                "\\v", "\u0085", 1L
+                                "\\v", "\u2028", 1L
+                                "\\v", " ", 0L
+                                "\\V", "A", 1L
+                                "\\V", "\n", 0L
+                                "[a\\H]", "a", 1L
+                                "[a\\H]", "\n", 1L
+                                "[a\\H]", " ", 0L
+                                "[^\\h]", "\n", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "a\nb"; VString "\\v" ])
+                              (VString "\n")
+                              "vertical escape extracts a newline"
+                          Expect.equal
+                              (call "REGEXP_REPLACE" [ VString "a b"; VString "\\h"; VString "_" ])
+                              (VString "a_b")
+                              "horizontal escape replaces a space"
+                          Expect.equal
+                              (call "REGEXP_LIKE" [ VString "\\h"; VString "\\\\h"; VString "c" ])
+                              (VInt 1L)
+                              "escaped backslash keeps h literal"
+
+                      testCase "REGEXP line break escape treats CRLF as one match"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "a\r\nb"; VString "\\R" ])
+                              (VString "\r\n")
+                              "CRLF is one line break"
+                          Expect.equal
+                              (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "\\R"; VString "_" ])
+                              (VString "a_b")
+                              "replace CRLF once"
+                          Expect.equal
+                              (call "REGEXP_LIKE" [ VString "\r\n"; VString "^\\R$"; VString "c" ])
+                              (VInt 1L)
+                              "anchors span one CRLF match"
+
+                      testCase "REGEXP quoted literal syntax follows MySQL"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "^\\Qa+b\\E$", "a+b", 1L
+                                "^\\Qa+b\\E$", "aaab", 0L
+                                "^\\Qa+b", "a+b", 1L
+                                "^\\Qa+b", "aaab", 0L
+                                "^\\Qa\\b\\E$", "a\\b", 1L
+                                "^\\Eabc$", "Eabc", 1L
+                                "^\\Q[a]\\E$", "[a]", 1L
+                                "^[\\Q]\\E]$", "]", 1L
+                                "^[\\Qa-b\\E]$", "-", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "a.\r\nb"; VString "\\Q.\\E\\R" ])
+                              (VString ".\r\n")
+                              "quoted dot leaves CRLF available to the line-break escape"
+
+                      testCase "REGEXP word shorthand includes join controls"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "\\w", "\u200c", 1L
+                                "\\w", "\u200d", 1L
+                                "\\W", "\u200d", 0L
+                                "\\W", "!", 1L
+                                "[\\w]", "\u200d", 1L
+                                "[\\W]", "\u200d", 0L
+                                "[a\\W]", "!", 1L
+                                "[a\\W]", "\u200d", 0L
+                                "[\\Q]\\E\\W]", "]", 1L
+                                "[\\Q]\\E\\W]", "!", 1L
+                                "[\\Q]\\E\\W]", "\u200d", 0L
+                                "[^\\w]", "\u200d", 0L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+
+                      testCase "REGEXP word boundaries follow MySQL word characters"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "a\\b\u200db", "a\u200db", 0L
+                                "a\\B\u200db", "a\u200db", 1L
+                                "a\\b\u200cb", "a\u200cb", 0L
+                                "a\\B\u0301b", "a\u0301b", 1L
+                                "!\\ba", "!a", 1L
+                                "a\\b!", "a!", 1L
+                                "\\B!\\B", "!", 1L
+                                "[\\b]", "b", 1L
+                                "[\\b]", "\b", 0L
+                                "[\\B]", "B", 1L
+                                "[\\W\\b]", "b", 1L
+                                "[\\W\\b]", "a", 0L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+
+                      testCase "REGEXP quoted quantifiers remain literal"
+                      <| fun _ ->
+                          for pattern, value in
+                              [ "\\Q{3,2}\\E", "{3,2}"
+                                "\\Q{3,2}", "{3,2}"
+                                "\\Q{\\E", "{" ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt 1L)
+                                  (sprintf "%s matches its quoted literal" pattern)
 
                       testCase "REGEXP_SUBSTR returns the matched substring, or NULL if none"
                       <| fun _ ->

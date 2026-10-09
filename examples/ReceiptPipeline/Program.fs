@@ -111,11 +111,17 @@ let ocr (ctx: QueryContext) (args: Value list) : Value =
                 )
             | Some exe ->
                 // pdftotext wants a file; `-` streams the text to stdout.
-                let tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString "N" + ".pdf")
+                let tempDirectory = Directory.CreateTempSubdirectory("fsdb-ocr-")
+                let input = Path.Combine(tempDirectory.FullName, "receipt.pdf")
 
                 try
-                    File.WriteAllBytes(tmp, pdf)
-                    let psi = ProcessStartInfo(exe, sprintf "-q \"%s\" -" tmp, RedirectStandardOutput = true)
+                    if not (OperatingSystem.IsWindows()) then
+                        File.SetUnixFileMode(
+                            tempDirectory.FullName,
+                            UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute
+                        )
+                    File.WriteAllBytes(input, pdf)
+                    let psi = ProcessStartInfo(exe, sprintf "-q \"%s\" -" input, RedirectStandardOutput = true)
                     use proc = Process.Start psi
                     let text = proc.StandardOutput.ReadToEnd()
                     proc.WaitForExit()
@@ -125,7 +131,7 @@ let ocr (ctx: QueryContext) (args: Value list) : Value =
 
                     VString text
                 finally
-                    File.Delete tmp
+                    Directory.Delete(tempDirectory.FullName, true)
     | [ _ ] -> raise (SqlError(1582, "ocr expects a BLOB argument"))
     | _ -> raise (SqlError(1582, "ocr expects (pdf_blob)"))
 

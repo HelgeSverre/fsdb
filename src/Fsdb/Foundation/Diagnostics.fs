@@ -23,14 +23,32 @@ type DivisionByZeroPolicy =
 exception EvaluationError of code: int * message: string
 exception RaisedCondition of SqlState.Error
 
-let private active = AsyncLocal<ResizeArray<Condition> option>()
-let private deferred = AsyncLocal<ResizeArray<Condition> option>()
+type private Collector =
+    { Conditions: ResizeArray<Condition>
+      Limit: int
+      mutable Count: int
+      mutable ErrorCount: int }
+
+let private active = AsyncLocal<Collector option>()
+let private deferred = AsyncLocal<Collector option>()
+let private retainedLimit = AsyncLocal<int option>()
 let private rowNumber = AsyncLocal<int option>()
 let private divisionByZeroPolicy = AsyncLocal<DivisionByZeroPolicy>()
 let private strictNumericConversion = AsyncLocal<bool>()
 
+let private boundedCondition (condition: Condition) =
+    if condition.Message.Length > 511 then
+        { condition with Message = condition.Message.Substring(0, 511) }
+    else condition
+
 let record (condition: Condition) : unit =
-    active.Value |> Option.iter (fun conditions -> conditions.Add condition)
+    active.Value |> Option.iter (fun collector ->
+        collector.Count <- collector.Count + 1
+        if condition.Level = Error then collector.ErrorCount <- collector.ErrorCount + 1
+        if collector.Conditions.Count < collector.Limit then collector.Conditions.Add(boundedCondition condition))
+
+let withRetainedLimit limit body =
+    DynamicScope.withValue retainedLimit (Some(max 0 (min 65535 limit))) body
 
 let warning code message =
     record
@@ -113,22 +131,37 @@ let withRowNumber (row: int) (body: unit -> 'a) : 'a =
 
 type CapturedConditions =
     { BeforeError: Condition list
-      AfterError: Condition list }
+      AfterError: Condition list
+      Count: int
+      ErrorCount: int
+      Limit: int }
 
-let conditions captured = captured.BeforeError @ captured.AfterError
+let conditions captured = (captured.BeforeError @ captured.AfterError) |> List.truncate captured.Limit
 
 let complete error captured =
-    captured.BeforeError
-    @ (error |> Option.map (fromError >> List.singleton) |> Option.defaultValue [])
-    @ captured.AfterError
+    (captured.BeforeError
+    @ (error |> Option.map (fromError >> boundedCondition >> List.singleton) |> Option.defaultValue [])
+    @ captured.AfterError)
+    |> List.truncate captured.Limit
 
 let captureStatement (body: unit -> 'a) : 'a * CapturedConditions =
-    let conditions = ResizeArray()
-    let afterError = ResizeArray()
+    let limit = retainedLimit.Value |> Option.defaultValue 1024
+    let collector () =
+        { Conditions = ResizeArray()
+          Limit = limit
+          Count = 0
+          ErrorCount = 0 }
+    let beforeError = collector ()
+    let afterError = collector ()
     let result =
         DynamicScope.withValue deferred (Some afterError) (fun () ->
-            DynamicScope.withValue active (Some conditions) body)
-    result, { BeforeError = List.ofSeq conditions; AfterError = List.ofSeq afterError }
+            DynamicScope.withValue active (Some beforeError) body)
+    result,
+    { BeforeError = List.ofSeq beforeError.Conditions
+      AfterError = List.ofSeq afterError.Conditions
+      Count = beforeError.Count + afterError.Count
+      ErrorCount = beforeError.ErrorCount + afterError.ErrorCount
+      Limit = limit }
 
 let capture (body: unit -> 'a) : 'a * Condition list =
     let result, captured = captureStatement body

@@ -8,7 +8,15 @@ export SIMPLETEST_BASE_URL='http://127.0.0.1:8080'
 export MINK_DRIVER_ARGS_WEBDRIVER='["chrome", {"browserName":"chrome", "goog:chromeOptions":{"args":["--headless", "--no-sandbox", "--disable-dev-shm-usage"]}}, "http://127.0.0.1:9515"]'
 
 concurrency="${DRUPAL_CONCURRENCY:-8}"
+if [[ ! "$concurrency" =~ ^[1-9][0-9]{0,14}$ ]]; then
+    echo "DRUPAL_CONCURRENCY must be a positive integer" >&2
+    exit 2
+fi
 http_workers="${DRUPAL_HTTP_WORKERS:-$((concurrency * 2))}"
+if [[ ! "$http_workers" =~ ^[1-9][0-9]{0,15}$ ]]; then
+    echo "DRUPAL_HTTP_WORKERS must be a positive integer" >&2
+    exit 2
+fi
 artifact_dir="${SMOKE_RUN_ID:+/smoke-results/$SMOKE_RUN_ID}"
 
 if [[ -n "$artifact_dir" ]]; then
@@ -24,7 +32,7 @@ fi
 
 PHP_CLI_SERVER_WORKERS="$http_workers" php -S 0.0.0.0:8080 .ht.router.php >"$http_log" 2>&1 &
 http_pid=$!
-chromedriver --port=9515 --allowed-ips='' >"$webdriver_log" 2>&1 &
+chromedriver --port=9515 --allowed-ips=127.0.0.1 >"$webdriver_log" 2>&1 &
 webdriver_pid=$!
 
 cleanup() {

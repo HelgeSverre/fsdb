@@ -200,6 +200,7 @@ module CommitEvents =
 
     let rec summarize =
         function
+        | WithDdlAllowInvalidDates(_, event)
         | WithFullTextWordLengths(_, event)
         | WithNgramTokenSize(_, event)
         | WithStopwordFiltering(_, event)

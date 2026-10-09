@@ -56,6 +56,9 @@ type Collation =
       /// expansion rules here, but keeps accents significant even for an
       /// accent-insensitive collation.
       IsSubstringPrefix: string -> string -> bool
+      /// Fast substring search when both operands are ASCII, whose offsets
+      /// are unchanged by the substring collation's normalization.
+      FindSubstringAscii: string -> string -> int -> int
       /// PAD SPACE: trailing spaces are insignificant — `Equals` trims,
       /// and LIKE trims both subject and pattern ends before matching.
       PadSpace: bool
@@ -245,6 +248,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             binaryPrefix
         else
             fun value prefix -> ci.IsPrefix(substringText value, substringText prefix, substringFold)
+      FindSubstringAscii =
+        if spec.ByteOrder then
+            fun value needle offset -> value.IndexOf(needle, offset, StringComparison.Ordinal)
+        else
+            fun value needle offset -> ci.IndexOf(value, needle, offset, substringFold)
       PadSpace = spec.PadSpace
       EqualityIsOrderEquivalence =
         not spec.PadSpace

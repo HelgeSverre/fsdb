@@ -2699,6 +2699,66 @@ module ContractCatalog =
                           STR_TO_DATE('2024-02-29', '%Y-%m-%d'), TIMESTAMPADD(DAY, 1, '2024-02-29'),
                           TIMESTAMPDIFF(DAY, '2024-02-29', '2024-03-02')"""
 
+        let temporalEdgeSteps =
+            [| Contract.query
+                   "time-components-round-seven-digits"
+                   "SELECT HOUR('-34:20:30.1234567'),MINUTE('-34:20:30.1234567'),SECOND('-34:20:30.1234567'),MICROSECOND('-34:20:30.1234567'),HOUR('34:59:59.9999995'),MINUTE('34:59:59.9999995'),SECOND('34:59:59.9999995'),MICROSECOND('34:59:59.9999995'),HOUR('838:59:59.9999995'),MINUTE('838:59:59.9999995'),SECOND('838:59:59.9999995'),MICROSECOND('838:59:59.9999995')"
+               |> Contract.comparingValues
+               Contract.query
+                   "time-components-clamp-warning-source"
+                   "SELECT HOUR('838:59:59.9999995'),MINUTE('838:59:59.9999995'),TIME('839:00:00')"
+                   |> Contract.comparingValues
+               Contract.query "time-components-clamp-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               Contract.execute "time-precision-truncate-mode" "SET SESSION sql_mode='TIME_TRUNCATE_FRACTIONAL'"
+               Contract.query
+                   "time-precision-truncate-scalars"
+                   "SELECT TIME('12:34:56.1234567'),MICROSECOND('12:34:56.1234567'),TIME('34:59:59.9999995'),HOUR('34:59:59.9999995'),TIME_FORMAT('12:34:56.1234567','%f'),EXTRACT(MICROSECOND FROM '12:34:56.1234567'),MICROSECOND('2024-01-01 12:34:56.1234567'),EXTRACT(MICROSECOND FROM '2024-01-01 12:34:56.1234567'),DATE('2024-01-01 23:59:59.9999995')"
+                   |> Contract.comparingValues
+               Contract.execute "time-precision-default-mode" "SET SESSION sql_mode=DEFAULT"
+               Contract.execute "time-precision-source-table" "CREATE TABLE temporal_precision_source(n INT)"
+               Contract.execute "time-precision-log-table" "CREATE TABLE temporal_precision_log(n INT)"
+               Contract.execute "time-precision-captured-mode" "SET SESSION sql_mode='TIME_TRUNCATE_FRACTIONAL'"
+               Contract.execute
+                   "time-precision-create-trigger"
+                   "CREATE TRIGGER temporal_precision_trigger AFTER INSERT ON temporal_precision_source FOR EACH ROW INSERT INTO temporal_precision_log VALUES (MICROSECOND('12:34:56.1234567'))"
+               Contract.execute
+                   "time-precision-create-function"
+                   "CREATE FUNCTION temporal_precision_fn() RETURNS INT DETERMINISTIC NO SQL RETURN MICROSECOND('12:34:56.1234567')"
+               Contract.execute "time-precision-restore-mode" "SET SESSION sql_mode=DEFAULT"
+               Contract.execute "time-precision-fire-trigger" "INSERT INTO temporal_precision_source VALUES(1)"
+               Contract.query "time-precision-captured-results" "SELECT (SELECT n FROM temporal_precision_log),temporal_precision_fn()"
+                   |> Contract.comparingValues
+               Contract.execute "time-precision-drop-function" "DROP FUNCTION temporal_precision_fn"
+               Contract.execute "time-precision-drop-trigger" "DROP TRIGGER temporal_precision_trigger"
+               Contract.execute "time-precision-drop-log" "DROP TABLE temporal_precision_log"
+               Contract.execute "time-precision-drop-source" "DROP TABLE temporal_precision_source"
+               Contract.query
+                   "time-constructor-clamp-source"
+                   "SELECT SEC_TO_TIME(3020400),SEC_TO_TIME(-3020400),MAKETIME(839,0,0),MAKETIME(-839,0,0),MAKETIME(839,1,2.5),MAKETIME(839,1,'2.500'),MAKETIME(839,1,2e0)"
+                   |> Contract.comparingValues
+               Contract.query "time-constructor-clamp-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               Contract.query
+                   "time-arithmetic-clamp-source"
+                   "SELECT ADDTIME('838:59:59','00:00:01'),SUBTIME('-838:59:59','00:00:01'),TIMEDIFF('838:59:59','-00:00:01')"
+                   |> Contract.comparingValues
+               Contract.query "time-arithmetic-clamp-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               Contract.query
+                   "time-arithmetic-subsecond-source"
+                   "SELECT ADDTIME('838:59:59','00:00:00.000001'),TIMEDIFF('838:59:59','-00:00:00.000001')"
+                   |> Contract.comparingValues
+               Contract.query "time-arithmetic-subsecond-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               Contract.query
+                   "time-arithmetic-invalid-left-source"
+                   "SELECT SUBTIME('839:00:00','00:00:01'),TIMEDIFF('839:00:00','00:00:01')"
+                   |> Contract.comparingValues
+               Contract.query "time-arithmetic-invalid-left-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               Contract.query "time-arithmetic-invalid-add-source" "SELECT ADDTIME('839:00:00','00:00:01')"
+                   |> Contract.comparingValues
+               Contract.query "time-arithmetic-invalid-add-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               Contract.query "time-arithmetic-invalid-right-source" "SELECT TIMEDIFF('00:00:01','-839:00:00')"
+                   |> Contract.comparingValues
+               Contract.query "time-arithmetic-invalid-right-warnings" "SHOW WARNINGS" |> Contract.comparingValues |]
+
         let jsonSteps, jsonCoverage =
             functionProbe
                 "json-functions"
@@ -2842,6 +2902,7 @@ module ContractCatalog =
                 [ numericSteps
                   stringSteps
                   temporalSteps
+                  temporalEdgeSteps
                   jsonSteps
                   spatialSteps
                   typedSpatialConstructorSteps
@@ -3173,6 +3234,10 @@ module ContractCatalog =
                Contract.execute "wrong-value-count" "INSERT INTO contract_errors VALUES (3)" |> Contract.fails 1136 "21S01"
                Contract.query "scalar-subquery-cardinality" "SELECT (SELECT id FROM contract_errors)" |> Contract.fails 1242 "21000"
                Contract.query "row-arity" "SELECT (1, 2) = (1, 2, 3)" |> Contract.fails 1241 "21000"
+               Contract.query "empty-row-in-arity" "SELECT (1, 2) IN (SELECT id FROM contract_errors WHERE 0)"
+               |> Contract.fails 1241 "21000"
+               Contract.query "empty-row-in-valid" "SELECT (1, 2) IN (SELECT id, n FROM contract_errors WHERE 0)"
+               |> Contract.comparingValues
                Contract.query "state-unchanged" "SELECT id, n FROM contract_errors ORDER BY id" |]
           Cleanup = [| "DROP TABLE IF EXISTS contract_errors" |]
           Coverage =
@@ -6479,6 +6544,48 @@ module ContractCatalog =
                   [ "ALTER TABLE child ADD COLUMN c INT,ADD CONSTRAINT new_fk FOREIGN KEY(c) REFERENCES parent(n)" ],
                   [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk"
                     "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY new_fk" ]
+              "add-fk-modify-compatible", None,
+                  [ "ALTER TABLE child ADD COLUMN c BIGINT"
+                    "ALTER TABLE child ADD CONSTRAINT final_fk FOREIGN KEY(c) REFERENCES parent(n),MODIFY c INT" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY final_fk" ]
+              "modify-add-fk-compatible", None,
+                  [ "ALTER TABLE child ADD COLUMN c BIGINT"
+                    "ALTER TABLE child MODIFY c INT,ADD CONSTRAINT final_fk FOREIGN KEY(c) REFERENCES parent(n)" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY final_fk" ]
+              "add-fk-modify-incompatible", Some(6, 3780, "HY000"),
+                  [ "ALTER TABLE child ADD CONSTRAINT final_fk FOREIGN KEY(b) REFERENCES parent(n),MODIFY b BIGINT" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "modify-drop-fk", None,
+                  [ "ALTER TABLE child MODIFY a BIGINT,DROP FOREIGN KEY fk" ],
+                  []
+              "drop-fk-modify", None,
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk,MODIFY a BIGINT" ],
+                  []
+              "modify-drop-readd-fk", Some(6, 3780, "HY000"),
+                  [ "ALTER TABLE child MODIFY a BIGINT,DROP FOREIGN KEY fk,ADD CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n)" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "change-compatible", None,
+                  [ "ALTER TABLE child CHANGE COLUMN a renamed INT" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "change-incompatible", Some(6, 3780, "HY000"),
+                  [ "ALTER TABLE child CHANGE COLUMN a renamed BIGINT" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
+              "drop-fk-change", None,
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk,CHANGE COLUMN a renamed BIGINT" ],
+                  []
+              "change-drop-fk", None,
+                  [ "ALTER TABLE child CHANGE COLUMN a renamed BIGINT,DROP FOREIGN KEY fk" ],
+                  []
+              "add-fk-change-final", None,
+                  [ "ALTER TABLE child ADD CONSTRAINT new_fk FOREIGN KEY(renamed) REFERENCES parent(n),CHANGE COLUMN b renamed INT" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY new_fk" ]
+              "change-add-fk-final", None,
+                  [ "ALTER TABLE child CHANGE COLUMN b renamed INT,ADD CONSTRAINT new_fk FOREIGN KEY(renamed) REFERENCES parent(n)" ],
+                  [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk"
+                    "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY new_fk" ]
               "rename-child-column", None,
                   [ "ALTER TABLE child RENAME COLUMN a TO renamed" ],
                   [ "ALTER TABLE fk_alter_probe.child DROP FOREIGN KEY fk" ]
@@ -8311,8 +8418,62 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS signal_parent" |]
           Coverage = [| "statement:delete", [| "text-differential" |] |] }
 
+    let private regexpPosixClasses =
+        { Name = "regexp-posix-classes"
+          Setup =
+            [| "CREATE TABLE regex_display(n INT(4) ZEROFILL,s VARCHAR(4))"
+               "INSERT INTO regex_display VALUES (7,'007')"
+               "CREATE TABLE regex_dynamic(id INT PRIMARY KEY,s VARCHAR(10),p VARCHAR(10),f CHAR(1))"
+               "INSERT INTO regex_dynamic VALUES (1,'abc','^a','c'),(2,'abc','^b','c'),(3,'Abc','^a','i'),(4,'Abc','^a','c')" |]
+          Steps =
+            [| Contract.query "letter-classes"
+                   "SELECT REGEXP_LIKE('a','[[:lower:]]','c'),REGEXP_LIKE('A','[[:lower:]]','c'),REGEXP_LIKE('α','[[:lower:]]','c'),REGEXP_LIKE('Α','[[:lower:]]','i'),REGEXP_LIKE('a','[[:upper:]]','c'),REGEXP_LIKE('A','[[:upper:]]','c'),REGEXP_LIKE('Α','[[:upper:]]','c'),REGEXP_LIKE('α','[[:upper:]]','i')"
+                   |> Contract.comparingValues
+               Contract.query "digit-and-blank-classes"
+                   "SELECT REGEXP_LIKE('５','[[:xdigit:]]','c'),REGEXP_LIKE('Ｇ','[[:xdigit:]]','c'),REGEXP_LIKE('f','[[:xdigit:]]','c'),REGEXP_LIKE('g','[[:xdigit:]]','c'),REGEXP_LIKE('\\t','[[:blank:]]','c'),REGEXP_LIKE('\\n','[[:blank:]]','c'),REGEXP_LIKE(' ','[[:blank:]]','c')"
+                   |> Contract.comparingValues
+               Contract.query "unicode-and-character-boundaries"
+                   "SELECT REGEXP_LIKE('Ⅳ','[[:alpha:]]','c'),REGEXP_LIKE('Ⅳ','[[:alnum:]]','c'),REGEXP_LIKE('\u0301','[[:word:]]','c'),REGEXP_LIKE('\u200d','[[:word:]]','c'),REGEXP_LIKE('²','[[:word:]]','c'),REGEXP_LIKE('A','[[:ascii:]]','c'),REGEXP_LIKE('é','[[:ascii:]]','c'),REGEXP_LIKE('\\t','[[:cntrl:]]','c'),REGEXP_LIKE('_','[[:punct:]]','c'),REGEXP_LIKE('+','[[:punct:]]','c'),REGEXP_LIKE('\u200d','[[:graph:]]','c'),REGEXP_LIKE(' ','[[:graph:]]','c'),REGEXP_LIKE(' ','[[:print:]]','c'),REGEXP_LIKE('\\n','[[:print:]]','c')"
+                   |> Contract.comparingValues
+               Contract.query "negated-classes"
+                   "SELECT REGEXP_LIKE('A','[[:^alpha:]]','c'),REGEXP_LIKE('1','[[:^alpha:]]','c'),REGEXP_LIKE('\\n','[[:^alpha:]]','c'),REGEXP_LIKE('\u0301','[[:^word:]]','c'),REGEXP_LIKE('!','[[:^word:]]','c'),REGEXP_LIKE(' ','[[:^graph:]]','c'),REGEXP_LIKE('\\n','[[:^graph:]]','c'),REGEXP_LIKE(' ','[[:^print:]]','c'),REGEXP_LIKE('\\n','[[:^print:]]','c')"
+                   |> Contract.comparingValues
+               Contract.query "combined-classes"
+                   "SELECT REGEXP_LIKE('a','[a[:digit:]]','c'),REGEXP_LIKE('7','[a[:digit:]]','c'),REGEXP_LIKE('b','[a[:digit:]]','c'),REGEXP_LIKE('A','[[:alpha:][:digit:]]','c'),REGEXP_LIKE('7','[[:alpha:][:digit:]]','c'),REGEXP_LIKE('!','[[:alpha:][:digit:]]','c'),REGEXP_LIKE('a7','^[a[:digit:]]+$','c')"
+                   |> Contract.comparingValues
+               Contract.query "mixed-negated-members"
+                   "SELECT REGEXP_LIKE('x','[x[:^alpha:]]','c'),REGEXP_LIKE('7','[x[:^alpha:]]','c'),REGEXP_LIKE('A','[x[:^alpha:]]','c'),REGEXP_LIKE('\\n','[x[:^alpha:]]','c'),REGEXP_LIKE('x7','^[x[:^alpha:]]+$','c'),REGEXP_LIKE('7','[[:^alpha:][:digit:]]','c'),REGEXP_LIKE('A','[[:^alpha:][:digit:]]','c'),REGEXP_LIKE('7','[^x[:^alpha:]]','c'),REGEXP_LIKE('A','[^x[:^alpha:]]','c')"
+                   |> Contract.comparingValues
+               Contract.query "whitespace-escapes"
+                   "SELECT REGEXP_LIKE(' ','\\\\h','c'),REGEXP_LIKE('\\n','\\\\h','c'),REGEXP_LIKE(' ','\\\\H','c'),REGEXP_LIKE('\\n','\\\\v','c'),REGEXP_LIKE(' ','\\\\v','c'),REGEXP_LIKE('A','\\\\V','c'),REGEXP_LIKE('\\n','[a\\\\H]','c'),REGEXP_LIKE(' ','[a\\\\H]','c')"
+                   |> Contract.comparingValues
+               Contract.query "line-break-escape"
+                   "SELECT REGEXP_SUBSTR('a\\r\\nb','\\\\R'),REGEXP_REPLACE('a\\r\\nb','\\\\R','_'),REGEXP_LIKE('\\r\\n','^\\\\R$','c')"
+                   |> Contract.comparingValues
+               Contract.query "quoted-regex-literals"
+                   "SELECT REGEXP_LIKE('a+b','^\\\\Qa+b\\\\E$','c'),REGEXP_LIKE('aaab','^\\\\Qa+b\\\\E$','c'),REGEXP_LIKE('a+b','^\\\\Qa+b','c'),REGEXP_LIKE('Eabc','^\\\\Eabc$','c'),REGEXP_LIKE(']','^[\\\\Q]\\\\E]$','c'),REGEXP_LIKE('-','^[\\\\Qa-b\\\\E]$','c')"
+                   |> Contract.comparingValues
+               Contract.query "word-shorthand"
+                   "SELECT REGEXP_LIKE('‌','\\\\w','c'),REGEXP_LIKE('‍','\\\\w','c'),REGEXP_LIKE('‍','\\\\W','c'),REGEXP_LIKE('!','\\\\W','c'),REGEXP_LIKE('‍','[\\\\w]','c'),REGEXP_LIKE('!','[a\\\\W]','c'),REGEXP_LIKE('‍','[a\\\\W]','c'),REGEXP_LIKE(']','[\\\\Q]\\\\E\\\\W]','c'),REGEXP_LIKE('‍','[\\\\Q]\\\\E\\\\W]','c')"
+                   |> Contract.comparingValues
+               Contract.query "word-boundary-and-bracket-escapes"
+                   "SELECT REGEXP_LIKE('a‍b','a\\\\B‍b','c'),REGEXP_LIKE('a‍b','a\\\\b‍b','c'),REGEXP_LIKE('b','[\\\\b]','c'),REGEXP_LIKE('B','[\\\\B]','c'),REGEXP_LIKE('b','[\\\\W\\\\b]','c'),REGEXP_LIKE('a','[\\\\W\\\\b]','c')"
+                   |> Contract.comparingValues
+               Contract.query "quoted-intervals"
+                   "SELECT REGEXP_LIKE('{3,2}','\\\\Q{3,2}\\\\E','c'),REGEXP_LIKE('{3,2}','\\\\Q{3,2}','c'),REGEXP_LIKE('{','\\\\Q{\\\\E','c')"
+                   |> Contract.comparingValues
+               Contract.query "zerofill-and-text-operands"
+                   "SELECT REGEXP_LIKE(n,'^000'),n LIKE '000%',REGEXP_LIKE(s,'^00'),s LIKE '00%' FROM regex_display"
+                   |> Contract.comparingValues
+               Contract.query "row-varying-patterns-and-flags"
+                   "SELECT id,REGEXP_LIKE(s,p,f),s REGEXP p FROM regex_dynamic ORDER BY id"
+                   |> Contract.comparingValues |]
+          Cleanup = [| "DROP TABLE IF EXISTS regex_dynamic"; "DROP TABLE IF EXISTS regex_display" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let all =
         [| missingTableDiagnostics
+           regexpPosixClasses
            qualifiedDuplicateKeys
            alterCoercion
            alterRowOrder

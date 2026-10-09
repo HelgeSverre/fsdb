@@ -23,9 +23,15 @@ type Diagnostics =
 
 let empty = { Context = []; Hints = None; Resolution = []; Execution = emptyExecution }
 let private sameName left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
+let private boundedWarning (message: string) =
+    // MySQL diagnostic messages expose at most 511 characters.
+    if message.Length > 511 then message.Substring(0, 511) else message
 let private quoteIdentifier ansiQuotes (name: string) =
     let delimiter = if ansiQuotes then "\"" else "`"
-    delimiter + name.Replace(delimiter, delimiter + delimiter) + delimiter
+    // Only the prefix can survive diagnostic truncation. Avoid copying a
+    // multi-kilobyte QB_NAME once for every unresolved hint target.
+    let prefix = if name.Length > 511 then name.Substring(0, 511) else name
+    delimiter + prefix.Replace(delimiter, delimiter + delimiter) + delimiter
 
 type private Target =
     | TableTarget of name: string * table: string * indexes: string list
@@ -89,7 +95,7 @@ let private targetWarnings quote indexesFor (block: Block) =
     let warnings = ResizeArray<int * string>()
     let sources = block.Sources |> List.collect FromItem.leaves
     let sourceFor table = sources |> List.tryFind (fun source -> FromItem.tryQualifier source |> Option.exists (sameName table))
-    let unresolved name label = warnings.Add(3128, sprintf "Unresolved name %s for %s hint" label name)
+    let unresolved name label = warnings.Add(3128, boundedWarning (sprintf "Unresolved name %s for %s hint" label name))
     let indexExists source index =
         match source with
         | Some(FromTable table) -> indexesFor table |> Option.defaultValue [] |> List.exists (sameName index)
@@ -137,7 +143,7 @@ let private joinTargetWarnings quote (block: Block) =
                     let found = sources |> List.exists (fun source -> FromItem.tryQualifier source |> Option.exists (sameName table))
                     not sameBlock || not found)
                 |> Option.map (fun (table, requested) ->
-                    3128, sprintf "Unresolved name %s for %s hint" (quote table + blockSuffix quote requested) (OptimizerHints.joinOrderName kind))
+                    3128, boundedWarning (sprintf "Unresolved name %s for %s hint" (quote table + blockSuffix quote requested) (OptimizerHints.joinOrderName kind)))
             | _ -> None)
         |> List.ofSeq
 
@@ -173,7 +179,7 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                       Targets = ResizeArray(); Seen = HashSet(); JoinOrders = HashSet() }) |> Map.ofList
                 let context = ResizeArray<int * int * string>()
                 let named = Dictionary<string, Block>(StringComparer.OrdinalIgnoreCase)
-                let warn offset code text = context.Add(offset, code, text)
+                let warn offset code text = context.Add(offset, code, boundedWarning text)
                 let duplicate offset text = warn offset 3126 ("Hint " + text + " is ignored as conflicting/duplicated")
                 let selectHints, statementHints =
                     hints |> List.partition (fun hint -> hint.Location.Keyword.Equals("SELECT", StringComparison.OrdinalIgnoreCase))

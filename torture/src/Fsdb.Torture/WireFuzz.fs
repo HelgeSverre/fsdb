@@ -203,7 +203,7 @@ module WireRunner =
                 response.WriteByte 0uy
 
                 if hasCapability ClientConnectWithDb capabilities then
-                    response.WriteNullTerminatedString "mysql"
+                    response.WriteNullTerminatedString "information_schema"
 
                 if hasCapability ClientPluginAuth capabilities then
                     response.WriteNullTerminatedString "caching_sha2_password"
@@ -465,24 +465,19 @@ module WireRunner =
         else
             "pass"
 
-    let private createWireUser username target connectionString timeoutSeconds =
+    let private createWireUser username database target connectionString timeoutSeconds =
         task {
             use! connection = Database.openConnection connectionString
             let account = sprintf "'%s'@'%%'" username
-            let! dropped = Database.execute target connection timeoutSeconds ("DROP USER IF EXISTS " + account)
+            let! created = Database.execute target connection timeoutSeconds ("CREATE USER " + account + " IDENTIFIED BY ''")
 
-            if not (TargetOutcome.succeeded dropped) then
-                return Error dropped.Message
+            if not (TargetOutcome.succeeded created) then
+                return Error created.Message
             else
-                let! created = Database.execute target connection timeoutSeconds ("CREATE USER " + account + " IDENTIFIED BY ''")
+                let! granted =
+                    Database.execute target connection timeoutSeconds (sprintf "GRANT ALL PRIVILEGES ON `%s`.* TO %s" database account)
 
-                if not (TargetOutcome.succeeded created) then
-                    return Error created.Message
-                else
-                    let! granted =
-                        Database.execute target connection timeoutSeconds ("GRANT ALL PRIVILEGES ON *.* TO " + account)
-
-                    return if TargetOutcome.succeeded granted then Ok() else Error granted.Message
+                return if TargetOutcome.succeeded granted then Ok() else Error granted.Message
         }
 
     let private dropWireUser username target connectionString timeoutSeconds =
@@ -531,18 +526,19 @@ module WireRunner =
             Directory.CreateDirectory directory |> ignore
             let! revision, dirty = Tooling.gitState ()
             let assemblyPath = typeof<Fsdb.Storage.Store>.Assembly.Location
-            let username = sprintf "fsdb_wire_%d_%s" Environment.ProcessId ((Hashing.text runId).Substring(0, 8))
-            let localDatabase = "fsdb_wire_" + (Hashing.text runId).Substring(0, 12)
+            let nonce = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes 16).ToLowerInvariant()
+            let username = "fsdb_wire_" + nonce
+            let localDatabase = "fsdb_wire_" + nonce
             Fsdb.Log.silence ()
             use certificate = serverCertificate ()
             let serverOptions = Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withCertificate certificate
             use subject = new FsdbSubject(serverOptions = serverOptions)
             let fsdbConnection = Runner.fsdbConnectionString subject.Port
 
-            match! createWireUser username "mysql" options.MySqlConnection options.TimeoutSeconds with
+            match! createWireUser username localDatabase "mysql" options.MySqlConnection options.TimeoutSeconds with
             | Error error -> return Error("could not create MySQL wire user: " + error)
             | Ok() ->
-                match! createWireUser username "fsdb" fsdbConnection options.TimeoutSeconds with
+                match! createWireUser username localDatabase "fsdb" fsdbConnection options.TimeoutSeconds with
                 | Error error ->
                     let! _ = dropWireUser username "mysql" options.MySqlConnection options.TimeoutSeconds
                     return Error("could not create fsdb wire user: " + error)

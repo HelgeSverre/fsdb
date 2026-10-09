@@ -2303,6 +2303,51 @@ let tests =
                     | Err(1253, _) -> ()
                     | other -> failtestf "expected incompatible collation error, got %A" other
 
+                testCase "FULLTEXT functional key parts are rejected before catalog publication"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "CREATE TABLE rejected (body VARCHAR(100), FULLTEXT KEY ft ((LOWER(body))))" with
+                    | Err(3759, _) -> ()
+                    | other -> failtestf "expected MySQL FULLTEXT functional-key error, got %A" other
+
+                    Expect.isFalse (store.Catalog.[defaultDatabase].ContainsKey "rejected") "failed CREATE leaves no table"
+                    runDefault store "CREATE TABLE docs (body VARCHAR(100))" |> ignore
+
+                    match runDefault store "CREATE FULLTEXT INDEX ft ON docs ((LOWER(body)))" with
+                    | Err(3759, _) -> ()
+                    | other -> failtestf "expected MySQL FULLTEXT functional-key error, got %A" other
+
+                    match runDefault store "ALTER TABLE docs ADD FULLTEXT INDEX ft ((LOWER(body)))" with
+                    | Err(3759, _) -> ()
+                    | other -> failtestf "expected MySQL FULLTEXT functional-key error, got %A" other
+
+                    let parsedIndex =
+                        match Fsdb.Parser.parse "CREATE TABLE shape (body VARCHAR(100), FULLTEXT KEY ft ((LOWER(body))))" with
+                        | Ok(CreateTable table) -> table.Indexes.Head
+                        | other -> failtestf "expected FULLTEXT index shape, got %A" other
+
+                    match alterTable store defaultDatabase "docs" [ AddIndex { parsedIndex with Unique = true } ] with
+                    | Error(ExpressionError(3759, _)) -> ()
+                    | other -> failtestf "direct storage caller bypassed FULLTEXT validation: %A" other
+
+                testCase "charset conversion rejects newly colliding UNIQUE values atomically"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE names (name VARCHAR(20) COLLATE utf8mb4_bin UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO names VALUES ('A'), ('a')" |> ignore
+
+                    match runDefault store "ALTER TABLE names CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected duplicate-key error from folded collation, got %A" other
+
+                    let table = store.Catalog.[defaultDatabase].[normalizeTableName "names"]
+                    Expect.equal table.Columns.Head.Collation (Some "utf8mb4_bin") "failed ALTER retains collation"
+
+                    match runDefault store "SELECT name FROM names ORDER BY name" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "A" ]; [ Some "a" ] ] "failed ALTER retains both rows"
+                    | other -> failtestf "expected both original rows, got %A" other
+
                 testCase "CHANGE COLUMN renames and SELECT sees the new name"
                 <| fun _ ->
                     let store = newStore ()
@@ -5175,6 +5220,10 @@ let tests =
                     | Err(1241, "Operand should contain 2 column(s)") -> ()
                     | other -> failtestf "expected row-IN arity error, got %A" other
 
+                    match runDefault store "SELECT (1, 2) IN (SELECT 1 WHERE 0)" with
+                    | Err(1241, "Operand should contain 2 column(s)") -> ()
+                    | other -> failtestf "expected empty row-IN subquery arity error, got %A" other
+
                     match runDefault store "SELECT (1, 2)" with
                     | Err(1241, "Operand should contain 1 column(s)") -> ()
                     | other -> failtestf "expected scalar-context row arity error, got %A" other
@@ -5210,6 +5259,29 @@ let tests =
                     match runDefault store "SELECT s FROM t WHERE s REGEXP '^H'" with
                     | ResultSet([ "s" ], [ [ Some "Hello" ] ]) -> ()
                     | other -> failtestf "expected the case-sensitive REGEXP to match 'Hello' against '^H', got %A" other
+
+                testCase "text predicates preserve numeric ZEROFILL display"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT(4) ZEROFILL, s VARCHAR(4))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (7,'007')" |> ignore
+
+                    match runDefault store "SELECT REGEXP_LIKE(n,'^000'),n LIKE '000%',REGEXP_LIKE(s,'^00'),s LIKE '00%' FROM t" with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected numeric ZEROFILL and text operands to match their display forms, got %A" other
+
+                testCase "REGEXP row patterns and match types remain independent"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t(id INT PRIMARY KEY,s VARCHAR(10),p VARCHAR(10),f CHAR(1))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1,'abc','^a','c'),(2,'abc','^b','c'),(3,'Abc','^a','i'),(4,'Abc','^a','c')" |> ignore
+
+                    match runDefault store "SELECT id,REGEXP_LIKE(s,p,f),s REGEXP p FROM t ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "1" ]
+                                     [ Some "2"; Some "0"; Some "0" ]
+                                     [ Some "3"; Some "1"; Some "1" ]
+                                     [ Some "4"; Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected each row's pattern and flags to govern its match, got %A" other
 
                 testCase "REGEXP entry points use operand collation and match_type case policy"
                 <| fun _ ->
@@ -9233,6 +9305,54 @@ let tests =
                         [ [ None; Some "1" ]; [ None; Some "2" ]; [ None; Some "3" ]; [ None; Some "4" ]; [ None; Some "5" ] ]
                         "an empty left side preserves every indexed right row"
 
+                testCase "indexed joins recheck equality when a derived probe cannot use the index"
+                <| fun _ ->
+                    let store = newStore ()
+                    let metadata =
+                        { TypeId = TypeLong
+                          ColumnLength = 11u
+                          Flags = 0us
+                          Decimals = 0uy
+                          CollationId = None
+                          Origin = None }
+                    let registry =
+                        builtins
+                        |> registerScalarWithMetadata "BAD_INT" metadata (fun _ -> VString "blocked")
+
+                    runDefault store "CREATE TABLE indexed_keys (k INT, value VARCHAR(12), KEY ix_k (k))" |> ignore
+                    runDefault store "INSERT INTO indexed_keys VALUES (0, 'zero'), (1, 'one')" |> ignore
+
+                    for joinSql in
+                        [ "JOIN indexed_keys r USING (k)"
+                          "NATURAL JOIN indexed_keys r"
+                          "LEFT JOIN indexed_keys r USING (k)"
+                          "JOIN indexed_keys r ON d.k = r.k" ] do
+                        let sql =
+                            $"SELECT r.value FROM (SELECT BAD_INT() AS k) d {joinSql} LIMIT 10"
+
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "zero" ] ]) -> ()
+                        | other -> failtestf "expected only the numeric-zero match for %s, got %A" joinSql other
+
+                    runDefault store "DELETE FROM indexed_keys WHERE k = 0" |> ignore
+
+                    for joinSql in [ "LEFT JOIN indexed_keys r USING (k)"; "NATURAL LEFT JOIN indexed_keys r" ] do
+                        let sql = $"SELECT r.value FROM (SELECT BAD_INT() AS k) d {joinSql} LIMIT 10"
+
+                        match run store registry sql with
+                        | ResultSet(_, [ [ None ] ]) -> ()
+                        | other -> failtestf "expected a null-padded unmatched row for %s, got %A" joinSql other
+
+                    for joinSql in
+                        [ "RIGHT JOIN (SELECT BAD_INT() AS k) d USING (k)"
+                          "NATURAL RIGHT JOIN (SELECT BAD_INT() AS k) d"
+                          "RIGHT JOIN (SELECT BAD_INT() AS k) d ON r.k = d.k AND r.k > 0" ] do
+                        let sql = $"SELECT r.value FROM indexed_keys r {joinSql} LIMIT 10"
+
+                        match run store registry sql with
+                        | ResultSet(_, [ [ None ] ]) -> ()
+                        | other -> failtestf "expected a null-padded preserved-right row for %s, got %A" joinSql other
+
                 testCase "indexed USING and NATURAL outer joins retain their coalesced rows"
                 <| fun _ ->
                     let store = newStore ()
@@ -10742,6 +10862,181 @@ let tests =
                     | Err(1452, _) -> ()
                     | other -> failtestf "expected 1452 for a missing parent key, got %A" other ]
 
+          testList
+              "foreign-key column changes"
+              [ testCase "foreign-key columns cannot change type or be dropped and re-added"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE fk_parent (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE fk_child (id INT PRIMARY KEY, pid INT, CONSTRAINT fk_cp FOREIGN KEY(pid) REFERENCES fk_parent(id))" |> ignore
+
+                    let rejectedAlterations =
+                        [ "ALTER TABLE fk_parent MODIFY id BIGINT NOT NULL", 3780
+                          "ALTER TABLE fk_child MODIFY pid BIGINT", 3780
+                          "ALTER TABLE fk_child DROP COLUMN pid, ADD COLUMN pid INT", 1828
+                          "ALTER TABLE fk_parent DROP PRIMARY KEY, DROP COLUMN id, ADD COLUMN id INT PRIMARY KEY", 1829 ]
+
+                    for checks in [ true; false ] do
+                        setForeignKeyChecks store checks
+
+                        for sql, code in rejectedAlterations do
+                            match runDefault store sql with
+                            | Err(actual, _) when actual = code -> ()
+                            | other -> failtestf "expected %d with foreign_key_checks=%b for %s, got %A" code checks sql other
+
+                    setForeignKeyChecks store true
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE fk_child MODIFY pid INT NOT NULL")
+                        (Affected 0UL)
+                        "compatible nullability change remains allowed"
+
+                    match runDefault store "ALTER TABLE fk_child DROP FOREIGN KEY fk_cp, DROP COLUMN pid, ADD COLUMN pid INT" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "dropping the constraint permits replacing its column, got %A" other
+
+                testCase "foreign-key type compatibility keeps MySQL's family boundaries"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE text_parent (id VARCHAR(10) COLLATE utf8mb4_bin PRIMARY KEY)" |> ignore
+
+                    match runDefault store "CREATE TABLE text_child (pid VARCHAR(30) COLLATE utf8mb4_bin, CONSTRAINT fk_text FOREIGN KEY(pid) REFERENCES text_parent(id))" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "varchar length differences are compatible, got %A" other
+
+                    match runDefault store "CREATE TABLE wrong_collation (pid VARCHAR(30) COLLATE utf8mb4_0900_ai_ci, CONSTRAINT fk_wrong FOREIGN KEY(pid) REFERENCES text_parent(id))" with
+                    | Err(3780, _) -> ()
+                    | other -> failtestf "different text collations are incompatible, got %A" other
+
+                    runDefault store "CREATE TABLE decimal_parent (id DECIMAL(10,2) PRIMARY KEY)" |> ignore
+
+                    match runDefault store "CREATE TABLE decimal_child (pid DECIMAL(12,3), CONSTRAINT fk_decimal FOREIGN KEY(pid) REFERENCES decimal_parent(id))" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "decimal precision and scale differences are compatible, got %A" other
+
+                    runDefault store "CREATE TABLE enum_parent (id ENUM('a','b') PRIMARY KEY)" |> ignore
+
+                    match runDefault store "CREATE TABLE enum_child (pid ENUM('a','b','c'), CONSTRAINT fk_enum FOREIGN KEY(pid) REFERENCES enum_parent(id))" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "ENUM member lists may differ, got %A" other
+
+                    runDefault store "CREATE TABLE set_parent (id SET('a','b') PRIMARY KEY)" |> ignore
+
+                    match runDefault store "CREATE TABLE enum_set_child (pid ENUM('a','b'), CONSTRAINT fk_enum_set FOREIGN KEY(pid) REFERENCES set_parent(id))" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "MySQL 8.4 accepts ENUM references to SET columns, got %A" other
+
+                    match runDefault store "CREATE TABLE set_enum_child (pid SET('a','b'), CONSTRAINT fk_set_enum FOREIGN KEY(pid) REFERENCES enum_parent(id))" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "MySQL 8.4 accepts SET references to ENUM columns, got %A" other
+
+                    runDefault store "CREATE TABLE latin_parent (id VARCHAR(10) CHARACTER SET latin1 PRIMARY KEY)" |> ignore
+
+                    match runDefault store "CREATE TABLE utf8_child (pid VARCHAR(10) CHARACTER SET utf8mb4, CONSTRAINT fk_charset FOREIGN KEY(pid) REFERENCES latin_parent(id))" with
+                    | Err(3780, _) -> ()
+                    | other -> failtestf "different implicit charsets must not share an FK, got %A" other
+
+                    match runDefault store "ALTER TABLE text_parent CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci" with
+                    | Err(3780, _) -> ()
+                    | other -> failtestf "conversion to a different referenced collation fails with 3780, got %A" other
+
+                testCase "ADD FOREIGN KEY validates the final column type in a combined ALTER"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent_final (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE child_final (pid BIGINT)" |> ignore
+
+                    match runDefault store "ALTER TABLE child_final ADD CONSTRAINT fk_final FOREIGN KEY(pid) REFERENCES parent_final(id), MODIFY pid INT" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "MySQL 8.4 accepts an FK compatible with the final column type, got %A" other
+
+                    runDefault store "CREATE TABLE child_reverse (pid BIGINT)" |> ignore
+
+                    match runDefault store "ALTER TABLE child_reverse MODIFY pid INT, ADD CONSTRAINT fk_reverse FOREIGN KEY(pid) REFERENCES parent_final(id)" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "the reversed action order also uses the final type, got %A" other
+
+                    runDefault store "CREATE TABLE child_invalid (pid INT)" |> ignore
+
+                    match runDefault store "ALTER TABLE child_invalid ADD CONSTRAINT fk_invalid FOREIGN KEY(pid) REFERENCES parent_final(id), MODIFY pid BIGINT" with
+                    | Err(3780, _) -> ()
+                    | other -> failtestf "MySQL 8.4 rejects an FK incompatible with the final type, got %A" other
+
+                testCase "DROP FOREIGN KEY permits a column type change in either ALTER action order"
+                <| fun _ ->
+                    for action in
+                        [ "MODIFY pid BIGINT,DROP FOREIGN KEY fk_child"
+                          "DROP FOREIGN KEY fk_child,MODIFY pid BIGINT" ] do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE parent_drop (id INT PRIMARY KEY)" |> ignore
+                        runDefault store "CREATE TABLE child_drop (pid INT,CONSTRAINT fk_child FOREIGN KEY(pid) REFERENCES parent_drop(id))" |> ignore
+
+                        match runDefault store ("ALTER TABLE child_drop " + action) with
+                        | Affected 0UL -> ()
+                        | other -> failtestf "MySQL 8.4 accepts %s, got %A" action other
+
+                        match runDefault store "SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_NAME='child_drop' AND COLUMN_NAME='pid'" with
+                        | ResultSet(_, [ [ Some columnType ] ]) -> Expect.equal columnType "bigint" "the new child type is published"
+                        | other -> failtestf "expected the altered child type, got %A" other
+
+                        match runDefault store "SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_NAME='child_drop' AND REFERENCED_TABLE_NAME IS NOT NULL" with
+                        | ResultSet(_, []) -> ()
+                        | other -> failtestf "expected the foreign key to be removed, got %A" other
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent_readd (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE child_readd (pid INT,CONSTRAINT fk_child FOREIGN KEY(pid) REFERENCES parent_readd(id))" |> ignore
+
+                    match runDefault store "ALTER TABLE child_readd MODIFY pid BIGINT,DROP FOREIGN KEY fk_child,ADD CONSTRAINT fk_child FOREIGN KEY(pid) REFERENCES parent_readd(id)" with
+                    | Err(3780, _) -> ()
+                    | other -> failtestf "MySQL 8.4 rejects an incompatible re-added key, got %A" other
+
+                    match runDefault store "SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_NAME='child_readd' AND COLUMN_NAME='pid'" with
+                    | ResultSet(_, [ [ Some columnType ] ]) -> Expect.equal columnType "int" "the failed ALTER retains the original child type"
+                    | other -> failtestf "expected the original child type, got %A" other
+
+                    match runDefault store "SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_NAME='child_readd' AND REFERENCED_TABLE_NAME IS NOT NULL" with
+                    | ResultSet(_, [ [ Some name ] ]) -> Expect.equal name "fk_child" "the failed ALTER retains the original foreign key"
+                    | other -> failtestf "expected the original foreign key, got %A" other
+
+                testCase "CHANGE COLUMN validates foreign keys against the final definition"
+                <| fun _ ->
+                    let cases =
+                        [ "rename-compatible", "CHANGE COLUMN a renamed INT", None,
+                          [ [ Some "renamed"; Some "int" ]; [ Some "b"; Some "int" ] ],
+                          [ [ Some "fk"; Some "renamed" ] ]
+                          "rename-incompatible", "CHANGE COLUMN a renamed BIGINT", Some 3780,
+                          [ [ Some "a"; Some "int" ]; [ Some "b"; Some "int" ] ],
+                          [ [ Some "fk"; Some "a" ] ]
+                          "drop-change", "DROP FOREIGN KEY fk,CHANGE COLUMN a renamed BIGINT", None,
+                          [ [ Some "renamed"; Some "bigint" ]; [ Some "b"; Some "int" ] ], []
+                          "change-drop", "CHANGE COLUMN a renamed BIGINT,DROP FOREIGN KEY fk", None,
+                          [ [ Some "renamed"; Some "bigint" ]; [ Some "b"; Some "int" ] ], []
+                          "add-final-change", "ADD CONSTRAINT new_fk FOREIGN KEY(renamed) REFERENCES parent_change(n),CHANGE COLUMN b renamed INT", None,
+                          [ [ Some "a"; Some "int" ]; [ Some "renamed"; Some "int" ] ],
+                          [ [ Some "fk"; Some "a" ]; [ Some "new_fk"; Some "renamed" ] ]
+                          "change-add-final", "CHANGE COLUMN b renamed INT,ADD CONSTRAINT new_fk FOREIGN KEY(renamed) REFERENCES parent_change(n)", None,
+                          [ [ Some "a"; Some "int" ]; [ Some "renamed"; Some "int" ] ],
+                          [ [ Some "fk"; Some "a" ]; [ Some "new_fk"; Some "renamed" ] ] ]
+
+                    for name, action, error, columns, keys in cases do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE parent_change (n INT PRIMARY KEY)" |> ignore
+                        runDefault store "CREATE TABLE child_change (a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent_change(n))" |> ignore
+
+                        match runDefault store ("ALTER TABLE child_change " + action), error with
+                        | Affected 0UL, None -> ()
+                        | Err(actual, _), Some expected when actual = expected -> ()
+                        | actual, _ -> failtestf "%s returned %A instead of error %A" name actual error
+
+                        match runDefault store "SELECT COLUMN_NAME,COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_NAME='child_change' ORDER BY ORDINAL_POSITION" with
+                        | ResultSet(_, actual) -> Expect.equal actual columns (name + " columns")
+                        | other -> failtestf "%s columns returned %A" name other
+
+                        match runDefault store "SELECT CONSTRAINT_NAME,COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_NAME='child_change' AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY CONSTRAINT_NAME" with
+                        | ResultSet(_, actual) -> Expect.equal actual keys (name + " keys")
+                        | other -> failtestf "%s keys returned %A" name other ]
+
           // Every case below mirrors a probe pinned against the MySQL 8.4.11
           // oracle (see `Executor.jsonTableRows`' doc for the semantics).
           testList
@@ -12048,6 +12343,18 @@ let tests =
                     expectRow
                         "SELECT HOUR('-34:20:30.123456'), MINUTE('-34:20:30.123456'), SECOND('-34:20:30.123456'), MICROSECOND('-34:20:30.123456')"
                         [ Some "34"; Some "20"; Some "30"; Some "123456" ]
+
+                    expectRow
+                        "SELECT HOUR('-34:20:30.1234567'), MINUTE('-34:20:30.1234567'), SECOND('-34:20:30.1234567'), MICROSECOND('-34:20:30.1234567')"
+                        [ Some "34"; Some "20"; Some "30"; Some "123457" ]
+
+                    expectRow
+                        "SELECT HOUR('34:59:59.9999995'), MINUTE('34:59:59.9999995'), SECOND('34:59:59.9999995'), MICROSECOND('34:59:59.9999995')"
+                        [ Some "35"; Some "0"; Some "0"; Some "0" ]
+
+                    expectRow
+                        "SELECT HOUR('838:59:59.9999995'), MINUTE('838:59:59.9999995'), SECOND('838:59:59.9999995'), MICROSECOND('838:59:59.9999995')"
+                        [ Some "838"; Some "59"; Some "59"; Some "0" ]
 
                 testCase "time formatting, periods, day numbers, and seeded RAND match MySQL"
                 <| fun _ ->

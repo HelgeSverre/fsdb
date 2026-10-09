@@ -13,7 +13,6 @@ open System.Collections.Generic
 open System.Globalization
 open FParsec
 open Fsdb.Ast
-open Fsdb.Collections
 open Fsdb.Sql
 open Fsdb.Value
 open Fsdb.Temporal
@@ -38,6 +37,11 @@ let defaultOptions: ParserOptions =
       RealAsFloat = false
       NoBackslashEscapes = false
       LiteralCollation = None }
+
+let private allowsBackslashEscape (options: ParserOptions) delimiter =
+    delimiter <> '`'
+    && not options.NoBackslashEscapes
+    && not (delimiter = '"' && options.AnsiQuotes)
 
 /// Diagnostics raised after recognizing syntax that MySQL rejects semantically.
 let trySemanticError (detail: string) =
@@ -69,9 +73,7 @@ let inline private visitSqlSourceParts
         let start = index
         match text.[index] with
         | '\'' | '"' | '`' as delimiter ->
-            let backslashEscapes =
-                not options.NoBackslashEscapes && delimiter <> '`'
-                && not (delimiter = '"' && options.AnsiQuotes)
+            let backslashEscapes = allowsBackslashEscape options delimiter
             index <- index + 1
             let mutable closed = false
             while index < finish && not closed do
@@ -347,7 +349,7 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (sourcePo
         let sourceStart = i
         let outputStart = if sourcePositions.IsSome then output.Length else 0
         match quoteChar with
-        | Some q when not options.NoBackslashEscapes && sql.[i] = '\\' && q <> '`' && i + 1 < sql.Length ->
+        | Some q when allowsBackslashEscape options q && sql.[i] = '\\' && i + 1 < sql.Length ->
             // backslash-escapes only apply inside '...'/"...", not `...`
             appendPair sql.[i] sql.[i + 1]
             i <- i + 2
@@ -412,8 +414,8 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (sourcePo
                         { Body = sql.Substring(i + 3, closeAt - (i + 3))
                           BodyOffset = i + 3
                           KeywordOffset = hintKeywordOffset
-                          Keyword = hintKeyword.ToUpperInvariant()
-                          StatementKeyword = (statementKeyword |> Option.defaultValue hintKeyword).ToUpperInvariant()
+                          Keyword = hintKeyword
+                          StatementKeyword = statementKeyword |> Option.defaultValue hintKeyword
                           ParenthesisDepth = parenthesisDepth
                           IsLeadingSelect = leadingSelect }
 
@@ -468,22 +470,35 @@ let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (sourcePo
 
             let word = sql.Substring(start, i - start)
             appendText word
-            hintKeyword <- word
-            hintKeywordOffset <- start
-            if statementKeyword.IsNone then
-                statementKeyword <- Some hintKeyword
-                statementDepth <- parenthesisDepth
-            leadingSelect <- false
-            if word.Equals("SELECT", StringComparison.OrdinalIgnoreCase) && parenthesisDepth = statementDepth then
-                leadingSelect <- not statementSelectSeen
-                statementSelectSeen <- true
-
-            optimizerHintMayFollow <-
+            let isHintKeyword =
                 word.Equals("SELECT", StringComparison.OrdinalIgnoreCase)
                 || word.Equals("INSERT", StringComparison.OrdinalIgnoreCase)
                 || word.Equals("REPLACE", StringComparison.OrdinalIgnoreCase)
                 || word.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)
                 || word.Equals("DELETE", StringComparison.OrdinalIgnoreCase)
+            hintKeyword <- if isHintKeyword then word.ToUpperInvariant() else ""
+            hintKeywordOffset <- start
+            if statementKeyword.IsNone then
+                // Only recognized statement kinds matter to hint resolution.
+                // An arbitrary first token must not be copied into every hint.
+                let statementKind =
+                    if word.Length > 16 then None
+                    else
+                        match word.ToUpperInvariant() with
+                        | "WITH" | "EXPLAIN" | "CREATE" | "ALTER" | "SELECT"
+                        | "INSERT" | "REPLACE" | "UPDATE" | "DELETE" as kind -> Some kind
+                        | _ -> None
+                match statementKind with
+                | Some kind ->
+                    statementKeyword <- Some kind
+                    statementDepth <- parenthesisDepth
+                | None -> ()
+            leadingSelect <- false
+            if word.Equals("SELECT", StringComparison.OrdinalIgnoreCase) && parenthesisDepth = statementDepth then
+                leadingSelect <- not statementSelectSeen
+                statementSelectSeen <- true
+
+            optimizerHintMayFollow <- isHintKeyword
         | None ->
             match sql.[i] with
             | '(' -> parenthesisDepth <- parenthesisDepth + 1
@@ -1118,9 +1133,8 @@ let private exceedsAmbiguousSelectParenthesisDepth (sql: string) =
     while index < sql.Length && not exceeded do
         match quote with
         | Some q when
-            not (activeOptions ()).NoBackslashEscapes
+            allowsBackslashEscape (activeOptions ()) q
             && sql.[index] = '\\'
-            && q <> '`'
             && index + 1 < sql.Length
             ->
             index <- index + 2
@@ -1192,7 +1206,7 @@ let private exceedsHighNotDepth (sql: string) =
 
     while index < sql.Length && not exceeded do
         match quote with
-        | Some q when not (activeOptions ()).NoBackslashEscapes && q <> '`' && sql.[index] = '\\' ->
+        | Some q when allowsBackslashEscape (activeOptions ()) q && sql.[index] = '\\' ->
             index <- min sql.Length (index + 2)
         | Some q when sql.[index] = q && index + 1 < sql.Length && sql.[index + 1] = q -> index <- index + 2
         | Some q when sql.[index] = q ->
@@ -1239,6 +1253,10 @@ let private exceedsHighNotDepth (sql: string) =
                 consecutive <- 0
 
             index <- finish
+        | None when sql.[index] = '+' ->
+            consecutive <- consecutive + 1
+            exceeded <- consecutive > maxExprDepth
+            index <- index + 1
         | None when
             sql.[index] = '('
             || sql.[index] = ')'
@@ -1262,7 +1280,7 @@ let private exceedsParenthesisDepthLimit (sql: string) =
 
     while index < sql.Length && not exceeded do
         match quote with
-        | Some q when sql.[index] = '\\' && q <> '`' && index + 1 < sql.Length -> index <- index + 2
+        | Some q when allowsBackslashEscape (activeOptions ()) q && sql.[index] = '\\' && index + 1 < sql.Length -> index <- index + 2
         | Some q when sql.[index] = q && index + 1 < sql.Length && sql.[index + 1] = q -> index <- index + 2
         | Some q when sql.[index] = q ->
             quote <- None
@@ -1968,9 +1986,11 @@ nameConstArgumentsRef.Value <-
     .>> followedBy (sym ")")
     >>= fun arguments ->
         let accepts parser source =
-            match run (parser .>> eof) source with
-            | Success _ -> true
-            | _ -> false
+            if exceedsHighNotDepth source then false
+            else
+                match run (parser .>> eof) source with
+                | Success _ -> true
+                | _ -> false
         match arguments with
         | [ nameSource, name; valueSource, value ] ->
             if not (accepts nameConstNameSyntax nameSource && accepts nameConstValueSyntax valueSource) then
@@ -5236,7 +5256,7 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) =
             while index < sql.Length && not closed do
                 let current = sql.[index]
 
-                if quote <> '`' && not options.NoBackslashEscapes && current = '\\' && index + 1 < sql.Length then
+                if allowsBackslashEscape options quote && current = '\\' && index + 1 < sql.Length then
                     output.Append(current).Append(sql.[index + 1]) |> ignore
                     index <- index + 2
                 elif current = quote && index + 1 < sql.Length && sql.[index + 1] = quote then
@@ -5318,7 +5338,7 @@ let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Res
             Result.Error "expression nested too deeply"
         elif exceedsAmbiguousSelectParenthesisDepth sql then
             Result.Error "SELECT nested too deeply"
-        elif (activeOptions ()).HighNotPrecedence && exceedsHighNotDepth sql then
+        elif exceedsHighNotDepth sql then
             Result.Error "expression nested too deeply"
         else
             match run parser sql with
@@ -5375,11 +5395,7 @@ type ParsedViewDefinition =
       Sql: string
       CheckOption: string }
 
-let private parsedViewDefinitionCapacity = 1024
-let private cacheableViewDefinitionLength = 16384
-let private parsedViewDefinitions = BoundedConcurrentCache<struct (ParserOptions * string), ParsedViewDefinition>(parsedViewDefinitionCapacity)
-
-let private parseViewDefinitionUncached options (sql: string) : Result<ParsedViewDefinition, string> =
+let parseViewDefinitionWithOptions options (sql: string) : Result<ParsedViewDefinition, string> =
     let parsed = parseWithOptions options sql
 
     let trailingCheckOption =
@@ -5413,21 +5429,9 @@ let private parseViewDefinitionUncached options (sql: string) : Result<ParsedVie
 
     parsedDefinition
     |> Result.map (fun statement ->
-        let definition =
-            { Statement = statement
-              Sql = definition
-              CheckOption = checkOption }
-
-        if sql.Length <= cacheableViewDefinitionLength then
-            parsedViewDefinitions.TryAdd(struct (options, sql), definition) |> ignore
-
-        definition)
-
-/// Parses a stored view query and separates its trailing CHECK OPTION clause.
-let parseViewDefinitionWithOptions options (sql: string) : Result<ParsedViewDefinition, string> =
-    match parsedViewDefinitions.TryGetValue (struct (options, sql)) with
-    | true, definition -> Result.Ok definition
-    | false, _ -> parseViewDefinitionUncached options sql
+        { Statement = statement
+          Sql = definition
+          CheckOption = checkOption })
 
 let parseViewDefinition sql = parseViewDefinitionWithOptions defaultOptions sql
 
@@ -5638,7 +5642,7 @@ let parseHandler (sql: string) : Result<HandlerCommand, string> =
 /// Splits a COM_QUERY batch at statement delimiters outside literals,
 /// comments, and supported compound object bodies. The parser still validates each
 /// returned statement separately.
-let private splitStatementRanges (sql: string) =
+let private splitStatementRanges (options: ParserOptions) (sql: string) =
     let statements = ResizeArray<int * int>()
     let mutable start = 0
     let mutable i = 0
@@ -5648,7 +5652,13 @@ let private splitStatementRanges (sql: string) =
     let mutable compoundDepth = 0
     let mutable compoundStatementStart = false
     let mutable compoundLabelCandidate = false
-    let headerWords = ResizeArray<string>()
+    let mutable firstHeaderWord = ""
+    let mutable previousHeaderWords = "", ""
+    let mutable hasProcedure = false
+    let mutable hasFunction = false
+    let mutable hasTrigger = false
+    let mutable hasReturns = false
+    let mutable hasForEachRow = false
     let mutable compoundHeader = None
 
     let isWordStart c = Char.IsLetter c || c = '_'
@@ -5658,18 +5668,9 @@ let private splitStatementRanges (sql: string) =
         match compoundHeader with
         | Some result -> result
         | None ->
-            let words = headerWords |> Seq.map _.ToUpperInvariant() |> List.ofSeq
-            let containsSequence (expected: string list) =
-                words
-                |> List.windowed expected.Length
-                |> List.exists ((=) expected)
-
             let result =
-                match words with
-                | "CREATE" :: _ when List.contains "PROCEDURE" words -> true
-                | "CREATE" :: _ when List.contains "FUNCTION" words -> List.contains "RETURNS" words
-                | "CREATE" :: _ when List.contains "TRIGGER" words -> containsSequence [ "FOR"; "EACH"; "ROW" ]
-                | _ -> false
+                firstHeaderWord = "CREATE"
+                && (hasProcedure || (hasFunction && hasReturns) || (hasTrigger && hasForEachRow))
 
             compoundHeader <- Some result
             result
@@ -5683,7 +5684,7 @@ let private splitStatementRanges (sql: string) =
 
     while i < sql.Length do
         match quote with
-        | Some q when sql.[i] = '\\' && q <> '`' && i + 1 < sql.Length -> i <- i + 2
+        | Some q when allowsBackslashEscape options q && sql.[i] = '\\' && i + 1 < sql.Length -> i <- i + 2
         | Some q when sql.[i] = q && i + 1 < sql.Length && sql.[i + 1] = q -> i <- i + 2
         | Some q when sql.[i] = q ->
             quote <- None
@@ -5725,8 +5726,15 @@ let private splitStatementRanges (sql: string) =
             while stop < sql.Length && isWordPart sql.[stop] do
                 stop <- stop + 1
 
-            let word = sql.[i .. stop - 1]
-            headerWords.Add word
+            let word = sql.Substring(i, stop - i).ToUpperInvariant()
+            if firstHeaderWord = "" then firstHeaderWord <- word
+            let older, previous = previousHeaderWords
+            hasProcedure <- hasProcedure || word = "PROCEDURE"
+            hasFunction <- hasFunction || word = "FUNCTION"
+            hasTrigger <- hasTrigger || word = "TRIGGER"
+            hasReturns <- hasReturns || word = "RETURNS"
+            hasForEachRow <- hasForEachRow || (older = "FOR" && previous = "EACH" && word = "ROW")
+            previousHeaderWords <- previous, word
             compoundLabelCandidate <- false
 
             if word.Equals("BEGIN", StringComparison.OrdinalIgnoreCase) then
@@ -5761,7 +5769,13 @@ let private splitStatementRanges (sql: string) =
         | None when sql.[i] = ';' && compoundDepth = 0 ->
             addStatement i
             start <- i + 1
-            headerWords.Clear()
+            firstHeaderWord <- ""
+            previousHeaderWords <- "", ""
+            hasProcedure <- false
+            hasFunction <- false
+            hasTrigger <- false
+            hasReturns <- false
+            hasForEachRow <- false
             compoundHeader <- None
             compoundLabelCandidate <- false
             i <- i + 1
@@ -5786,26 +5800,29 @@ let private splitStatementRanges (sql: string) =
 
 let splitStatements (sql: string) : Result<string list, string> =
     let normalized = stripVersionComments sql
-    splitStatementRanges normalized
+    splitStatementRanges defaultOptions normalized
     |> Result.map (List.map (fun (first, last) -> normalized.Substring(first, last - first).Trim()))
 
 /// Scan executable comments for delimiters while retaining original text for diagnostics.
-let internal splitStatementsPreservingSource (sql: string) =
+let internal splitStatementsPreservingSourceWithOptions (options: ParserOptions) (sql: string) =
     let positions = ResizeArray<int * int>()
     positions.Add(0, 0)
-    let normalized = scanComments true true (Some positions) defaultOptions sql |> fst |> Option.get
+    let normalized = scanComments true true (Some positions) options sql |> fst |> Option.get
     let offsets = positions.ToArray()
     let originalPosition position =
         let index = precedingBoundaryIndex offsets position
         let boundary, delta = offsets.[index]
         if position <> boundary && index + 1 < offsets.Length && snd offsets.[index + 1] <> delta then None
         else Some(position + delta)
-    splitStatementRanges normalized
+    splitStatementRanges options normalized
     |> Result.map (List.map (fun (first, last) ->
         match originalPosition first, originalPosition last with
         | Some start, Some finish -> sql.Substring(start, finish - start).Trim()
         // Delimiters inside an executable comment require its expanded statement text.
         | _ -> normalized.Substring(first, last - first).Trim()))
+
+let internal splitStatementsPreservingSource sql =
+    splitStatementsPreservingSourceWithOptions defaultOptions sql
 
 /// Parses one standalone expression for persisted schema objects such as
 /// CHECK constraints. It shares the statement parser's placeholder/depth

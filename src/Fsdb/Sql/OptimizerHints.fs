@@ -223,13 +223,23 @@ let parse options (location: Parser.OptimizerHintLocation) =
     with SyntaxAt offset -> warn "Optimizer hint syntax error" offset
     List.ofSeq hints, List.ofSeq diagnostics
 
-let formatDiagnostic (sql: string) (diagnostic: Diagnostic) =
-    let position = diagnostic.Offset
-    let suffix = sql.Substring(position, min 80 (sql.Length - position))
-    let line = 1 + (sql.Substring(0, position) |> Seq.filter ((=) '\n') |> Seq.length)
-    sprintf "%s near '%s' at line %d" diagnostic.Prefix suffix line
+let diagnosticFormatter (sql: string) =
+    let lineStarts = ResizeArray<int>()
+    lineStarts.Add 0
+    for index = 0 to sql.Length - 1 do
+        if sql.[index] = '\n' then lineStarts.Add(index + 1)
+    let lineStarts = lineStarts.ToArray()
+
+    fun (diagnostic: Diagnostic) ->
+        let position = diagnostic.Offset
+        let suffix = sql.Substring(position, min 80 (sql.Length - position))
+        let found = Array.BinarySearch(lineStarts, position)
+        let line = if found >= 0 then found + 1 else ~~~found
+        sprintf "%s near '%s' at line %d" diagnostic.Prefix suffix line
+
+let formatDiagnostic sql diagnostic = diagnosticFormatter sql diagnostic
 
 let syntaxDiagnostics options sql =
     Parser.optimizerHintLocationsWithOptions options sql
     |> List.collect (parse options >> snd)
-    |> List.map (formatDiagnostic sql)
+    |> List.map (diagnosticFormatter sql)

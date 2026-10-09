@@ -274,6 +274,12 @@ let tests =
                       | Error(1290, _) -> ()
                       | other -> failtestf "expected the escaping symlink to be refused, got %A" other)
 
+          testCase "disabled server file reads reject before resolving a path"
+          <| fun _ ->
+              match Fsdb.LoadData.readServerFile Fsdb.ServerOptions.SecureFilePolicy.Disabled 1024 "\u0000" with
+              | Error(1290, _) -> ()
+              | other -> failtestf "expected secure_file_priv rejection, got %A" other
+
           testCase "TLS configuration loads client certificate authorities"
           <| fun _ ->
               TestSupport.withDirectory "tls-options" (fun directory ->

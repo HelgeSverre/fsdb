@@ -73,11 +73,15 @@ let private mutationSource (name: string) =
     FromTable { Database = database; Table = table; Alias = None; Partitions = [] }
 
 let collect querySource statement =
+    // Hint scope expansion is advisory. Bound repeated CTE instantiation so a
+    // small acyclic diamond cannot create millions of duplicate hint blocks.
+    let maxHintBlocks = 4096
     let mutable nextNumber = 0
     let allocate offset sources query =
         nextNumber <- nextNumber + 1
         { Number = nextNumber; SourceOffset = offset; Sources = sources; Query = query; ParentBlock = None; Source = None }
     let rec query scope active = function
+        | _ when nextNumber >= maxHintBlocks -> empty
         | PlainSelect select -> selectBlock scope active select
         | UnionSelect(first, rest, ordering, limit, offset) ->
             let scope = extend scope first.Ctes
@@ -85,9 +89,10 @@ let collect querySource statement =
                 [ yield selectBlock scope active { first with Ctes = [] }
                   for _, select in rest do yield selectBlock scope active select ]
             // UNION owns an additional post-processing block without a hint location.
-            nextNumber <- nextNumber + 1
+            if nextNumber < maxHintBlocks then nextNumber <- nextNumber + 1
             combine (branches @ [expressions scope active ((ordering |> List.map fst) @ Option.toList limit @ Option.toList offset)])
     and source scope active = function
+        | _ when nextNumber >= maxHintBlocks -> empty
         | FromTable table when table.Database.IsNone ->
             match lookup scope table.Table with
             | Some(binding, definitionScope) ->
@@ -113,23 +118,25 @@ let collect querySource statement =
     and expressions scope active values =
         values |> List.collect Expression.collectSubqueries |> List.map (selectBlock scope active) |> combine
     and selectBlock scope active (select: SelectStmt) =
-        let scope = extend scope select.Ctes
-        let block =
-            match querySource with
-            | SourceOffsets positionOf ->
-                positionOf select |> Option.map (fun offset -> allocate (Some offset) (sources select) (Some select))
-            | BoundStatement -> Some(allocate None (sources select) (Some select))
-        let projections = expressions scope active (select.Projections |> List.map _.Expression)
-        let from = combine [select.From |> Option.map (source scope active) |> Option.defaultValue empty; joinBlocks scope active select.Joins]
-        let remaining =
-            expressions scope active
-                (Option.toList select.Where @ select.GroupBy @ Option.toList select.Having
-                 @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
-                 @ (select.OrderBy |> List.map fst) @ Option.toList select.Limit @ Option.toList select.Offset)
-        let nested = withParent (block |> Option.map _.Number)
-        { Numbered = Option.toList block @ nested (projections.Numbered @ from.Numbered @ remaining.Numbered)
-          Context = projections.Context @ from.Context @ remaining.Context @ (block |> Option.toList |> List.map BlockHints)
-          Resolution = Option.toList block @ nested (from.Resolution @ projections.Resolution @ remaining.Resolution) }
+        if nextNumber >= maxHintBlocks then empty
+        else
+            let scope = extend scope select.Ctes
+            let block =
+                match querySource with
+                | SourceOffsets positionOf ->
+                    positionOf select |> Option.map (fun offset -> allocate (Some offset) (sources select) (Some select))
+                | BoundStatement -> Some(allocate None (sources select) (Some select))
+            let projections = expressions scope active (select.Projections |> List.map _.Expression)
+            let from = combine [select.From |> Option.map (source scope active) |> Option.defaultValue empty; joinBlocks scope active select.Joins]
+            let remaining =
+                expressions scope active
+                    (Option.toList select.Where @ select.GroupBy @ Option.toList select.Having
+                     @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
+                     @ (select.OrderBy |> List.map fst) @ Option.toList select.Limit @ Option.toList select.Offset)
+            let nested = withParent (block |> Option.map _.Number)
+            { Numbered = Option.toList block @ nested (projections.Numbered @ from.Numbered @ remaining.Numbered)
+              Context = projections.Context @ from.Context @ remaining.Context @ (block |> Option.toList |> List.map BlockHints)
+              Resolution = Option.toList block @ nested (from.Resolution @ projections.Resolution @ remaining.Resolution) }
     let scope = { Parent = None; Definitions = [] }
     let mutation ctes from (joins: Join list) values =
         let scope = extend scope ctes

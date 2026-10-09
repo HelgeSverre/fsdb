@@ -342,6 +342,7 @@ type TransactionLockClaim =
     | ExclusiveKeyLock of database: string * table: string * key: string
 
 type CommitEvent =
+    | WithDdlAllowInvalidDates of enabled: bool * event: CommitEvent
     | WithFullTextWordLengths of lengths: StorageOptions.WordLengths * event: CommitEvent
     | WithNgramTokenSize of size: int * event: CommitEvent
     | WithStopwordFiltering of enabled: bool * event: CommitEvent
@@ -627,6 +628,7 @@ let internal requiresImmediateAutoIncrementPublication (store: Store) =
     hasCommitConsumer store
 
 let rec private eventRollbackWork = function
+    | WithDdlAllowInvalidDates(_, event)
     | WithFullTextWordLengths(_, event)
     | WithNgramTokenSize(_, event)
     | WithStopwordFiltering(_, event)
@@ -679,6 +681,7 @@ let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent li
         observerError |> Option.iter raise
 
 let rec private observerEvent = function
+    | WithDdlAllowInvalidDates(_, event)
     | WithFullTextWordLengths(_, event)
     | WithNgramTokenSize(_, event)
     | WithStopwordFiltering(_, event)
@@ -740,12 +743,19 @@ let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> un
                 captureNgramTokenSize store.NgramTokenSize event
                 |> captureFullTextWordLengths store.FullTextWordLengths event
                 |> captureFullTextStopwords store event
+            let captured =
+                match event with
+                | SchemaChanged _ | SchemaChangedAt _ when not store.FullTextStopwordsEnabled ->
+                    WithStopwordFiltering(false, captured)
+                | SchemaChanged _ | SchemaChangedAt _ ->
+                    let settings = fullTextStopwordSettings store
+                    if settings.Source.IsSome then WithFullTextStopwordSettings(settings, captured) else captured
+                | _ -> captured
             match event with
-            | SchemaChanged _ | SchemaChangedAt _ when not store.FullTextStopwordsEnabled ->
-                WithStopwordFiltering(false, captured)
+            // Replay re-coerces DDL defaults and ALTER rows; the committed
+            // result depends on whether invalid calendar dates were allowed.
             | SchemaChanged _ | SchemaChangedAt _ ->
-                let settings = fullTextStopwordSettings store
-                if settings.Source.IsSome then WithFullTextStopwordSettings(settings, captured) else captured
+                WithDdlAllowInvalidDates(store.ExecutionSettings.SqlMode.AllowInvalidDates, captured)
             | _ -> captured)
     recordRollbackWork store events
 
@@ -1049,7 +1059,7 @@ let withExecutionSettings (store: Store) (settings: ExecutionSettings) (body: un
     store.ExecutionSettings <- settings
 
     try
-        body ()
+        withTimeTruncateFractional settings.SqlMode.TimeTruncateFractional body
     finally
         store.ExecutionSettings <- previous
 
@@ -6186,6 +6196,8 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
 /// Validate the FULLTEXT parser and its text-column compatibility.
 let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Result<unit, StorageError> =
     match ix.Kind with
+    | kind when kind.IsFullText && (ix.KeyColumns |> List.exists (fun key -> key.Transform.IsSome)) ->
+        Error(ExpressionError(3759, "Fulltext functional index is not supported."))
     | FullTextIndex(Some parser) when FullText.tryTokenizer (Some parser) |> Option.isNone ->
         Error(FullTextParserNotDefined parser)
     | kind when not kind.IsFullText -> Ok()
@@ -6223,6 +6235,91 @@ let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Resu
                 with
                 | Some bad -> Error(FullTextColumnNotAllowed bad.Name)
                 | None -> Ok()
+
+let private foreignKeyColumnsCompatible (child: ColumnDef) (parent: ColumnDef) =
+    let sameTextCollation =
+        String.Equals(
+            child.Collation |> Option.defaultValue Collation.defaultCollation.Name,
+            parent.Collation |> Option.defaultValue Collation.defaultCollation.Name,
+            StringComparison.OrdinalIgnoreCase
+        )
+
+    match child.Type, parent.Type with
+    | TBool, TBool
+    | TBool, TTinyInt false
+    | TTinyInt false, TBool -> true
+    | TTinyInt left, TTinyInt right
+    | TSmallInt left, TSmallInt right
+    | TMediumInt left, TMediumInt right
+    | TInt left, TInt right
+    | TBigInt left, TBigInt right -> left = right
+    | TChar _, TChar _
+    | TChar _, TVarchar _
+    | TVarchar _, TChar _
+    | TVarchar _, TVarchar _
+    | TEnum _, TEnum _
+    | TEnum _, TSet _
+    | TSet _, TEnum _
+    | TSet _, TSet _ -> sameTextCollation
+    | TBinary _, TBinary _
+    | TBinary _, TVarBinary _
+    | TVarBinary _, TBinary _
+    | TVarBinary _, TVarBinary _
+    | TDecimal _, TDecimal _
+    | TBit _, TBit _
+    | TFloat _, TFloat _
+    | TDouble _, TDouble _
+    | TDateTime _, TDateTime _
+    | TTimestamp _, TTimestamp _
+    | TTime _, TTime _ -> true
+    | _ -> child.Type = parent.Type
+
+let private incompatibleForeignKeyColumns
+    (childColumns: ColumnDef list)
+    (parentColumns: ColumnDef list)
+    (foreignKey: ForeignKeyDef)
+    =
+    let findColumn name (columns: ColumnDef list) =
+        columns |> List.tryFind (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
+
+    if not (sameLength foreignKey.Columns foreignKey.RefColumns) then None
+    else
+        List.zip foreignKey.Columns foreignKey.RefColumns
+        |> List.tryFind (fun (childName, parentName) ->
+            match findColumn childName childColumns, findColumn parentName parentColumns with
+            | Some child, Some parent -> not (foreignKeyColumnsCompatible child parent)
+            | _ -> false)
+
+let private virtualForeignKeyColumn
+    (childColumns: ColumnDef list)
+    (parentColumns: ColumnDef list)
+    (foreignKey: ForeignKeyDef)
+    =
+    let findVirtual name (columns: ColumnDef list) =
+        columns
+        |> List.tryFind (fun column ->
+            String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)
+            && (match column.Generated with
+                | Some(_, Virtual) -> true
+                | _ -> false))
+
+    List.zip foreignKey.Columns foreignKey.RefColumns
+    |> List.tryPick (fun (childName, parentName) ->
+        findVirtual childName childColumns
+        |> Option.orElseWith (fun () -> findVirtual parentName parentColumns))
+
+let private virtualForeignKeyError (foreignKey: ForeignKeyDef) (column: ColumnDef) =
+    ExpressionError(3733, sprintf "Foreign key '%s' uses virtual column '%s' which is not supported." foreignKey.Name column.Name)
+
+let private incompatibleForeignKeyError (foreignKey: ForeignKeyDef) (childName, parentName) =
+    ExpressionError(
+        3780,
+        sprintf
+            "Referencing column '%s' and referenced column '%s' in foreign key constraint '%s' are incompatible."
+            childName
+            parentName
+            foreignKey.Name
+    )
 
 let private validateForeignKeyDefinition
     (store: Store)
@@ -6323,18 +6420,22 @@ let private validateForeignKeyDefinition
                           |> List.map _.Columns
                       yield! parentColumns |> List.filter _.Unique |> List.map (fun column -> [ column.Name ]) ]
 
-                if uniqueKeys |> List.exists (fun columns -> sameColumns columns foreignKey.RefColumns) then
-                    Ok()
-                else
-                    Error(
-                        ExpressionError(
-                            6125,
-                            sprintf
-                                "Failed to add the foreign key constraint. Missing unique key for constraint '%s' in the referenced table '%s'"
-                                foreignKey.Name
-                                foreignKey.RefTable
+                match virtualForeignKeyColumn childColumns parentColumns foreignKey with
+                | Some column -> Error(virtualForeignKeyError foreignKey column)
+                | None ->
+                    match incompatibleForeignKeyColumns childColumns parentColumns foreignKey with
+                    | Some pair -> Error(incompatibleForeignKeyError foreignKey pair)
+                    | None when uniqueKeys |> List.exists (fun columns -> sameColumns columns foreignKey.RefColumns) -> Ok()
+                    | None ->
+                        Error(
+                            ExpressionError(
+                                6125,
+                                sprintf
+                                    "Failed to add the foreign key constraint. Missing unique key for constraint '%s' in the referenced table '%s'"
+                                    foreignKey.Name
+                                    foreignKey.RefTable
+                            )
                         )
-                    )
 
 let private normalizePrimaryKeyNullability (columns: ColumnDef list) =
     columns
@@ -7097,7 +7198,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         // give — otherwise `reindexTable` (Map.ofList, last-wins) silently
         // drops every row but one from the new UniqueIndex, and both the
         // fast path and the constraint itself go missing from then on.
-        checkIndexLengths table.Columns [ ix ]
+        checkFullTextColumns table.Columns ix
+        |> Result.bind (fun () -> checkIndexLengths table.Columns [ ix ])
         |> Result.bind (fun () -> ix.Columns |> traverse (resolveColumn table.Columns))
         |> Result.bind (fun idxs ->
             let group =
@@ -7560,7 +7662,12 @@ let private validateForeignKeyDrops (table: Table) actions =
             | _ -> Ok remaining)) (Ok names)
     |> Result.map ignore
 
-let private retargetAlterForeignKeyColumns catalog address (candidate: Table) actions =
+let private retargetAlterForeignKeyColumns
+    (catalog: Catalog)
+    (address: TableAddress)
+    (candidate: Table)
+    (actions: AlterAction list)
+    =
     let renames = actions |> List.choose (function
         | RenameColumnTo(oldName, newName) -> Some(oldName, newName)
         | ChangeColumn(oldName, column, _) -> Some(oldName, column.Name)
@@ -7577,8 +7684,14 @@ let private retargetAlterForeignKeyColumns catalog address (candidate: Table) ac
                     else { table with ForeignKeys = foreignKeys; SchemaRevision = table.SchemaRevision + 1L }))) (setCatalogTable address candidate catalog)
     let candidate = tryCatalogTable address updated |> Option.get
     let validateColumns () =
-        let missing columns =
-            columns |> List.tryFind (fun name -> candidate.Columns |> List.exists (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)) |> not)
+        let dropped =
+            actions
+            |> List.choose (function DropColumn name -> Some(name.ToLowerInvariant()) | _ -> None)
+            |> Set.ofList
+        let missing (columns: string list) =
+            columns |> List.tryFind (fun name ->
+                Set.contains (name.ToLowerInvariant()) dropped
+                || (candidate.Columns |> List.exists (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)) |> not))
         let childError = candidate.ForeignKeys |> List.tryPick (fun foreignKey ->
             missing foreignKey.Columns |> Option.map (fun name ->
                 ExpressionError(1828, sprintf "Cannot drop column '%s': needed in a foreign key constraint '%s'" name foreignKey.Name)))
@@ -7587,9 +7700,32 @@ let private retargetAlterForeignKeyColumns catalog address (candidate: Table) ac
                 let _, table = catalogTableIdentity updated childAddress
                 ExpressionError(1829, sprintf "Cannot drop column '%s': needed in a foreign key constraint '%s' of table '%s'" name foreignKey.Name table)))
         childError |> Option.orElseWith parentError |> Option.map Error |> Option.defaultValue (Ok())
+    let validateTypes () =
+        let check (childColumns: ColumnDef list) (parentColumns: ColumnDef list) (foreignKey: ForeignKeyDef) =
+            incompatibleForeignKeyColumns childColumns parentColumns foreignKey
+            |> Option.map (incompatibleForeignKeyError foreignKey)
+
+        let childErrors =
+            candidate.ForeignKeys
+            |> List.tryPick (fun foreignKey ->
+                let parentAddress = referencedTableAddress address.Database foreignKey
+                tryCatalogTable parentAddress updated
+                |> Option.bind (fun parent -> check candidate.Columns parent.Columns foreignKey))
+
+        let parentErrors () =
+            referencingForeignKeys updated address
+            |> List.tryPick (fun (childAddress, foreignKey) ->
+                tryCatalogTable childAddress updated
+                |> Option.bind (fun child -> check child.Columns candidate.Columns foreignKey))
+
+        childErrors |> Option.orElseWith parentErrors |> Option.map Error |> Option.defaultValue (Ok())
+
     let validation =
-        if actions |> List.exists (function DropColumn _ -> true | _ -> false) then validateColumns ()
-        else Ok()
+        (if actions |> List.exists (function DropColumn _ -> true | _ -> false) then validateColumns () else Ok())
+        |> Result.bind (fun () ->
+            if actions |> List.exists (function ModifyColumn _ | ChangeColumn _ | ConvertCharset _ -> true | _ -> false) then
+                validateTypes ()
+            else Ok())
     validation |> Result.map (fun () -> updated, candidate)
 
 let private resolveAlterForeignKeys (table: Table) actions =
@@ -7780,7 +7916,19 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                                 | _ -> state) (Ok converted))
                         |> Result.map (fun converted -> key, converted, preserveFullText))
                 |> Result.bind (fun (finalKey, finalTable, preserveFullText) ->
-                    retargetAlterForeignKeyColumns catalog (tableAddress dbName origKey) finalTable actions
+                    let uniqueValidation =
+                        if actions |> List.exists (function ConvertCharset _ -> true | _ -> false) then
+                            let validateRow = alterUniqueRowValidator finalTable
+                            finalTable.RowsArray
+                            |> Seq.map validateRow
+                            |> Seq.tryPick (function Error error -> Some error | Ok _ -> None)
+                            |> function Some error -> Error error | None -> Ok()
+                        else
+                            Ok()
+
+                    uniqueValidation
+                    |> Result.bind (fun () ->
+                        retargetAlterForeignKeyColumns catalog (tableAddress dbName origKey) finalTable actions)
                     |> Result.map (fun (catalog, finalTable) ->
                         let db = tryCatalogDatabase dbName catalog |> Option.get
                         let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
@@ -10661,7 +10809,12 @@ let private replayIdentityFallbackCountLocal = System.Threading.AsyncLocal<int>(
 
 let internal replayIdentityFallbackCount () = replayIdentityFallbackCountLocal.Value
 
-let private resolveReplayIdentity (table: Table) (consumed: HashSet<RowId>) preferred expected =
+let private resolveReplayIdentity
+    (table: Table)
+    (consumed: HashSet<RowId>)
+    (fallbackRows: Lazy<Dictionary<Value[], Queue<RowId>>>)
+    preferred
+    expected =
     match table.RowsArray.TryFind preferred with
     | Some current when current = expected && consumed.Add preferred -> Some preferred
     | _ ->
@@ -10669,19 +10822,36 @@ let private resolveReplayIdentity (table: Table) (consumed: HashSet<RowId>) pref
         // consumes before merge. Its before-image makes that rare rebase safe.
         replayIdentityFallbackCountLocal.Value <- replayIdentityFallbackCountLocal.Value + 1
 
-        table.RowsArray.Indexed
-        |> Seq.tryPick (fun (rowId, row) ->
-            if row = expected && consumed.Add rowId then Some rowId else None)
+        match fallbackRows.Value.TryGetValue expected with
+        | false, _ -> None
+        | true, candidates ->
+            while candidates.Count > 0 && consumed.Contains(candidates.Peek()) do
+                candidates.Dequeue() |> ignore
+            if candidates.Count = 0 then None
+            else
+                let rowId = candidates.Dequeue()
+                consumed.Add rowId |> ignore
+                Some rowId
 
 let private mutationsById table items identity before after onMissing =
     let consumed = HashSet<RowId>()
+    let fallbackRows = lazy (
+        let rows = Dictionary<Value[], Queue<RowId>>(HashIdentity.Structural)
+        for rowId, row in table.RowsArray.Indexed do
+            match rows.TryGetValue row with
+            | true, candidates -> candidates.Enqueue rowId
+            | _ ->
+                let candidates = Queue<RowId>()
+                candidates.Enqueue rowId
+                rows.Add(row, candidates)
+        rows)
 
     items
     |> List.choose (fun item ->
         let preferred = identity item
         let expected = before item
 
-        match resolveReplayIdentity table consumed preferred expected with
+        match resolveReplayIdentity table consumed fallbackRows preferred expected with
         | Some rowId ->
             Some
                 { RowId = rowId

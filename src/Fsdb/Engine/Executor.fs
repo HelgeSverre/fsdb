@@ -175,6 +175,11 @@ type private IndexAccessPolicy =
     | CostedRead
     | CandidateNarrowing
 
+type private AccessPlanningMemo =
+    { Table: Table
+      Reference: TableRef
+      Entries: Dictionary<Expr, PhysicalAccessPlan option> }
+
 let private acceptsEqualityAccess policy (plan: EqualityAccessPlan) =
     match policy with
     | CostedRead -> isUsefulEqualityAccess plan
@@ -552,10 +557,17 @@ let private getMemoized (memo: Dictionary<'key, 'value>) key compute =
         memo.[key] <- value
         value
 
+type private MemoizedRegex =
+    { Pattern: string
+      MatchType: string option
+      CollationName: string
+      Result: Result<Regex, Regexp.RegexError> }
+
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
       LiteralMemberships: Dictionary<Expr, EqualityMembership option>
+      Regexes: Dictionary<Expr, MemoizedRegex>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string, MaterializedEqualityLookup option>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
@@ -567,6 +579,7 @@ let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
       LiteralMemberships = Dictionary<Expr, EqualityMembership option>(HashIdentity.Reference)
+      Regexes = Dictionary<Expr, MemoizedRegex>(HashIdentity.Reference)
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
       MaterializedCorrelatedEqualities =
         Dictionary<FromItem, Dictionary<string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
@@ -576,6 +589,26 @@ let private freshStatementMemo () =
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
 
 let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMemo statementMemo
+
+let private compileStatementRegex
+    (expression: Expr)
+    (collation: Collation.Collation)
+    (matchType: string option)
+    (pattern: string)
+    : Result<Regex, Regexp.RegexError> =
+    let cached = (currentStatementMemo ()).Regexes
+    match cached.TryGetValue expression with
+    | true, previous
+        when previous.Pattern = pattern && previous.MatchType = matchType && previous.CollationName = collation.Name ->
+        previous.Result
+    | _ ->
+        let result = Regexp.compile collation matchType pattern
+        cached.[expression] <-
+            { Pattern = pattern
+              MatchType = matchType
+              CollationName = collation.Name
+              Result = result }
+        result
 
 type ColumnSource =
     | PhysicalColumn of ColumnOrigin
@@ -616,6 +649,8 @@ let internal withJoinHintDiagnostics (diagnostics: OptimizerHintResolution.Execu
 
 let private metadataProbe = System.Threading.AsyncLocal<bool>()
 let private planningProbe = System.Threading.AsyncLocal<bool>()
+let private emptyPhysicalPlanningProbe = System.Threading.AsyncLocal<bool>()
+let private accessPlanningMemo = System.Threading.AsyncLocal<AccessPlanningMemo option>()
 let private directOnlyRestriction = System.Threading.AsyncLocal<string option>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
@@ -879,6 +914,22 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) =
         None
     else
         tryStoredViewDefinition store dbName viewName
+
+/// A stored view binds its dependencies to the permanent catalog. Session
+/// temporary tables may shadow those names for direct queries, but cannot
+/// change the objects a definer view reads.
+let private storeForStoredView (store: Store) =
+    if store.TableShadows.IsEmpty then store
+    else
+        let permanentCatalog =
+            store.TableShadows
+            |> Map.fold (fun catalog (database, tableName) original ->
+                catalog
+                |> Map.change database (Option.map (fun tables ->
+                    match original with
+                    | Some table -> Map.add tableName table tables
+                    | None -> Map.remove tableName tables))) store.Catalog
+        { Storage.beginTransactionSnapshotFromCatalog store permanentCatalog with TableShadows = Map.empty }
 
 let private parseStoredViewStatement (view: StoredView) =
     let options = { Parser.defaultOptions with LiteralCollation = Some view.CollationConnection }
@@ -2393,7 +2444,12 @@ let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (esc
         let charEq = if caseSensitive then (=) else col.CharEquals
         boolToValue (likeMatch (escape |> Option.defaultValue '\\') charEq text pat)
 
-let private regexpOp (coll: Collation.Collation option) (subject: Value) (pattern: Value) : Result<Value, EvalError> =
+let private regexpOp
+    (compile: Collation.Collation -> string option -> string -> Result<Regex, Regexp.RegexError>)
+    (coll: Collation.Collation option)
+    (subject: Value)
+    (pattern: Value)
+    : Result<Value, EvalError> =
     match subject, pattern with
     | VNull, _
     | _, VNull -> Ok VNull
@@ -2406,7 +2462,7 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
             else
                 coll |> Option.defaultValue Collation.defaultCollation
 
-        match Regexp.compile col None pat with
+        match compile col None pat with
         | Error(Regexp.InvalidPattern _ as error) -> Error(Regexp.errorCode error, Regexp.errorMessage error)
         | Error Regexp.InvalidMatchType -> Error(1210, "Incorrect arguments to regexp function")
         | Ok regex ->
@@ -4090,6 +4146,7 @@ let private hashPairs
     let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(SqlValueKeyComparer(collations, true))
 
     for buildIndex, buildItem in build do
+        Limits.checkQueryCancellation buildIndex
         match buildKeyOf buildItem with
         | Some key ->
             match buckets.TryGetValue key with
@@ -4101,12 +4158,16 @@ let private hashPairs
         | None -> ()
 
     seq {
+        let mutable inspected = 0
         for probeIndex, probeItem in probe do
+            Limits.checkQueryCancellation probeIndex
             match probeKeyOf probeItem with
             | Some key ->
                 match buckets.TryGetValue key with
                 | true, bucket ->
                     for buildIndex, buildItem in bucket do
+                        Limits.checkQueryCancellation inspected
+                        inspected <- inspected + 1
                         yield buildIndex, buildItem, probeIndex, probeItem
                 | false, _ -> ()
             | None -> ()
@@ -4329,6 +4390,10 @@ type private RowOperand =
     | RowScalar of expression: Expr * column: ColumnDef option * value: Value
     | RowValues of RowOperand list
 
+let private rowOperandWidth = function
+    | RowScalar _ -> 1
+    | RowValues values -> values.Length
+
 type private RangeOffset =
     | NumericRangeOffset of Value
     | TemporalRangeOffset of Value
@@ -4499,10 +4564,6 @@ let private rowComparisonResult
     (left: RowOperand)
     (right: RowOperand)
     : Result<Value, EvalError> =
-    let width = function
-        | RowScalar _ -> 1
-        | RowValues values -> values.Length
-
     let scalarComparison left right comparisonOp =
         match left, right with
         | RowScalar(leftExpr, leftColumn, leftValue), RowScalar(rightExpr, rightColumn, rightValue) ->
@@ -4515,7 +4576,7 @@ let private rowComparisonResult
                 rightColumn
                 comparisonOp
                 rightValue
-        | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (width left))
+        | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (rowOperandWidth left))
 
     let rec compareRows comparisonOp left right =
         match left, right with
@@ -4566,7 +4627,7 @@ let private rowComparisonResult
             | Gte -> ordered pairs
             | NullSafeEq -> nullSafe pairs
             | _ -> Error(1241, "Operand should contain 1 column(s)")
-        | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (width left))
+        | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (rowOperandWidth left))
 
     compareRows op left right
 
@@ -4723,6 +4784,14 @@ let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
             registry
 
     { shadowed with
+        Extensions =
+            shadowed.Extensions
+            |> Map.map (fun name extension ->
+                if extension.DirectOnly then
+                    { extension with
+                        Fn = fun _ _ -> raise (SqlError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name)) }
+                else
+                    extension)
         Scalars =
             shadowed.Scalars
             |> Map.map (fun _ scalar arguments ->
@@ -4779,6 +4848,11 @@ let private isSubstringSearchFunction (name: string) =
     | "POSITION"
     | "INSTR" -> true
     | _ -> false
+
+// Metadata inference revisits the same AST nodes through several numeric and
+// function-shape paths. Keep results only for the current inference call.
+let private metadataInferenceCache =
+    System.Threading.AsyncLocal<Dictionary<EvalContext, Dictionary<Expr, ColumnMetadata option>>>()
 
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let evaluated =
@@ -4990,7 +5064,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let ve = displayValueForText ctx e ve
                 let vp = displayValueForText ctx p vp
                 regexCollation ctx "regexp_like" e ve p vp
-                |> Result.bind (fun collation -> regexpOp (Some collation) ve vp)))
+                |> Result.bind (fun collation -> regexpOp (compileStatementRegex expr) (Some collation) ve vp)))
     | In((Row _ as e), xs)
     | In(e, ((Row _) :: _ as xs)) ->
         evalRowOperand ctx e
@@ -5063,6 +5137,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Err(code, message) -> Error(code, message)
             | Affected _ -> Ok VNull
             | MultipleResults _ -> Error nestedSubqueryResultsError
+            | ResultSet(columns, _) when columns.Length <> rowOperandWidth value ->
+                Error(1241, sprintf "Operand should contain %d column(s)" (rowOperandWidth value))
             | ResultSet(_, _) ->
                 let membershipKey =
                     match subquery.RowEqualityMembership, value with
@@ -5350,7 +5426,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
                     regexCollation ctx (name.ToLowerInvariant()) subjectExpr subject patternExpr pattern
                     |> Result.map (fun collation ->
-                        match Functions.regexpFunction name collation with
+                        match Functions.regexpFunctionWithCompiler (compileStatementRegex expr) name collation with
                         | Some function_ -> function_ arguments
                         | None -> VNull))))
     | NamedFunction "HEX" [ argument ] when Functions.isUnmodifiedBuiltinScalar "HEX" ctx.Registry ->
@@ -5789,6 +5865,34 @@ and private tryReducedScalarProjection ctx (select: SelectStmt) =
     | _ -> None
 
 and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
+    let cache = metadataInferenceCache.Value
+    let ownsCache = isNull cache
+    let cache =
+        if ownsCache then
+            let fresh = Dictionary<EvalContext, Dictionary<Expr, ColumnMetadata option>>(HashIdentity.Reference)
+            metadataInferenceCache.Value <- fresh
+            fresh
+        else cache
+
+    try
+        let expressions =
+            match cache.TryGetValue ctx with
+            | true, existing -> existing
+            | _ ->
+                let fresh = Dictionary<Expr, ColumnMetadata option>(HashIdentity.Reference)
+                cache.Add(ctx, fresh)
+                fresh
+
+        match expressions.TryGetValue expr with
+        | true, metadata -> metadata
+        | _ ->
+            let metadata = metadataOfExprCore ctx expr
+            expressions.Add(expr, metadata)
+            metadata
+    finally
+        if ownsCache then metadataInferenceCache.Value <- null
+
+and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
     let withCollation inner collation =
         metadataOfExpr ctx inner
         |> Option.map (fun metadata -> { metadata with CollationId = metadataCollationId collation })
@@ -6742,19 +6846,22 @@ and private outputColumnWireOverrides ctx columns select =
     outputColumnWireOverridesFor false ctx columns select
 
 and private displayValueForText (ctx: EvalContext) expression value =
-    match displayColumnForExpr ctx expression with
-    | Some column when column.NumericDisplay |> Option.exists _.ZeroFill ->
-        renderOutputValue (outputFormatOfColumn column) value
-        |> Option.map VString
-        |> Option.defaultValue VNull
+    match value with
+    | VString _ -> value
     | _ ->
-        let format = outputFormatOfExpr ctx expression
-        match value with
-        | VDateTime _ | VTimestamp _ | VZeroDateTime _ | VTime _ ->
-            renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
-        | _ when format.DecimalScale.IsSome || format.ApproximateScale.IsSome ->
-            renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
-        | _ -> value
+        match displayColumnForExpr ctx expression with
+        | Some column when column.NumericDisplay |> Option.exists _.ZeroFill ->
+            renderOutputValue (outputFormatOfColumn column) value
+            |> Option.map VString
+            |> Option.defaultValue VNull
+        | _ ->
+            let format = outputFormatOfExpr ctx expression
+            match value with
+            | VDateTime _ | VTimestamp _ | VZeroDateTime _ | VTime _ ->
+                renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
+            | _ when format.DecimalScale.IsSome || format.ApproximateScale.IsSome ->
+                renderOutputValue format value |> Option.map VString |> Option.defaultValue VNull
+            | _ -> value
 
 and private validateConcatEncoding ctx name descriptor expressions values =
     match descriptor with
@@ -7021,6 +7128,7 @@ and private resolveTableRef
     else
         match tryStoredView store tableDb tableRef.Table with
         | Some view ->
+            let viewStore = storeForStoredView store
             let effectiveAccount = registryAccount registry |> Option.map Auth.formatAccount |> Option.defaultValue ""
             let stackKey = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
             let cacheKey = fst stackKey, snd stackKey, effectiveAccount.ToLowerInvariant()
@@ -7043,15 +7151,15 @@ and private resolveTableRef
                     let resolved =
                         match parseStoredViewStatement view with
                         | Result.Ok((Select select) as statement) ->
-                            match registryForView store registry view statement with
+                            match registryForView viewStore registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
                             | Result.Ok viewRegistry ->
-                                resolveRelationBody store viewRegistry view.Schema view.Columns (PlainSelect select) None
+                                resolveRelationBody viewStore viewRegistry view.Schema view.Columns (PlainSelect select) None
                         | Result.Ok((Union(first, rest, orderBy, limit, offset)) as statement) ->
-                            match registryForView store registry view statement with
+                            match registryForView viewStore registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
                             | Result.Ok viewRegistry ->
-                                resolveRelationBody store viewRegistry view.Schema view.Columns (UnionSelect(first, rest, orderBy, limit, offset)) None
+                                resolveRelationBody viewStore viewRegistry view.Schema view.Columns (UnionSelect(first, rest, orderBy, limit, offset)) None
                         | _ -> Error(Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s)" view.Schema view.Name))
 
                     if not (isNull (box memo)) then memo.[cacheKey] <- resolved
@@ -8549,7 +8657,8 @@ and private tryPhysicalTableRef (store: Store) (dbName: string) (tableRef: Table
         && store.VirtualTables.ContainsKey(tableRef.Table.ToLowerInvariant())
 
     if
-        cteShadows
+        emptyPhysicalPlanningProbe.Value
+        || cteShadows
         || not tableRef.Partitions.IsEmpty
         || isVirtual
         || System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase)
@@ -9622,25 +9731,40 @@ and private applyPreparedJoin
                  && probe.ProbeIndices.Length = equiKeys.Length
                  && residualConjuncts |> List.forall safeLeftFilter ->
             let leftRowsFor (right: Value[]) =
-                probe.ProbeIndices
-                |> List.map (fun rightIndex -> right.[rightIndex])
-                |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
+                let indexedRows =
+                    probe.ProbeIndices
+                    |> List.map (fun rightIndex -> right.[rightIndex])
+                    |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
+                let usedIndex = indexedRows.IsSome
+
+                indexedRows
                 |> Option.map _.CandidateRows
                 |> Option.defaultValue probe.Table.RowsArray.Indexed
                 |> Seq.map (fun (rowId, left) -> rowId, readLeft left)
+                |> Seq.mapi (fun index row -> Limits.checkQueryCancellation index; row)
                 |> Seq.filter (fun (_, left) ->
-                    match residualHolds (Array.append left rightNullPadding) with
+                    let matches =
+                        if usedIndex then residualHolds (Array.append left rightNullPadding)
+                        else
+                            let combined = Array.append left right
+                            evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
+                            |> Result.map (truthy >> (=) (Some true))
+
+                    match matches with
                     | Ok matches -> matches
                     | Error(code, message) -> raise (SqlError(code, message)))
                 |> List.ofSeq
 
             let rows =
                 seq {
+                    let mutable inspected = 0
                     for right in joinRows do
                         match leftRowsFor right with
                         | [] -> yield Array.append leftNullPadding right
                         | matches ->
                             for _, left in matches do
+                                Limits.checkQueryCancellation inspected
+                                inspected <- inspected + 1
                                 yield Array.append left right
                 }
             Ok(newSources, rows, coalesceNames)
@@ -9649,50 +9773,78 @@ and private applyPreparedJoin
                 probe.Index.UsesWholeStoredValues
                 && probe.ProbeIndices.Length = equiKeys.Length
 
-            let candidateHolds combined =
-                if exactKey then
+            let candidateHolds usedIndex combined =
+                // A failed lookup scans the table; those rows have not yet
+                // satisfied even the equality represented by the index.
+                if exactKey && usedIndex then
                     residualHolds combined
                 else
                     evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
                     |> Result.map (truthy >> (=) (Some true))
 
             let rightRowsFor (left: Value[]) =
-                probe.ProbeIndices
-                |> List.map (fun leftIndex -> left.[leftIndex])
-                |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
-                |> Option.map _.CandidateRows
-                |> Option.defaultValue probe.Table.RowsArray.Indexed
-                |> Seq.map (fun (rowId, right) -> rowId, readRight right)
+                let indexedRows =
+                    probe.ProbeIndices
+                    |> List.map (fun leftIndex -> left.[leftIndex])
+                    |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
+                let rows =
+                    indexedRows
+                    |> Option.map _.CandidateRows
+                    |> Option.defaultValue probe.Table.RowsArray.Indexed
+                    |> Seq.map (fun (rowId, right) -> rowId, readRight right)
+
+                indexedRows.IsSome, rows
+
+            let exactCandidateMatches usedIndex combined =
+                if usedIndex then true
+                else
+                    match candidateHolds false combined with
+                    | Ok matches -> matches
+                    | Error(code, message) -> raise (SqlError(code, message))
 
             match join.Kind, exactKey, residualConjuncts with
             | (InnerJoin | StraightJoin | NaturalJoin), true, [] ->
                 let candidates =
                     seq {
+                        let mutable inspected = 0
                         for left in rowsSoFar do
-                            for _, right in rightRowsFor left do
-                                yield Array.append left right
+                            let usedIndex, rightRows = rightRowsFor left
+                            for _, right in rightRows do
+                                Limits.checkQueryCancellation inspected
+                                inspected <- inspected + 1
+                                let combined = Array.append left right
+                                if exactCandidateMatches usedIndex combined then yield combined
                     }
 
                 Ok(newSources, candidates, coalesceNames)
             | (InnerJoin | StraightJoin | NaturalJoin), _, _ ->
                 seq {
                     for left in rowsSoFar do
-                        for _, right in rightRowsFor left do
-                            yield Array.append left right
+                        let usedIndex, rightRows = rightRowsFor left
+                        for _, right in rightRows do
+                            yield usedIndex, Array.append left right
                 }
                 |> traverseSeq
-                    (fun combined -> candidateHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
+                    (fun (usedIndex, combined) ->
+                        candidateHolds usedIndex combined
+                        |> Result.map (fun matches -> if matches then Some combined else None))
                 |> Result.mapError Err
                 |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
             | (LeftJoin | NaturalLeftJoin), true, [] ->
                 let candidates =
                     seq {
+                        let mutable inspected = 0
                         for left in rowsSoFar do
                             let mutable matched = false
+                            let usedIndex, rightRows = rightRowsFor left
 
-                            for _, right in rightRowsFor left do
-                                matched <- true
-                                yield Array.append left right
+                            for _, right in rightRows do
+                                Limits.checkQueryCancellation inspected
+                                inspected <- inspected + 1
+                                let combined = Array.append left right
+                                if exactCandidateMatches usedIndex combined then
+                                    matched <- true
+                                    yield combined
 
                             if not matched then
                                 yield Array.append left rightNullPadding
@@ -9702,10 +9854,12 @@ and private applyPreparedJoin
             | (LeftJoin | NaturalLeftJoin), _, _ ->
                 seq {
                     for leftIndex, left in leftIndexed.Value do
-                        for rightIndex, (_, right) in rightRowsFor left |> Seq.indexed do
-                            yield leftIndex, rightIndex, Array.append left right
+                        let usedIndex, rightRows = rightRowsFor left
+                        for rightIndex, (_, right) in rightRows |> Seq.indexed do
+                            yield leftIndex, rightIndex, (usedIndex, Array.append left right)
                 }
-                |> keepMatches candidateHolds id
+                |> keepMatches (fun (usedIndex, combined) -> candidateHolds usedIndex combined) id
+                |> Result.map (List.map (fun (leftIndex, rightIndex, (_, combined)) -> leftIndex, rightIndex, combined))
                 |> Result.map (buildCombinedRows [] >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
             | (RightJoin | NaturalRightJoin), _, _ ->
                 let positionedRight =
@@ -9718,12 +9872,14 @@ and private applyPreparedJoin
 
                 seq {
                     for leftIndex, left in leftIndexed.Value do
-                        for rowId, right in rightRowsFor left do
+                        let usedIndex, rightRows = rightRowsFor left
+                        for rowId, right in rightRows do
                             match Map.tryFind rowId rightPositions with
-                            | Some rightIndex -> yield leftIndex, rightIndex, Array.append left right
+                            | Some rightIndex -> yield leftIndex, rightIndex, (usedIndex, Array.append left right)
                             | None -> ()
                 }
-                |> keepMatches candidateHolds id
+                |> keepMatches (fun (usedIndex, combined) -> candidateHolds usedIndex combined) id
+                |> Result.map (List.map (fun (leftIndex, rightIndex, (_, combined)) -> leftIndex, rightIndex, combined))
                 |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
             | _ -> failwith "indexed join kind"
         | _, None when hashEligible ->
@@ -9766,8 +9922,11 @@ and private applyPreparedJoin
             | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), true ->
                 let combined =
                     seq {
+                        let mutable inspected = 0
                         for left in rowsSoFar do
                             for _, right in rightIndexed do
+                                Limits.checkQueryCancellation inspected
+                                inspected <- inspected + 1
                                 yield Array.append left right
                     }
 
@@ -10361,9 +10520,21 @@ and private tryMergeDirectView
                           Alias = None
                           Partitions = [] }
 
+                    let aliasesHiddenPhysicalColumn (physicalTable: Table) =
+                        let exposed = direct.OrderedColumns |> List.map _.ToLowerInvariant() |> Set.ofList
+                        let hidden =
+                            physicalTable.Columns
+                            |> List.map (fun column -> column.Name.ToLowerInvariant())
+                            |> List.filter (fun name -> not (Set.contains name exposed))
+                            |> Set.ofList
+                        select.Projections
+                        |> List.exists (fun projection ->
+                            Set.contains ((projectionLabel projection).ToLowerInvariant()) hidden)
+
                     match tryPhysicalTableRef store direct.Database source with
                     | Error _
                     | Ok None -> Ok None
+                    | Ok(Some physicalTable) when aliasesHiddenPhysicalColumn physicalTable -> Ok None
                     | Ok(Some _) ->
                         match
                             registryForViewSecurity
@@ -12825,32 +12996,37 @@ and private physicalAccessKeyNames = function
 
 and private tryIndexMergeAccessPlan policy kind (table: Table) accesses =
     let candidateCounts = accesses |> List.map physicalAccessCandidateCount
-    let rowIdSets = accesses |> List.map physicalAccessRowIds
+    // A union cannot be narrower than any branch. Reject an already broad
+    // branch before forcing its lazy range rows and every other branch's rows.
+    let broadUnion =
+        policy = CostedRead && kind = MergeUnion
+        && (candidateCounts |> List.exists (fun count ->
+            QueryPlanner.chooseRange table.RowsArray.Count count <> QueryPlanner.IndexRange))
 
-    let rowIds =
-        match kind with
-        | MergeUnion -> Set.unionMany rowIdSets
-        | MergeIntersection -> rowIdSets |> List.reduce Set.intersect
-
-    let accepted =
-        match policy with
-        | CandidateNarrowing -> true
-        | CostedRead ->
-            match kind with
-            | MergeUnion -> QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
-            | MergeIntersection -> QueryPlanner.chooseIndexIntersection table.RowsArray.Count candidateCounts rowIds.Count
-
-    if not accepted then
+    if broadUnion then
         None
     else
-        let keyNames = accesses |> List.collect physicalAccessKeyNames |> List.distinct
-
-        Some
-            { Operation = kind
-              KeyNames = keyNames
-              Columns = table.Columns
-              CandidateRowIds = rowIds
-              Rows = lazy (Storage.rowsForRowIds table rowIds) }
+        let rowIdSets = accesses |> List.map physicalAccessRowIds
+        let rowIds =
+            match kind with
+            | MergeUnion -> Set.unionMany rowIdSets
+            | MergeIntersection -> rowIdSets |> List.reduce Set.intersect
+        let accepted =
+            match policy with
+            | CandidateNarrowing -> true
+            | CostedRead ->
+                match kind with
+                | MergeUnion -> QueryPlanner.chooseRange table.RowsArray.Count rowIds.Count = QueryPlanner.IndexRange
+                | MergeIntersection -> QueryPlanner.chooseIndexIntersection table.RowsArray.Count candidateCounts rowIds.Count
+        if not accepted then None
+        else
+            let keyNames = accesses |> List.collect physicalAccessKeyNames |> List.distinct
+            Some
+                { Operation = kind
+                  KeyNames = keyNames
+                  Columns = table.Columns
+                  CandidateRowIds = rowIds
+                  Rows = lazy (Storage.rowsForRowIds table rowIds) }
 
 and private tryIndexUnionAccessInTableWith
     (policy: IndexAccessPolicy)
@@ -12968,8 +13144,24 @@ and private choosePhysicalAccessBeforeIndexOrder (indexOrder: IndexOrderPlan opt
         | _ -> true)
 
 and private tryPhysicalAccessInTableWith policy store registry table tref whereExpr =
-    physicalAccessCandidatesInTableWith policy store registry table tref whereExpr
-    |> choosePhysicalAccess
+    let compute () =
+        physicalAccessCandidatesInTableWith policy store registry table tref whereExpr
+        |> choosePhysicalAccess
+    match policy, whereExpr with
+    | CandidateNarrowing, Some expression ->
+        let withinMemo (memo: AccessPlanningMemo) =
+            match memo.Entries.TryGetValue expression with
+            | true, planned -> planned
+            | false, _ ->
+                let planned = compute ()
+                memo.Entries.Add(expression, planned)
+                planned
+        match accessPlanningMemo.Value with
+        | Some memo when System.Object.ReferenceEquals(memo.Table, table) && memo.Reference = tref -> withinMemo memo
+        | _ ->
+            let memo = { Table = table; Reference = tref; Entries = Dictionary<Expr, PhysicalAccessPlan option>(HashIdentity.Reference) }
+            DynamicScope.withValue accessPlanningMemo (Some memo) (fun () -> withinMemo memo)
+    | _ -> compute ()
 
 and private tryPhysicalAccessWith policy store registry dbName tref whereExpr =
     physicalFastPathTable store dbName tref
@@ -14170,7 +14362,7 @@ and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr)
         | _ -> None)
     |> Option.defaultValue expr
 
-/// GROUP BY and HAVING use MySQL's source-first name resolution.
+/// GROUP BY resolves source columns before projection aliases.
 and private resolveGroupOrHavingCol (columnIndex: Map<string, int list>) (projections: Projection list) (name: string) : Result<Expr, EvalError> =
     match Map.tryFind (name.ToLowerInvariant()) columnIndex with
     | Some [ _ ] -> Ok(Col name)
@@ -14191,7 +14383,12 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | UserVariable _
     | SystemVariable _ -> Ok expr
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
-    | Col name -> resolveGroupOrHavingCol columnIndex projections name
+    | Col name ->
+        match projections |> List.tryPick (function
+            | { Expression = projection; Alias = Some alias } when equalsIgnoreCase alias name -> Some projection
+            | _ -> None) with
+        | Some projection -> Ok projection
+        | None -> resolveGroupOrHavingCol columnIndex projections name
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
@@ -14931,9 +15128,34 @@ and private runGroupedSelect
                 if expressions.IsEmpty then None else Some(lifetime, expressions)
             | _ -> None)
     let aggregateArguments = aggregateInputPlans |> List.collect snd
+    // COUNT only needs to distinguish NULL from non-NULL. Keep that fact,
+    // rather than retaining a potentially huge computed value for every row.
+    let countOnlyArguments = Dictionary<Expr, bool>(HashIdentity.Reference)
+    for aggregate in aggregateCalls do
+        match aggregate with
+        | FuncCall(name, arguments) ->
+            let countOnly =
+                equalsIgnoreCase name "COUNT"
+                && Functions.isUnmodifiedBuiltinAggregate name registry
+                && (match arguments with [ Distinct _ ] -> false | _ -> true)
+            for argument in arguments do
+                match argument with
+                | Star _ -> ()
+                | Distinct expression | OrderBy(expression, _) | expression ->
+                    match countOnlyArguments.TryGetValue expression with
+                    | true, previous -> countOnlyArguments.[expression] <- previous && countOnly
+                    | false, _ -> countOnlyArguments.Add(expression, countOnly)
+        | _ -> ()
     let evaluateArguments row arguments =
         let context = ctxFor row
-        arguments |> traverse (fun expression -> evalExpr context expression |> Result.map (fun value -> expression, value))
+        arguments |> traverse (fun expression ->
+            evalExpr context expression
+            |> Result.map (fun value ->
+                let retained =
+                    match countOnlyArguments.TryGetValue expression with
+                    | true, true when value <> VNull -> VInt 1L
+                    | _ -> value
+                expression, retained))
     let materializeInputs row =
         if aggregateArguments.IsEmpty then Ok { Values = row; AggregateInputs = [] }
         else
@@ -17497,8 +17719,9 @@ and private runSelect
     // `containsAggregate`/`GroupBy.IsEmpty` routing above) — so it's just
     // ANDed onto the same per-row `matches` check here.
     let matchesWhere = prepareWhereMatches ctxFor whereExpr
+    let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex projections)
     let constantHaving =
-        select.Having |> Option.bind (fun expression ->
+        havingExpression |> Option.bind (fun resolved -> resolved |> Result.toOption) |> Option.bind (fun expression ->
             let context = { ctxFor [||] with Clause = HavingClause }
             if isLiteralConstantExpression registry expression then
                 Some(evalExpr context expression |> Result.map (truthy >> (=) (Some true)))
@@ -17510,10 +17733,11 @@ and private runSelect
             if not keep then
                 Ok false
             else
-                match constantHaving, select.Having with
+                match constantHaving, havingExpression with
                 | Some result, _ -> result
                 | None, None -> Ok true
-                | None, Some expr -> evalExpr { ctxFor row with Clause = HavingClause } expr |> Result.map (fun v -> truthy v = Some true))
+                | None, Some(Error error) -> Error error
+                | None, Some(Ok expr) -> evalExpr { ctxFor row with Clause = HavingClause } expr |> Result.map (fun v -> truthy v = Some true))
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections
@@ -19130,9 +19354,12 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
 
     let checkMutationWhere (fromRef: TableRef) (joins: Join list) (expressions: Expr list) : Result<unit, QueryResult> =
         let query = mutationSourceQuery (Some(FromTable fromRef)) joins [] expressions
+        let onlyPhysicalTables =
+            joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false)
         let result, _, _ =
             withPlanningProbe (fun () ->
-                withSourceMetadataProbe (fun () -> runSelectStmt store validationRegistry dbName query None))
+                DynamicScope.withValue emptyPhysicalPlanningProbe onlyPhysicalTables (fun () ->
+                    withSourceMetadataProbe (fun () -> runSelectStmt store validationRegistry dbName query None)))
         match result with
         | Err(code, message) -> Error(Err(code, message))
         | _ -> Ok()
@@ -19532,7 +19759,11 @@ let private rejectUnsafeGeneratedExpressions registry columns =
     [ rejectDirectOnlyGenerated registry columns
       rejectQuantifiedComparisonsInGenerated columns
       rejectSubqueriesInGenerated columns
-      rejectSessionVariablesInGenerated columns ]
+      rejectSessionVariablesInGenerated columns
+      rejectGeneratedExpression
+          (Expression.exists (function Placeholder _ -> true | _ -> false))
+          (fun column -> Err(1064, sprintf "Unbound placeholder in generated column '%s'" column))
+          columns ]
     |> List.tryPick id
 
 let private effectfulDdlFunctions = set [ "BENCHMARK"; "SLEEP" ]

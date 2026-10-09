@@ -18,25 +18,28 @@ let private pathComparison =
     if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
 
 let private allowedPath policy (path: string) =
-    try
-        let candidate = ServerOptions.canonicalPath path
+    match policy with
+    | ServerOptions.SecureFilePolicy.Disabled -> Error secureFileError
+    | _ ->
+        try
+            let candidate = ServerOptions.canonicalPath path
 
-        match policy with
-        | ServerOptions.SecureFilePolicy.Disabled -> Error secureFileError
-        | ServerOptions.SecureFilePolicy.Unrestricted -> Ok candidate
-        | ServerOptions.SecureFilePolicy.Directory root ->
-            let root = ServerOptions.normalizeSecureFileDirectory root
+            match policy with
+            | ServerOptions.SecureFilePolicy.Disabled -> Error secureFileError
+            | ServerOptions.SecureFilePolicy.Unrestricted -> Ok candidate
+            | ServerOptions.SecureFilePolicy.Directory root ->
+                let root = ServerOptions.normalizeSecureFileDirectory root
 
-            if candidate.StartsWith(root, pathComparison) then
-                Ok candidate
-            else
-                Error secureFileError
-    with
-    | :? ArgumentException
-    | :? NotSupportedException
-    | :? PathTooLongException -> Error secureFileError
-    | :? UnauthorizedAccessException -> Error(13, sprintf "Can't get stat of '%s' (OS errno 13 - Permission denied)" path)
-    | :? IOException as error -> Error(29, sprintf "Error reading file '%s': %s" path error.Message)
+                if candidate.StartsWith(root, pathComparison) then
+                    Ok candidate
+                else
+                    Error secureFileError
+        with
+        | :? ArgumentException
+        | :? NotSupportedException
+        | :? PathTooLongException -> Error secureFileError
+        | :? UnauthorizedAccessException -> Error(13, sprintf "Can't get stat of '%s' (OS errno 13 - Permission denied)" path)
+        | :? IOException as error -> Error(29, sprintf "Error reading file '%s': %s" path error.Message)
 
 /// Opens a server-owned input only after applying `secure_file_priv`, then
 /// bounds both the initial size and growth after the open.

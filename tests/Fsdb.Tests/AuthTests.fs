@@ -51,6 +51,18 @@ let tests =
               Expect.isFalse (verifyPassword CachingSha2Password stored "wrong") "different plaintext fails"
               Expect.isFalse (verifyPassword CachingSha2Password "$A$005$malformed" "secret") "malformed hashes fail closed"
 
+          testCase "imported caching SHA-2 round counts use three hexadecimal digits"
+          <| fun _ ->
+              let salt = Text.Encoding.ASCII.GetBytes "abcdefghijklmnopqrst"
+              let stored = cachingSha2PasswordHashWithSalt salt "secret"
+              let withRounds digits = stored.Substring(0, 3) + digits + stored.Substring(6)
+
+              Expect.isTrue (isValidHash CachingSha2Password (withRounds "999")) "MySQL accepts 999"
+              Expect.isTrue (isValidHash CachingSha2Password (withRounds "00A")) "MySQL accepts hexadecimal rounds"
+              Expect.isTrue (isValidHash CachingSha2Password (withRounds "FFF")) "MySQL accepts the maximum"
+              Expect.isFalse (isValidHash CachingSha2Password (withRounds "000")) "zero rounds are invalid"
+              Expect.isFalse (isValidHash CachingSha2Password (withRounds "GGG")) "non-hexadecimal rounds are invalid"
+
           testCase "caching SHA-2 fast responses use the cached double digest"
           <| fun _ ->
               let password = "s3cret"

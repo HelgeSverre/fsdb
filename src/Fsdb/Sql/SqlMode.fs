@@ -1,5 +1,6 @@
 module Fsdb.Sql.SqlMode
 
+open System
 open Fsdb.Parser
 
 type Settings =
@@ -53,17 +54,28 @@ let private canonicalOrder =
       "PAD_CHAR_TO_FULL_LENGTH"
       "TIME_TRUNCATE_FRACTIONAL" ]
 
-let private validModes = Set.ofList canonicalOrder
+let private scanModes (value: string) =
+    let mutable modes = Set.empty
+    let mutable invalid = None
+    let mutable start = 0
+    while start <= value.Length && invalid.IsNone do
+        let separator = value.IndexOf(',', start)
+        let finish = if separator < 0 then value.Length else separator
+        let mutable length = finish - start
+        while length > 0 && Char.IsWhiteSpace value.[start + length - 1] do
+            length <- length - 1
+        if length > 0 then
+            let name = value.AsSpan(start, length)
+            let mutable matched = None
+            for mode in canonicalOrder do
+                if name.Equals(mode.AsSpan(), StringComparison.OrdinalIgnoreCase) then matched <- Some mode
+            match matched with
+            | Some mode -> modes <- Set.add mode modes
+            | None -> invalid <- Some(value.Substring(start, length))
+        start <- if separator < 0 then value.Length + 1 else separator + 1
+    modes, invalid
 
-let private names (value: string) =
-    value.Split(',')
-    |> Array.map _.TrimEnd()
-    |> Array.filter (System.String.IsNullOrEmpty >> not)
-
-let private parse (value: string) : Set<string> =
-    names value
-    |> Seq.map _.ToUpperInvariant()
-    |> Set.ofSeq
+let private parse (value: string) : Set<string> = scanModes value |> fst
 
 let private expand (modes: Set<string>) =
     modes
@@ -76,9 +88,10 @@ let private render (modes: Set<string>) =
     |> fun names -> System.String.Join(',', names)
 
 let tryNormalize (value: string) : Result<string, string> =
-    match names value |> Array.tryFind (fun name -> not (validModes.Contains(name.ToUpperInvariant()))) with
+    let modes, invalid = scanModes value
+    match invalid with
     | Some invalid -> Error invalid
-    | None -> value |> parse |> expand |> render |> Ok
+    | None -> modes |> expand |> render |> Ok
 
 let private enabled (modes: Set<string>) (name: string) =
     modes.Contains(name.ToUpperInvariant())

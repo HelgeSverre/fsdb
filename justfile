@@ -168,7 +168,7 @@ bench-mysql-start:
     if [ ! -d {{ BENCH_MYSQL_DATADIR }} ]; then
         {{ MYSQLD }} --no-defaults --initialize-insecure --datadir={{ BENCH_MYSQL_DATADIR }}
     fi
-    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_DATADIR }} --port="$mysql_port" \
+    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_DATADIR }} --port="$mysql_port" --bind-address=127.0.0.1 \
         --socket={{ BENCH_MYSQL_DATADIR }}/mysql.sock --pid-file={{ BENCH_MYSQL_DATADIR }}/mysql.pid \
         > {{ BENCH_MYSQL_DATADIR }}/mysqld.log 2>&1 &
     disown
@@ -193,7 +193,7 @@ bench-mysql-start-nofsync:
     if [ ! -d {{ BENCH_MYSQL_NOFSYNC_DATADIR }} ]; then
         {{ MYSQLD }} --no-defaults --initialize-insecure --datadir={{ BENCH_MYSQL_NOFSYNC_DATADIR }}
     fi
-    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_NOFSYNC_DATADIR }} --port="$mysql_port" \
+    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_NOFSYNC_DATADIR }} --port="$mysql_port" --bind-address=127.0.0.1 \
         --socket={{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysql.sock --pid-file={{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysql.pid \
         --skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0 \
         > {{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysqld.log 2>&1 &

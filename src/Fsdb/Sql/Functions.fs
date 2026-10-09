@@ -2121,6 +2121,10 @@ let private dateTimeFormats =
 /// parser as a fallback) — `None` rather than an error for anything that
 /// doesn't look like a date.
 let tryDateTimeValue (v: Value) : DateTime option =
+    let atSessionPrecision (dateTime: DateTime) =
+        let ticks = timeTicksAtSessionPrecision dateTime.Ticks
+        if ticks <= DateTime.MaxValue.Ticks then Some(DateTime(ticks, dateTime.Kind)) else None
+
     match v with
     | VDateTime dt -> Some dt
     | VTimestamp dt -> Some dt
@@ -2138,10 +2142,10 @@ let tryDateTimeValue (v: Value) : DateTime option =
         | None -> None
         | Some s ->
             match DateTime.TryParseExact(s.Trim(), dateTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None) with
-            | true, dt -> Some dt
+            | true, dt -> atSessionPrecision dt
             | false, _ ->
                 match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                | true, dt -> Some dt
+                | true, dt -> atSessionPrecision dt
                 | false, _ -> None
 
 let private asDateOnly (v: Value) : DateOnly option = tryDateTimeValue v |> Option.map DateOnly.FromDateTime
@@ -2593,6 +2597,22 @@ let private dateFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map VDate |> Option.defaultValue VNull
     | _ -> VNull
 
+let private warnTruncatedTime value =
+    Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" value)
+
+let private parsedTimeValue value =
+    value
+    |> toText
+    |> Option.bind (fun text ->
+        tryParseTimeInputTicks text
+        |> Option.map (fun ticks ->
+            let rounded = timeTicksAtSessionPrecision ticks
+
+            if rounded < -maxTimeTicks || rounded > maxTimeTicks then
+                warnTruncatedTime text
+
+            timeValueOrClamp rounded))
+
 let private timeFn: Scalar =
     function
     | [ VTime value ] -> VTime value
@@ -2600,8 +2620,8 @@ let private timeFn: Scalar =
         let _, hour, minute, second, micros = zeroDateTimeParts value
         VTime(timeValueOrClamp ((int64 hour * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond + int64 micros * 10L))
     | [ v ] when not (anyNull [ v ]) ->
-        match toText v |> Option.bind tryParseTimeInputTicks with
-        | Some ticks -> VTime(timeValueOrClamp (roundTimeTicksToFsp 6 ticks))
+        match parsedTimeValue v with
+        | Some time -> VTime time
         | None -> tryDateTimeValue v |> Option.map (fun value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)) |> Option.defaultValue VNull
     | _ -> VNull
 
@@ -2648,7 +2668,7 @@ let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromTime: TimeVal
     | [ VZeroDateTime dateTime ] -> VInt(int64 (fromZero dateTime))
     | [ VTime value ] -> VInt(int64 (fromTime value))
     | [ value ] when not (anyNull [ value ]) ->
-        match value |> toText |> Option.bind tryParseTimeInputTicks |> Option.bind tryTimeValue with
+        match parsedTimeValue value with
         | Some time -> VInt(int64 (fromTime time))
         | None -> tryDateTimeValue value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
@@ -2717,9 +2737,35 @@ let private utcTimestampFn = currentTimestampFn (FixedOffset 0)
 let private tryTimeTicks (value: Value) =
     match value with
     | VTime time -> Some(timeTicks time)
-    | _ -> value |> toText |> Option.bind tryParseTimeInputTicks |> Option.map (roundTimeTicksToFsp 6)
+    | _ -> parsedTimeValue value |> Option.map timeTicks
 
 let private timeResult ticks = VTime(timeValueOrClamp ticks)
+
+let private formatUnboundedTime fsp ticks =
+    let magnitude = timeMagnitude ticks
+    let totalSeconds = magnitude / uint64 TimeSpan.TicksPerSecond
+    let hours = (totalSeconds / 3600UL).ToString().PadLeft(2, '0')
+    let minutes = int (totalSeconds % 3600UL / 60UL)
+    let seconds = int (totalSeconds % 60UL)
+    let sign = if ticks < 0L then "-" else ""
+    let whole = sprintf "%s%s:%02d:%02d" sign hours minutes seconds
+
+    if fsp = 0 then whole
+    else
+        let microseconds = int (magnitude % uint64 TimeSpan.TicksPerSecond / 10UL)
+        whole + "." + (sprintf "%06d" microseconds).Substring(0, fsp)
+
+let private timeArgumentPrecision value =
+    let text = toText value |> Option.defaultValue ""
+    let decimalPoint = text.LastIndexOf('.')
+    if decimalPoint > text.LastIndexOf(':') then min 6 (text.Length - decimalPoint - 1)
+    else 0
+
+let private timeResultWithWarning fsp ticks =
+    if ticks < -maxTimeTicks || ticks > maxTimeTicks then
+        warnTruncatedTime (formatUnboundedTime fsp ticks)
+
+    timeResult ticks
 
 let private tryDateTimeValueInZone zone value =
     match value with
@@ -2757,7 +2803,7 @@ let private addTimeFn (direction: int64) : Scalar =
         | None -> VNull
         | Some intervalTicks ->
             match tryTimeTicks value with
-            | Some valueTicks -> timeResult (valueTicks + direction * intervalTicks)
+            | Some valueTicks -> timeResultWithWarning 0 (valueTicks + direction * intervalTicks)
             | None ->
                 match tryDateTimeValue value with
                 | Some dateTime ->
@@ -2772,10 +2818,12 @@ let private timeDiffFn: Scalar =
     function
     | [ left; right ] when not (anyNull [ left; right ]) ->
         match tryTimeTicks left, tryTimeTicks right with
-        | Some leftTicks, Some rightTicks -> timeResult (leftTicks - rightTicks)
+        | Some leftTicks, Some rightTicks ->
+            timeResultWithWarning (max (timeArgumentPrecision left) (timeArgumentPrecision right)) (leftTicks - rightTicks)
         | None, None ->
             match tryDateTimeValue left, tryDateTimeValue right with
-            | Some leftDate, Some rightDate -> timeResult ((leftDate - rightDate).Ticks)
+            | Some leftDate, Some rightDate ->
+                timeResultWithWarning (max (timeArgumentPrecision left) (timeArgumentPrecision right)) ((leftDate - rightDate).Ticks)
             | _ -> VNull
         | _ -> VNull
     | _ -> VNull
@@ -2789,12 +2837,12 @@ let private secToTimeFn: Scalar =
         let ticks =
             if seconds >= maximumSeconds then
                 if seconds > maximumSeconds then
-                    Diagnostics.warning 1292 "Truncated incorrect time value"
+                    warnTruncatedTime (toText value |> Option.defaultValue "")
 
                 maxTimeTicks
             elif seconds <= -maximumSeconds then
                 if seconds < -maximumSeconds then
-                    Diagnostics.warning 1292 "Truncated incorrect time value"
+                    warnTruncatedTime (toText value |> Option.defaultValue "")
 
                 -maxTimeTicks
             else
@@ -2805,9 +2853,9 @@ let private secToTimeFn: Scalar =
 
 let private makeTimeFn: Scalar =
     function
-    | [ hours; minutes; seconds ] when not (anyNull [ hours; minutes; seconds ]) ->
+    | [ hoursValue; minutes; secondsValue ] when not (anyNull [ hoursValue; minutes; secondsValue ]) ->
         let hours =
-            match hours with
+            match hoursValue with
             | VInt value -> value
             | VUInt value when value > uint64 Int64.MaxValue -> Int64.MaxValue
             | VUInt value -> int64 value
@@ -2822,12 +2870,26 @@ let private makeTimeFn: Scalar =
                     int64 number
 
         let minutes = int64 (toDouble minutes)
-        let seconds = toDouble seconds
+        let seconds = toDouble secondsValue
 
         if minutes < 0L || minutes > 59L || seconds < 0.0 || seconds >= 60.0 then
             VNull
         elif hours < -838L || hours > 838L then
-            Diagnostics.warning 1292 "Truncated incorrect time value"
+            let hoursText =
+                match hoursValue with
+                | VUInt value when value > uint64 Int64.MaxValue -> string value
+                | _ -> string hours
+
+            let secondsText =
+                match secondsValue with
+                | VDouble _ | VString _ | VEncodedString _ -> sprintf "%09.6f" seconds
+                | _ ->
+                    let text = toText secondsValue |> Option.defaultValue "0"
+                    let decimalPoint = text.IndexOf('.')
+                    if decimalPoint < 0 then text.PadLeft(2, '0')
+                    else text.Substring(0, decimalPoint).PadLeft(2, '0') + text.Substring(decimalPoint)
+
+            warnTruncatedTime (sprintf "%s:%02d:%s" hoursText minutes secondsText)
             timeResult (if hours < 0L then -maxTimeTicks else maxTimeTicks)
         else
             let sign = if hours < 0L then -1L else 1L
@@ -3073,16 +3135,7 @@ let private extractFn: Scalar =
             | "YEAR_MONTH" -> VInt(compose [ year, 0; month, 2 ])
             | _ -> VNull
 
-        match toText u |> Option.map (fun unit -> unit.ToUpperInvariant()), v with
-        | Some "WEEK", _ -> weekFn 0 [ v ]
-        | Some unit, VZeroDate date ->
-            let year, month, day = zeroDateParts date
-            extract unit year month day 0 0 0 0
-        | Some unit, VZeroDateTime dateTime ->
-            let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
-            let year, month, day = zeroDateParts date
-            extract unit year month day hour minute second microseconds
-        | Some unit, VTime value ->
+        let extractTime unit value =
             let hour, minute, second, microseconds = timeParts value
 
             match unit with
@@ -3104,12 +3157,26 @@ let private extractFn: Scalar =
                 | VInt result when timeTicks value < 0L -> VInt(-result)
                 | result -> result
             | _ -> VNull
+
+        match toText u |> Option.map (fun unit -> unit.ToUpperInvariant()), v with
+        | Some "WEEK", _ -> weekFn 0 [ v ]
+        | Some unit, VZeroDate date ->
+            let year, month, day = zeroDateParts date
+            extract unit year month day 0 0 0 0
+        | Some unit, VZeroDateTime dateTime ->
+            let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
+            let year, month, day = zeroDateParts date
+            extract unit year month day hour minute second microseconds
+        | Some unit, VTime value -> extractTime unit value
         | Some unit, value ->
-            tryDateTimeValue value
-            |> Option.map (fun dateTime ->
-                let microseconds = int ((dateTime.Ticks % 10_000_000L) / 10L)
-                extract unit dateTime.Year dateTime.Month dateTime.Day dateTime.Hour dateTime.Minute dateTime.Second microseconds)
-            |> Option.defaultValue VNull
+            match parsedTimeValue value with
+            | Some time -> extractTime unit time
+            | None ->
+                tryDateTimeValue value
+                |> Option.map (fun dateTime ->
+                    let microseconds = int ((dateTime.Ticks % 10_000_000L) / 10L)
+                    extract unit dateTime.Year dateTime.Month dateTime.Day dateTime.Hour dateTime.Minute dateTime.Second microseconds)
+                |> Option.defaultValue VNull
         | _ -> VNull
     | _ -> VNull
 
@@ -3365,6 +3432,10 @@ let private locateAt (collation: Collation.Collation) (str: string) (sub: string
             VInt 0L
         elif sub = "" then
             VInt(emptyNeedleOffset collation str startOffset)
+        elif (str |> Seq.forall (fun c -> c <= '\u007f'))
+             && (sub |> Seq.forall (fun c -> c <= '\u007f')) then
+            let offset = collation.FindSubstringAscii str sub startOffset
+            VInt(if offset < 0 then 0L else position + int64 (offset - startOffset))
         else
             let mutable offset = startOffset
             let mutable scalarPosition = position
@@ -4539,8 +4610,14 @@ let private raiseRegexError (functionName: string) = function
     | Regexp.InvalidPattern _ as error -> raise (SqlError(Regexp.errorCode error, Regexp.errorMessage error))
     | Regexp.InvalidMatchType -> raise (SqlError(1210, sprintf "Incorrect arguments to %s" functionName))
 
-let private regexResult (functionName: string) (collation: Collation.Collation) (matchType: string option) (pattern: string) =
-    match Regexp.compile collation matchType pattern with
+let private regexResult
+    (compile: Collation.Collation -> string option -> string -> Result<Regex, Regexp.RegexError>)
+    (functionName: string)
+    (collation: Collation.Collation)
+    (matchType: string option)
+    (pattern: string)
+    =
+    match compile collation matchType pattern with
     | Ok regex -> regex
     | Error error -> raiseRegexError functionName error
 
@@ -4583,17 +4660,17 @@ let private normalizedOffset (input: Regexp.PreparedInput) sourceOffset =
 let private regexpPositionError () =
     raise (SqlError(3686, "Index out of bounds in regular expression search."))
 
-let private regexpLikeFn (collation: Collation.Collation) : Scalar =
+let private regexpLikeFn compile (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
         if anyNull rest then VNull
         else
-            let regex = regexResult "regexp_like" collation (matchTypeArg rest 0) (req p)
+            let regex = regexResult compile "regexp_like" collation (matchTypeArg rest 0) (req p)
             let input = Regexp.prepareText (matchTypeArg rest 0) (req p) (req e)
             withRegexTimeout (fun () -> if regex.IsMatch input then VInt 1L else VInt 0L)
     | _ -> VNull
 
-let private regexpInstrFn (collation: Collation.Collation) : Scalar =
+let private regexpInstrFn compile (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
         if anyNull rest then VNull
@@ -4604,7 +4681,7 @@ let private regexpInstrFn (collation: Collation.Collation) : Scalar =
             let occurrence = intArgOr 1 rest 1
             let returnEnd = intArgOr 0 rest 2 <> 0
 
-            let regex = regexResult "regexp_instr" collation (matchTypeArg rest 3) (req p)
+            let regex = regexResult compile "regexp_instr" collation (matchTypeArg rest 3) (req p)
 
             withRegexTimeout (fun () ->
                 if pos < 1 || pos > Regexp.scalarCount source then
@@ -4621,7 +4698,7 @@ let private regexpInstrFn (collation: Collation.Collation) : Scalar =
                 | None -> VInt 0L)
     | _ -> VNull
 
-let private regexpSubstrFn (collation: Collation.Collation) : Scalar =
+let private regexpSubstrFn compile (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
         if anyNull rest then VNull
@@ -4631,7 +4708,7 @@ let private regexpSubstrFn (collation: Collation.Collation) : Scalar =
             let pos = intArgOr 1 rest 0
             let occurrence = intArgOr 1 rest 1
 
-            let regex = regexResult "regexp_substr" collation (matchTypeArg rest 2) (req p)
+            let regex = regexResult compile "regexp_substr" collation (matchTypeArg rest 2) (req p)
 
             withRegexTimeout (fun () ->
                 if pos < 1 then
@@ -4759,7 +4836,7 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
 /// `occurrence = 0` (the default) replaces every match; a positive
 /// `occurrence` replaces only that one match, leaving the rest of the
 /// string untouched either way.
-let private regexpReplaceFn (collation: Collation.Collation) : Scalar =
+let private regexpReplaceFn compile (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: r :: rest when not (anyNull [ e; p; r ]) ->
         if anyNull rest then VNull
@@ -4769,7 +4846,7 @@ let private regexpReplaceFn (collation: Collation.Collation) : Scalar =
             let pos = intArgOr 1 rest 0
             let occurrence = intArgOr 0 rest 1
 
-            let regex = regexResult "regexp_replace" collation (matchTypeArg rest 2) (req p)
+            let regex = regexResult compile "regexp_replace" collation (matchTypeArg rest 2) (req p)
             let input = Regexp.prepareInput (matchTypeArg rest 2) (req p) source
 
             withRegexTimeout (fun () ->
@@ -4797,19 +4874,21 @@ let validateRegexpArity (name: string) arguments =
         raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
     | _ -> ()
 
-let regexpFunction (name: string) (collation: Collation.Collation) : Scalar option =
+let regexpFunctionWithCompiler compile (name: string) (collation: Collation.Collation) : Scalar option =
     let implementation =
         match name.ToUpperInvariant() with
-        | "REGEXP_LIKE" -> Some(regexpLikeFn collation)
-        | "REGEXP_INSTR" -> Some(regexpInstrFn collation)
-        | "REGEXP_SUBSTR" -> Some(regexpSubstrFn collation)
-        | "REGEXP_REPLACE" -> Some(regexpReplaceFn collation)
+        | "REGEXP_LIKE" -> Some(regexpLikeFn compile collation)
+        | "REGEXP_INSTR" -> Some(regexpInstrFn compile collation)
+        | "REGEXP_SUBSTR" -> Some(regexpSubstrFn compile collation)
+        | "REGEXP_REPLACE" -> Some(regexpReplaceFn compile collation)
         | _ -> None
 
     implementation
     |> Option.map (fun invoke arguments ->
         validateRegexpArity name arguments
         invoke arguments)
+
+let regexpFunction name collation = regexpFunctionWithCompiler Regexp.compile name collation
 
 let private requiredRegexpFunction name =
     regexpFunction name Collation.defaultCollation

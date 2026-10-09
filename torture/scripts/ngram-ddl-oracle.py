@@ -8,9 +8,11 @@ import time
 
 
 def run():
-    data = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-ngram-ddl-"))
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-ngram-ddl-"))
+    data = workspace / "data"
+    data.mkdir()
     socket = str(data / "mysql.sock")
-    log_path = data.with_suffix(".log")
+    log_path = workspace / "server.log"
     server = None
 
     def sql(statement):
@@ -128,8 +130,7 @@ def run():
         raise
     finally:
         stop()
-        shutil.rmtree(data)
-        log_path.unlink(missing_ok=True)
+        shutil.rmtree(workspace)
 
 if __name__ == "__main__":
     run()

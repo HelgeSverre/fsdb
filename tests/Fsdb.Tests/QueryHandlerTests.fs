@@ -72,7 +72,30 @@ let private groupedMutationQuery () =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "maximum execution time retains unsigned settings and scope defaults"
+        [ testCase "unqualified missing functions require a selected database"
+          <| fun _ ->
+              let run = queryFixture []
+              let missing = Err(1046, "No database selected")
+              Expect.equal (run "SELECT no_such_function()") missing "unqualified function without database"
+              Expect.equal (run "SELECT\nno_such_function()") missing "newline after SELECT"
+              Expect.equal (run "WITH c AS (SELECT 1) SELECT no_such_function() FROM c") missing "CTE query"
+              Expect.equal (run "SHOW WARNINGS")
+                  (ResultSet([ "Level"; "Code"; "Message" ],
+                      [ [ Some "Error"; Some "1046"; Some "No database selected" ]
+                        [ Some "Error"; Some "1046"; Some "No database selected" ] ])) "both error conditions"
+              Expect.equal (run "SELECT fsdb.no_such_function()")
+                  (Err(1305, "FUNCTION fsdb.no_such_function does not exist")) "qualified function keeps 1305"
+              Expect.equal (run "SELECT @a:=no_such_function()") missing "assignment retains database error"
+              match run "SHOW WARNINGS" with
+              | ResultSet(_, rows) ->
+                  Expect.equal (rows |> List.map (fun row -> row[1]))
+                      [ Some "1287"; Some "1046"; Some "1046" ] "deprecation warning precedes both errors"
+              | other -> failtestf "expected diagnostics, got %A" other
+              Expect.equal (run "USE fsdb") (Affected 0UL) "select database"
+              Expect.equal (run "SELECT no_such_function()")
+                  (Err(1305, "FUNCTION no_such_function does not exist")) "selected database keeps 1305"
+
+          testCase "maximum execution time retains unsigned settings and scope defaults"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let mutable session = create 1 store
@@ -6863,8 +6886,8 @@ let tests =
               Expect.equal dropped (Affected 0UL) "dropped stored function"
 
               match handle session "SELECT one_argument(1)" |> snd with
-              | Err(1305, _) -> ()
-              | other -> failtestf "expected dropped function to be unavailable, got %A" other
+              | Err(1046, _) -> ()
+              | other -> failtestf "expected dropped function without a selected database to fail, got %A" other
 
               let session, _ = handle session "CREATE TABLE routine_commit (value INT)"
               let session, _ = handle session "BEGIN"
@@ -9148,6 +9171,15 @@ let tests =
               match handle session "KILL QUERY 999999" |> snd with
               | Err(1094, _) -> ()
               | other -> failtestf "expected 1094 for an unknown thread id, got %A" other
+
+          testCase "oversized KILL id returns MySQL's saturated unknown-thread error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql in [ "KILL 999999999999999999999999999"; "KILL QUERY 999999999999999999999999999" ] do
+                  match handle session sql |> snd with
+                  | Err(1094, "Unknown thread id: 9223372036854775807") -> ()
+                  | other -> failtestf "expected saturated 1094 for %s, got %A" sql other
 
           testCase "PROCESS grants visibility while SUPER grants authority to KILL another user"
           <| fun _ ->

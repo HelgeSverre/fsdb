@@ -8,9 +8,11 @@ import time
 
 
 def probe(restart_size):
-    data = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-ngram-xa-"))
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-ngram-xa-"))
+    data = workspace / "data"
+    data.mkdir()
     socket = str(data / "mysql.sock")
-    log_path = data.with_suffix(".log")
+    log_path = workspace / "server.log"
     server = None
 
     def sql(statement):
@@ -114,8 +116,7 @@ def probe(restart_size):
         raise
     finally:
         stop()
-        shutil.rmtree(data)
-        log_path.unlink(missing_ok=True)
+        shutil.rmtree(workspace)
         print("Disposed native MySQL", flush=True)
 
 

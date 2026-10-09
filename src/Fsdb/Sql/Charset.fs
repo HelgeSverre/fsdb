@@ -105,13 +105,14 @@ let private singleByteCodec name defaultCollation description (highCodePoints: i
     let codePoint value =
         if value < 0x80uy then int value else highCodePoints.[int value - 128]
 
-    let decodeText bytes =
-        bytes
-        |> Array.map (fun value ->
+    let decodeText (bytes: byte[]) =
+        let text = StringBuilder(bytes.Length)
+        for value in bytes do
             match codePoint value with
-            | 0 -> "?"
-            | value -> Rune(value).ToString())
-        |> String.concat ""
+            | 0 -> text.Append '?' |> ignore
+            | point when point <= 0xFFFF -> text.Append(char point) |> ignore
+            | point -> text.Append(Rune(point).ToString()) |> ignore
+        text.ToString()
 
     { Info =
         { Name = name
@@ -208,7 +209,12 @@ let private tis620Codec =
         else
             "?"
 
-    let decodeBytes bytes = bytes |> Array.map decodeByte |> String.concat ""
+    let decodedBytes = Array.init 256 (byte >> decodeByte)
+    let decodeBytes (bytes: byte[]) =
+        let text = StringBuilder(bytes.Length)
+        for value in bytes do
+            text.Append(decodedBytes.[int value]) |> ignore
+        text.ToString()
 
     { Info =
         { Name = "tis620"

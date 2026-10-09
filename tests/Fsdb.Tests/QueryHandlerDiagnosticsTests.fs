@@ -59,6 +59,26 @@ let tests =
                   Expect.equal (database.["parent"].Columns |> List.map _.Name) [ "n"; "m" ] "parent columns survive"
                   Expect.equal (database.["child"].ForeignKeys |> List.map _.Name) [ "fk" ] "constraint survives"
 
+          testCase "foreign keys reject virtual generated columns on either side"
+          <| fun _ ->
+              for parentSql, childSql in
+                  [ ("CREATE TABLE parent(id INT PRIMARY KEY,x INT AS (id+1) VIRTUAL,UNIQUE KEY(x))",
+                     "CREATE TABLE child(n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(x))")
+                    ("CREATE TABLE parent(id INT PRIMARY KEY)",
+                     "CREATE TABLE child(id INT,x INT AS (id+1) VIRTUAL,KEY(x),CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(id))") ] do
+                  let store = Fsdb.Storage.create()
+                  let session = create 1 store
+                  let session, parentResult = handle session parentSql
+                  Expect.isNone (errorInfo parentResult) "parent setup"
+                  let _, childResult = handle session childSql
+                  Expect.equal
+                      (errorInfo childResult |> Option.map (fun error -> error.Code, error.State, error.Message))
+                      (Some(3733, "HY000", "Foreign key 'fk' uses virtual column 'x' which is not supported."))
+                      "virtual FK rejection"
+                  Expect.isFalse
+                      (store.Catalog.[Fsdb.Storage.defaultDatabase].ContainsKey "child")
+                      "rejected table stays absent"
+
           testCase "Foreign-key additions bind to the final column definition"
           <| fun _ ->
               for sql in
@@ -736,6 +756,96 @@ let tests =
                       else []
                   Expect.equal (conditionTriples actualSession) expectedConditions (expression + " conditions")
 
+          testCase "TIME functions warn once per clamped argument"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result =
+                  handle session "SELECT HOUR('838:59:59.9999995'), MINUTE('838:59:59.9999995'), TIME('839:00:00')"
+              Expect.equal result (ResultSet([ "HOUR('838:59:59.9999995')"; "MINUTE('838:59:59.9999995')"; "TIME('839:00:00')" ], [ [ Some "838"; Some "59"; Some "838:59:59" ] ])) "clamped values"
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: '838:59:59.9999995'"
+                    warning 1292 "Truncated incorrect time value: '838:59:59.9999995'"
+                    warning 1292 "Truncated incorrect time value: '839:00:00'" ]
+                  "one warning per clamped argument"
+              let session, result = handle session "SELECT HOUR('838:59:59.0000004')"
+              Expect.equal result (ResultSet([ "HOUR('838:59:59.0000004')" ], [ [ Some "838" ] ])) "rounded maximum"
+              Expect.equal (conditionTriples session) [] "rounding into range does not warn"
+
+          testCase "overflowing SEC_TO_TIME and MAKETIME retain MySQL warning values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result =
+                  handle session "SELECT SEC_TO_TIME(3020400), SEC_TO_TIME(-3020400), MAKETIME(839,0,0), MAKETIME(-839,0,0)"
+              match result with
+              | ResultSet(_, [ [ Some "838:59:59"; Some "-838:59:59"; Some "838:59:59"; Some "-838:59:59" ] ]) -> ()
+              | other -> failtestf "unexpected clamped TIME values: %A" other
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: '3020400'"
+                    warning 1292 "Truncated incorrect time value: '-3020400'"
+                    warning 1292 "Truncated incorrect time value: '839:00:00'"
+                    warning 1292 "Truncated incorrect time value: '-839:00:00'" ]
+                  "source values in overflow warnings"
+              let session, _ = handle session "SELECT MAKETIME(839,1,2.5), MAKETIME(839,1,'2.500'), MAKETIME(839,1,2e0)"
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: '839:01:02.5'"
+                    warning 1292 "Truncated incorrect time value: '839:01:02.500000'"
+                    warning 1292 "Truncated incorrect time value: '839:01:02.000000'" ]
+                  "seconds precision in overflow warnings"
+
+          testCase "TIME arithmetic reports overflowing result values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result =
+                  handle session "SELECT ADDTIME('838:59:59','00:00:01'), SUBTIME('-838:59:59','00:00:01'), TIMEDIFF('838:59:59','-00:00:01')"
+              match result with
+              | ResultSet(_, [ [ Some "838:59:59"; Some "-838:59:59"; Some "838:59:59" ] ]) -> ()
+              | other -> failtestf "unexpected TIME arithmetic values: %A" other
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: '839:00:00'"
+                    warning 1292 "Truncated incorrect time value: '-839:00:00'"
+                    warning 1292 "Truncated incorrect time value: '839:00:00'" ]
+                  "whole-second arithmetic overflow"
+              let session, _ =
+                  handle session "SELECT ADDTIME('838:59:59','00:00:00.000001'), TIMEDIFF('838:59:59','-00:00:00.000001')"
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: '838:59:59'"
+                    warning 1292 "Truncated incorrect time value: '838:59:59.000001'" ]
+                  "microsecond arithmetic overflow"
+
+          testCase "TIME arithmetic clamps an invalid operand before calculating"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result =
+                  handle session "SELECT SUBTIME('839:00:00','00:00:01'), TIMEDIFF('839:00:00','00:00:01')"
+              match result with
+              | ResultSet(_, [ [ Some "838:59:58"; Some "838:59:58" ] ]) -> ()
+              | other -> failtestf "unexpected result after operand clamping: %A" other
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: '839:00:00'"
+                    warning 1292 "Truncated incorrect time value: '839:00:00'" ]
+                  "one warning for each invalid operand"
+              let session, _ = handle session "SELECT ADDTIME('839:00:00','00:00:01')"
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: '839:00:00'"
+                    warning 1292 "Truncated incorrect time value: '839:00:00'" ]
+                  "operand and result overflows both warn"
+              let session, result = handle session "SELECT TIMEDIFF('00:00:01','-839:00:00')"
+              match result with
+              | ResultSet(_, [ [ Some "838:59:59" ] ]) -> ()
+              | other -> failtestf "unexpected clamped TIMEDIFF result: %A" other
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: '-839:00:00'"
+                    warning 1292 "Truncated incorrect time value: '839:00:00'" ]
+                  "invalid right operand and overflowing difference"
+
           testCase "SHOW WARNINGS LIMIT n is accepted, matching the mysql CLI's/mysqli's routine probe"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -759,6 +869,27 @@ let tests =
               match handle session "SHOW COUNT(*) ERRORS" |> snd with
               | ResultSet([ "@@session.error_count" ], [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected @@session.error_count = 0, got %A" other
+
+          testCase "max_error_count caps retained warnings while preserving the total count"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = create 1 store
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              run "CREATE TABLE t (n INT)" |> ignore
+              run "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'" |> ignore
+              run "SET SESSION max_error_count = 1" |> ignore
+              Expect.equal (run "INSERT INTO t VALUES ('one'), ('two')") (Affected 2UL) "both rows insert"
+              Expect.equal session.DiagnosticsCount 2 "both warnings count"
+              Expect.equal session.Diagnostics.Length 1 "only one warning is retained"
+              match run "SHOW COUNT(*) WARNINGS" with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected total warning count, got %A" other
+              match run "SHOW WARNINGS" with
+              | ResultSet(_, [ [ Some "Warning"; Some "1366"; _ ] ]) -> ()
+              | other -> failtestf "expected one retained warning, got %A" other
 
           testCase "SHOW ERRORS is accepted like SHOW WARNINGS"
           <| fun _ ->

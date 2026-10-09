@@ -679,6 +679,40 @@ let tests =
               | ResultSet(_, [ [ Some "2023-12-31 18:30:00.123456" ] ]) -> ()
               | other -> failtestf "expected the recovered instant in UTC, got %A" other
 
+          testCase "empty prepared XA branches reuse the live catalog in snapshots"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let mutable session = Fsdb.Session.create 1 store
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  match result with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+              run "CREATE TABLE xa_shared_catalog (id INT PRIMARY KEY, payload TEXT)"
+              for id in 1..128 do
+                  run (sprintf "INSERT INTO xa_shared_catalog VALUES (%d, REPEAT('x', 256))" id)
+              snapshotNow dir store
+              let baseline = FileInfo(snapshotPath dir).Length
+              for id in 1..16 do
+                  let xid = sprintf "empty-%d" id
+                  run (sprintf "XA START '%s'" xid)
+                  run (sprintf "XA END '%s'" xid)
+                  run (sprintf "XA PREPARE '%s'" xid)
+              snapshotNow dir store
+              let withBranches = FileInfo(snapshotPath dir).Length
+              Expect.isLessThan (withBranches - baseline) (baseline * 2L) "prepared branches share one base catalog rather than copying it per branch"
+              let recovered = load dir
+              Expect.equal (preparedXas recovered |> List.length) 16 "every prepared branch survives the compact snapshot"
+              attach dir recovered
+              let recoverySession = Fsdb.Session.create 2 recovered
+              match handle recoverySession "XA COMMIT 'empty-1'" |> snd with
+              | Err(code, message) -> failtestf "recovered branch commit failed: %d %s" code message
+              | _ -> ()
+              Expect.equal (preparedXas recovered |> List.length) 15 "a branch decoded from the shared base remains committable"
+
           testCase "prepared XA branches survive snapshot rotation and restart"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -3210,6 +3244,21 @@ let tests =
                   Expect.equal walColumn.Comment "from WAL" "the new WAL comment survives"
               | other -> failtestf "expected mixed-format recovery, got %A" other
 
+          testCase "replay refuses an incompatible committed schema without truncating the WAL"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let statement =
+                  match Fsdb.Parser.parse "CREATE TABLE bad (body VARCHAR(100), FULLTEXT KEY ft ((LOWER(body))))" with
+                  | Ok statement -> statement
+                  | Error error -> failtestf "expected DDL to parse, got %s" error
+              let record = encodeWalRecord (SchemaChanged(defaultDatabase, statement))
+              File.WriteAllBytes(walPath dir, record)
+
+              Expect.throwsT<InvalidDataException>
+                  (fun () -> load dir |> ignore)
+                  "a previously accepted but now invalid schema requires explicit recovery"
+              Expect.equal (File.ReadAllBytes(walPath dir)) record "the committed WAL remains available for migration"
+
           testCase "a column's ON UPDATE CURRENT_TIMESTAMP flag survives a restart"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -3417,6 +3466,52 @@ let tests =
                   Expect.equal (formatZeroDate date) "2023-02-31" "date"
                   Expect.equal (formatZeroDateTime dateTime) "2023-04-31 12:34:56.123456" "datetime"
               | other -> failtestf "expected recovered invalid dates, got %A" other
+
+          testCase "WAL replay preserves allowed invalid date defaults and ALTER values"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES,ALLOW_INVALID_DATES'"
+              let session, created = handle session "CREATE TABLE invalid_default (d DATE DEFAULT '2023-02-31')"
+              Expect.equal created (Affected 0UL) "the originating session accepts the default"
+              let session, created = handle session "CREATE TABLE invalid_alter (d DATE)"
+              Expect.equal created (Affected 0UL) "the ALTER table is created"
+              let session, inserted = handle session "INSERT INTO invalid_alter VALUES ('2023-04-31')"
+              Expect.equal inserted (Affected 1UL) "the invalid date is accepted"
+              let session, altered = handle session "ALTER TABLE invalid_alter MODIFY COLUMN d DATE NOT NULL"
+              Expect.equal altered (Affected 0UL) "ALTER preserves the allowed value"
+              let session, created = handle session "CREATE TABLE invalid_recoerce (d DATE)"
+              Expect.equal created (Affected 0UL) "the control table is created"
+              let session, inserted = handle session "INSERT INTO invalid_recoerce VALUES ('2023-04-31')"
+              Expect.equal inserted (Affected 1UL) "the control value is accepted"
+              let session, _ = handle session "SET SESSION sql_mode=''"
+              let _, altered = handle session "ALTER TABLE invalid_recoerce MODIFY COLUMN d DATE NOT NULL"
+              Expect.equal altered (Affected 0UL) "non-strict ALTER coerces the invalid value"
+
+              let assertDates (recovered: Store) =
+                  let defaultColumn = recovered.Catalog.[defaultDatabase].[normalizeTableName "invalid_default"].Columns.Head
+
+                  match defaultColumn.Default with
+                  | Some(DConst(VZeroDate date)) ->
+                      Expect.equal (formatZeroDate date) "2023-02-31" "the invalid default survives recovery"
+                  | other -> failtestf "expected a recovered invalid date default, got %A" other
+
+                  match rowsOf recovered defaultDatabase "invalid_alter" with
+                  | [ [| VZeroDate date |] ] ->
+                      Expect.equal (formatZeroDate date) "2023-04-31" "ALTER's invalid date survives recovery"
+                  | other -> failtestf "expected a recovered ALTER date, got %A" other
+
+                  match rowsOf recovered defaultDatabase "invalid_recoerce" with
+                  | [ [| VZeroDate date |] ] ->
+                      Expect.equal (formatZeroDate date) "0000-00-00" "ALTER's intended coercion survives recovery"
+                  | other -> failtestf "expected a recovered coerced date, got %A" other
+
+              let recovered = load dir
+              assertDates recovered
+              snapshotNow dir recovered
+              load dir |> assertDates
 
           testCase "WAL replay preserves a zero-date default accepted by the originating session"
           <| fun _ ->
