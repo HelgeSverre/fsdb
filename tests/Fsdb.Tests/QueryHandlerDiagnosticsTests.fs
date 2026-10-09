@@ -79,6 +79,111 @@ let tests =
                       (store.Catalog.[Fsdb.Storage.defaultDatabase].ContainsKey "child")
                       "rejected table stays absent"
 
+          testCase "BIT and binary foreign-key columns follow the MySQL type family"
+          <| fun _ ->
+              for childType, parentType, expectedError in
+                  [ "BIT(9)", "BINARY(1)", None
+                    "BINARY(1)", "BIT(8)", None
+                    "BIT(16)", "VARBINARY(1)", None
+                    "VARBINARY(2)", "BIT(1)", None
+                    "BIT(8)", "CHAR(1)", Some 3780 ] do
+                  let store = Fsdb.Storage.create()
+                  let session = create 1 store
+                  let parentSql = sprintf "CREATE TABLE parent(x %s NOT NULL UNIQUE)" parentType
+                  let childSql = sprintf "CREATE TABLE child(x %s,CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x))" childType
+                  let session, parentResult = handle session parentSql
+                  Expect.isNone (errorInfo parentResult) parentSql
+                  let _, childResult = handle session childSql
+                  Expect.equal
+                      (errorInfo childResult |> Option.map _.Code)
+                      expectedError
+                      (sprintf "%s references %s" childType parentType)
+
+          testCase "ENUM and SET foreign keys require matching storage widths"
+          <| fun _ ->
+              let declaration kind count =
+                  [ 0 .. count - 1 ]
+                  |> List.map (sprintf "'v%d'")
+                  |> String.concat ","
+                  |> sprintf "%s(%s)" kind
+              for childType, parentType, expectedError in
+                  [ declaration "SET" 8, declaration "ENUM" 2, None
+                    declaration "SET" 9, declaration "ENUM" 2, Some 3780
+                    declaration "SET" 9, declaration "SET" 8, Some 3780
+                    declaration "ENUM" 256, declaration "ENUM" 255, Some 3780 ] do
+                  let session = create 1 (Fsdb.Storage.create())
+                  let parentSql = sprintf "CREATE TABLE parent(x %s NOT NULL UNIQUE)" parentType
+                  let childSql = sprintf "CREATE TABLE child(x %s,CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x))" childType
+                  let session, parentResult = handle session parentSql
+                  Expect.isNone (errorInfo parentResult) "parent setup"
+                  let _, childResult = handle session childSql
+                  Expect.equal
+                      (errorInfo childResult |> Option.map _.Code)
+                      expectedError
+                      (sprintf "%s references %s" childType parentType)
+
+          testCase "foreign-key ALTER protects fixed-width column representations"
+          <| fun _ ->
+              for oldType, newType, parentType, expectedError in
+                  [ "BIT(8)", "BIT(9)", "BIT(8)", Some 1832
+                    "BINARY(1)", "BINARY(2)", "BINARY(1)", Some 1832
+                    "CHAR(1)", "CHAR(2)", "CHAR(1)", Some 1832
+                    "TIME(0)", "TIME(6)", "TIME(0)", Some 1832
+                    "DATETIME(0)", "DATETIME(6)", "TIMESTAMP(0)", Some 1832
+                    "DECIMAL(10,2)", "DECIMAL(11,2)", "DECIMAL(10,2)", Some 1832
+                    "VARBINARY(1)", "VARBINARY(2)", "VARBINARY(1)", None
+                    "VARCHAR(1)", "VARCHAR(2)", "VARCHAR(1)", None
+                    "ENUM('a','b')", "ENUM('a','b','c')", "ENUM('a','b')", None
+                    "ENUM('a','b')", "ENUM('a','c')", "ENUM('a','b')", Some 1832
+                    "SET('a','b')", "SET('a','b','c')", "SET('a','b')", None
+                    "SET('a','b')", "SET('a','c')", "SET('a','b')", Some 1832 ] do
+                  let store = Fsdb.Storage.create()
+                  let mutable session = create 1 store
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  Expect.isNone
+                      (run (sprintf "CREATE TABLE parent(x %s NOT NULL UNIQUE)" parentType) |> errorInfo)
+                      (sprintf "%s parent setup" parentType)
+                  Expect.isNone
+                      (run (sprintf "CREATE TABLE child(x %s,CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x))" oldType) |> errorInfo)
+                      (sprintf "%s child setup against %s" oldType parentType)
+                  let result = run (sprintf "ALTER TABLE child MODIFY COLUMN x %s" newType)
+                  Expect.equal
+                      (errorInfo result |> Option.map _.Code)
+                      expectedError
+                      (sprintf "%s to %s" oldType newType)
+
+              let store = Fsdb.Storage.create()
+              let mutable session = create 1 store
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              Expect.isNone (run "CREATE TABLE parent(x BIT(8) NOT NULL UNIQUE)" |> errorInfo) "parent setup"
+              Expect.isNone
+                  (run "CREATE TABLE child(x BIT(8),CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x))" |> errorInfo)
+                  "child setup"
+              Expect.equal
+                  (run "ALTER TABLE parent MODIFY COLUMN x BIT(9) NOT NULL UNIQUE"
+                   |> errorInfo
+                   |> Option.map (fun error -> error.Code, error.State, error.Message))
+                  (Some(1833, "HY000", "Cannot change column 'x': used in a foreign key constraint 'fk' of table 'fsdb.child'"))
+                  "referenced column cannot change representation"
+
+              for alter in
+                  [ "MODIFY COLUMN x BIT(9),ADD CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x)"
+                    "ADD CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x),MODIFY COLUMN x BIT(9)" ] do
+                  let mutable session = create 1 (Fsdb.Storage.create())
+                  let run sql =
+                      let next, result = handle session sql
+                      session <- next
+                      result
+                  Expect.isNone (run "CREATE TABLE parent(x BIT(8) NOT NULL UNIQUE)" |> errorInfo) "parent setup"
+                  Expect.isNone (run "CREATE TABLE child(x BIT(8))" |> errorInfo) "child setup"
+                  Expect.isNone (run ("ALTER TABLE child " + alter) |> errorInfo) alter
+
           testCase "Foreign-key additions bind to the final column definition"
           <| fun _ ->
               for sql in

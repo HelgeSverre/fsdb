@@ -47,6 +47,30 @@ precision, signed versus unsigned `DECIMAL`, and `YEAR` to `YEAR`. A
 accepted `SET`↔`ENUM` pair was checked in both directions; the regression
 covers both directions and the implicit-character-set rejection.
 
+Further MySQL 8.4.11 probes accepted `BIT` paired with `BINARY` or `VARBINARY`
+in either direction, regardless of declared lengths, but rejected `BIT` paired
+with character `CHAR` or integer types. `ENUM` and `SET` member lists may differ
+only when their encoded widths agree: crossing the eight-member `SET` boundary
+or the 255-member `ENUM` boundary returned 3780, including cross-family pairs.
+`DATETIME` and `TIMESTAMP` also referenced one another in either direction,
+while `DATE` remained incompatible with both. Creation now applies these
+same type-family and width rules.
+
+An existing foreign-key column has a stricter ALTER boundary than creation.
+Changing `BIT`, `BINARY`, `CHAR`, `TIME`, `DATETIME`, `TIMESTAMP`, or `DECIMAL`
+representation returned 1832 for a child column and 1833 for a referenced
+parent column, even when the final child/parent types would be compatible.
+An incompatible final type still returned 3780 first. Compatible `VARCHAR` and
+`VARBINARY` widening within their length-prefix width succeeded; crossing
+that width returned 1832. Appending `ENUM` or `SET` members within the encoded
+width succeeded, while replacing or removing members returned 1832. fsdb now
+checks the final type compatibility and constrained-column storage layout
+before publishing the ALTER catalog. A key added in the same `ALTER` does not
+impose the old column's layout restriction: changing `BIT(8)` to `BIT(9)` and
+adding its compatible reference succeeded in either action order. The
+`foreign-key-column-storage` wire
+contract covers representative cases on both sides of a foreign key.
+
 The `foreign_key_checks=0` drop/re-add boundary was re-probed on a fresh
 MySQL 8.4.11 server. MySQL still returns 1828 for a child column and 1829
 for a referenced parent column, leaving both definitions unchanged. It also

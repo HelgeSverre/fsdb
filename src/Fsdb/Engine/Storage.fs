@@ -6244,6 +6244,11 @@ let private foreignKeyColumnsCompatible (child: ColumnDef) (parent: ColumnDef) =
             StringComparison.OrdinalIgnoreCase
         )
 
+    let enumSetBytes = function
+        | TEnum values -> Some(if values.Length > 255 then 2 else 1)
+        | TSet values -> Some((values.Length + 7) / 8)
+        | _ -> None
+
     match child.Type, parent.Type with
     | TBool, TBool
     | TBool, TTinyInt false
@@ -6256,20 +6261,26 @@ let private foreignKeyColumnsCompatible (child: ColumnDef) (parent: ColumnDef) =
     | TChar _, TChar _
     | TChar _, TVarchar _
     | TVarchar _, TChar _
-    | TVarchar _, TVarchar _
+    | TVarchar _, TVarchar _ -> sameTextCollation
     | TEnum _, TEnum _
     | TEnum _, TSet _
     | TSet _, TEnum _
-    | TSet _, TSet _ -> sameTextCollation
+    | TSet _, TSet _ -> sameTextCollation && enumSetBytes child.Type = enumSetBytes parent.Type
     | TBinary _, TBinary _
     | TBinary _, TVarBinary _
     | TVarBinary _, TBinary _
     | TVarBinary _, TVarBinary _
+    | TBit _, TBinary _
+    | TBit _, TVarBinary _
+    | TBinary _, TBit _
+    | TVarBinary _, TBit _
     | TDecimal _, TDecimal _
     | TBit _, TBit _
     | TFloat _, TFloat _
     | TDouble _, TDouble _
     | TDateTime _, TDateTime _
+    | TDateTime _, TTimestamp _
+    | TTimestamp _, TDateTime _
     | TTimestamp _, TTimestamp _
     | TTime _, TTime _ -> true
     | _ -> child.Type = parent.Type
@@ -7494,6 +7505,20 @@ let internal columnTypeChangePreservesLayout (previous: ColumnDef) currentType =
     | TVarBinary oldLength, TVarBinary newLength -> sameLengthPrefix 1 oldLength newLength
     | oldType, newType -> oldType = newType
 
+let private foreignKeyColumnChangePreservesLayout (previous: ColumnDef) currentType =
+    let retainsPrefix (oldValues: string list) (newValues: string list) =
+        newValues.Length >= oldValues.Length
+        && List.take oldValues.Length newValues = oldValues
+
+    match previous.Type, currentType with
+    | TEnum oldValues, TEnum newValues ->
+        retainsPrefix oldValues newValues
+        && (oldValues.Length > 255) = (newValues.Length > 255)
+    | TSet oldValues, TSet newValues ->
+        retainsPrefix oldValues newValues
+        && (oldValues.Length + 7) / 8 = (newValues.Length + 7) / 8
+    | _ -> columnTypeChangePreservesLayout previous currentType
+
 let private columnChangePreservesFullText (before: Table) (after: Table) oldName newName =
     match resolveColumn before.Columns oldName, resolveColumn after.Columns newName with
     | Ok oldPosition, Ok newPosition when oldPosition = newPosition ->
@@ -7718,7 +7743,61 @@ let private retargetAlterForeignKeyColumns
                 tryCatalogTable childAddress updated
                 |> Option.bind (fun child -> check child.Columns candidate.Columns foreignKey))
 
-        childErrors |> Option.orElseWith parentErrors |> Option.map Error |> Option.defaultValue (Ok())
+        match childErrors |> Option.orElseWith parentErrors with
+        | Some error -> Error error
+        | None ->
+            let original = tryCatalogTable address catalog |> Option.get
+            let retainedForeignKeys =
+                let dropped =
+                    actions
+                    |> List.choose (function DropForeignKey name -> Some(name.ToLowerInvariant()) | _ -> None)
+                    |> Set.ofList
+                original.ForeignKeys
+                |> List.map (fun foreignKey -> foreignKey.Name.ToLowerInvariant())
+                |> List.filter (fun name -> not (Set.contains name dropped))
+                |> Set.ofList
+
+            let retained (foreignKey: ForeignKeyDef) =
+                Set.contains (foreignKey.Name.ToLowerInvariant()) retainedForeignKeys
+
+            alterColumnSources original actions
+            |> Result.bind (fun sources ->
+                let changedLayout =
+                    candidate.Columns
+                    |> List.choose (fun column ->
+                        match Map.tryFind (column.Name.ToLowerInvariant()) sources with
+                        | Some(StoredColumn(index, _))
+                            when not (foreignKeyColumnChangePreservesLayout original.Columns.[index] column.Type) ->
+                            Some(column.Name.ToLowerInvariant(), column.Name)
+                        | _ -> None)
+                    |> Map.ofList
+
+                let changed (names: string list) =
+                    names |> List.tryPick (fun name -> Map.tryFind (name.ToLowerInvariant()) changedLayout)
+
+                let childError =
+                    candidate.ForeignKeys
+                    |> List.filter retained
+                    |> List.tryPick (fun foreignKey ->
+                        changed foreignKey.Columns
+                        |> Option.map (fun column ->
+                            ExpressionError(1832, sprintf "Cannot change column '%s': used in a foreign key constraint '%s'" column foreignKey.Name)))
+
+                let parentError () =
+                    referencingForeignKeys updated address
+                    |> List.tryPick (fun (childAddress, foreignKey) ->
+                        (if childAddress = address && not (retained foreignKey) then None
+                         else changed foreignKey.RefColumns)
+                        |> Option.map (fun column ->
+                            let database, table = catalogTableIdentity updated childAddress
+                            ExpressionError(
+                                1833,
+                                sprintf
+                                    "Cannot change column '%s': used in a foreign key constraint '%s' of table '%s.%s'"
+                                    column foreignKey.Name database table
+                            )))
+
+                childError |> Option.orElseWith parentError |> Option.map Error |> Option.defaultValue (Ok()))
 
     let validation =
         (if actions |> List.exists (function DropColumn _ -> true | _ -> false) then validateColumns () else Ok())

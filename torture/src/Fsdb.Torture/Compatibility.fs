@@ -6632,6 +6632,26 @@ module ContractCatalog =
           Cleanup = [| "SET foreign_key_checks=0"; "DROP DATABASE IF EXISTS fk_alter_other"; "DROP DATABASE IF EXISTS fk_alter_probe"; "SET foreign_key_checks=1" |]
           Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
 
+    let private foreignKeyColumnStorage =
+        { Name = "foreign-key-column-storage"
+          Setup = [| "CREATE DATABASE fk_column_storage_probe" |]
+          Steps =
+            [| Contract.execute "select-database" "USE fk_column_storage_probe"
+               Contract.execute "create-binary-parent" "CREATE TABLE binary_parent(x BINARY(1) NOT NULL UNIQUE)"
+               Contract.execute "create-bit-child" "CREATE TABLE bit_child(x BIT(9),CONSTRAINT fk_bit_child FOREIGN KEY(x) REFERENCES binary_parent(x))"
+               Contract.execute "reject-bit-width-change" "ALTER TABLE bit_child MODIFY COLUMN x BIT(16)" |> Contract.fails 1832 "HY000"
+               Contract.execute "create-bit-parent" "CREATE TABLE bit_parent(x BIT(8) NOT NULL UNIQUE)"
+               Contract.execute "create-binary-child" "CREATE TABLE binary_child(x VARBINARY(2),CONSTRAINT fk_binary_child FOREIGN KEY(x) REFERENCES bit_parent(x))"
+               Contract.execute "reject-parent-width-change" "ALTER TABLE bit_parent MODIFY COLUMN x BIT(9) NOT NULL UNIQUE" |> Contract.fails 1833 "HY000"
+               Contract.execute "create-enum-parent" "CREATE TABLE enum_parent(x ENUM('a','b') NOT NULL UNIQUE)"
+               Contract.execute "create-set-child" "CREATE TABLE set_child(x SET('a','b'),CONSTRAINT fk_set_child FOREIGN KEY(x) REFERENCES enum_parent(x))"
+               Contract.execute "extend-set-members" "ALTER TABLE set_child MODIFY COLUMN x SET('a','b','c')"
+               Contract.execute "reject-set-member-replacement" "ALTER TABLE set_child MODIFY COLUMN x SET('a','c')" |> Contract.fails 1832 "HY000"
+               Contract.execute "create-new-bit-child" "CREATE TABLE new_bit_child(x BIT(8))"
+               Contract.execute "add-fk-with-width-change" "ALTER TABLE new_bit_child MODIFY COLUMN x BIT(9),ADD CONSTRAINT fk_new_bit FOREIGN KEY(x) REFERENCES bit_parent(x)" |]
+          Cleanup = [| "DROP DATABASE IF EXISTS fk_column_storage_probe" |]
+          Coverage = [| "statement:alter-table", [| "text-differential" |] |] }
+
     let private foreignKeyNames =
         let cases =
             [
@@ -8489,6 +8509,7 @@ module ContractCatalog =
            foreignKeyIndexLifecycle
            foreignKeyRenameCollisions
            foreignKeyAlterDefinitions
+           foreignKeyColumnStorage
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings
