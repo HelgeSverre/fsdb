@@ -3144,6 +3144,9 @@ let tests =
                     check "labels o STRAIGHT_JOIN names d" "d" "(1)" "" [ "2" ]
                     check "names d STRAIGHT_JOIN labels o" "o" "(1,'1')" "" [ "1"; "2" ]
                     check "names d STRAIGHT_JOIN labels o" "o" "(1,'x')" "" [ "2" ]
+                    match runDefault store "SELECT d.id FROM names d STRAIGHT_JOIN labels o ON o.k=d.k AND d.id>0 WHERE o.k IN (1,NULL) ORDER BY d.id" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected numeric IN to follow a join key inside a compound ON condition, got %A" other
                     runDefault store "INSERT INTO labels VALUES('other1'),('other2'),('other3'),('other4')" |> ignore
                     check "names d JOIN labels o" "o" "(1,NULL)" "" [ "1"; "2" ]
 

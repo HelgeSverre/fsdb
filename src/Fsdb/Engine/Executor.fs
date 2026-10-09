@@ -11290,18 +11290,26 @@ and private transferNumericJoinIn
              && (select.StraightJoin
                  || join.Kind = StraightJoin
                  || (select.Where |> Option.exists (collectMatchAgainst >> List.isEmpty >> not))) ->
-        match join.Table, join.On, physical baseRef with
-        | FromTable rightRef, BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, rightName)), Some baseTable ->
+        match join.Table, physical baseRef with
+        | FromTable rightRef, Some baseTable ->
             match physical rightRef with
             | None -> select
             | Some rightTable ->
                 let baseQualifier = key (baseRef.Alias |> Option.defaultValue baseRef.Table)
                 let rightQualifier = key (rightRef.Alias |> Option.defaultValue rightRef.Table)
                 let equalityColumns =
-                    match key leftOwner, key rightOwner with
-                    | left, right when left = baseQualifier && right = rightQualifier -> Some(leftName, rightName)
-                    | left, right when left = rightQualifier && right = baseQualifier -> Some(rightName, leftName)
-                    | _ -> None
+                    join.On
+                    |> conjuncts
+                    |> List.choose (function
+                        | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, rightName)) ->
+                            match key leftOwner, key rightOwner with
+                            | left, right when left = baseQualifier && right = rightQualifier -> Some(leftName, rightName)
+                            | left, right when left = rightQualifier && right = baseQualifier -> Some(rightName, leftName)
+                            | _ -> None
+                        | _ -> None)
+                    |> function
+                        | [ columns ] -> Some columns
+                        | _ -> None
 
                 let columns =
                     equalityColumns

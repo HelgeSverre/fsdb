@@ -119,7 +119,10 @@ audited two-source equality joins now transfer literal multi-value numeric
 `IN` when `STRAIGHT_JOIN` fixes the first source or a MATCH predicate identifies
 the driven source. A single-value `IN` retains its original comparison behavior.
 The `mixed-type-join-in` contract covers both explicit join orders, the MATCH
-case, and a string/numeric mixed list.
+case, and a string/numeric mixed list. MySQL also makes the same placement when
+the equality is one conjunct of a compound `ON` condition: adding
+`AND d.id>0` gives ID 2 with names first and IDs 1 and 2 with labels first.
+fsdb now recognizes that audited shape as well.
 
 Costed joins without MATCH remain open. MySQL may choose the filtered table
 even when its raw row count is larger; simply selecting the smaller table
