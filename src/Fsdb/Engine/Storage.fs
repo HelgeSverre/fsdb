@@ -3473,7 +3473,12 @@ let private foreignKeyStorageValue (column: ColumnDef) value =
     | _ -> value
 
 let private foreignKeyHasDistinctTemporalStorage (child: ColumnDef) (parent: ColumnDef) =
+    let fractionalBytes precision = (precision + 1) / 2
     match child.Type, parent.Type with
+    | TTime childPrecision, TTime parentPrecision
+    | TDateTime childPrecision, TDateTime parentPrecision
+    | TTimestamp childPrecision, TTimestamp parentPrecision ->
+        fractionalBytes childPrecision <> fractionalBytes parentPrecision
     | TTime _, TDateTime _
     | TTime _, TTimestamp _
     | TDateTime _, TTime _

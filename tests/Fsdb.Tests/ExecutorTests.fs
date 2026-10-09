@@ -11091,6 +11091,35 @@ let tests =
                     | Err(1452, _) -> ()
                     | other -> failtestf "different byte lengths must not match, got %A" other
 
+                testCase "temporal foreign keys compare fractional storage widths"
+                <| fun _ ->
+                    for kind, baseValue in
+                        [ "TIME", "12:34:56"
+                          "DATETIME", "2024-01-02 12:34:56"
+                          "TIMESTAMP", "2024-01-02 12:34:56" ] do
+                        for parentPrecision, childPrecision, matches in
+                            [ 0, 0, true
+                              0, 1, false
+                              1, 2, true
+                              2, 1, true
+                              2, 3, false
+                              3, 4, true
+                              5, 6, true ] do
+                            let store = newStore ()
+                            let value = baseValue + (if parentPrecision = 0 then ".000000" else ".100000")
+                            let parent = $"temporal_parent_{kind}_{parentPrecision}_{childPrecision}"
+                            let child = $"temporal_child_{kind}_{parentPrecision}_{childPrecision}"
+                            runDefault store $"CREATE TABLE {parent}(k {kind}({parentPrecision}) PRIMARY KEY)" |> ignore
+                            runDefault store $"CREATE TABLE {child}(k {kind}({childPrecision}),CONSTRAINT fk_temporal FOREIGN KEY(k) REFERENCES {parent}(k))" |> ignore
+                            runDefault store $"INSERT INTO {parent} VALUES('{value}')" |> ignore
+                            let actual = runDefault store $"INSERT INTO {child} VALUES('{value}')"
+                            if matches then
+                                Expect.equal actual (Affected 1UL) $"{kind}({parentPrecision}) to {kind}({childPrecision}) shares storage width"
+                            else
+                                match actual with
+                                | Err(1452, _) -> ()
+                                | other -> failtestf "expected 1452 for %s(%d) to %s(%d), got %A" kind parentPrecision kind childPrecision other
+
                 testCase "ADD FOREIGN KEY validates the final column type in a combined ALTER"
                 <| fun _ ->
                     let store = newStore ()

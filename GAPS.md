@@ -354,7 +354,10 @@ cover compatible type families, incompatible type and collation changes, and
 drop/re-add actions. Differing-width BIT keys compare their stored bytes;
 audited cascades retain out-of-range child values and subsequent referential
 actions. Stored BIT values and bit literals retain MySQL's distinct `HEX()`
-formatting.
+formatting. [Temporal FK probes](torture/findings/2026-10-09-year-column-values.md)
+now distinguish the fractional storage-byte tiers within `TIME`, `DATETIME`,
+and `TIMESTAMP`, including equal displayed values that must not match across
+tiers.
 
 Named CHECK constraints support enforcement state
 and `ALTER` validation, and ENUM or SET values enforce membership. Adding a

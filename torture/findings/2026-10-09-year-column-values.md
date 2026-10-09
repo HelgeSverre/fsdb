@@ -32,3 +32,15 @@ ordinary and zero-value inserts in both directions for these pairs. fsdb
 accepts those declarations and compares their distinct physical key domains
 rather than equating zero date-time values across DATETIME and TIMESTAMP.
 Other physical-key combinations and referential actions remain unverified.
+
+Within each of `TIME`, `DATETIME`, and `TIMESTAMP`, MySQL 8.4.11 accepts
+foreign keys with different fractional precisions but matches values by the
+fractional storage-byte tier: precision 0 uses no extra bytes, 1–2 use one,
+3–4 use two, and 5–6 use three. Equal displayed values match within a tier
+(`TIME(1)` to `TIME(2)`, for example) and fail with 1452 across tiers
+(`TIME(2)` to `TIME(3)`), in either precision direction. fsdb now uses that
+same physical-key boundary for all three temporal families.
+The expanded `time-date-foreign-keys` contract passed all 148 steps at
+`torture/artifacts/runs/20261009T233133629-60515/contracts`; `just check`
+passed all 3,250 tests. The full contract run retained only the nine
+identifier-case differences from the pinned server's case mode.

@@ -6815,7 +6815,31 @@ module ContractCatalog =
                    Contract.execute (sprintf "create-child-%d" index) (sprintf "CREATE TABLE %s(x %s,CONSTRAINT %s FOREIGN KEY(x) REFERENCES %s(x))" child childType foreignKey parent)
                    Contract.execute (sprintf "insert-parent-%d" index) (sprintf "INSERT INTO %s VALUES('%s')" parent parentValue)
                    Contract.execute (sprintf "reject-child-%d" index) (sprintf "INSERT INTO %s VALUES('%s')" child childValue) |> Contract.fails 1452 "23000"
-                   Contract.query (sprintf "empty-child-%d" index) (sprintf "SELECT COUNT(*) FROM %s" child) |]
+                   Contract.query (sprintf "empty-child-%d" index) (sprintf "SELECT COUNT(*) FROM %s" child)
+               Contract.execute "restore-sql-mode" "SET SESSION sql_mode=DEFAULT"
+               for kind, baseValue in
+                   [ "TIME", "12:34:56"
+                     "DATETIME", "2024-01-02 12:34:56"
+                     "TIMESTAMP", "2024-01-02 12:34:56" ] do
+                   for parentPrecision, childPrecision, matches in
+                       [ 0, 0, true
+                         0, 1, false
+                         1, 2, true
+                         2, 1, true
+                         2, 3, false
+                         3, 4, true
+                         5, 6, true ] do
+                       let label = sprintf "%s-%d-%d" kind parentPrecision childPrecision
+                       let parent = sprintf "fraction_parent_%s_%d_%d" kind parentPrecision childPrecision
+                       let child = sprintf "fraction_child_%s_%d_%d" kind parentPrecision childPrecision
+                       let foreignKey = sprintf "fk_fraction_%s_%d_%d" kind parentPrecision childPrecision
+                       let value = baseValue + (if parentPrecision = 0 then ".000000" else ".100000")
+                       Contract.execute (label + "-create-parent") (sprintf "CREATE TABLE %s(x %s(%d) PRIMARY KEY)" parent kind parentPrecision)
+                       Contract.execute (label + "-create-child") (sprintf "CREATE TABLE %s(x %s(%d),CONSTRAINT %s FOREIGN KEY(x) REFERENCES %s(x))" child kind childPrecision foreignKey parent)
+                       Contract.execute (label + "-insert-parent") (sprintf "INSERT INTO %s VALUES('%s')" parent value)
+                       let insertion = Contract.execute (label + "-insert-child") (sprintf "INSERT INTO %s VALUES('%s')" child value)
+                       if matches then insertion else insertion |> Contract.fails 1452 "23000"
+                       Contract.query (label + "-child-count") (sprintf "SELECT COUNT(*) FROM %s" child) |]
           Cleanup = [| "DROP DATABASE IF EXISTS fk_time_date_probe" |]
           Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
 
