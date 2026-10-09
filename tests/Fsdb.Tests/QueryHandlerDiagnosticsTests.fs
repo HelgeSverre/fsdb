@@ -35,7 +35,44 @@ let private routineUpdateSetup functionSql =
 let tests =
     testList
         "Diagnostics"
-        [ testCase "Foreign keys create or reuse native supporting indexes"
+        [ testCase "Foreign keys protect their last child and parent index even with checks disabled"
+          <| fun _ ->
+              for checks in [ "0"; "1" ] do
+                  for sql, name in
+                      [ "ALTER TABLE child DROP INDEX fk", "fk"
+                        "DROP INDEX fk ON child", "fk"
+                        "ALTER TABLE parent DROP PRIMARY KEY", "PRIMARY" ] do
+                      let mutable session = create 1 (Fsdb.Storage.create ())
+                      let run sql =
+                          let next, result = handle session sql
+                          session <- next
+                          result
+                      for setup in
+                          [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+                            "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                            "SET foreign_key_checks=" + checks ] do
+                          Expect.isNone (run setup |> errorInfo) setup
+                      Expect.equal (run sql |> errorInfo |> Option.map (fun error -> error.Code, error.State, error.Message))
+                          (Some(1553, "HY000", sprintf "Cannot drop index '%s': needed in a foreign key constraint" name)) sql
+                      let table = if name = "PRIMARY" then "parent" else "child"
+                      match run ("SHOW INDEX FROM " + table) with
+                      | ResultSet(_, rows) -> Expect.equal (rows |> List.map (List.item 2)) [ Some name ] "rejected ALTER preserves the index"
+                      | result -> failtestf "expected surviving index, got %A" result
+
+          testCase "Foreign-key index drops validate the complete ALTER definition"
+          <| fun _ ->
+              for sql in
+                  [ "ALTER TABLE child DROP FOREIGN KEY fk,DROP INDEX fk"
+                    "ALTER TABLE child DROP INDEX fk,DROP FOREIGN KEY fk"
+                    "ALTER TABLE child DROP INDEX fk,ADD INDEX replacement(a,b)"
+                    "ALTER TABLE parent DROP PRIMARY KEY,ADD UNIQUE KEY replacement(n)" ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE parent(n INT PRIMARY KEY)"
+                  let session, _ = handle session "CREATE TABLE child(a INT,b INT,CONSTRAINT fk FOREIGN KEY(a) REFERENCES parent(n))"
+                  let _, result = handle session sql
+                  Expect.isNone (errorInfo result) sql
+
+          testCase "Foreign keys create or reuse native supporting indexes"
           <| fun _ ->
               for definition, expected in
                   [ "FOREIGN KEY(a) REFERENCES parent(n)", [ "a" ]

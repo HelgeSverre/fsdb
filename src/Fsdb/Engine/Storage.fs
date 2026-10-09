@@ -7560,6 +7560,38 @@ let private resolveAlterForeignKeys (table: Table) actions =
         |> fst
     resolved @ generatedIndexes, indexes
 
+let private indexesIncludingPrimaryKey (table: Table) =
+    if table.Indexes |> List.exists isPrimaryIndex then table.Indexes
+    else
+        match primaryKeyColumns table with
+        | [] -> table.Indexes
+        | columns ->
+            { Name = "PRIMARY"
+              KeyColumns = indexColumns columns
+              Unique = true
+              Visible = true
+              Kind = BTree } :: table.Indexes
+
+let private validateDroppedForeignKeyIndexes catalog address (candidate: Table) droppedIndexes =
+    match droppedIndexes with
+    | [] -> Ok()
+    | _ ->
+        let remainingIndexes = indexesIncludingPrimaryKey candidate
+        let parentReferences =
+            catalog |> setCatalogTable address candidate |> fun catalog -> referencingForeignKeys catalog address
+        let parentSupports columns (index: IndexDef) =
+            index.Unique && index.Columns.Length = List.length columns && ForeignKeyIndexes.supports columns index
+        let required (index: IndexDef) =
+            (candidate.ForeignKeys |> List.exists (fun foreignKey ->
+                ForeignKeyIndexes.supports foreignKey.Columns index
+                && not (remainingIndexes |> List.exists (ForeignKeyIndexes.supports foreignKey.Columns))))
+            || (parentReferences |> List.exists (fun (_, foreignKey) ->
+                parentSupports foreignKey.RefColumns index
+                && not (remainingIndexes |> List.exists (parentSupports foreignKey.RefColumns))))
+        match droppedIndexes |> List.tryFind required with
+        | Some index -> Error(ExpressionError(1553, sprintf "Cannot drop index '%s': needed in a foreign key constraint" index.Name))
+        | None -> Ok()
+
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
@@ -7585,7 +7617,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
 
                 let step acc action =
                     acc
-                    |> Result.bind (fun (key, tbl, preserveFullText) ->
+                    |> Result.bind (fun (key, tbl, preserveFullText, droppedIndexes) ->
                         let validation =
                             match action with
                             | AddForeignKey foreignKey ->
@@ -7603,15 +7635,20 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                                         Ok())
                             | _ -> Ok()
 
+                        let droppedIndex =
+                            match action with
+                            | DropIndexAction name -> tbl.Indexes |> List.tryFind (fun index -> String.Equals(index.Name, name, StringComparison.OrdinalIgnoreCase))
+                            | DropPrimaryKey -> indexesIncludingPrimaryKey tbl |> List.tryFind isPrimaryIndex
+                            | _ -> None
                         validation
                         |> Result.bind (fun () -> applyAlterAction mode tbl action)
                         |> Result.mapError (function
                             | UnknownColumn name when convertsColumns -> unknownAlterColumn table.OriginalName name
                             | error -> error)
                         |> Result.map (fun (tbl', newKey) ->
-                            (newKey |> Option.defaultValue key), tbl', preserveFullText && alterPreservesFullText tbl tbl' action))
+                            (newKey |> Option.defaultValue key), tbl', preserveFullText && alterPreservesFullText tbl tbl' action, droppedIndexes @ Option.toList droppedIndex))
 
-                let validateAutoIncrementKey (_, finalTable: Table, _) =
+                let validateAutoIncrementKey (_, finalTable: Table, _, _) =
                     let indexed column =
                         column.PrimaryKey
                         || column.Unique
@@ -7627,9 +7664,12 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                     | None -> Ok()
 
                 validateIndexNames indexes
-                |> Result.bind (fun () -> actions |> List.fold step (Ok(origKey, definition, true)))
+                |> Result.bind (fun () -> actions |> List.fold step (Ok(origKey, definition, true, [])))
                 |> Result.bind (fun state -> validateForeignKeyNames db addedForeignKeys |> Result.map (fun () -> state))
                 |> Result.bind (fun state -> validateAutoIncrementKey state |> Result.map (fun () -> state))
+                |> Result.bind (fun (key, candidate, preserveFullText, droppedIndexes) ->
+                    validateDroppedForeignKeyIndexes catalog (tableAddress dbName origKey) candidate droppedIndexes
+                    |> Result.map (fun () -> key, candidate, preserveFullText))
                 |> Result.bind (fun (key, candidate, preserveFullText) ->
                     if not convertsColumns then Ok(key, candidate, preserveFullText)
                     else
