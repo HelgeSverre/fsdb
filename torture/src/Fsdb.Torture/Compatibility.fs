@@ -6670,7 +6670,11 @@ module ContractCatalog =
                Contract.query "display-years" "SELECT id,y FROM year_value_input ORDER BY id"
                Contract.execute "reject-out-of-range-year" "INSERT INTO year_value_input VALUES(7,100)" |> Contract.fails 1264 "22003"
                Contract.execute "reject-truncated-year" "INSERT INTO year_value_input VALUES(10,'24x')" |> Contract.fails 1265 "01000"
-               Contract.query "unchanged-after-error" "SELECT COUNT(*) FROM year_value_input" |]
+               Contract.query "unchanged-after-error" "SELECT COUNT(*) FROM year_value_input"
+               Contract.execute "disable-strict-year-mode" "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+               Contract.execute "insert-truncated-year" "INSERT INTO year_value_input VALUES(10,'24x'),(11,'000x')"
+               Contract.query "truncated-year-warnings" "SHOW WARNINGS"
+               Contract.query "truncated-year-values" "SELECT id,y+0 FROM year_value_input WHERE id IN (10,11) ORDER BY id" |]
           Cleanup = [| "DROP TABLE IF EXISTS year_value_input" |]
           Coverage = [| "statement:insert", [| "text-differential" |] |] }
 

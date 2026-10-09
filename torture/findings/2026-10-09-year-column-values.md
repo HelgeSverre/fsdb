@@ -7,7 +7,8 @@ text, such as `'24x'`, raises 1265 in strict mode; non-strict mode stores
 2024 with warning 1265. The accepted four-digit range is 1901–2155; 100
 and 1900 return 1264 under the default
 strict mode. The `year-column-values` differential contract checks the
-representative values, error, and unchanged row count. fsdb now normalizes
+representative values, strict errors, unchanged row count, non-strict stored
+values, and warning row ordinals. fsdb now normalizes
 these inputs at column coercion, so stored rows and indexes use the same
 canonical year.
 
