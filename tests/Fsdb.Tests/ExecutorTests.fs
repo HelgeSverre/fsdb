@@ -10995,6 +10995,24 @@ let tests =
                         | ResultSet(_, [ [ Some "y" ] ]) -> ()
                         | other -> failtestf "expected child storage byte 2 to render as y for %s to %s, got %A" parentType childType other
 
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (x SET('a','b') PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE child (x ENUM('x','y'),CONSTRAINT fk FOREIGN KEY(x) REFERENCES parent(x) ON UPDATE CASCADE ON DELETE CASCADE)" |> ignore
+                    runDefault store "INSERT INTO parent VALUES('a')" |> ignore
+                    runDefault store "INSERT INTO child VALUES('x')" |> ignore
+                    Expect.equal (runDefault store "UPDATE parent SET x='a,b' WHERE x='a'") (Affected 1UL) "out-of-domain ordinal cascades"
+                    match runDefault store "SELECT x,x+0 FROM child" with
+                    | ResultSet(_, [ [ Some ""; Some "3" ] ]) -> ()
+                    | other -> failtestf "expected an empty label retaining ordinal 3, got %A" other
+                    for predicate, expected in [ "x=''", "1"; "x=3", "1"; "x='3'", "0" ] do
+                        match runDefault store ("SELECT COUNT(*) FROM child IGNORE INDEX(fk) WHERE " + predicate) with
+                        | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected predicate
+                        | other -> failtestf "unexpected invalid ENUM lookup for %s: %A" predicate other
+                    Expect.equal (runDefault store "DELETE FROM parent WHERE x='a,b'") (Affected 1UL) "out-of-domain ordinal remains a referenced key"
+                    match runDefault store "SELECT COUNT(*) FROM child" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the out-of-domain child to cascade-delete, got %A" other
+
                 testCase "ADD FOREIGN KEY validates the final column type in a combined ALTER"
                 <| fun _ ->
                     let store = newStore ()

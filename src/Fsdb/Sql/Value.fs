@@ -1108,6 +1108,9 @@ type Value =
     | VDouble of float
     | VDecimal of decimal
     | VString of string
+    /// A foreign-key cascade may write an ENUM storage ordinal absent from
+    /// the child's declaration. It displays as empty text but remains numeric.
+    | VEnumOrdinal of uint64
     /// Text bytes that cannot round-trip through the declared character set.
     | VEncodedString of charset: string * bytes: byte[]
     | VBytes of byte[]
@@ -1308,6 +1311,7 @@ let toText (v: Value) : string option =
     | VDouble d -> Some(formatDouble d)
     | VDecimal d -> Some(d.ToString(CultureInfo.InvariantCulture))
     | VString s -> Some s
+    | VEnumOrdinal _ -> Some ""
     | VEncodedString(charset, bytes) -> Some(Charset.decodeBytes charset bytes)
     | VBinaryLiteral b
     | VBytes b -> Some(Text.Encoding.Latin1.GetString b)
@@ -1372,6 +1376,7 @@ let toWire (v: Value) : string =
     | VDouble d -> "D" + d.ToString("R", CultureInfo.InvariantCulture)
     | VDecimal d -> "M" + d.ToString(CultureInfo.InvariantCulture)
     | VString s -> "S" + b64 s
+    | VEnumOrdinal ordinal -> "R" + string ordinal
     | VEncodedString(charset, bytes) -> "E" + b64 charset + ":" + Convert.ToBase64String bytes
     | VBinaryLiteral b -> "L" + Convert.ToBase64String b
     | VBytes b -> "B" + Convert.ToBase64String b
@@ -1411,6 +1416,7 @@ let ofWire (s: string) : Value =
                 | None -> failwithf "Value.ofWire: invalid bit payload %s" payload
             | _ -> failwithf "Value.ofWire: invalid bit payload %s" payload
         | 'S' -> VString(unb64 payload)
+        | 'R' -> VEnumOrdinal(UInt64.Parse(payload, CultureInfo.InvariantCulture))
         | 'E' ->
             match payload.Split(':', 2) with
             | [| charset; bytes |] -> VEncodedString(unb64 charset, Convert.FromBase64String bytes)
@@ -1474,6 +1480,9 @@ let encodeValue (w: Writer) (v: Value) : unit =
     | VString s ->
         w.WriteByte 0x04uy
         w.WriteLenEncString s
+    | VEnumOrdinal ordinal ->
+        w.WriteByte 0x12uy
+        w.WriteInt64LE(int64 ordinal)
     | VBinaryLiteral b ->
         w.WriteByte 0x10uy
         w.WriteLenEncBytes b
@@ -1534,6 +1543,7 @@ let decodeValue (r: #IReader) : Value =
         let bytes = r.ReadLenEncInt() |> Option.map (int >> r.ReadBytes) |> Option.defaultValue [||]
         VEncodedString(charset, bytes)
     | 0x04uy -> VString(r.ReadLenEncString() |> Option.defaultValue "")
+    | 0x12uy -> VEnumOrdinal(uint64 (r.ReadInt64LE()))
     | 0x05uy ->
         r.ReadLenEncInt()
         |> Option.map (fun n -> r.ReadBytes(int n))
@@ -1599,7 +1609,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VBit(width, _) -> { columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag }
     | VDouble _ -> columnMetadata TypeDouble
     | VDecimal _ -> columnMetadata TypeNewDecimal
-    | VString _ | VEncodedString _ -> columnMetadata TypeVarString
+    | VString _ | VEnumOrdinal _ | VEncodedString _ -> columnMetadata TypeVarString
     | VJson _ -> { columnMetadata TypeJson with Flags = BinaryFlag }
     | VGeometry _ -> { columnMetadata TypeGeometry with Flags = BlobFlag ||| BinaryFlag }
     | VBinaryLiteral _
@@ -1792,6 +1802,7 @@ let private asJsonOperand (v: Value) : int * JsonNode =
     | VDouble d -> 1, JsonValue.Create d
     | VDecimal d -> 1, JsonValue.Create d
     | VString s -> 2, JsonValue.Create s
+    | VEnumOrdinal _ -> 2, JsonValue.Create ""
     | VEncodedString(charset, bytes) -> 2, JsonValue.Create(Charset.decodeBytes charset bytes)
     | VDate _ -> 6, null
     | VZeroDate _ -> 6, null
@@ -1880,6 +1891,9 @@ let rec compare (a: Value) (b: Value) : int =
         | 0 -> compareJsonNodes na nb
         | c -> c
     | VDecimal x, VDecimal y -> Decimal.Compare(x, y)
+    | VEnumOrdinal x, VEnumOrdinal y -> Operators.compare x y
+    | VEnumOrdinal _, _ -> compare (VString "") b
+    | _, VEnumOrdinal _ -> compare a (VString "")
     | VInt x, VInt y -> Operators.compare x y
     // The unsigned 64-bit domain and the signed one only overlap on
     // [0, 2^63); `decimal` holds both exactly, so promoting is the one

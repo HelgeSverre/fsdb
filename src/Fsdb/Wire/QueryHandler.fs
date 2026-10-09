@@ -254,6 +254,7 @@ let private valueToSqlLiteralWithOptions (options: Parser.ParserOptions) (v: Val
     | VZeroDate _
     | VZeroDateTime _
     | VString _
+    | VEnumOrdinal _
     | VJson _ -> "'" + escapeSqlString options (v |> toText |> Option.defaultValue "") + "'"
     | VGeometry geometry -> "ST_GeomFromWKB(X'" + Convert.ToHexString(geometryToWkb geometry) + "', " + string geometry.Srid + ")"
 

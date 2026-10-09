@@ -4202,6 +4202,7 @@ let private enumOrdinalForColumn (column: ColumnDef option) (value: Value) : Val
             declared
             |> List.tryFindIndex (fun item -> System.String.Equals(item, label, System.StringComparison.OrdinalIgnoreCase))
             |> Option.map (fun idx -> VInt(int64 (idx + 1)))
+        | VEnumOrdinal ordinal -> Some(VInt(int64 ordinal))
         | _ -> None
     | _ -> None
 
@@ -4241,12 +4242,19 @@ let private comparisonOperands
     (right: Value)
     : Value * Value =
     let pa, pb =
-        match enumOrdinalForColumn leftColumn left, ordinalComparand right with
-        | Some oa, Some nb -> oa, nb
+        match left, right with
+        // An out-of-domain ENUM ordinal displays as empty text. MySQL uses
+        // its ordinal against a number, but its displayed text against a
+        // quoted numeric string such as '3'.
+        | VEnumOrdinal _, VString _
+        | VString _, VEnumOrdinal _ -> left, right
         | _ ->
-            match ordinalComparand left, enumOrdinalForColumn rightColumn right with
-            | Some na, Some ob -> na, ob
-            | _ -> left, right
+            match enumOrdinalForColumn leftColumn left, ordinalComparand right with
+            | Some oa, Some nb -> oa, nb
+            | _ ->
+                match ordinalComparand left, enumOrdinalForColumn rightColumn right with
+                | Some na, Some ob -> na, ob
+                | _ -> left, right
 
     pa, pb
 
@@ -6258,6 +6266,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         simple TypeNewDecimal
         |> Option.map (fun metadata ->
             withDecimalShape (decimalShape expr None) { metadata with Flags = NotNullFlag })
+    | Lit(VEnumOrdinal _) -> simple TypeVarString
     | ConnectionLiteral(value, collation) ->
         metadataOfExpr ctx (Lit value)
         |> Option.map (fun metadata -> { metadata with CollationId = metadataCollationId collation })

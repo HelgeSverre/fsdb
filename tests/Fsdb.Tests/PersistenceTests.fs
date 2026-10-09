@@ -3450,6 +3450,13 @@ let tests =
                   let r = Reader(w.ToArray())
                   Expect.equal (decodeValue r) original (sprintf "%A round-trips" original)
 
+          testCase "the Value binary codec retains an out-of-domain ENUM ordinal"
+          <| fun _ ->
+              let original = VEnumOrdinal 3UL
+              let writer = Writer()
+              encodeValue writer original
+              Expect.equal (decodeValue (Reader(writer.ToArray()))) original "invalid ENUM ordinal round-trips"
+
           testCase "WAL replay preserves invalid component dates"
           <| fun _ ->
               let dir = tempDataDir ()

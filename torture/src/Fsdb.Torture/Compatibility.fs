@@ -6698,7 +6698,18 @@ module ContractCatalog =
                    Contract.execute (sprintf "cascade-update-%d" index) (sprintf "UPDATE %s SET x='b' WHERE x='a'" parent)
                    Contract.query (sprintf "child-after-update-%d" index) (sprintf "SELECT x FROM %s" child)
                    Contract.execute (sprintf "cascade-delete-%d" index) (sprintf "DELETE FROM %s WHERE x='b'" parent)
-                   Contract.query (sprintf "child-after-delete-%d" index) (sprintf "SELECT COUNT(*) FROM %s" child) |]
+                   Contract.query (sprintf "child-after-delete-%d" index) (sprintf "SELECT COUNT(*) FROM %s" child)
+               Contract.execute "create-wide-set-parent" "CREATE TABLE wide_set_parent(x SET('a','b') PRIMARY KEY)"
+               Contract.execute "create-short-enum-child" "CREATE TABLE short_enum_child(x ENUM('x','y'),CONSTRAINT fk_wide_set FOREIGN KEY(x) REFERENCES wide_set_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)"
+               Contract.execute "insert-wide-set-parent" "INSERT INTO wide_set_parent VALUES('a')"
+               Contract.execute "insert-short-enum-child" "INSERT INTO short_enum_child VALUES('x')"
+               Contract.execute "cascade-out-of-domain-ordinal" "UPDATE wide_set_parent SET x='a,b' WHERE x='a'"
+               Contract.query "out-of-domain-ordinal" "SELECT x,x+0 FROM short_enum_child"
+               Contract.query "out-of-domain-empty-label-scan" "SELECT COUNT(*) FROM short_enum_child IGNORE INDEX(fk_wide_set) WHERE x=''"
+               Contract.query "out-of-domain-numeric-ordinal-scan" "SELECT COUNT(*) FROM short_enum_child IGNORE INDEX(fk_wide_set) WHERE x=3"
+               Contract.query "out-of-domain-quoted-ordinal-scan" "SELECT COUNT(*) FROM short_enum_child IGNORE INDEX(fk_wide_set) WHERE x='3'"
+               Contract.execute "delete-out-of-domain-parent" "DELETE FROM wide_set_parent WHERE x='a,b'"
+               Contract.query "out-of-domain-child-deleted" "SELECT COUNT(*) FROM short_enum_child" |]
           Cleanup = [| "DROP DATABASE IF EXISTS fk_enum_set_bytes_probe" |]
           Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
 

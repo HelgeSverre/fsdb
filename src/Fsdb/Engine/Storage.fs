@@ -2251,6 +2251,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             let enumFail () = Error(DataTruncatedForColumn col.Name)
 
             match v with
+            | VEnumOrdinal _ -> Ok v
             | VString s ->
                 match values |> List.tryFind (fun allowed -> String.Equals(allowed, s, StringComparison.OrdinalIgnoreCase)) with
                 // MySQL stores the declaration index and reads back the
@@ -2856,8 +2857,10 @@ let private encodeEqualityValues (columns: ColumnDef list) (indices: int list) (
         // The column's own collation key — case/accent folding per the
         // declared COLLATE (utf8mb4_bin stays byte-distinct, a PAD SPACE
         // collation trims). Same rules as WHERE equality, so the index and
-        // the comparison can never disagree.
+        // ordinary text comparison agrees with indexed equality. Cascaded
+        // out-of-domain ENUM ordinals use a separate physical key below.
         | VString value -> "S" + (collationOf index).KeyOf value
+        | VEnumOrdinal ordinal -> "R" + string ordinal
         | VEncodedString(charset, bytes) -> "S" + (collationOf index).KeyOf(Charset.decodeBytes charset bytes)
         | VBinaryLiteral value
         | VBytes value -> "B" + Convert.ToHexString value
@@ -3460,6 +3463,7 @@ let private foreignKeyStorageValue (column: ColumnDef) value =
         |> Option.map (fun index -> uint64 (index + 1))
         |> Option.defaultValue 0UL
         |> VUInt
+    | TEnum _, VEnumOrdinal ordinal -> VUInt ordinal
     | TSet members, VString labels ->
         let selected = labels.Split(',') |> Set.ofArray
         members
@@ -3518,8 +3522,9 @@ let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parent
     | TYear, TTinyInt true, VInt 0L -> VInt 0L
     | TYear, TTinyInt true, VInt yearByte -> VInt(yearByte + 1900L)
     | TTinyInt true, TYear, VInt yearByte -> VInt yearByte
-    | TEnum members, (TEnum _ | TSet _), VUInt key when key > 0UL && key <= uint64 members.Length ->
-        VString members.[int key - 1]
+    | TEnum members, (TEnum _ | TSet _), VUInt key ->
+        if key > 0UL && key <= uint64 members.Length then VString members.[int key - 1]
+        else VEnumOrdinal key
     | TSet members, (TEnum _ | TSet _), VUInt key ->
         members
         |> List.indexed

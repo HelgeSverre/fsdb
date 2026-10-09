@@ -54,10 +54,15 @@ an update to encoded value 2 cascades to the child's own `'y'` label. This
 holds in all four ENUM/SET parent-child combinations, and mismatched encoded
 values return 1452. The `enum-set-foreign-key-bytes` contract checks lookup,
 rejection, update cascade, and delete cascade. fsdb now uses the encoded
-values for these FK operations. A rarer case remains: MySQL can cascade an
-encoded value outside a child ENUM's declared member count and retain its
-ordinal while displaying an empty label; fsdb's ENUM value representation
-does not yet retain that invalid ordinal.
+values for these FK operations. MySQL can also cascade an encoded value
+outside a child ENUM's declared member count and retain its ordinal while
+displaying an empty label. fsdb now preserves that internal ordinal through
+referential lookup, display, numeric expressions, and persistence. The
+contract checks an out-of-domain cascade, scan-based comparisons, and
+subsequent delete. MySQL's FK support index misses the cascaded row for
+equality predicates on either its old or new ordinal, even though an
+`IGNORE INDEX` scan sees it. fsdb keeps its index consistent with the stored
+row; indexed lookups of this invalid ordinal remain a deliberate divergence.
 
 Further MySQL 8.4.11 probes accepted `BIT` paired with `BINARY` or `VARBINARY`
 in either direction, regardless of declared lengths, but rejected `BIT` paired
