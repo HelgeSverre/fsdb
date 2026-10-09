@@ -81,6 +81,20 @@ BINARY to BIT, and the latter delete cascades too. fsdb now compares the
 stored byte sequence for these cross-family keys and converts cascaded values
 to the child column's representation.
 
+MySQL also compares the stored bytes when two `BIT` foreign-key columns have
+different declared widths. `BIT(1)` and `BIT(8)` value 1 match in either
+parent/child direction because both occupy one byte; updates and deletes
+cascade. `BIT(8)` value 1 and `BIT(9)` value 1 do not match because their
+stored keys occupy one and two bytes. The same physical-key comparison now
+covers fsdb's referential lookups and actions without changing same-width
+indexed keys.
+
+The expanded `bit-binary-foreign-key-bytes` contract passed all 38 steps
+against MySQL 8.4.11 at
+`torture/artifacts/runs/20261009T231344896-24141/contracts`. The full run
+retained only the nine identifier-case differences from the pinned server's
+different case mode. `just check` passed all 3,249 tests.
+
 An existing foreign-key column has a stricter ALTER boundary than creation.
 Changing `BIT`, `BINARY`, `CHAR`, `TIME`, `DATETIME`, `TIMESTAMP`, or `DECIMAL`
 representation returned 1832 for a child column and 1833 for a referenced

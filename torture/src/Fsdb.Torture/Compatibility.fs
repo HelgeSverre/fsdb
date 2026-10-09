@@ -6733,7 +6733,28 @@ module ContractCatalog =
                Contract.execute "cascade-binary-update" "UPDATE binary_parent SET x=X'0002' WHERE x=X'0001'"
                Contract.query "bit-child-after-update" "SELECT x+0 FROM bit_child"
                Contract.execute "cascade-binary-delete" "DELETE FROM binary_parent WHERE x=X'0002'"
-               Contract.query "bit-child-after-delete" "SELECT COUNT(*) FROM bit_child" |]
+               Contract.query "bit-child-after-delete" "SELECT COUNT(*) FROM bit_child"
+               Contract.execute "create-one-bit-parent" "CREATE TABLE one_bit_parent(x BIT(1) PRIMARY KEY)"
+               Contract.execute "create-eight-bit-child" "CREATE TABLE eight_bit_child(x BIT(8),CONSTRAINT fk_bit_width FOREIGN KEY(x) REFERENCES one_bit_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)"
+               Contract.execute "insert-one-bit-parent" "INSERT INTO one_bit_parent VALUES(b'1')"
+               Contract.execute "insert-eight-bit-child" "INSERT INTO eight_bit_child VALUES(b'00000001')"
+               Contract.execute "cascade-one-bit-update" "UPDATE one_bit_parent SET x=b'0' WHERE x=b'1'"
+               Contract.query "eight-bit-child-after-update" "SELECT x+0 FROM eight_bit_child"
+               Contract.execute "cascade-one-bit-delete" "DELETE FROM one_bit_parent WHERE x=b'0'"
+               Contract.query "eight-bit-child-after-delete" "SELECT COUNT(*) FROM eight_bit_child"
+               Contract.execute "create-reverse-eight-bit-parent" "CREATE TABLE reverse_eight_bit_parent(x BIT(8) PRIMARY KEY)"
+               Contract.execute "create-one-bit-child" "CREATE TABLE one_bit_child(x BIT(1),CONSTRAINT fk_bit_reverse FOREIGN KEY(x) REFERENCES reverse_eight_bit_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)"
+               Contract.execute "insert-reverse-eight-bit-parent" "INSERT INTO reverse_eight_bit_parent VALUES(b'00000001')"
+               Contract.execute "insert-one-bit-child" "INSERT INTO one_bit_child VALUES(b'1')"
+               Contract.execute "cascade-reverse-eight-bit-update" "UPDATE reverse_eight_bit_parent SET x=b'00000000' WHERE x=b'00000001'"
+               Contract.query "one-bit-child-after-update" "SELECT x+0 FROM one_bit_child"
+               Contract.execute "cascade-reverse-eight-bit-delete" "DELETE FROM reverse_eight_bit_parent WHERE x=b'00000000'"
+               Contract.query "one-bit-child-after-delete" "SELECT COUNT(*) FROM one_bit_child"
+               Contract.execute "create-eight-bit-parent" "CREATE TABLE eight_bit_parent(x BIT(8) PRIMARY KEY)"
+               Contract.execute "create-nine-bit-child" "CREATE TABLE nine_bit_child(x BIT(9),CONSTRAINT fk_bit_bytes FOREIGN KEY(x) REFERENCES eight_bit_parent(x))"
+               Contract.execute "insert-eight-bit-parent" "INSERT INTO eight_bit_parent VALUES(b'00000001')"
+               Contract.execute "reject-different-byte-length" "INSERT INTO nine_bit_child VALUES(b'000000001')" |> Contract.fails 1452 "23000"
+               Contract.query "nine-bit-child-after-rejection" "SELECT COUNT(*) FROM nine_bit_child" |]
           Cleanup = [| "DROP DATABASE IF EXISTS fk_bit_binary_bytes_probe" |]
           Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
 

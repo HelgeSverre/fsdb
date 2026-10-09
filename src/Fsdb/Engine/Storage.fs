@@ -3488,6 +3488,11 @@ let private foreignKeyUsesBitBinaryBytes (child: ColumnDef) (parent: ColumnDef) 
     | (TBinary _ | TVarBinary _), TBit _ -> true
     | _ -> false
 
+let private foreignKeyUsesDifferentBitWidths (child: ColumnDef) (parent: ColumnDef) =
+    match child.Type, parent.Type with
+    | TBit childWidth, TBit parentWidth -> childWidth <> parentWidth
+    | _ -> false
+
 let private foreignKeyBitBinaryBytes (column: ColumnDef) value =
     match column.Type, value with
     | TBit width, VBit(_, bits) -> Some(bitBytes width bits)
@@ -3496,7 +3501,7 @@ let private foreignKeyBitBinaryBytes (column: ColumnDef) value =
 
 let private foreignKeyValuesMatch (child: ColumnDef) childValue (parent: ColumnDef) parentValue =
     if foreignKeyHasDistinctTemporalStorage child parent then false
-    elif foreignKeyUsesBitBinaryBytes child parent then
+    elif foreignKeyUsesBitBinaryBytes child parent || foreignKeyUsesDifferentBitWidths child parent then
         match foreignKeyBitBinaryBytes child childValue, foreignKeyBitBinaryBytes parent parentValue with
         | Some childBytes, Some parentBytes -> childBytes = parentBytes
         | _ -> false
@@ -3533,6 +3538,7 @@ let private foreignKeyNeedsRowComparison child parent =
     foreignKeyUsesYearByte child parent
     || foreignKeyUsesEnumSetBytes child parent
     || foreignKeyUsesBitBinaryBytes child parent
+    || foreignKeyUsesDifferentBitWidths child parent
     || foreignKeyHasDistinctTemporalStorage child parent
 
 let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parentValue =

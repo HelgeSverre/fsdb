@@ -11041,6 +11041,42 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected the BIT child to cascade-delete, got %A" other
 
+                testCase "BIT foreign keys compare storage bytes across declared widths"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE bit_one_parent (x BIT(1) PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE bit_eight_child (x BIT(8),CONSTRAINT fk_bit_width FOREIGN KEY(x) REFERENCES bit_one_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)" |> ignore
+                    runDefault store "INSERT INTO bit_one_parent VALUES(b'1')" |> ignore
+                    Expect.equal (runDefault store "INSERT INTO bit_eight_child VALUES(b'00000001')") (Affected 1UL) "equal one-byte keys match"
+                    Expect.equal (runDefault store "UPDATE bit_one_parent SET x=b'0' WHERE x=b'1'") (Affected 1UL) "parent update cascades"
+                    match runDefault store "SELECT x+0 FROM bit_eight_child" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the BIT child to retain the updated key, got %A" other
+                    Expect.equal (runDefault store "DELETE FROM bit_one_parent WHERE x=b'0'") (Affected 1UL) "parent delete cascades"
+                    match runDefault store "SELECT COUNT(*) FROM bit_eight_child" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the BIT child to cascade-delete, got %A" other
+
+                    runDefault store "CREATE TABLE bit_eight_key (x BIT(8) PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE bit_one_child (x BIT(1),CONSTRAINT fk_bit_reverse FOREIGN KEY(x) REFERENCES bit_eight_key(x) ON UPDATE CASCADE ON DELETE CASCADE)" |> ignore
+                    runDefault store "INSERT INTO bit_eight_key VALUES(b'00000001')" |> ignore
+                    Expect.equal (runDefault store "INSERT INTO bit_one_child VALUES(b'1')") (Affected 1UL) "reverse one-byte keys match"
+                    Expect.equal (runDefault store "UPDATE bit_eight_key SET x=b'00000000' WHERE x=b'00000001'") (Affected 1UL) "reverse parent update cascades"
+                    match runDefault store "SELECT x+0 FROM bit_one_child" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the reverse BIT child to retain the updated key, got %A" other
+                    Expect.equal (runDefault store "DELETE FROM bit_eight_key WHERE x=b'00000000'") (Affected 1UL) "reverse parent delete cascades"
+                    match runDefault store "SELECT COUNT(*) FROM bit_one_child" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the reverse BIT child to cascade-delete, got %A" other
+
+                    runDefault store "CREATE TABLE bit_eight_parent (x BIT(8) PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE bit_nine_child (x BIT(9),CONSTRAINT fk_bit_bytes FOREIGN KEY(x) REFERENCES bit_eight_parent(x))" |> ignore
+                    runDefault store "INSERT INTO bit_eight_parent VALUES(b'00000001')" |> ignore
+                    match runDefault store "INSERT INTO bit_nine_child VALUES(b'000000001')" with
+                    | Err(1452, _) -> ()
+                    | other -> failtestf "different byte lengths must not match, got %A" other
+
                 testCase "ADD FOREIGN KEY validates the final column type in a combined ALTER"
                 <| fun _ ->
                     let store = newStore ()
