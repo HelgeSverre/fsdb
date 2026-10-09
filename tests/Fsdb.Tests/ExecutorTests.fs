@@ -11044,6 +11044,9 @@ let tests =
                 testCase "BIT foreign keys compare storage bytes across declared widths"
                 <| fun _ ->
                     let store = newStore ()
+                    match runDefault store "SELECT HEX(b'00000001'),HEX(b'000000001')" with
+                    | ResultSet(_, [ [ Some "01"; Some "0001" ] ]) -> ()
+                    | other -> failtestf "BIT literals retain their declared byte width in HEX, got %A" other
                     runDefault store "CREATE TABLE bit_one_parent (x BIT(1) PRIMARY KEY)" |> ignore
                     runDefault store "CREATE TABLE bit_eight_child (x BIT(8),CONSTRAINT fk_bit_width FOREIGN KEY(x) REFERENCES bit_one_parent(x) ON UPDATE CASCADE ON DELETE CASCADE)" |> ignore
                     runDefault store "INSERT INTO bit_one_parent VALUES(b'1')" |> ignore
@@ -11069,6 +11072,17 @@ let tests =
                     match runDefault store "SELECT COUNT(*) FROM bit_one_child" with
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected the reverse BIT child to cascade-delete, got %A" other
+
+                    runDefault store "INSERT INTO bit_eight_key VALUES(b'00000001')" |> ignore
+                    runDefault store "INSERT INTO bit_one_child VALUES(b'1')" |> ignore
+                    Expect.equal (runDefault store "UPDATE bit_eight_key SET x=b'00000010' WHERE x=b'00000001'") (Affected 1UL) "a cascade can carry an out-of-range BIT value"
+                    match runDefault store "SELECT x+0,HEX(x) FROM bit_one_child" with
+                    | ResultSet(_, [ [ Some "2"; Some "2" ] ]) -> ()
+                    | other -> failtestf "expected the BIT(1) child to retain its cascaded storage byte, got %A" other
+                    Expect.equal (runDefault store "DELETE FROM bit_eight_key WHERE x=b'00000010'") (Affected 1UL) "out-of-range BIT key remains referenced"
+                    match runDefault store "SELECT COUNT(*) FROM bit_one_child" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the out-of-range BIT child to cascade-delete, got %A" other
 
                     runDefault store "CREATE TABLE bit_eight_parent (x BIT(8) PRIMARY KEY)" |> ignore
                     runDefault store "CREATE TABLE bit_nine_child (x BIT(9),CONSTRAINT fk_bit_bytes FOREIGN KEY(x) REFERENCES bit_eight_parent(x))" |> ignore

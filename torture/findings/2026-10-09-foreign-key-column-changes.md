@@ -95,6 +95,18 @@ against MySQL 8.4.11 at
 retained only the nine identifier-case differences from the pinned server's
 different case mode. `just check` passed all 3,249 tests.
 
+A further MySQL 8.4.11 probe updated a `BIT(8)` parent from 1 to 2 with a
+referencing `BIT(1)` child. The cascade retained the out-of-range child value
+2, and a later parent delete cascaded to that child. MySQL's indexed equality
+lookup missed the invalid child value while an index-ignored scan found it;
+fsdb keeps its index consistent with the stored row. `HEX()` renders stored
+BIT values as unpadded numbers (`2` here), while a bit literal retains its
+declared bytes (`HEX(b'00000001')` is `01`).
+The expanded `bit-binary-foreign-key-bytes` contract passed all 47 steps at
+`torture/artifacts/runs/20261009T232455021-53958/contracts`, and `just check`
+passed all 3,249 tests. The full contract run retained the same nine
+identifier-case differences elsewhere.
+
 An existing foreign-key column has a stricter ALTER boundary than creation.
 Changing `BIT`, `BINARY`, `CHAR`, `TIME`, `DATETIME`, `TIMESTAMP`, or `DECIMAL`
 representation returned 1832 for a child column and 1833 for a referenced

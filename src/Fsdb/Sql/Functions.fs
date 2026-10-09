@@ -3676,9 +3676,10 @@ let private charFn: Scalar =
 let internal hexFn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
-        match tryRawBytes value with
-        | Some bytes -> VString(bytes |> Array.map (fun byte -> byte.ToString "X2") |> String.concat "")
-        | None ->
+        match value, tryRawBytes value with
+        | VBit(_, bits), _ -> VString(bits.ToString "X")
+        | _, Some bytes -> VString(bytes |> Array.map (fun byte -> byte.ToString "X2") |> String.concat "")
+        | _, None ->
             match value with
             | VInt value -> VString(value.ToString "X")
             | VUInt value -> VString(value.ToString "X")

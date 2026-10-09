@@ -351,7 +351,10 @@ Native audits cover [ignored updates](torture/findings/2026-10-09-update-ignore.
 [combined definition changes](torture/findings/2026-10-09-foreign-key-alter.md)
 also match the tested cases. [Column-change probes](torture/findings/2026-10-09-foreign-key-column-changes.md)
 cover compatible type families, incompatible type and collation changes, and
-drop/re-add actions.
+drop/re-add actions. Differing-width BIT keys compare their stored bytes;
+audited cascades retain out-of-range child values and subsequent referential
+actions. Stored BIT values and bit literals retain MySQL's distinct `HEX()`
+formatting.
 
 Named CHECK constraints support enforcement state
 and `ALTER` validation, and ENUM or SET values enforce membership. Adding a
