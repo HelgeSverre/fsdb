@@ -1,0 +1,234 @@
+[
+  {
+    "name": "schema",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "stderr": "ERROR 1826 (HY000) at line 7: Duplicate foreign key constraint name 'shared'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "case-insensitive",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT SHARED FOREIGN KEY(a) REFERENCES parent(n))",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "stderr": "ERROR 1826 (HY000) at line 7: Duplicate foreign key constraint name 'SHARED'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "checks-disabled",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "SET foreign_key_checks=0",
+      "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "SET foreign_key_checks=1",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "stderr": "ERROR 1826 (HY000) at line 8: Duplicate foreign key constraint name 'shared'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "generated-explicit",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT,FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT child_ibfk_1 FOREIGN KEY(b) REFERENCES parent(n))",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'child_ibfk_1'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "duplicate-explicit-shared-index",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,KEY a(a),CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "",
+    "stderr": "ERROR 1826 (HY000) at line 6: Duplicate foreign key constraint name 'shared'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "alter-existing",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "stderr": "ERROR 1826 (HY000) at line 7: Duplicate foreign key constraint name 'shared'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "alter-other",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT)",
+      "ALTER TABLE other ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "stderr": "ERROR 1826 (HY000) at line 8: Duplicate foreign key constraint name 'shared'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "alter-drop-add",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child DROP FOREIGN KEY shared,ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n)",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "stderr": "ERROR 1826 (HY000) at line 7: Duplicate foreign key constraint name 'shared'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "alter-add-drop",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),DROP FOREIGN KEY shared",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "stderr": "ERROR 1826 (HY000) at line 7: Duplicate foreign key constraint name 'shared'\n",
+    "errors": [
+      [
+        1826,
+        "HY000"
+      ]
+    ]
+  },
+  {
+    "name": "alter-two-adds",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,b INT)",
+      "ALTER TABLE child ADD CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n),ADD CONSTRAINT shared FOREIGN KEY(b) REFERENCES parent(n)",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "",
+    "stderr": "ERROR 1061 (42000) at line 7: Duplicate key name 'shared'\n",
+    "errors": [
+      [
+        1061,
+        "42000"
+      ]
+    ]
+  },
+  {
+    "name": "missing-parent-precedence",
+    "statements": [
+      "USE probe",
+      "SET foreign_key_checks=0",
+      "DROP TABLE IF EXISTS child,parent,other,renamed",
+      "SET foreign_key_checks=1",
+      "CREATE TABLE parent(n INT PRIMARY KEY)",
+      "CREATE TABLE child(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES parent(n))",
+      "CREATE TABLE other(a INT,CONSTRAINT shared FOREIGN KEY(a) REFERENCES missing(n))",
+      "SELECT CONSTRAINT_NAME,TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='probe' ORDER BY TABLE_NAME,CONSTRAINT_NAME"
+    ],
+    "stdout": "CONSTRAINT_NAME\tTABLE_NAME\nshared\tchild\n",
+    "stderr": "ERROR 1824 (HY000) at line 7: Failed to open the referenced table 'missing'\n",
+    "errors": [
+      [
+        1824,
+        "HY000"
+      ]
+    ]
+  }
+]

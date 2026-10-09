@@ -49,6 +49,10 @@ before applying any action, and generates only the unnamed constraints in
 statement order. The WAL records the resolved actions. REFERENCES privileges
 and algorithm selection recognize both named and unnamed declarations.
 
+The [collision and error-precedence audit](2026-10-09-foreign-key-collisions.md)
+confirms schema-wide case-insensitive names, pre-statement ALTER name
+reservation, and the interaction with backing-index errors.
+
 Backing-index metadata and collision validation remain open, including
 schema-wide generated-name collisions and error precedence for duplicate
 explicit names. Broader combinations with a rename in the same ALTER and
