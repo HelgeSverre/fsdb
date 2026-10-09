@@ -716,6 +716,11 @@ routines, events, and administrative probes.
 
 ## 15. Differential-testing and performance tails
 
+The [BIT/binary foreign-key update snapshot](benchmarks/results/2026-10-09-foreign-key-bit-binary.md)
+adds a same-type control for the recently corrected byte-key path. Its short
+run is too noisy to identify a lookup penalty; a durability-matched scaling
+measurement remains open.
+
 The [UPDATE IGNORE batching comparison](benchmarks/results/4ebf5f82-update-ignore-batching.md)
 removes the measured per-row publication regression for updates without
 triggers, incoming foreign keys, or custom-function calls. The valid 5,000-row

@@ -7,6 +7,7 @@ open BenchmarkDotNet.Jobs
 open BenchmarkDotNet.Running
 open Fsdb.Benchmarks.LoadBenchmarks
 open Fsdb.Benchmarks.ServerBenchmarks
+open Fsdb.Benchmarks.ForeignKeyBenchmarks
 
 [<EntryPoint>]
 let main argv =
@@ -51,7 +52,14 @@ let main argv =
                             String.Equals(methodName, benchmark.Descriptor.WorkloadMethod.Name, StringComparison.OrdinalIgnoreCase)))
                 )
 
-        BenchmarkRunner.Run<ServerBenchmarks>(config) |> ignore
+        let isForeignKeyMethod (name: string) =
+            name.Equals("BitUpdate", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("BinaryUpdate", StringComparison.OrdinalIgnoreCase)
+
+        if Array.isEmpty selectedMethods || selectedMethods |> Array.exists (isForeignKeyMethod >> not) then
+            BenchmarkRunner.Run<ServerBenchmarks>(config) |> ignore
+        if Array.isEmpty selectedMethods || selectedMethods |> Array.exists isForeignKeyMethod then
+            BenchmarkRunner.Run<ForeignKeyBenchmarks>(config) |> ignore
         // Separate class/run: the connect cycle needs its fixed small
         // invocation count (see its doc) which the shared job must not have.
         if

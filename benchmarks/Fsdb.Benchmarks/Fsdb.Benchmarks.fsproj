@@ -17,6 +17,7 @@
     <Compile Include="BenchServer.fs" />
     <Compile Include="LoadBenchmarks.fs" />
     <Compile Include="ServerBenchmarks.fs" />
+    <Compile Include="ForeignKeyBenchmarks.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
