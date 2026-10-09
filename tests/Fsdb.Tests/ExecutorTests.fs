@@ -3112,6 +3112,41 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected hash joins to resolve both key collations, got %A" other
 
+                testCase "multi-value numeric IN follows the first equality key in MySQL joins"
+                <| fun _ ->
+                    let store = newStore ()
+                    for sql in
+                        [ "CREATE TABLE names(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,body TEXT,KEY(k),FULLTEXT(body))"
+                          "CREATE TABLE labels(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci)"
+                          "INSERT INTO names VALUES(1,'①','needle'),(2,'1','needle'),(3,'other','ordinary')"
+                          "INSERT INTO labels VALUES('1')" ] do
+                        match runDefault store sql with
+                        | Err(code, message) -> failtestf "setup failed (%d): %s" code message
+                        | _ -> ()
+
+                    let check fromClause owner candidates extra expected =
+                        let sql =
+                            sprintf
+                                "SELECT d.id FROM %s ON o.k=d.k WHERE %s.k IN %s%s ORDER BY d.id"
+                                fromClause owner candidates extra
+                        match runDefault store sql with
+                        | ResultSet(_, rows) -> Expect.equal (rows |> List.map List.head) (expected |> List.map Some) sql
+                        | other -> failtestf "unexpected join result for %s: %A" sql other
+
+                    check "names d STRAIGHT_JOIN labels o" "o" "(1,NULL)" "" [ "2" ]
+                    check "names d STRAIGHT_JOIN labels o" "d" "(1,NULL)" "" [ "2" ]
+                    check "labels o STRAIGHT_JOIN names d" "o" "(1,NULL)" "" [ "1"; "2" ]
+                    check "labels o STRAIGHT_JOIN names d" "d" "(1,NULL)" "" [ "1"; "2" ]
+                    check "names d JOIN labels o" "o" "(1,NULL)" "" [ "1"; "2" ]
+                    check "names d JOIN labels o" "o" "(1,NULL)" " AND MATCH(d.body) AGAINST('needle')" [ "2" ]
+                    check "names d JOIN labels o" "d" "(1,NULL)" " AND MATCH(d.body) AGAINST('needle')" [ "2" ]
+                    check "names d STRAIGHT_JOIN labels o" "o" "(1)" "" [ "1"; "2" ]
+                    check "labels o STRAIGHT_JOIN names d" "d" "(1)" "" [ "2" ]
+                    check "names d STRAIGHT_JOIN labels o" "o" "(1,'1')" "" [ "1"; "2" ]
+                    check "names d STRAIGHT_JOIN labels o" "o" "(1,'x')" "" [ "2" ]
+                    runDefault store "INSERT INTO labels VALUES('other1'),('other2'),('other3'),('other4')" |> ignore
+                    check "names d JOIN labels o" "o" "(1,NULL)" "" [ "1"; "2" ]
+
                 testCase "outer hash joins preserve the retained side's scan order"
                 <| fun _ ->
                     let store = newStore ()

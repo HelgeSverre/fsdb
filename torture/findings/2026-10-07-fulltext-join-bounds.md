@@ -73,12 +73,12 @@ join-bound oracle and natural-phrase oracle pass. The contract lane passes
 49 cases / 5,117 steps without differences at
 `20261007T103918427-74525/contracts`.
 
-## Mixed-type IN remains open
+## Mixed-type IN across equality joins
 
-The same native oracle records a join-order-dependent difference for a numeric
+The same native oracle records a join-order-dependent result for a numeric
 IN filter on collation-equivalent text keys. MATCH can change the chosen plan,
-but the difference also occurs without full-text search. This remains a general
-query-execution gap, outside compatible-domain bound propagation.
+but the behavior also occurs without full-text search. It is separate from
+compatible-domain bound propagation.
 
 ```sql
 CREATE TABLE names(id INT PRIMARY KEY,
@@ -90,8 +90,8 @@ SELECT d.id FROM names d JOIN labels o ON o.k=d.k
 WHERE o.k IN (1,NULL) AND MATCH(d.body) AGAINST('needle') ORDER BY d.id;
 ```
 
-MySQL 8.4.11 returns ID 2; fsdb returns IDs 1 and 2. Removing MATCH returns
-IDs 1 and 2 on both engines. Replacing IN with `o.k=1` or
+MySQL 8.4.11 returns ID 2; fsdb previously returned IDs 1 and 2. Removing
+MATCH returns IDs 1 and 2 on both engines. Replacing IN with `o.k=1` or
 `o.k BETWEEN 1 AND 1` also retains both rows on MySQL. Replacing the numeric
 literal with the string `'1'` retains both rows with IN and MATCH.
 
@@ -101,9 +101,9 @@ query the written predicate is `o.k IN (1,NULL)`:
 | Join form | MATCH | MySQL filter owner | MySQL IDs | fsdb IDs |
 |---|---|---|---|---|
 | `names d JOIN labels o` | absent | o | 1, 2 | 1, 2 |
-| `names d JOIN labels o` | present | d | 2 | 1, 2 |
-| `names d STRAIGHT_JOIN labels o` | absent | d | 2 | 1, 2 |
-| `names d STRAIGHT_JOIN labels o` | present | d | 2 | 1, 2 |
+| `names d JOIN labels o` | present | d | 2 | 2 |
+| `names d STRAIGHT_JOIN labels o` | absent | d | 2 | 2 |
+| `names d STRAIGHT_JOIN labels o` | present | d | 2 | 2 |
 | `labels o STRAIGHT_JOIN names d` | absent | o | 1, 2 | 1, 2 |
 | `labels o STRAIGHT_JOIN names d` | present | o | 1, 2 | 1, 2 |
 
@@ -115,6 +115,17 @@ and predicate owner for every pair, without pinning estimated costs.
 General numeric-bound propagation across text equalities is invalid: the
 collation equates `'①'` and `'1'`, but their numeric conversions differ. An
 unconditional rewrite would disagree with MySQL's labels-first plan. The
-remaining compatibility work therefore needs plan-specific transformation
-coverage; it is not resolved by permitting mixed-type full-text bounds. No
-known-gap suppression is added for this case.
+audited two-source equality joins now transfer literal multi-value numeric
+`IN` when `STRAIGHT_JOIN` fixes the first source or a MATCH predicate identifies
+the driven source. A single-value `IN` retains its original comparison behavior.
+The `mixed-type-join-in` contract covers both explicit join orders, the MATCH
+case, and a string/numeric mixed list.
+
+Costed joins without MATCH remain open. MySQL may choose the filtered table
+even when its raw row count is larger; simply selecting the smaller table
+introduced a wrong result in a counterprobe with additional label rows. fsdb
+therefore retains the written predicate for these plans until its source-choice
+model can identify the owner reliably. In particular, when `d.k IN (1,NULL)`
+is written on an ordinary `names d JOIN labels o` and MySQL drives from `o`,
+fsdb still returns only ID 2 where MySQL returns IDs 1 and 2. Broader join
+graphs are likewise open.

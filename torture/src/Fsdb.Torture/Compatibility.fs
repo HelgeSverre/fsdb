@@ -8511,9 +8511,45 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS regex_dynamic"; "DROP TABLE IF EXISTS regex_display" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private mixedTypeJoinIn =
+        { Name = "mixed-type-join-in"
+          Setup =
+            [| "CREATE TABLE join_names(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,body TEXT,KEY(k),FULLTEXT(body))"
+               "CREATE TABLE join_labels(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci)"
+               "INSERT INTO join_names VALUES(1,'①','needle'),(2,'1','needle'),(3,'other','ordinary')"
+               "INSERT INTO join_labels VALUES('1')" |]
+          Steps =
+            [| for label, fromClause in
+                   [ "names-first-straight", "join_names d STRAIGHT_JOIN join_labels o"
+                     "labels-first-straight", "join_labels o STRAIGHT_JOIN join_names d"
+                     "costed", "join_names d JOIN join_labels o" ] do
+                   for owner in (if label = "costed" then [ "o" ] else [ "d"; "o" ]) do
+                       let name = sprintf "%s-%s" label owner
+                       let sql = sprintf "SELECT d.id FROM %s ON o.k=d.k WHERE %s.k IN (1,NULL) ORDER BY d.id" fromClause owner
+                       Contract.query name sql
+                   if label = "costed" then
+                       for owner in [ "d"; "o" ] do
+                           let name = sprintf "%s-%s-match" label owner
+                           let sql =
+                               sprintf
+                                   "SELECT d.id FROM %s ON o.k=d.k WHERE %s.k IN (1,NULL) AND MATCH(d.body) AGAINST('needle') ORDER BY d.id"
+                                   fromClause owner
+                           Contract.query name sql
+               Contract.query "single-value-in"
+                   "SELECT d.id FROM join_labels o STRAIGHT_JOIN join_names d ON o.k=d.k WHERE d.k IN (1) ORDER BY d.id"
+               Contract.query "mixed-value-in"
+                   "SELECT d.id FROM join_names d STRAIGHT_JOIN join_labels o ON o.k=d.k WHERE o.k IN (1,'1') ORDER BY d.id"
+               Contract.execute "grow-filtered-source"
+                   "INSERT INTO join_labels VALUES('other1'),('other2'),('other3'),('other4')"
+               Contract.query "filtered-source-still-drives"
+                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE o.k IN (1,NULL) ORDER BY d.id" |]
+          Cleanup = [| "DROP TABLE IF EXISTS join_labels"; "DROP TABLE IF EXISTS join_names" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let all =
         [| missingTableDiagnostics
            regexpPosixClasses
+           mixedTypeJoinIn
            qualifiedDuplicateKeys
            alterCoercion
            alterRowOrder

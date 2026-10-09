@@ -11269,6 +11269,100 @@ and private runUnmergedSelectStmt
                 DynamicScope.withValue lockingReadRows rows (fun () ->
                     runUnlockedSelectStmt current registry dbName select outer))
 
+/// MySQL attaches a multi-value IN condition on equal text keys to the first
+/// source chosen for the join. Numeric members expose that placement because
+/// collation-equal strings need not have equal numeric conversions.
+and private transferNumericJoinIn
+    (store: Store)
+    (dbName: string)
+    (select: SelectStmt)
+    =
+    let key (name: string) = name.ToLowerInvariant()
+    let physical tableRef =
+        tryPhysicalTableRef store dbName tableRef
+        |> Result.toOption
+        |> Option.flatten
+
+    match select.From, select.Joins with
+    | Some(FromTable baseRef), [ join ]
+        when join.Using.IsEmpty
+             && (join.Kind = InnerJoin || join.Kind = StraightJoin)
+             && (select.StraightJoin
+                 || join.Kind = StraightJoin
+                 || (select.Where |> Option.exists (collectMatchAgainst >> List.isEmpty >> not))) ->
+        match join.Table, join.On, physical baseRef with
+        | FromTable rightRef, BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, rightName)), Some baseTable ->
+            match physical rightRef with
+            | None -> select
+            | Some rightTable ->
+                let baseQualifier = key (baseRef.Alias |> Option.defaultValue baseRef.Table)
+                let rightQualifier = key (rightRef.Alias |> Option.defaultValue rightRef.Table)
+                let equalityColumns =
+                    match key leftOwner, key rightOwner with
+                    | left, right when left = baseQualifier && right = rightQualifier -> Some(leftName, rightName)
+                    | left, right when left = rightQualifier && right = baseQualifier -> Some(rightName, leftName)
+                    | _ -> None
+
+                let columns =
+                    equalityColumns
+                    |> Option.bind (fun (baseName, rightName) ->
+                        match
+                            baseTable.Columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name baseName),
+                            rightTable.Columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name rightName)
+                        with
+                        | Some baseColumn, Some rightColumn when compatibleEqualityColumns baseColumn rightColumn ->
+                            match baseColumn.Type with
+                            | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                                Some(baseColumn.Name, rightColumn.Name)
+                            | _ -> None
+                        | _ -> None)
+
+                let matchOwners =
+                    select.Where
+                    |> Option.toList
+                    |> List.collect collectMatchAgainst
+                    |> List.collect (function
+                        | MatchAgainst(columns, _, _) -> columns |> List.choose _.Qualifier
+                        | _ -> [])
+                    |> List.map key
+                    |> List.distinct
+
+                let firstQualifier =
+                    if select.StraightJoin || join.Kind = StraightJoin then Some baseQualifier
+                    else
+                        match matchOwners with
+                        | [ owner ] when owner = baseQualifier || owner = rightQualifier -> Some owner
+                        | _ -> None
+
+                match columns, firstQualifier, select.Where with
+                | Some(baseName, rightName), Some firstQualifier, Some where ->
+                    let isNumericLiteral = function
+                        | LiteralValue value ->
+                            match value with
+                            | VInt _ | VUInt _ | VDecimal _ | VDouble _ -> true
+                            | _ -> false
+                        | _ -> false
+
+                    let transfer = function
+                        | In(QualifiedCol(owner, column), candidates) as predicate
+                            when candidates.Length > 1
+                                 && List.forall (function LiteralValue _ -> true | _ -> false) candidates
+                                 && List.exists isNumericLiteral candidates ->
+                            let owner = key owner
+                            let isJoinKey =
+                                (owner = baseQualifier && equalsIgnoreCase column baseName)
+                                || (owner = rightQualifier && equalsIgnoreCase column rightName)
+                            if isJoinKey then
+                                let targetName = if firstQualifier = baseQualifier then baseName else rightName
+                                In(QualifiedCol(firstQualifier, targetName), candidates)
+                            else predicate
+                        | predicate -> predicate
+
+                    { select with Where = where |> conjuncts |> List.map transfer |> combineConjuncts }
+                | _ -> select
+        | _ -> select
+    | _ -> select
+
 and private runUnlockedSelectStmt
     (store: Store)
     (registry: Registry)
@@ -11276,6 +11370,7 @@ and private runUnlockedSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
+    let select = transferNumericJoinIn store dbName select
     let matchNodes =
         (select.Projections |> List.collect (_.Expression >> collectMatchAgainst))
         @ (select.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
