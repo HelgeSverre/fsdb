@@ -24479,51 +24479,63 @@ let rec executeAs
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+                    let selectionStore = Storage.beginTransactionSnapshotFromCatalog store baseCatalog
                     let invocationTables =
                         sources
                         |> List.choose _.PhysicalTable
                         |> List.map (physicalTableKey dbName)
                         |> Set.ofList
 
-                    let apply =
-                        withTriggerInvocationTables invocationTables (fun () ->
-                            grouped.Tables
-                            |> Array.mapi (fun index tableRef ->
-                                if claimedRows.[index].Count = 0 then
-                                    Ok 0
-                                else
-                                    let tdb, tname = tableRef.Database |> Option.defaultValue dbName, tableRef.Table
-                                    if deleteStmt.Ignore then
-                                        tableSnapshot snapshot tdb tname
-                                        |> Result.mapError storageErr
-                                        |> Result.bind (fun table ->
-                                            let identities = Dictionary<Value[], RowId>(HashIdentity.Reference)
-                                            for rowId, row in table.RowsArray.Indexed do
-                                                identities.[row] <- rowId
-                                            let candidates =
-                                                claimedRows.[index] |> Seq.choose (fun row ->
-                                                    match identities.TryGetValue row with
-                                                    | true, rowId -> Some(rowId, row)
-                                                    | _ -> None) |> List.ofSeq
+                    let applyTable index (tableRef: TableRef) =
+                        if claimedRows.[index].Count = 0 then
+                            Ok 0
+                        else
+                            let tdb, tname = tableRef.Database |> Option.defaultValue dbName, tableRef.Table
+                            tableSnapshot selectionStore tdb tname
+                            |> Result.mapError storageErr
+                            |> Result.bind (fun original ->
+                                tableSnapshot snapshot tdb tname
+                                |> Result.mapError storageErr
+                                |> Result.bind (fun current ->
+                                    let rowIds = Dictionary<Value[], RowId>(HashIdentity.Reference)
+                                    for rowId, row in original.RowsArray.Indexed do
+                                        rowIds.[row] <- rowId
+                                    let selectedRowIds =
+                                        claimedRows.[index]
+                                        |> Seq.choose (fun selected ->
+                                            match rowIds.TryGetValue selected with
+                                            | true, rowId -> Some rowId
+                                            | _ -> None)
+                                        |> List.ofSeq
+                                    let candidates =
+                                        selectedRowIds
+                                        |> List.choose (fun rowId -> current.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                                    // MySQL counts selected targets already removed by an earlier cascade.
+                                    let removedEarlier = selectedRowIds.Length - candidates.Length
+                                    let deleteSelected =
+                                        if deleteStmt.Ignore then
                                             let initialRestriction =
                                                 if targetIndices.Length > 1 && snapshot.ForeignKeyChecks then
                                                     Storage.foreignKeyDeleteRestriction baseCatalog tdb tname
                                                 else
                                                     fun _ -> None
-                                            deleteIgnoredRows snapshot tdb tname candidates (fun _ -> Ok true) initialRestriction)
-                                    else
-                                        let deletedRows = claimedRows.[index] |> Seq.map (fun row -> Some row, None) |> List.ofSeq
-                                        let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "DELETE"
-                                        let afterTriggers = triggersFor snapshot tdb tname "AFTER" "DELETE"
-                                        triggerResult (fireTriggers snapshot tdb tname Before TriggerDelete beforeTriggers deletedRows)
-                                        |> Result.bind (fun () ->
-                                            match deleteRows snapshot tdb tname (fun row -> Ok(claimed.[index].Contains row)) with
-                                            | Error error -> Error(storageErr error)
-                                            | Ok count ->
-                                                triggerResult (fireTriggers snapshot tdb tname After TriggerDelete afterTriggers deletedRows)
-                                                |> Result.map (fun () -> count)))
-                            |> Array.toList
-                            |> traverse id)
+                                            deleteIgnoredRows snapshot tdb tname candidates (fun _ -> Ok true) initialRestriction
+                                        else
+                                            let deletedRows = candidates |> List.map (fun (_, row) -> Some row, None)
+                                            let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "DELETE"
+                                            let afterTriggers = triggersFor snapshot tdb tname "AFTER" "DELETE"
+                                            triggerResult (fireTriggers snapshot tdb tname Before TriggerDelete beforeTriggers deletedRows)
+                                            |> Result.bind (fun () ->
+                                                match deleteRowsCandidates snapshot tdb tname candidates (fun _ -> Ok true) with
+                                                | Error error -> Error(storageErr error)
+                                                | Ok count ->
+                                                    triggerResult (fireTriggers snapshot tdb tname After TriggerDelete afterTriggers deletedRows)
+                                                    |> Result.map (fun () -> count))
+                                    deleteSelected |> Result.map ((+) removedEarlier)))
+
+                    let apply =
+                        withTriggerInvocationTables invocationTables (fun () ->
+                            grouped.Tables |> Array.mapi applyTable |> Array.toList |> traverse id)
 
                     match apply with
                     | Ok counts ->

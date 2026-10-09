@@ -32,6 +32,13 @@ differences before row skipping was implemented.
   children and unreferenced parents, and report warning 1451. The one-child
   case reports three affected rows; two children in the reverse target order
   likewise leave parent 2.
+- With two children and only one selected by a joined delete, RESTRICT skips
+  the parent but removes the selected child; CASCADE removes the parent and
+  both children; SET NULL removes the parent and selected child while retaining
+  the other child with a NULL reference. This holds in both target orders.
+  A parent-first cascade still counts the selected child as affected even
+  though the cascade removes it before the child target is processed. Plain
+  multi-target deletion has the same SET NULL and CASCADE behavior.
 - An explicit transaction can roll back successful deletions after the warning.
 - ON DELETE CASCADE still deletes the child.
 - A trigger's explicit SIGNAL SQLSTATE 45000 remains error 1644; IGNORE does
@@ -50,6 +57,11 @@ A multi-target ignored delete also checks the original catalog for restrictions
 before attempting each deletion against the working snapshot. This preserves
 MySQL's parent blocker when a targeted child was removed earlier in the same
 statement; the working-snapshot check still catches new blockers.
+Multi-target deletes resolve selected rows to stable row IDs from the original
+catalog, then use their current row images when each table is processed. A
+preceding parent SET NULL can replace a child row image without dropping that
+child from the selected deletion set. A child already removed by an earlier
+cascade still contributes to the affected count if it was selected as a target.
 A fatal error prevents publication of the statement snapshot. Explicit transaction
 rollback restores both successful deletions and trigger writes.
 
@@ -92,3 +104,7 @@ No failure is enrolled in the known-gap allowlist.
   steps against the pinned MySQL 8.4.11 oracle. The full 111-case run had nine
   previously recorded identifier-case differences elsewhere; none was in this
   contract. Artifact: `torture/artifacts/runs/20261009T220505258-43853/contracts`.
+- The RESTRICT/CASCADE/SET NULL subset follow-up passed all 276 steps in the
+  same contract, including affected-row counts in both target orders. The full
+  111-case run retained only those nine identifier-case differences. Artifact:
+  `torture/artifacts/runs/20261009T223215702-27095/contracts`.

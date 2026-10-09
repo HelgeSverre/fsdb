@@ -32,6 +32,14 @@ let private deleteIgnoreSession () =
       "INSERT INTO parent VALUES(1),(2),(3)"; "INSERT INTO child VALUES(1,2)" ]
     |> List.fold step (Fsdb.Session.create 1 (create ()))
 
+let private multiTargetSession action =
+    [ "CREATE DATABASE probe"; "USE probe"
+      "CREATE TABLE parent(id INT PRIMARY KEY)"
+      $"CREATE TABLE child(id INT PRIMARY KEY,pid INT,CONSTRAINT fk_parent FOREIGN KEY(pid) REFERENCES parent(id) ON DELETE {action})"
+      "INSERT INTO parent VALUES(1),(2),(3)"
+      "INSERT INTO child VALUES(1,2),(2,2)" ]
+    |> List.fold step (Fsdb.Session.create 1 (create ()))
+
 /// MySQL 8.4.11's exact 1442 text (write-probed on the disposable server).
 let private text1442 (table: string) =
     sprintf
@@ -130,6 +138,26 @@ let tests =
                   (ResultSet([ "id" ], [ [ Some "2" ] ])) "referenced parent remains"
               Expect.equal (handle next "SELECT id,pid FROM child ORDER BY id" |> snd)
                   (ResultSet([ "id"; "pid" ], [])) "selected child is removed"
+
+          testCase "multi-target deletion retains selected child identity after SET NULL" <| fun _ ->
+              for modifier in [ ""; " IGNORE" ] do
+                  let session = multiTargetSession "SET NULL"
+                  let next, result = handle session $"DELETE{modifier} p,c FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
+                  Expect.equal result (Affected 2UL) "MySQL deletes the parent and selected child"
+                  Expect.equal (handle next "SELECT id FROM parent ORDER BY id" |> snd)
+                      (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ] ])) "referenced parent is removed"
+                  Expect.equal (handle next "SELECT id,pid FROM child ORDER BY id" |> snd)
+                      (ResultSet([ "id"; "pid" ], [ [ Some "2"; None ] ])) "only the unselected child remains"
+
+          testCase "multi-target deletion counts a selected child removed by CASCADE" <| fun _ ->
+              for modifier in [ ""; " IGNORE" ] do
+                  let session = multiTargetSession "CASCADE"
+                  let next, result = handle session $"DELETE{modifier} p,c FROM parent p JOIN child c ON c.pid=p.id WHERE c.id=1"
+                  Expect.equal result (Affected 2UL) "MySQL counts the selected child and parent"
+                  Expect.equal (handle next "SELECT id FROM parent ORDER BY id" |> snd)
+                      (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ] ])) "parent is deleted"
+                  Expect.equal (handle next "SELECT id,pid FROM child ORDER BY id" |> snd)
+                      (ResultSet([ "id"; "pid" ], [])) "cascade removes both children"
 
           testCase "DELETE IGNORE rolls back earlier deletions after a fatal AFTER trigger" <| fun _ ->
               let session =
