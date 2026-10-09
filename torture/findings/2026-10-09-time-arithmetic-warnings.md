@@ -29,7 +29,11 @@ right operands, result values, and warning order; all pass against MySQL 8.4.11.
 The final `just check` run passed all 3,228 tests, and the nine known
 identifier-case contract differences are unchanged.
 
-One warning-count boundary remains: MySQL emits one warning for
-`ADDTIME('00:00:01','839:00:00')`, while fsdb's operand clamp and overflowing
-result each emit one. The result value is clamped correctly. This exceptional
-deduplication has not been folded into the shared warning path.
+A fresh disposable MySQL 8.4.11 probe confirmed that
+`ADDTIME('00:00:01','839:00:00')` emits two identical 1292 warnings: one for
+the invalid interval operand and one for the overflowing result. fsdb's two
+warnings match. The same probe confirmed two warnings when the invalid operand
+is on the left, three when both operands are invalid and their sum overflows,
+and distinct operand/result warnings for the corresponding SUBTIME and
+TIMEDIFF cases. The earlier claim of one warning was incorrect; there is no
+known warning-count gap in these cases.

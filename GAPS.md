@@ -287,8 +287,9 @@ scalar parsing uses the object's captured SQL mode
 seconds precision ([native oracle](torture/findings/2026-10-09-time-constructor-warnings.md)).
 `ADDTIME`, `SUBTIME`, and `TIMEDIFF` report overflowing TIME results with
 their function-specific warning precision and clamp invalid TIME operands
-before arithmetic in the audited combinations; an invalid second `ADDTIME`
-operand can still produce one extra warning when its overflow text repeats
+before arithmetic in the audited combinations. A fresh native probe confirmed
+that MySQL also emits both warnings when an invalid `ADDTIME` operand and its
+overflowing result have identical warning text
 ([native oracle](torture/findings/2026-10-09-time-arithmetic-warnings.md)).
 
 Numeric offsets appended to DATETIME and TIMESTAMP inputs are converted into
