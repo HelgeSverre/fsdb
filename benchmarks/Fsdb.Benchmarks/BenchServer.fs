@@ -1,7 +1,6 @@
 /// Shared bench-server lifecycle: start/stop a throwaway fsdb and reseed a
-/// target's `fsdb_bench` database. Both the latency suite (ServerBenchmarks)
-/// and the load harness (LoadBenchmarks) need this, and `startFsdb`'s
-/// `--data-dir` support (the durable variant) is written here once.
+/// target's `fsdb_bench` database. The latency, foreign-key, and load suites
+/// share this lifecycle, including the durable `--data-dir` variant.
 module Fsdb.Benchmarks.BenchServer
 
 open System
@@ -21,6 +20,12 @@ let benchBin () =
 /// `mysql-nofsync` to the target list via this env flag.
 let isDurableRun () =
     Environment.GetEnvironmentVariable "FSDB_BENCH_TARGETS" = "durable"
+
+let targets () =
+    if isDurableRun () then
+        [| "fsdb"; "fsdb-wal"; "mysql"; "mysql-nofsync" |]
+    else
+        [| "fsdb"; "mysql" |]
 
 /// A fresh throwaway data dir for the `fsdb-wal` (durable) variant.
 let tempDataDir () =
@@ -87,3 +92,30 @@ let stopFsdb (proc: Process) =
 
     proc.WaitForExit(5000) |> ignore
     proc.Dispose()
+
+type TargetSession =
+    | FsdbSession of Process * string option
+    | MysqlSession
+
+/// Each benchmark case owns a freshly seeded target and its cleanup state.
+let startTarget (target: string) =
+    match target with
+    | "fsdb" -> FsdbSession(startFsdb (benchBin ()) None, None)
+    | "fsdb-wal" ->
+        let dir = tempDataDir ()
+        FsdbSession(startFsdb (benchBin ()) (Some dir), Some dir)
+    | "mysql"
+    | "mysql-nofsync" ->
+        resetAndSeed target
+        MysqlSession
+    | _ -> invalidArg "target" $"unknown benchmark target: {target}"
+
+let stopTarget = function
+    | MysqlSession -> ()
+    | FsdbSession(proc, dataDir) ->
+        stopFsdb proc
+        dataDir |> Option.iter (fun dir ->
+            try
+                Directory.Delete(dir, true)
+            with _ ->
+                ())

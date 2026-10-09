@@ -10,8 +10,6 @@
 module Fsdb.Benchmarks.ServerBenchmarks
 
 open System
-open System.Diagnostics
-open System.IO
 open System.Threading
 open BenchmarkDotNet.Attributes
 open MySqlConnector
@@ -29,8 +27,7 @@ type ServerBenchmarks() =
     // privilege-check path instead of root's all-global fast path.
     let mutable limitedConn : MySqlConnection = Unchecked.defaultof<_>
     let mutable concurrentConnections : MySqlConnection array = [||]
-    let mutable fsdbProcess : Process option = None
-    let mutable dataDir : string option = None
+    let mutable targetSession : BenchServer.TargetSession option = None
     let mutable rng = Random(1234)
     let mutable insertCounter = 0
     let halfAgeList = [ 18..47 ] |> List.map string |> String.concat ","
@@ -47,25 +44,14 @@ type ServerBenchmarks() =
     // The durability-matched run (`just bench-durable`) adds `fsdb-wal` and
     // `mysql-nofsync` so each engine is measured with and without the fsync
     // cost its writes actually pay.
-    member this.Targets() : string[] =
-        if BenchServer.isDurableRun () then
-            [| "fsdb"; "fsdb-wal"; "mysql"; "mysql-nofsync" |]
-        else
-            [| "fsdb"; "mysql" |]
+    member _.Targets() : string[] = BenchServer.targets ()
 
     [<ParamsSource("Targets")>]
     member val Target = "" with get, set
 
     [<GlobalSetup>]
     member this.Setup() =
-        if this.Target = "fsdb" then
-            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) None)
-        elif this.Target = "fsdb-wal" then
-            let dir = BenchServer.tempDataDir ()
-            dataDir <- Some dir
-            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) (Some dir))
-        else
-            BenchServer.resetAndSeed this.Target
+        targetSession <- Some(BenchServer.startTarget this.Target)
 
         conn <- new MySqlConnection(Schema.connectionString this.Target)
         conn.Open()
@@ -104,17 +90,8 @@ type ServerBenchmarks() =
         compressedConn.Dispose()
         conn.Dispose()
 
-        if this.Target = "fsdb" || this.Target = "fsdb-wal" then
-            fsdbProcess |> Option.iter BenchServer.stopFsdb
-            fsdbProcess <- None
-
-            dataDir |> Option.iter (fun d ->
-                (try
-                    Directory.Delete(d, true)
-                 with _ ->
-                     ()))
-
-            dataDir <- None
+        targetSession |> Option.iter BenchServer.stopTarget
+        targetSession <- None
 
     member private this.Exec(sql: string) =
         use cmd = conn.CreateCommand()
@@ -994,28 +971,16 @@ type ServerBenchmarks() =
 [<InvocationCount(32, 1)>]
 type ConnectBenchmarks() =
 
-    let mutable fsdbProcess : Process option = None
-    let mutable dataDir : string option = None
+    let mutable targetSession : BenchServer.TargetSession option = None
 
-    member this.Targets() : string[] =
-        if BenchServer.isDurableRun () then
-            [| "fsdb"; "fsdb-wal"; "mysql"; "mysql-nofsync" |]
-        else
-            [| "fsdb"; "mysql" |]
+    member _.Targets() : string[] = BenchServer.targets ()
 
     [<ParamsSource("Targets")>]
     member val Target = "" with get, set
 
     [<GlobalSetup>]
     member this.Setup() =
-        if this.Target = "fsdb" then
-            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) None)
-        elif this.Target = "fsdb-wal" then
-            let dir = BenchServer.tempDataDir ()
-            dataDir <- Some dir
-            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) (Some dir))
-        else
-            BenchServer.resetAndSeed this.Target
+        targetSession <- Some(BenchServer.startTarget this.Target)
 
         // The password-verified account the connect cycle authenticates as.
         use conn = new MySqlConnection(Schema.connectionString this.Target)
@@ -1031,17 +996,8 @@ type ConnectBenchmarks() =
 
     [<GlobalCleanup>]
     member this.Cleanup() =
-        if this.Target = "fsdb" || this.Target = "fsdb-wal" then
-            fsdbProcess |> Option.iter BenchServer.stopFsdb
-            fsdbProcess <- None
-
-            dataDir |> Option.iter (fun dir ->
-                try
-                    Directory.Delete(dir, true)
-                with _ ->
-                    ())
-
-            dataDir <- None
+        targetSession |> Option.iter BenchServer.stopTarget
+        targetSession <- None
 
     [<Benchmark>]
     member this.ConnectAuthenticateClose() =

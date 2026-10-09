@@ -1,8 +1,6 @@
 module Fsdb.Benchmarks.ForeignKeyBenchmarks
 
 open System
-open System.Diagnostics
-open System.IO
 open BenchmarkDotNet.Attributes
 open MySqlConnector
 open Fsdb.Benchmarks.BenchServer
@@ -12,15 +10,10 @@ open Fsdb.Benchmarks.Schema
 [<MemoryDiagnoser>]
 type ForeignKeyBenchmarks() =
     let mutable conn : MySqlConnection = Unchecked.defaultof<_>
-    let mutable fsdbProcess : Process option = None
-    let mutable dataDir : string option = None
+    let mutable targetSession : BenchServer.TargetSession option = None
     let mutable nextValue = 1
 
-    member _.Targets() =
-        if BenchServer.isDurableRun () then
-            [| "fsdb"; "fsdb-wal"; "mysql"; "mysql-nofsync" |]
-        else
-            [| "fsdb"; "mysql" |]
+    member _.Targets() = BenchServer.targets ()
 
     [<ParamsSource("Targets")>]
     member val Target = "" with get, set
@@ -32,14 +25,7 @@ type ForeignKeyBenchmarks() =
 
     [<GlobalSetup>]
     member this.Setup() =
-        if this.Target = "fsdb" then
-            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) None)
-        elif this.Target = "fsdb-wal" then
-            let dir = BenchServer.tempDataDir ()
-            dataDir <- Some dir
-            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) (Some dir))
-        else
-            BenchServer.resetAndSeed this.Target
+        targetSession <- Some(BenchServer.startTarget this.Target)
 
         conn <- new MySqlConnection(Schema.connectionString this.Target)
         conn.Open()
@@ -62,8 +48,8 @@ type ForeignKeyBenchmarks() =
     [<GlobalCleanup>]
     member _.Cleanup() =
         conn.Dispose()
-        fsdbProcess |> Option.iter BenchServer.stopFsdb
-        dataDir |> Option.iter (fun dir -> Directory.Delete(dir, true))
+        targetSession |> Option.iter BenchServer.stopTarget
+        targetSession <- None
 
     member private this.UpdateChild(table: string) =
         nextValue <- if nextValue = 1 then 2 else 1
