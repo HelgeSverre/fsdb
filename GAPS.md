@@ -678,6 +678,14 @@ routines, events, and administrative probes.
 
 ## 15. Differential-testing and performance tails
 
+The [UPDATE IGNORE comparison](benchmarks/results/0504f672-update-ignore.md)
+identifies a measured regression after correct per-row rejection handling:
+valid 5,000-row updates without triggers take 3.6–3.9 times longer and allocate
+about 2.3 times as much as the prior implementation, while plain UPDATE
+controls remain stable. Repeated per-row publication is a profiling target;
+any batched replacement must retain warning order, accepted rows, trigger
+semantics, and single evaluation of assignments.
+
 The remaining campaigns include planner and numeric-expression overhead.
 Indexed joins, equality/`IN`, and secondary ranges retain measurable fixed
 overhead compared with MySQL. The [numeric-expression snapshot](benchmarks/results/c29d188d-numeric.md)
