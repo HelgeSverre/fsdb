@@ -1995,10 +1995,17 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 match parseNumeric s with
                 | Some d when Double.IsFinite d && d >= 0.0 && d <= 2155.0 ->
                     let text = s.Trim()
-                    let shortStringZero = d = 0.0 && text.Length <= 2 && text.Length > 0 && (text |> Seq.forall ((=) '0'))
+                    let shortStringZero = d = 0.0 && text.Length > 0 && text.Length <> 4 && (text |> Seq.forall ((=) '0'))
                     finish (decimal d) shortStringZero
                 | Some _ -> outOfYearRange ()
-                | None -> numericFallback (Some "integer") (fun () -> VInt 0L)
+                | None ->
+                    match Value.tryLeadingDecimal s with
+                    | Some number ->
+                        if strict then Error(DataTruncatedForColumn col.Name)
+                        else
+                            warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
+                            finish number false
+                    | None -> numericFallback (Some "integer") (fun () -> VInt 0L)
             | _ -> numericFallback (Some "integer") (fun () -> VInt 0L)
         | TDouble unsigned
         | TFloat unsigned ->

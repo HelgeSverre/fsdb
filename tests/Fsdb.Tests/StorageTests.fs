@@ -812,11 +812,16 @@ let tests =
                     VInt 2024L, 2024L
                     VString "0", 2000L
                     VString "00", 2000L
-                    VString "0000", 0L ] do
+                    VString "000", 2000L
+                    VString "0000", 0L
+                    VString "00000", 2000L ] do
                   Expect.equal (coerceValue true year input) (Ok(VInt expected)) (sprintf "YEAR input %A" input)
               match coerceValue true year (VInt 100L) with
               | Error(OutOfRangeForColumn "year") -> ()
               | other -> failtestf "expected YEAR range error, got %A" other
+              match coerceValue true year (VString "24x") with
+              | Error(DataTruncatedForColumn "year") -> ()
+              | other -> failtestf "expected YEAR truncation error, got %A" other
 
           testCase "unsigned decimal columns reject negative values"
           <| fun _ ->

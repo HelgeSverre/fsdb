@@ -6665,10 +6665,11 @@ module ContractCatalog =
           Setup = [| "CREATE TABLE year_value_input(id INT PRIMARY KEY,y YEAR)" |]
           Steps =
             [| Contract.execute "insert-numeric-years" "INSERT INTO year_value_input VALUES(1,0),(2,24),(3,70),(4,2024)"
-               Contract.execute "insert-string-years" "INSERT INTO year_value_input VALUES(5,'0'),(6,'0000')"
+               Contract.execute "insert-string-years" "INSERT INTO year_value_input VALUES(5,'0'),(6,'0000'),(8,'000'),(9,'00000')"
                Contract.query "normalized-years" "SELECT id,y+0 FROM year_value_input ORDER BY id"
                Contract.query "display-years" "SELECT id,y FROM year_value_input ORDER BY id"
                Contract.execute "reject-out-of-range-year" "INSERT INTO year_value_input VALUES(7,100)" |> Contract.fails 1264 "22003"
+               Contract.execute "reject-truncated-year" "INSERT INTO year_value_input VALUES(10,'24x')" |> Contract.fails 1265 "01000"
                Contract.query "unchanged-after-error" "SELECT COUNT(*) FROM year_value_input" |]
           Cleanup = [| "DROP TABLE IF EXISTS year_value_input" |]
           Coverage = [| "statement:insert", [| "text-differential" |] |] }
