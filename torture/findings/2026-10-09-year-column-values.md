@@ -22,9 +22,11 @@ directions, plus rejection of signed tinyint. fsdb uses a shared physical-key
 rule across parent probes, insert lookups, cascades, and transaction validation.
 
 MySQL also accepts TIME paired with DATETIME or TIMESTAMP in either direction,
-including differing fractional precisions. DATE remains incompatible with
-them. Ordinary matching-clock-field inserts and zero-value inserts in the
-native probe returned 1452. The `time-date-foreign-keys` contract covers
-declaration and nonmatching ordinary inserts in both directions; fsdb now
-accepts those declarations and keeps their referential comparisons distinct.
+including differing fractional precisions, and DATETIME paired with TIMESTAMP
+in either direction. DATE remains incompatible with them. Ordinary
+matching-clock-field inserts and zero-value inserts in the native TIME probes
+returned 1452; equal displayed DATETIME/TIMESTAMP values also returned 1452.
+The `time-date-foreign-keys` contract covers declaration and nonmatching
+ordinary inserts in both directions for these pairs; fsdb accepts those
+declarations and keeps their referential comparisons distinct.
 Other physical-key combinations and referential actions remain unverified.

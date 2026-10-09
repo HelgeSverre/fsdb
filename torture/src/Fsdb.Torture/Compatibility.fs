@@ -6712,7 +6712,9 @@ module ContractCatalog =
                    [ 1, "DATETIME", "TIME", "2024-01-01 12:34:56", "12:34:56"
                      2, "TIME", "DATETIME", "12:34:56", "2024-01-01 12:34:56"
                      3, "TIMESTAMP(2)", "TIME(4)", "2024-01-01 12:34:56.12", "12:34:56.1200"
-                     4, "TIME(4)", "TIMESTAMP(2)", "12:34:56.1200", "2024-01-01 12:34:56.12" ] do
+                     4, "TIME(4)", "TIMESTAMP(2)", "12:34:56.1200", "2024-01-01 12:34:56.12"
+                     5, "DATETIME", "TIMESTAMP", "2024-01-01 12:34:56", "2024-01-01 12:34:56"
+                     6, "TIMESTAMP", "DATETIME", "2024-01-01 12:34:56", "2024-01-01 12:34:56" ] do
                    let parent = sprintf "time_parent_%d" index
                    let child = sprintf "time_child_%d" index
                    let foreignKey = sprintf "fk_time_%d" index
