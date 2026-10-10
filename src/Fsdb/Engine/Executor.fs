@@ -24704,45 +24704,80 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         | _ -> tryPhysicalCandidatesInTable store registry table tableRef (Some predicate) |> Option.isSome
 
     let hasKeyedJoinFilter (targetRef: TableRef) (joins: Join list) (predicate: Expr) =
-        match joins, physicalFastPathTable store dbName targetRef with
-        | [ join ], Some targetTable when join.Kind = InnerJoin ->
-            match join.Table with
-            | FromTable joinedRef ->
+        let joinedRefs =
+            joins
+            |> List.choose (fun join ->
+                match join.Kind, join.Table with
+                | InnerJoin, FromTable tableRef when join.Using.IsEmpty -> Some tableRef
+                | _ -> None)
+
+        let sources =
+            targetRef :: joinedRefs
+            |> List.choose (fun tableRef ->
+                physicalFastPathTable store dbName tableRef
+                |> Option.map (fun table -> tableRef, table))
+
+        if joins.IsEmpty || joinedRefs.Length <> joins.Length || sources.Length <> joins.Length + 1 then false
+        else
+            let targetTable = snd sources.Head
+            let targetQualifier = tableQualifier targetRef
+            let distinctQualifiers =
+                sources
+                |> List.map (fst >> tableQualifier >> _.ToLowerInvariant())
+                |> List.distinct
+                |> List.length = sources.Length
+
+            let edges =
+                joins
+                |> List.mapi (fun index join ->
+                    let joinedQualifier = sources.[index + 1] |> fst |> tableQualifier
+                    [ for earlierRef, earlierTable in sources |> List.take (index + 1) do
+                          let earlierQualifier = tableQualifier earlierRef
+                          if join.On
+                             |> conjuncts
+                             |> List.exists (function
+                                 | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
+                                     when equalsIgnoreCase leftOwner earlierQualifier
+                                          && equalsIgnoreCase rightOwner joinedQualifier ->
+                                     hasLeadingIndexColumn earlierTable leftName
+                                 | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
+                                     when equalsIgnoreCase rightOwner earlierQualifier
+                                          && equalsIgnoreCase leftOwner joinedQualifier ->
+                                     hasLeadingIndexColumn earlierTable rightName
+                                 | _ -> false) then
+                              yield joinedQualifier, earlierQualifier ])
+                |> List.concat
+
+            let rec reachesTarget visited owner =
+                if equalsIgnoreCase owner targetQualifier then true
+                elif visited |> List.exists (equalsIgnoreCase owner) then false
+                else
+                    edges
+                    |> List.exists (fun (source, destination) ->
+                        equalsIgnoreCase source owner
+                        && reachesTarget (owner :: visited) destination)
+
+            let hasSourceFilter (joinedRef, joinedTable) =
                 let joinedQualifier = tableQualifier joinedRef
-                match physicalFastPathTable store dbName joinedRef with
-                | Some joinedTable when joinedTable.RowsArray.Count <= targetTable.RowsArray.Count ->
-                    let qualifyBareLookup =
-                        Expression.rewrite (function
-                            | Col name when tableHasColumn joinedTable name && not (tableHasColumn targetTable name) ->
-                                Some(QualifiedCol(joinedQualifier, name))
-                            | _ -> None)
+                let qualifyBareLookup =
+                    Expression.rewrite (function
+                        | Col name when tableHasColumn joinedTable name
+                                        && (sources |> List.filter (fun (_, table) -> tableHasColumn table name) |> List.length = 1) ->
+                            Some(QualifiedCol(joinedQualifier, name))
+                        | _ -> None)
 
-                    let hasLookupFilter =
-                        predicate
-                        |> conjuncts
-                        |> List.exists (fun condition ->
-                            let condition = qualifyBareLookup condition
-                            canPushIntoSource joinedQualifier condition
-                            && Expression.exists (function
-                                | QualifiedCol(owner, _) -> equalsIgnoreCase owner joinedQualifier
-                                | _ -> false) condition)
+                joinedTable.RowsArray.Count <= targetTable.RowsArray.Count
+                && reachesTarget [] joinedQualifier
+                && (predicate
+                    |> conjuncts
+                    |> List.exists (fun condition ->
+                        let condition = qualifyBareLookup condition
+                        canPushIntoSource joinedQualifier condition
+                        && Expression.exists (function
+                            | QualifiedCol(owner, _) -> equalsIgnoreCase owner joinedQualifier
+                            | _ -> false) condition))
 
-                    hasLookupFilter
-                    && (join.On
-                        |> conjuncts
-                        |> List.exists (function
-                            | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
-                                when equalsIgnoreCase leftOwner (tableQualifier targetRef)
-                                     && equalsIgnoreCase rightOwner joinedQualifier ->
-                                hasLeadingIndexColumn targetTable leftName
-                            | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
-                                when equalsIgnoreCase rightOwner (tableQualifier targetRef)
-                                     && equalsIgnoreCase leftOwner joinedQualifier ->
-                                hasLeadingIndexColumn targetTable rightName
-                            | _ -> false))
-                | _ -> false
-            | _ -> false
-        | _ -> false
+            distinctQualifiers && (sources.Tail |> List.exists hasSourceFilter)
 
     let check (targetRef: TableRef) (joins: Join list) (whereExpr: Expr option) (limit: Expr option) (singleTarget: bool) =
         if limit.IsSome then Ok()

@@ -3604,6 +3604,25 @@ let tests =
                   | Err(1054, _) -> ()
                   | other -> failtestf "expected an unknown-column error for %s, got %A" predicate other
 
+          testCase "sql_safe_updates permits a filtered three-table key chain"
+          <| fun _ ->
+              for sql, expected in
+                  [ "UPDATE t JOIN l ON l.id=t.id JOIN m ON m.id=l.id SET t.v=1 WHERE m.v=0", Affected 2UL
+                    "UPDATE t JOIN l ON l.id=t.id JOIN m ON m.id=l.id SET t.v=1 WHERE l.v=0", Affected 2UL
+                    "UPDATE t JOIN l ON l.id=t.id JOIN m ON m.id=l.id SET t.v=1 WHERE t.v=0", Err(1175, "You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column. ")
+                    "UPDATE t STRAIGHT_JOIN l ON l.id=t.id STRAIGHT_JOIN m ON m.id=l.id SET t.v=1 WHERE m.v=0", Err(1175, "You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column. ")
+                    "DELETE t FROM t JOIN l ON l.id=t.id JOIN m ON m.id=l.id WHERE m.v=0", Affected 2UL ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "CREATE TABLE l(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "CREATE TABLE m(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "INSERT INTO t VALUES(1,0),(2,0)"
+                  let session, _ = handle session "INSERT INTO l VALUES(1,0),(2,0)"
+                  let session, _ = handle session "INSERT INTO m VALUES(1,0),(2,0)"
+                  let session, _ = handle session "SET sql_safe_updates=ON"
+                  let _, result = handle session sql
+                  Expect.equal result expected sql
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

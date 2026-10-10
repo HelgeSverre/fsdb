@@ -37,8 +37,15 @@ Native MySQL 8.4.11 also accepts two-target UPDATE and DELETE with either
 table's indexed `id=1` filter, and rejects an unindexed lookup-side filter
 or an unfiltered two-target UPDATE with 1175. The existing fsdb validator
 matches all seven audited multi-target cases; the differential contract and
-focused regression now protect them. Other multi-target access paths,
-broader filter shapes, and optimizer-dependent source choices remain open. The
+focused regression now protect them. A three-table chain exposed a concrete
+1175 mismatch: MySQL accepts a source-local filter on either lookup table
+when indexed equality links lead back to the target, while fsdb previously
+recognized only one join. Fsdb now follows those links through ordinary inner
+joins. The pinned contract matches two accepted UPDATE filters and a DELETE,
+and rejects a target-only filter or forced target-first `STRAIGHT_JOIN`; a
+native probe also accepted the chain when the last lookup table had 100 rows.
+Other multi-target access paths, broader filter shapes, and optimizer-dependent
+source choices remain open. The
 `sql_safe_updates` Expecto regression and `safe-update-mode` differential
 contract cover the accepted and rejected forms, error code, and unchanged
 target rows after rejection.
@@ -50,3 +57,6 @@ all in the previously documented identifier-case-policy cases on Linux mode
 The expanded contract passed all 386 safe-update steps at
 `torture/artifacts/runs/20261010T091140255-45246/contracts`; the complete run
 again differed only in the nine identifier-case-policy steps.
+The three-table extension passed all 446 safe-update steps at
+`torture/artifacts/runs/20261010T091904371-46091/contracts`; the full run
+again retained the same nine identifier-case-policy differences.

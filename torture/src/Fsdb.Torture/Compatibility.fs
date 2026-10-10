@@ -8296,14 +8296,21 @@ module ContractCatalog =
               "INSERT INTO safe_update_lookup VALUES(1,0),(2,0)"
               "SET sql_safe_updates=ON" ]
 
+        let chainReset =
+            [ "DROP TABLE IF EXISTS safe_update_middle" ]
+            @ reset
+            @ [ "CREATE TABLE safe_update_middle(id INT PRIMARY KEY, value INT)"
+                "INSERT INTO safe_update_middle VALUES(1,0),(2,0)" ]
+
         let cases =
-            let mutationCaseWith setup name rejected sql =
+            let mutationCaseWith (setup: string list) name rejected sql =
                 name,
-                (if rejected then Some(7, 1175, "HY000") else None),
+                (if rejected then Some(setup.Length, 1175, "HY000") else None),
                 setup @ [ sql; "SELECT id,value FROM safe_update_probe ORDER BY id" ]
 
             let mutationCase = mutationCaseWith reset
             let bareCase = mutationCaseWith bareReset
+            let chainCase = mutationCaseWith chainReset
 
             [ mutationCase "unrestricted-update" true "UPDATE safe_update_probe SET value=1"
               mutationCase "unindexed-update" true "UPDATE safe_update_probe SET value=1 WHERE value=0"
@@ -8360,6 +8367,11 @@ module ContractCatalog =
               mutationCase "multi-delete-lookup-filter" true "DELETE p,l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               mutationCase "multi-delete-target-key" false "DELETE p,l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE p.id=1"
               mutationCase "multi-delete-lookup-key" false "DELETE p,l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.id=1"
+              chainCase "chain-last-filter" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id JOIN safe_update_middle m ON m.id=l.id SET p.value=1 WHERE m.value=0"
+              chainCase "chain-middle-filter" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id JOIN safe_update_middle m ON m.id=l.id SET p.value=1 WHERE l.value=0"
+              chainCase "chain-target-filter" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id JOIN safe_update_middle m ON m.id=l.id SET p.value=1 WHERE p.value=0"
+              chainCase "chain-forced-target-first" true "UPDATE safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id STRAIGHT_JOIN safe_update_middle m ON m.id=l.id SET p.value=1 WHERE m.value=0"
+              chainCase "chain-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id JOIN safe_update_middle m ON m.id=l.id WHERE m.value=0"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
@@ -8377,7 +8389,7 @@ module ContractCatalog =
         { Name = "safe-update-mode"
           Setup = [||]
           Steps = isolatedScriptSteps cases
-          Cleanup = [| "DROP TABLE IF EXISTS safe_update_lookup"; "DROP TABLE IF EXISTS safe_update_probe" |]
+          Cleanup = [| "DROP TABLE IF EXISTS safe_update_middle"; "DROP TABLE IF EXISTS safe_update_lookup"; "DROP TABLE IF EXISTS safe_update_probe" |]
           Coverage =
             [| "statement:set", [| "text-differential" |]
                "statement:update", [| "text-differential" |]
