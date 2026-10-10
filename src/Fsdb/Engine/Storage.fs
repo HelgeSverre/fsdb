@@ -2898,6 +2898,14 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
         Some(encodeEqualityKey columns indices row)
 
 let private projectIndexValue indexName row (column: ColumnDef) prefixLength transform value =
+    let value =
+        match transform, column.NumericDisplay with
+        | Some FirstByte, Some _ ->
+            ColumnDisplay.renderStoredColumnValue column value
+            |> Option.map VString
+            |> Option.defaultValue VNull
+        | _ -> value
+
     let encodeText =
         column.Charset
         |> Option.map Charset.encode

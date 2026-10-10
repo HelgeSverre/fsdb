@@ -35,6 +35,9 @@ let private definitions =
       { CanonicalName = "BIT_LENGTH"
         Aliases = []
         Transform = BitLength }
+      { CanonicalName = "ASCII"
+        Aliases = []
+        Transform = FirstByte }
       { CanonicalName = "ABS"
         Aliases = []
         Transform = AbsoluteValue }
@@ -134,6 +137,7 @@ let rec hasTextResult = function
     | CharacterLength
     | ByteLength
     | BitLength
+    | FirstByte
     | AbsoluteValue
     | IsNullResult
     | Signum
@@ -191,7 +195,8 @@ let private supportsSingleTransform transform columnType =
         | _ -> false
     | CharacterLength
     | ByteLength
-    | BitLength ->
+    | BitLength
+    | FirstByte ->
         match columnType with
         | TGeometry _
         | TVector _ -> false
@@ -211,10 +216,11 @@ let private isTextTransform = function
     | Reversed -> true
     | _ -> false
 
-let private isLengthTransform = function
+let private isTextToIntegerTransform = function
     | CharacterLength
     | ByteLength
-    | BitLength -> true
+    | BitLength
+    | FirstByte -> true
     | _ -> false
 
 let supportsColumnType transform columnType =
@@ -225,9 +231,9 @@ let supportsColumnType transform columnType =
             let transforms = physical.Calls |> List.map snd
 
             match transforms, List.rev transforms with
-            | first :: _, length :: inner when isLengthTransform length && List.forall isTextTransform inner ->
+            | first :: _, textToInteger :: inner when isTextToIntegerTransform textToInteger && List.forall isTextTransform inner ->
                 if inner.IsEmpty then
-                    supportsSingleTransform length columnType
+                    supportsSingleTransform textToInteger columnType
                 else
                     supportsSingleTransform first columnType
             | first :: _, _ when List.forall isTextTransform transforms -> supportsSingleTransform first columnType
@@ -241,6 +247,7 @@ let rec fixedKeyLength = function
     | ByteLength
     | BitLength
     | Signum -> Some 8
+    | FirstByte
     | IsNullResult -> Some 4
     | Expression expression ->
         tryPhysicalExpression expression
@@ -369,6 +376,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _
+    | Some FirstByte, _
     | Some IsNullResult, _
     | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
     | Some(Expression expression), _ ->
@@ -377,7 +385,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             let transforms = physical.Calls |> List.map snd
 
             match List.tryLast transforms with
-            | Some transform when isLengthTransform transform -> tryExactInt64 value |> Option.map VInt
+            | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some _ when List.contains Signum transforms -> tryExactInt64 value |> Option.map VInt
             | Some AbsoluteValue when List.forall ((=) AbsoluteValue) transforms ->
                 tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
@@ -389,6 +397,9 @@ let private mapTextOrBytes mapText mapBytes value =
     match tryRawBytes value with
     | Some bytes -> VBytes(mapBytes bytes)
     | None -> value |> toText |> Option.defaultValue "" |> mapText |> VString
+
+let firstByteValue bytes =
+    bytes |> Array.tryHead |> Option.defaultValue 0uy |> int64 |> VInt
 
 let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble: float -> float) value =
     match value with
@@ -414,6 +425,13 @@ let rec projectValueWithStatus encodeText transform value =
     | Some CharacterLength, value -> VInt(characterLength value), None
     | Some ByteLength, value -> VInt(byteLengthWith encodeText value), None
     | Some BitLength, value -> VInt(byteLengthWith encodeText value * 8L), None
+    | Some FirstByte, value ->
+        let bytes =
+            match tryRawBytes value with
+            | Some bytes -> bytes
+            | None -> value |> toText |> Option.defaultValue "" |> encodeText
+
+        firstByteValue bytes, None
     | Some Floored, value -> roundFunctionalValue Math.Floor Math.Floor value
     | Some Ceiled, value -> roundFunctionalValue Math.Ceiling Math.Ceiling value
     | Some Signum, ((VString _ | VBytes _) as value) ->

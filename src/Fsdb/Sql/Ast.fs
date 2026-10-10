@@ -405,6 +405,7 @@ and IndexTransform =
     | CharacterLength
     | ByteLength
     | BitLength
+    | FirstByte
     | AbsoluteValue
     | IsNullResult
     | Expression of Expr

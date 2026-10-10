@@ -3630,25 +3630,11 @@ let private spaceFn: Scalar =
         if k > Limits.maxAllowedPacket then VNull else VString(String(' ', k))
     | _ -> VNull
 
-let private firstByteValue bytes =
-    bytes |> Array.tryHead |> Option.defaultValue 0uy |> int64 |> VInt
-
-/// The first byte of the string's UTF-8 encoding, not the first UTF-16 code
-/// unit — `ASCII('é')` is `195` (0xC3, the lead byte of é's 2-byte UTF-8
-/// encoding) in MySQL, not é's UTF-16 value 233.
-let private asciiFn: Scalar =
-    function
-    | [ value ] when not (anyNull [ value ]) ->
-        match tryRawBytes value with
-        | Some bytes -> firstByteValue bytes
-        | None -> value |> req |> Text.Encoding.UTF8.GetBytes |> firstByteValue
-    | _ -> VNull
-
 let private ordFn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
         match tryRawBytes value with
-        | Some bytes -> firstByteValue bytes
+        | Some bytes -> FunctionalIndex.firstByteValue bytes
         | None ->
             let text = req value
 
@@ -6627,7 +6613,7 @@ let private registerStringBuiltins registry =
     |> registerFunctionalString Reversed
     |> registerStringScalar "REPEAT" firstArgument (InheritArgument 0) repeatFn
     |> registerScalar "SPACE" (exactArity "SPACE" 1 spaceFn)
-    |> registerTextScalar "ASCII" firstArgument asciiFn
+    |> registerFunctionalByteText FirstByte
     |> registerTextScalar "ORD" firstArgument (exactArity "ORD" 1 ordFn)
     |> registerScalarResult "CHAR" binaryResult charFn
     |> registerByteScalar "HEX" firstArgument (exactArity "HEX" 1 hexFn)

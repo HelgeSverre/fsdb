@@ -4795,6 +4795,24 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE null_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private asciiFunctionalIndex =
+        { Name = "ascii-functional-index"
+          Setup =
+            [| "CREATE TABLE ascii_probe(id INT PRIMARY KEY,v VARCHAR(20) CHARACTER SET latin1,KEY ix_ascii ((ASCII(v))))"
+               "INSERT INTO ascii_probe VALUES(1,'é'),(2,''),(3,NULL),(4,'A')"
+               "CREATE TABLE ascii_numeric_probe(id INT PRIMARY KEY,v INT(4) ZEROFILL,KEY ix_ascii ((ASCII(v))))"
+               "INSERT INTO ascii_numeric_probe VALUES(1,1),(2,12)" |]
+          Steps =
+            [| Contract.query "source-bytes" "SELECT id,ASCII(v) FROM ascii_probe ORDER BY id"
+               Contract.query "latin1-key" "SELECT id FROM ascii_probe WHERE ASCII(v)=233 ORDER BY id"
+               Contract.query "empty-key" "SELECT id FROM ascii_probe WHERE ASCII(v)=0 ORDER BY id"
+               Contract.query "padded-numeric-key" "SELECT id,ASCII(v) FROM ascii_numeric_probe WHERE ASCII(v)=48 ORDER BY id"
+               Contract.execute "update" "UPDATE ascii_probe SET v='B' WHERE id=1"
+               Contract.query "old-key-removed" "SELECT id FROM ascii_probe WHERE ASCII(v)=233 ORDER BY id"
+               Contract.query "new-key-added" "SELECT id FROM ascii_probe WHERE ASCII(v)=66 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE ascii_probe"; "DROP TABLE ascii_numeric_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private signFunctionalIndex =
         { Name = "sign-functional-index"
           Setup =
@@ -9184,6 +9202,7 @@ module ContractCatalog =
            integralDoubleIndexProbes
            signFunctionalIndex
            isNullFunctionalIndex
+           asciiFunctionalIndex
            constantNullFallbackIndexes
            tableStatisticsCache
            missingTableDiagnostics

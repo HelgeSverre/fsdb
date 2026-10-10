@@ -8609,6 +8609,52 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an ABS override reports a scan"
                     Expect.equal overriddenPlan.Key None "an ABS override does not claim the functional index"
 
+                testCase "ASCII functional keys follow source bytes and writes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE ascii_keys(id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1, KEY ix_ascii ((ASCII(value))))" |> ignore
+                    runDefault store "INSERT INTO ascii_keys VALUES(1,'é'),(2,''),(3,NULL),(4,'A')" |> ignore
+
+                    Expect.equal
+                        (runDefault store "SELECT id,ASCII(value) FROM ascii_keys ORDER BY id")
+                        (ResultSet([ "id"; "ASCII(value)" ], [ [ Some "1"; Some "233" ]; [ Some "2"; Some "0" ]; [ Some "3"; None ]; [ Some "4"; Some "65" ] ]))
+                        "ASCII reads the source character-set bytes"
+
+                    Expect.equal
+                        (runDefault store "SELECT id,ASCII(value) FROM ascii_keys WHERE ASCII(value)=233")
+                        (ResultSet([ "id"; "ASCII(value)" ], [ [ Some "1"; Some "233" ] ]))
+                        "latin1 keys use the first source byte"
+
+                    let plan = runDefault store "EXPLAIN SELECT id FROM ascii_keys WHERE ASCII(value)=233" |> explainRow
+                    Expect.equal plan.Key (Some "ix_ascii") "the byte-value equality uses its key"
+
+                    runDefault store "UPDATE ascii_keys SET value='B' WHERE id=1" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM ascii_keys WHERE ASCII(value)=233")
+                        (ResultSet([ "id" ], []))
+                        "updates remove the old byte-value key"
+
+                    runDefault store "CREATE TABLE trimmed_bytes(id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1, KEY ix_trim_ascii ((ASCII(TRIM(value)))))" |> ignore
+                    runDefault store "INSERT INTO trimmed_bytes VALUES(1,' é '),(2,'A')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM trimmed_bytes WHERE ASCII(TRIM(value))=233")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "composed text transforms retain the source bytes"
+
+                    let composedPlan = runDefault store "EXPLAIN SELECT id FROM trimmed_bytes WHERE ASCII(TRIM(value))=233" |> explainRow
+                    Expect.equal composedPlan.Key (Some "ix_trim_ascii") "a composed first-byte expression uses its key"
+
+                    runDefault store "CREATE TABLE padded_bytes(id INT PRIMARY KEY, value INT(4) ZEROFILL, KEY ix_ascii ((ASCII(value))))" |> ignore
+                    runDefault store "INSERT INTO padded_bytes VALUES(1,1),(2,12)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM padded_bytes WHERE ASCII(value)=48 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "numeric display padding supplies the first byte"
+
+                    let overridden = builtins |> registerScalar "ASCII" (fun _ -> VInt 99L)
+                    let overridePlan = run store overridden "EXPLAIN SELECT id FROM ascii_keys WHERE ASCII(value)=99" |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden ASCII cannot claim its stored key"
+
                 testCase "ISNULL functional keys index NULL results and follow writes"
                 <| fun _ ->
                     let store = newStore ()
