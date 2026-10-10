@@ -3787,11 +3787,17 @@ let tests =
                           (ResultSet([ "id" ], [ [ Some id ] ]))
                           (sprintf "%s restores %s" source expression)
               let verifyTrigonometricLookups source recovered =
-                  for functionName, probe in [ "SIN", "0e0"; "COS", "1e0"; "TAN", "0e0" ] do
+                  for functionName, probe, id in
+                      [ "SIN", "0e0", "1"
+                        "COS", "1e0", "1"
+                        "TAN", "0e0", "1"
+                        "ASIN", "0e0", "1"
+                        "ACOS", "0e0", "2"
+                        "ATAN", "0e0", "1" ] do
                       let sql = sprintf "SELECT id FROM lookup_trig WHERE %s(value)=%s" functionName probe
                       Expect.equal
                           (handle (Fsdb.Session.create 62 recovered) sql |> snd)
-                          (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                          (ResultSet([ "id" ], [ [ Some id ] ]))
                           (sprintf "%s restores %s" source functionName)
 
               let run (session: Fsdb.Session.Session) (sql: string) =
@@ -3842,8 +3848,8 @@ let tests =
                     "INSERT INTO lookup_round VALUES (1, -2.50), (2, 0.01), (3, 2.99)"
                     "CREATE TABLE lookup_log (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_log_value ((LOG(value))), INDEX ix_ln_value ((LN(value))), INDEX ix_log2_value ((LOG2(value))), INDEX ix_log10_value ((LOG10(value))))"
                     "INSERT INTO lookup_log VALUES (1, 1), (2, 2), (3, 10), (4, NULL)"
-                    "CREATE TABLE lookup_trig (id INT PRIMARY KEY, value DOUBLE, INDEX ix_sin ((SIN(value))), INDEX ix_cos ((COS(value))), INDEX ix_tan ((TAN(value))))"
-                    "INSERT INTO lookup_trig VALUES (1, 0), (2, 1), (3, -1), (4, NULL)"
+                    "CREATE TABLE lookup_trig (id INT PRIMARY KEY, value DOUBLE, INDEX ix_sin ((SIN(value))), INDEX ix_cos ((COS(value))), INDEX ix_tan ((TAN(value))), INDEX ix_asin ((ASIN(value))), INDEX ix_acos ((ACOS(value))), INDEX ix_atan ((ATAN(value))))"
+                    "INSERT INTO lookup_trig VALUES (1, 0), (2, 1), (3, -1), (4, NULL), (5, 2)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
                     "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
                     "INSERT INTO lookup_abs_text VALUES (1, '12x'), (2, 'Other')"

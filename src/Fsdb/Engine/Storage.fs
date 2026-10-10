@@ -3042,10 +3042,11 @@ let private captureTableStatistics (now: DateTime) (table: Table) : TableStatist
       IndexCardinality = cardinalities }
 
 let private encodeUniqueKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string option =
-    if group.Indices |> List.exists (fun index -> row.[index] = VNull) then
+    let values = indexValues columns group row
+    if values |> List.contains VNull then
         None
     else
-        Some(encodeIndexKey columns group row)
+        Some(encodeEqualityValues columns group.Indices values)
 
 type WriteLockTargets =
     { RowIds: RowId list
@@ -7412,6 +7413,11 @@ let private formatDuplicateKeyValue indices (row: Value[]) =
     |> List.map (fun index -> row.[index] |> toText |> Option.defaultValue "NULL")
     |> String.concat "-"
 
+let private formatDuplicateUniqueValue columns group (row: Value[]) =
+    indexValues columns group row
+    |> List.map (fun value -> value |> toText |> Option.defaultValue "NULL")
+    |> String.concat "-"
+
 // A replacement may retain its own key; only another row can conflict.
 let private validateUpdatedUniqueKeys (table: Table) groups index rowId candidate =
     groups
@@ -7420,7 +7426,7 @@ let private validateUpdatedUniqueKeys (table: Table) groups index rowId candidat
         |> Option.bind (fun key ->
             match Map.tryFind key (Map.find group.Name index) with
             | Some otherRowId when otherRowId <> rowId ->
-                Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices candidate))
+                Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateUniqueValue table.Columns group candidate))
             | _ -> None))
     |> function
         | Some error -> Error error
@@ -7444,7 +7450,7 @@ let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: IndexKeyGr
         | [] -> None
         | row :: rest ->
             match encodeUniqueKey columns group row with
-            | Some key when Set.contains key seen -> formatDuplicateKeyValue group.Indices row |> Some
+            | Some key when Set.contains key seen -> formatDuplicateUniqueValue columns group row |> Some
             | Some key -> loop (Set.add key seen) rest
             | None -> loop seen rest
 
@@ -7495,7 +7501,7 @@ let private alterUniqueRowValidator (table: Table) =
         |> List.tryPick (fun (group, seen) ->
             match encodeUniqueKey table.Columns group row with
             | Some key when not (seen.Add key) ->
-                Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices row))
+                Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateUniqueValue table.Columns group row))
             | _ -> None)
         |> function
             | Some error -> Error error
@@ -9013,7 +9019,7 @@ let private insertCore
                                     |> List.tryPick (fun group ->
                                         match encodeUniqueKey table.Columns group candidate with
                                         | Some key when Map.find group.Name state.UniqueIndex |> Map.containsKey key ->
-                                            Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices candidate))
+                                            Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateUniqueValue table.Columns group candidate))
                                         | _ -> None)
 
                                 match uniqueCollision with
@@ -9242,7 +9248,7 @@ let internal insertPreparedCandidate
                             Map.tryFind group.Name table.UniqueIndex
                             |> Option.bind (Map.tryFind key)
                             |> Option.map (fun _ ->
-                                DuplicateKey(table.OriginalName, group.Name, formatDuplicateKeyValue group.Indices prepared.Values))))
+                                DuplicateKey(table.OriginalName, group.Name, formatDuplicateUniqueValue table.Columns group prepared.Values))))
 
                 match collision with
                 | Some error -> Error error

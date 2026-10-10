@@ -89,6 +89,15 @@ let private definitions =
       { CanonicalName = "TAN"
         Aliases = []
         Transform = Tangent }
+      { CanonicalName = "ASIN"
+        Aliases = []
+        Transform = ArcSine }
+      { CanonicalName = "ACOS"
+        Aliases = []
+        Transform = ArcCosine }
+      { CanonicalName = "ATAN"
+        Aliases = []
+        Transform = ArcTangent }
       // MySQL stores LOG and LN as distinct functional expressions.
       { CanonicalName = "LOG"
         Aliases = []
@@ -203,6 +212,9 @@ let rec hasTextResult = function
     | Sine
     | Cosine
     | Tangent
+    | ArcSine
+    | ArcCosine
+    | ArcTangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -280,6 +292,9 @@ let private supportsSingleTransform transform columnType =
     | Sine
     | Cosine
     | Tangent
+    | ArcSine
+    | ArcCosine
+    | ArcTangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -320,6 +335,9 @@ let private isNumericTransform = function
     | Sine
     | Cosine
     | Tangent
+    | ArcSine
+    | ArcCosine
+    | ArcTangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -332,6 +350,9 @@ let private producesDoubleResult = function
     | Sine
     | Cosine
     | Tangent
+    | ArcSine
+    | ArcCosine
+    | ArcTangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -703,6 +724,9 @@ let rec projectValueWithStatus encodeText transform value =
     | Some Sine, value -> trigonometricValue Math.Sin value
     | Some Cosine, value -> trigonometricValue Math.Cos value
     | Some Tangent, value -> trigonometricValue Math.Tan value
+    | Some ArcSine, value -> trigonometricValue Math.Asin value
+    | Some ArcCosine, value -> trigonometricValue Math.Acos value
+    | Some ArcTangent, value -> trigonometricValue Math.Atan value
     | Some Logarithm, value
     | Some NaturalLogarithm, value -> logarithmValue Math.Log value
     | Some BinaryLogarithm, value -> logarithmValue Math.Log2 value

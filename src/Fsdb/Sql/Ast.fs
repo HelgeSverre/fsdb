@@ -423,6 +423,9 @@ and IndexTransform =
     | Sine
     | Cosine
     | Tangent
+    | ArcSine
+    | ArcCosine
+    | ArcTangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm

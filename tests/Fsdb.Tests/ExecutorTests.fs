@@ -9248,6 +9248,66 @@ let tests =
                         (ResultSet([ "id" ], []))
                         "updates remove the old SIN key"
 
+                testCase "inverse trigonometric functional keys serve lookups and domain-null values"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE inverse_trig(id INT PRIMARY KEY,n DOUBLE,KEY ix_asin ((ASIN(n))),KEY ix_acos ((ACOS(n))),KEY ix_atan ((ATAN(n))))"
+                    |> ignore
+                    runDefault store "INSERT INTO inverse_trig VALUES(1,0),(2,1),(3,-1),(4,2),(5,NULL)" |> ignore
+
+                    for expression, key in [ "ASIN(n)", "ix_asin"; "ATAN(n)", "ix_atan" ] do
+                        let query = sprintf "SELECT id FROM inverse_trig WHERE %s=0e0" expression
+                        Expect.equal (runDefault store query) (ResultSet([ "id" ], [ [ Some "1" ] ])) query
+                        Expect.equal ((runDefault store ("EXPLAIN " + query) |> explainRow).Key) (Some key) query
+
+                    let acosQuery = "SELECT id FROM inverse_trig WHERE ACOS(n)=0e0"
+                    Expect.equal (runDefault store acosQuery) (ResultSet([ "id" ], [ [ Some "2" ] ])) acosQuery
+                    Expect.equal ((runDefault store ("EXPLAIN " + acosQuery) |> explainRow).Key) (Some "ix_acos") acosQuery
+                    Expect.equal
+                        (runDefault store "SELECT id FROM inverse_trig WHERE ASIN(n) IS NULL ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "5" ] ]))
+                        "out-of-domain and source NULL values have NULL keys"
+
+                    let range = "SELECT id FROM inverse_trig WHERE ATAN(n)>1e0"
+                    Expect.equal (runDefault store range) (ResultSet([ "id" ], [ [ Some "4" ] ])) range
+                    Expect.equal ((runDefault store ("EXPLAIN " + range) |> explainRow).Key) (Some "ix_atan") range
+                    Expect.equal
+                        ((runDefault store "EXPLAIN SELECT ATAN(n),COUNT(*) FROM inverse_trig GROUP BY ATAN(n) ORDER BY ATAN(n)" |> explainRow).Key)
+                        (Some "ix_atan")
+                        "ATAN grouping key"
+
+                    runDefault store "CREATE TABLE unique_inverse(id INT PRIMARY KEY,n DOUBLE,UNIQUE KEY ux_asin ((ASIN(n))))"
+                    |> ignore
+                    Expect.equal
+                        (runDefault store "INSERT INTO unique_inverse VALUES(1,0),(2,2),(3,NULL),(4,2)")
+                        (Affected 4UL)
+                        "unique inverse keys allow multiple computed NULLs"
+                    match runDefault store "INSERT INTO unique_inverse VALUES(5,0)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected duplicate ASIN key, got %A" other
+
+                    Expect.equal
+                        (runDefault store "UPDATE unique_inverse SET n=2 WHERE id=1")
+                        (Affected 1UL)
+                        "an out-of-domain result can replace a non-null unique key"
+
+                    runDefault store "UPDATE inverse_trig SET n=2 WHERE id=1" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM inverse_trig WHERE ASIN(n)=0e0")
+                        (ResultSet([ "id" ], []))
+                        "updates remove the old inverse-trig key"
+
+                testCase "unique functional keys use projected nullness"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE null_key(id INT PRIMARY KEY,n INT,UNIQUE KEY ux_null ((ISNULL(n))))"
+                    |> ignore
+                    Expect.equal (runDefault store "INSERT INTO null_key VALUES(1,NULL)") (Affected 1UL) "first NULL"
+                    Expect.equal
+                        (runDefault store "INSERT INTO null_key VALUES(2,NULL)")
+                        (Err(1062, "Duplicate entry '1' for key 'null_key.ux_null'"))
+                        "the duplicate diagnostic names the projected key"
+
                 testCase "logarithm functional keys keep distinct function identities"
                 <| fun _ ->
                     let store = newStore ()
