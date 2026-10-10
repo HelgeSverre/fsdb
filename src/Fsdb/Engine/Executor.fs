@@ -24748,21 +24748,20 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                 |> List.mapi (fun index join ->
                     let joinedRef, joinedTable = sources.[index + 1]
                     let joinedQualifier = tableQualifier joinedRef
+                    let joinConditions = conjuncts join.On @ whereConditions
                     [ for earlierRef, earlierTable in sources |> List.take (index + 1) do
                           let earlierQualifier = tableQualifier earlierRef
+                          let sharedIndexedColumn column =
+                              tableHasColumn joinedTable column
+                              && tableHasColumn earlierTable column
+                              && hasLeadingIndexColumn earlierTable column
                           let implicitKeyProbe =
                               (if join.Kind = NaturalJoin then
-                                   joinedTable.Columns
-                                   |> List.map _.Name
-                                   |> List.filter (tableHasColumn earlierTable)
+                                   earlierTable.Columns |> List.map _.Name
                                else join.Using)
-                              |> List.exists (fun column ->
-                                  tableHasColumn joinedTable column
-                                  && tableHasColumn earlierTable column
-                                  && hasLeadingIndexColumn earlierTable column)
+                              |> List.exists sharedIndexedColumn
                           let equalityProbe =
-                              (conjuncts join.On @ whereConditions)
-                              |> List.exists (probesIndexedKey earlierQualifier earlierTable joinedQualifier)
+                              joinConditions |> List.exists (probesIndexedKey earlierQualifier earlierTable joinedQualifier)
                           if implicitKeyProbe || equalityProbe then
                               yield joinedQualifier, earlierQualifier ])
                 |> List.concat
