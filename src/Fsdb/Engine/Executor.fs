@@ -18627,6 +18627,7 @@ let private selectMutationTargets
     (orderBy: OrderKey list)
     (limit: int option)
     : Result<(RowId * Value[]) list, EvalError> =
+    let rows = trackExaminedRows rows
     let matchedRows () =
         rows
         |> traverseSeq (fun ((_, row) as positioned) ->
