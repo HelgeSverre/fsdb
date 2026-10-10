@@ -43,6 +43,10 @@ No mismatch is enrolled in the known-gap allowlist.
 - The same byte interpretation applies to audited CASE, COALESCE, IFNULL,
   and IF results mixing DOUBLE with text or binary values, including a
   VARBINARY column. Their selected `1e20` value produces `31653230`.
+- Mixed UNION, INTERSECT, and EXCEPT scalar results preserve the combined
+  text or binary type. A computed scalar result using `_utf16` encodes the
+  selected numeric text in UTF-16, producing `0031006500320030` rather than
+  UTF-8 bytes.
 
 The executor shares IF/CASE branch selection between ordinary evaluation and
 HEX argument validation. Numeric HEX formatting remains in the existing scalar
@@ -79,5 +83,10 @@ preparation timing, warning order, and remaining unrelated diagnostics.
   no-warning cases, with an Expecto regression. The additional binary IF wire
   case passes within `hex-expression-conversion`; the full mode-0 run retains
   only the previously documented identifier-case differences.
+- Mixed set-operation and charset follow-up: the expanded native fixture
+  records eleven no-warning cases, with focused Expecto regressions and an
+  additional UTF-16 differential wire case. `just check` passes 3,273 tests;
+  the expanded HEX contract passes while the full mode-0 run retains only the
+  documented identifier-case differences.
 
 Wire artifact: `torture/artifacts/runs/20261008T224244964-83002/contracts`.

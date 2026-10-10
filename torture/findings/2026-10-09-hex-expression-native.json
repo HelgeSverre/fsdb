@@ -731,6 +731,40 @@
       "stdout": "case_text\n31653230\ncoalesce_text\n31653230\nifnull_text\n31653230\nif_binary\n31653230\ncase_binary\n31653230\ncoalesce_binary\n31653230\nif_column_binary\n31653230\n",
       "stderr": "",
       "errors": []
+    },
+    {
+      "name": "mixed-set-operations-and-computed-subquery-charset",
+      "statements": [
+        "USE probe",
+        "CREATE TABLE hex_set_charset_probe(id INT PRIMARY KEY,n DOUBLE,b VARBINARY(2))",
+        "INSERT INTO hex_set_charset_probe VALUES(1,1e20,X'61')",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 UNION ALL SELECT 'x' WHERE 0)) AS union_all_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 UNION SELECT 'x' WHERE 0)) AS union_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 UNION ALL SELECT X'78' WHERE 0)) AS union_all_binary",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 UNION SELECT X'78' WHERE 0)) AS union_binary",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 UNION ALL SELECT b FROM hex_set_charset_probe WHERE 0)) AS union_column_binary",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 INTERSECT SELECT CAST(n AS CHAR) FROM hex_set_charset_probe WHERE id=1)) AS intersect_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 INTERSECT ALL SELECT CAST(n AS CHAR) FROM hex_set_charset_probe WHERE id=1)) AS intersect_all_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 EXCEPT SELECT 'x' WHERE 0)) AS except_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_set_charset_probe WHERE id=1 EXCEPT ALL SELECT 'x' WHERE 0)) AS except_all_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT IF(id=1,n,_utf16 X'0078') FROM hex_set_charset_probe WHERE id=1)) AS utf16_if",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT CASE WHEN id=1 THEN n ELSE _utf16 X'0078' END FROM hex_set_charset_probe WHERE id=1)) AS utf16_case",
+        "SHOW WARNINGS",
+        "DROP TABLE hex_set_charset_probe"
+      ],
+      "stdout": "union_all_text\n31653230\nunion_text\n31653230\nunion_all_binary\n31653230\nunion_binary\n31653230\nunion_column_binary\n31653230\nintersect_text\n31653230\nintersect_all_text\n31653230\nexcept_text\n31653230\nexcept_all_text\n31653230\nutf16_if\n0031006500320030\nutf16_case\n0031006500320030\n",
+      "stderr": "",
+      "errors": []
     }
   ]
 }

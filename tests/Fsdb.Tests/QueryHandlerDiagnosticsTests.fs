@@ -987,6 +987,39 @@ let tests =
                   Expect.equal result (ResultSet([ "value" ], [ [ Some "31653230" ] ])) sql
                   Expect.isEmpty actualSession.Diagnostics (sql + " warnings")
 
+          testCase "HEX honors mixed set-operation scalar result types"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE hex_set_probe(id INT PRIMARY KEY,n DOUBLE,b VARBINARY(2))"
+              let session, _ = handle session "INSERT INTO hex_set_probe VALUES(1,1e20,X'61')"
+              for tail in
+                  [ "UNION ALL SELECT 'x' WHERE 0"
+                    "UNION SELECT 'x' WHERE 0"
+                    "UNION ALL SELECT X'78' WHERE 0"
+                    "UNION SELECT X'78' WHERE 0"
+                    "UNION ALL SELECT b FROM hex_set_probe WHERE 0"
+                    "INTERSECT SELECT CAST(n AS CHAR) FROM hex_set_probe WHERE id=1"
+                    "INTERSECT ALL SELECT CAST(n AS CHAR) FROM hex_set_probe WHERE id=1"
+                    "EXCEPT SELECT 'x' WHERE 0"
+                    "EXCEPT ALL SELECT 'x' WHERE 0" ] do
+                  let sql = sprintf "SELECT HEX((SELECT n FROM hex_set_probe WHERE id=1 %s)) AS value" tail
+                  let actualSession, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some "31653230" ] ])) sql
+                  Expect.isEmpty actualSession.Diagnostics (sql + " warnings")
+
+          testCase "HEX retains computed scalar subquery charset"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE hex_charset_probe(id INT PRIMARY KEY,n DOUBLE)"
+              let session, _ = handle session "INSERT INTO hex_charset_probe VALUES(1,1e20)"
+              for expression in
+                  [ "IF(id=1,n,_utf16 X'0078')"
+                    "CASE WHEN id=1 THEN n ELSE _utf16 X'0078' END" ] do
+                  let sql = sprintf "SELECT HEX((SELECT %s FROM hex_charset_probe WHERE id=1)) AS value" expression
+                  let actualSession, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some "0031006500320030" ] ])) sql
+                  Expect.equal (conditionTriples actualSession) [] (sql + " warnings")
+
           testCase "ALTER converts complete rows in final column order"
           <| fun _ ->
               for mode in [ ""; "STRICT_ALL_TABLES" ] do

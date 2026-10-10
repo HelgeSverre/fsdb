@@ -5652,9 +5652,20 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     match subquery.Metadata, value with
                     | [ metadata ], (VInt _ | VUInt _ | VDecimal _ | VDouble _)
                         when metadata.TypeId = TypeString
+                             || metadata.TypeId = TypeVarchar
                              || metadata.TypeId = TypeVarString
                              || metadata.TypeId = TypeBlob ->
-                        Value.toText value |> Option.map VString |> Option.defaultValue value
+                        match Value.toText value with
+                        | None -> value
+                        | Some text ->
+                            match metadata.CollationId |> Option.bind (int >> Collation.tryFindById) with
+                            | Some collation ->
+                                let charset = Collation.charsetOfCollation collation.Name
+                                if charset <> sourceCharset ctx expr then
+                                    VEncodedString(charset, Charset.encode charset text)
+                                else
+                                    VString text
+                            | None -> VString text
                     | _ -> value
                 if reducedProjection.IsNone then
                     Ok(Value.materialize value)
