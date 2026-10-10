@@ -146,6 +146,21 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.PointSelectByFixedPk() =
+        this.Query "SELECT id, name, email, age, meta, created_at FROM users WHERE id = 3"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.PointSelectByRoundPi() =
+        this.Query "SELECT id, name, email, age, meta, created_at FROM users WHERE id = ROUND(PI())"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.PointSelectByBitCountBound() =
+        this.Query "SELECT id, name, email, age, meta, created_at FROM users WHERE id = BIT_COUNT(7)"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.PointSelectByConstantExpression() =
         this.Query $"SELECT id, name, email, age, meta, created_at FROM users WHERE id = {randomUserId ()} + 0"
 
