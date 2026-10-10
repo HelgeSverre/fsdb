@@ -7371,19 +7371,27 @@ module ContractCatalog =
                    let label = kind.ToLowerInvariant() + "-cascade"
                    let parent = "cascade_parent_" + kind.ToLowerInvariant()
                    let child = "cascade_child_" + kind.ToLowerInvariant()
+                   let nullableChild = "nullable_child_" + kind.ToLowerInvariant()
                    Contract.execute (label + "-create-parent") (sprintf "CREATE TABLE %s(k %s(2) PRIMARY KEY)" parent kind)
                    Contract.execute (label + "-create-child") (sprintf "CREATE TABLE %s(id INT PRIMARY KEY,k %s(1),payload INT,FOREIGN KEY(k) REFERENCES %s(k) ON UPDATE CASCADE ON DELETE CASCADE)" child kind parent)
+                   Contract.execute (label + "-create-nullable-child") (sprintf "CREATE TABLE %s(id INT PRIMARY KEY,k %s(1),FOREIGN KEY(k) REFERENCES %s(k) ON UPDATE SET NULL ON DELETE SET NULL)" nullableChild kind parent)
                    Contract.execute (label + "-insert-parent") (sprintf "INSERT INTO %s VALUES('%s.10')" parent baseValue)
                    Contract.execute (label + "-insert-child") (sprintf "INSERT INTO %s VALUES(1,'%s.10',0)" child baseValue)
+                   Contract.execute (label + "-insert-nullable-child") (sprintf "INSERT INTO %s VALUES(1,'%s.10')" nullableChild baseValue)
                    Contract.execute (label + "-update-parent") (sprintf "UPDATE %s SET k='%s.12'" parent baseValue)
                    Contract.query (label + "-child-after-cascade") (sprintf "SELECT COUNT(*) FROM %s" child)
+                   Contract.query (label + "-nullable-child-after-update") (sprintf "SELECT id,k IS NULL FROM %s" nullableChild)
                    Contract.execute (label + "-reject-new-child") (sprintf "INSERT INTO %s VALUES(2,'%s.12',1)" child baseValue) |> Contract.fails 1452 "23000"
                    Contract.execute (label + "-reject-key-reassignment") (sprintf "UPDATE %s SET k='%s.12'" child baseValue) |> Contract.fails 1452 "23000"
                    Contract.execute (label + "-upsert-payload") (sprintf "INSERT INTO %s VALUES(1,'%s.12',2) ON DUPLICATE KEY UPDATE payload=2" child baseValue)
                    Contract.execute (label + "-update-payload") (sprintf "UPDATE %s SET payload=1" child)
                    Contract.execute (label + "-keep-key") (sprintf "UPDATE %s SET k=k" child)
                    Contract.execute (label + "-delete-parent") (sprintf "DELETE FROM %s" parent)
-                   Contract.query (label + "-child-after-delete") (sprintf "SELECT COUNT(*) FROM %s" child) |]
+                   Contract.query (label + "-child-after-delete") (sprintf "SELECT COUNT(*) FROM %s" child)
+                   Contract.execute (label + "-insert-second-parent") (sprintf "INSERT INTO %s VALUES('%s.20')" parent baseValue)
+                   Contract.execute (label + "-insert-second-nullable-child") (sprintf "INSERT INTO %s VALUES(2,'%s.20')" nullableChild baseValue)
+                   Contract.execute (label + "-delete-second-parent") (sprintf "DELETE FROM %s" parent)
+                   Contract.query (label + "-nullable-child-after-delete") (sprintf "SELECT id,k IS NULL FROM %s ORDER BY id" nullableChild) |]
           Cleanup = [| "DROP DATABASE IF EXISTS fk_time_date_probe" |]
           Coverage = [| "statement:foreign-key", [| "text-differential" |] |] }
 

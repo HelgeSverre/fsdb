@@ -42,9 +42,11 @@ insert or literal reassignment of `.12` in the child returns 1452 because ordina
 column coercion reduces it to precision 1. Fsdb now preserves the untouched
 stored key during SQL UPDATE and duplicate-key updates while coercing
 explicitly assigned values. The expanded `time-date-foreign-keys` contract
-and focused regression cover these
-same-family referential actions. Other temporal physical-key combinations
-remain unverified.
+and focused regression cover these same-family referential actions. A further
+MySQL 8.4.11 differential run also matched `ON UPDATE SET NULL` and
+`ON DELETE SET NULL` for the same mixed-precision pairs, including the
+retained nullable child rows. Other temporal physical-key combinations remain
+unverified.
 
 Within each of `TIME`, `DATETIME`, and `TIMESTAMP`, MySQL 8.4.11 accepts
 foreign keys with different fractional precisions but matches values by the
