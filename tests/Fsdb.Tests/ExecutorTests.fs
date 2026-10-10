@@ -6394,6 +6394,7 @@ let tests =
                           "POW(2,2)", "four"
                           "POWER(2,2)", "four"
                           "BIT_COUNT(7)", "three"
+                          "ROUND(PI())", "three"
                           "CRC32('abc')", "crc"
                           "2.0", "two" ] do
                         let sql = sprintf "SELECT label FROM numeric_bounds WHERE id=%s" expression
@@ -6475,6 +6476,11 @@ let tests =
                         run store overridden "EXPLAIN SELECT label FROM numeric_bounds WHERE id=MOD(5,3)"
                         |> explainRow
                     Expect.equal overridePlan.Key None "an overridden MOD cannot be folded into an index bound"
+                    let overriddenPi = builtins |> registerScalar "PI" (fun _ -> VDouble 4.0)
+                    let overriddenPiPlan =
+                        run store overriddenPi "EXPLAIN SELECT label FROM numeric_bounds WHERE id=ROUND(PI())"
+                        |> explainRow
+                    Expect.equal overriddenPiPlan.Key None "an overridden PI cannot be folded through ROUND"
                     Expect.equal
                         (runDefault store "UPDATE numeric_bounds SET label='counted' WHERE id=BIT_COUNT(7)")
                         (Affected 1UL)

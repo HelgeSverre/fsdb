@@ -20,6 +20,10 @@ MySQL 8.4.11 also chooses `PRIMARY`/`const` for `id=BIT_COUNT(7)` and
 `id=CRC32('abc')`. Fsdb now folds these unmodified deterministic builtins into
 numeric index bounds. Focused tests cover matching rows, plan keys, and
 UPDATE/DELETE effects; the differential contract checks the same final data.
+MySQL also uses `PRIMARY`/`const` for `id=ROUND(PI())`; fsdb now admits the
+unmodified, argument-free `PI()` as a nested planner constant while preserving
+its guard against overridden functions.
+
 The text-coercion result and both conversion warnings for indexed
 `BIT_COUNT('12x')` now match MySQL.
 Empty and whitespace-only text arguments also return zero with MySQL's
@@ -31,7 +35,7 @@ ones wider than 64 bits yield zero with a truncated-BINARY warning. Fsdb now
 keeps these two paths distinct.
 
 The expanded `numeric-constant-index-bounds` contract in run
-`20261010T160547990-6651` matched MySQL 8.4.11 on all 50 steps.
+`20261010T161131310-7062` matched MySQL 8.4.11 on all 51 steps.
 The complete run retained the same nine documented identifier-case
 differences elsewhere.
 
