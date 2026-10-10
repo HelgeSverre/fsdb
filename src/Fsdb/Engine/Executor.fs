@@ -5648,30 +5648,32 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(_, []), _ -> Ok VNull
             | ResultSet(_, [ _ ]), [ row ] ->
                 let value = row |> Array.tryHead |> Option.defaultValue VNull
-                let value =
-                    match subquery.Metadata, value with
-                    | [ metadata ], (VInt _ | VUInt _ | VDecimal _ | VDouble _)
-                        when metadata.TypeId = TypeString
-                             || metadata.TypeId = TypeVarchar
-                             || metadata.TypeId = TypeVarString
-                             || metadata.TypeId = TypeBlob ->
-                        match Value.toText value with
-                        | None -> value
-                        | Some text ->
-                            match metadata.CollationId |> Option.bind (int >> Collation.tryFindById) with
-                            | Some collation ->
-                                let charset = Collation.charsetOfCollation collation.Name
-                                if charset <> sourceCharset ctx expr then
-                                    VEncodedString(charset, Charset.encode charset text)
-                                else
-                                    VString text
-                            | None -> VString text
-                    | _ -> value
+                let value = coerceScalarSubqueryResult ctx expr subquery.Metadata value
                 if reducedProjection.IsNone then
                     Ok(Value.materialize value)
                 else
                     Ok value
             | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
+
+and private coerceScalarSubqueryResult ctx expression metadata value =
+    match metadata, value with
+    | [ column ], (VInt _ | VUInt _ | VDecimal _ | VDouble _)
+        when column.TypeId = TypeString
+             || column.TypeId = TypeVarchar
+             || column.TypeId = TypeVarString
+             || column.TypeId = TypeBlob ->
+        match Value.toText value with
+        | None -> value
+        | Some text ->
+            match column.CollationId |> Option.bind (int >> Collation.tryFindById) with
+            | Some collation ->
+                let charset = Collation.charsetOfCollation collation.Name
+                if charset <> sourceCharset ctx expression then
+                    VEncodedString(charset, Charset.encode charset text)
+                else
+                    VString text
+            | None -> VString text
+    | _ -> value
 
 and private validateExpressionInContext ctx expression =
     validateExpressionBindings
