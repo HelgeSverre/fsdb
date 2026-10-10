@@ -643,6 +643,23 @@ let private triggerSessionExecutor = System.Threading.AsyncLocal<(TriggerSession
 let private foundRowsOutputSlice = System.Threading.AsyncLocal<(int option * int option) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private joinHintDiagnostics = System.Threading.AsyncLocal<OptimizerHintResolution.ExecutionDiagnostics>()
+// An unset scope keeps direct Executor callers' explicit schema. A scoped None
+// means a wire session has selected no database, even when table names are qualified.
+let private functionDatabase = System.Threading.AsyncLocal<string option option>()
+
+let withFunctionDatabase database body =
+    DynamicScope.withValue functionDatabase (Some database) body
+
+let private currentFunctionDatabase fallback =
+    functionDatabase.Value |> Option.defaultValue (Some fallback)
+
+let private lookupScopedFunction registry dbName (name: string) =
+    match Functions.lookup name registry with
+    | Some function_ -> Some function_
+    | None when name.Contains('.', System.StringComparison.Ordinal) -> None
+    | None ->
+        currentFunctionDatabase dbName
+        |> Option.bind (fun database -> Functions.lookup (database + "." + name) registry)
 
 let internal withJoinHintDiagnostics (diagnostics: OptimizerHintResolution.ExecutionDiagnostics) body =
     let inherited = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
@@ -1927,9 +1944,7 @@ let private validateFunctionName (registry: Registry) (dbName: string) (name: st
     let known =
         intrinsicFunctionNames.Contains(name.ToUpperInvariant())
         || isAggregateFunctionName registry name
-        || (Functions.lookup name registry |> Option.isSome)
-        || (not (name.Contains('.', System.StringComparison.Ordinal))
-            && (Functions.lookup (dbName + "." + name) registry |> Option.isSome))
+        || (lookupScopedFunction registry dbName name |> Option.isSome)
     if known then Ok() else Error(unknownFunction name)
 
 /// Whether `expr` contains an aggregate call *anywhere*, not just at the
@@ -5469,11 +5484,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         evalHexArgument ctx argument
         |> Result.map (fun value -> prepareScalarArguments ctx "HEX" [ argument ] [ value ] |> Functions.hexFn)
     | FuncCall(name, args) ->
-        let scalar =
-            match Functions.lookup name ctx.Registry with
-            | Some function_ -> Some function_
-            | None when name.Contains('.', System.StringComparison.Ordinal) -> None
-            | None -> Functions.lookup (ctx.DbName + "." + name) ctx.Registry
+        let scalar = lookupScopedFunction ctx.Registry ctx.DbName name
 
         let compoundDescriptor () =
             if hasCombinedResultCollation ctx name then
@@ -7230,18 +7241,20 @@ and private resolveTableRef
                     viewStack.Value <- Set.add stackKey stack
                     cteScope.Value <- Map.empty
 
+                    let resolve viewRegistry body =
+                        withFunctionDatabase (Some view.Schema) (fun () ->
+                            resolveRelationBody viewStore viewRegistry view.Schema view.Columns body None)
+
                     let resolved =
                         match parseStoredViewStatement view with
                         | Result.Ok((Select select) as statement) ->
                             match registryForView viewStore registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
-                            | Result.Ok viewRegistry ->
-                                resolveRelationBody viewStore viewRegistry view.Schema view.Columns (PlainSelect select) None
+                            | Result.Ok viewRegistry -> resolve viewRegistry (PlainSelect select)
                         | Result.Ok((Union(first, rest, orderBy, limit, offset)) as statement) ->
                             match registryForView viewStore registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
-                            | Result.Ok viewRegistry ->
-                                resolveRelationBody viewStore viewRegistry view.Schema view.Columns (UnionSelect(first, rest, orderBy, limit, offset)) None
+                            | Result.Ok viewRegistry -> resolve viewRegistry (UnionSelect(first, rest, orderBy, limit, offset))
                         | _ -> Error(Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s)" view.Schema view.Name))
 
                     if not (isNull (box memo)) then memo.[cacheKey] <- resolved
@@ -21855,7 +21868,9 @@ let rec executeAs
                                         trigger.CollationConnection
 
                                 Storage.withExecutionSettings runStore settings (fun () ->
-                                    let result, conditions = Diagnostics.capture (fun () -> runBody oldRow newRow (statements, account))
+                                    let result, conditions =
+                                        withFunctionDatabase (Some db) (fun () ->
+                                            Diagnostics.capture (fun () -> runBody oldRow newRow (statements, account)))
                                     match result with
                                     | Err _ ->
                                         conditions |> List.iter Diagnostics.record

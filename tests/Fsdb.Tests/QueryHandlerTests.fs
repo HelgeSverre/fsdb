@@ -295,6 +295,53 @@ let tests =
                     "CREATE VIEW fsdb.function_ddl_view AS SELECT no_such_function() AS v" ] do
                   Expect.equal (withoutDatabase sql) (Err(1046, "No database selected")) sql
 
+          testCase "existing unqualified stored functions still require a selected database"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE FUNCTION fsdb.existing_fn() RETURNS INT DETERMINISTIC RETURN 7"
+                        "CREATE TABLE fsdb.existing_fn_source(id INT PRIMARY KEY,v INT)"
+                        "INSERT INTO fsdb.existing_fn_source VALUES(1,1)" ]
+              for sql in
+                  [ "SELECT existing_fn()"
+                    "DO existing_fn()"
+                    "SET @x=existing_fn()"
+                    "INSERT INTO fsdb.existing_fn_source VALUES(2,existing_fn())"
+                    "UPDATE fsdb.existing_fn_source SET v=existing_fn() WHERE id=1"
+                    "DELETE FROM fsdb.existing_fn_source WHERE existing_fn()=7"
+                    "CREATE TABLE fsdb.existing_fn_copy AS SELECT existing_fn() AS v"
+                    "CREATE VIEW fsdb.existing_fn_view AS SELECT existing_fn() AS v" ] do
+                  Expect.equal (run sql) (Err(1046, "No database selected")) sql
+              Expect.equal (run "SELECT fsdb.existing_fn()")
+                  (ResultSet([ "fsdb.existing_fn()" ], [ [ Some "7" ] ]))
+                  "a qualified function call remains valid without a selected database"
+              Expect.equal (run "SELECT id,v FROM fsdb.existing_fn_source")
+                  (ResultSet([ "id"; "v" ], [ [ Some "1"; Some "1" ] ]))
+                  "rejected mutations leave the table unchanged"
+
+          testCase "qualified views retain their function schema without a selected database"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable defining = create 1 store
+              let define sql =
+                  let next, result = handle defining sql
+                  defining <- next
+                  result
+              Expect.equal
+                  (define "CREATE FUNCTION fsdb.view_fn() RETURNS INT DETERMINISTIC RETURN 7")
+                  (Affected 0UL)
+                  "create function"
+              Expect.equal (define "USE fsdb") (Affected 0UL) "select view schema"
+              Expect.equal
+                  (define "CREATE VIEW fsdb.working_view AS SELECT view_fn() AS v")
+                  (Affected 0UL)
+                  "create view"
+              let reader = create 2 store
+              Expect.equal
+                  (handle reader "SELECT v FROM fsdb.working_view" |> snd)
+                  (ResultSet([ "v" ], [ [ Some "7" ] ]))
+                  "the qualified view uses its definition's function schema"
+
           testCase "maximum execution time retains unsigned settings and scope defaults"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -361,7 +408,8 @@ let tests =
           testCase "data-changing functions disable the SELECT deadline"
           <| fun _ ->
               let run = queryFixture
-                            [ "CREATE TABLE timed_source(n INT)"
+                            [ "USE fsdb"
+                              "CREATE TABLE timed_source(n INT)"
                               "INSERT INTO timed_source VALUES(1),(2)"
                               "CREATE TABLE timed_log(n INT)"
                               "CREATE FUNCTION timed_write() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO timed_log VALUES(1); RETURN SLEEP(0.3); END" ]
@@ -443,7 +491,7 @@ let tests =
           testCase "routine timeout warnings follow connection loading and routine DDL"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
-              let mutable session = create 1 store
+              let mutable session = { create 1 store with Database = Some "fsdb" }
               let run sql =
                   let next, result = handle session sql
                   session <- next
@@ -471,7 +519,7 @@ let tests =
               run "DROP PROCEDURE lifetime_other" |> ignore
               call true
               call false
-              session <- create 2 store
+              session <- { create 2 store with Database = Some "fsdb" }
               call true
               call false
               run "CREATE FUNCTION lifetime_f() RETURNS INT DETERMINISTIC RETURN (SELECT /*+ MAX_EXECUTION_TIME(1) */ 1)" |> ignore
@@ -1314,7 +1362,8 @@ let tests =
           <| fun _ ->
               let run =
                   queryFixture
-                      [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"
+                      [ "USE fsdb"
+                        "CREATE TABLE a(id INT PRIMARY KEY,n INT)"
                         "CREATE TABLE b(id INT PRIMARY KEY,n INT)"
                         "INSERT INTO b VALUES(1,0)"
                         "CREATE FUNCTION bump() RETURNS INT NO SQL RETURN @touches:=COALESCE(@touches,0)+1" ]
@@ -2134,7 +2183,7 @@ let tests =
 
           testCase "window aggregates materialize volatile arguments once per input"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
               let session, _ = handle session "CREATE TABLE volatile_inputs(id INT PRIMARY KEY)"
               let session, _ = handle session "INSERT INTO volatile_inputs VALUES(1),(2),(3)"
               let session, created = handle session "CREATE FUNCTION tick() RETURNS INT NOT DETERMINISTIC NO SQL RETURN (@n:=COALESCE(@n,0)+1)"
@@ -2162,7 +2211,7 @@ let tests =
           testCase "stored functions preserve caller variables and signaled SQLSTATE"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
-              let session = create 1 store
+              let session = { create 1 store with Database = Some "fsdb" }
               let session, _ = handle session "CREATE FUNCTION tick() RETURNS INT NOT DETERMINISTIC NO SQL RETURN (@n:=COALESCE(@n,0)+1)"
               let session, _ = handle session "CREATE FUNCTION twice_tick() RETURNS INT NOT DETERMINISTIC NO SQL RETURN tick()+tick()"
               let session, created = handle session "CREATE FUNCTION fail_tick() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE ignored INT DEFAULT (@n:=COALESCE(@n,0)+1); SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='counter failed'; RETURN 0; END"
@@ -2175,14 +2224,15 @@ let tests =
               Expect.equal (error.Code, error.State, error.Message) (1644, "45000", "counter failed") "raised condition retains its SQLSTATE"
               let _, calls = handle session "SELECT @n AS calls"
               Expect.equal calls (ResultSet([ "calls" ], [ [ Some "13" ] ])) "assignments survive the error"
-              let other, value = handle (create 2 store) "SELECT tick() AS value"
+              let other, value =
+                  handle { create 2 store with Database = Some "fsdb" } "SELECT tick() AS value"
               Expect.equal value (ResultSet([ "value" ], [ [ Some "1" ] ])) "another session has independent variables"
               let _, calls = handle other "SELECT @n AS calls"
               Expect.equal calls (ResultSet([ "calls" ], [ [ Some "1" ] ])) "other session keeps its own assignment"
 
           testCase "stored functions execute user-variable SET with local values"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
               let session, created = handle session "CREATE FUNCTION set_tick(step INT) RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE delta INT DEFAULT step; SET @n=COALESCE(@n,0)+delta,@label=CONCAT('count,',@n); RETURN @n; END"
               TestSupport.Sql.expectOk created "create function with user-variable SET"
               let session, _ = handle session "SET @n=10"
@@ -2197,7 +2247,7 @@ let tests =
 
           testCase "stored SET resumes at the next assignment after a handled error"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
               let session, created = handle session "CREATE FUNCTION raise_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='failed assignment'; RETURN 0; END"
               TestSupport.Sql.expectOk created "create failing expression"
               let session, created = handle session "CREATE FUNCTION handled_set() RETURNS INT NOT DETERMINISTIC NO SQL BEGIN DECLARE CONTINUE HANDLER FOR SQLSTATE '45000' SET @handled=1; SET @n=@n+1,@bad=raise_set(),@tail=7; RETURN @n; END"
@@ -7176,7 +7226,7 @@ let tests =
 
           testCase "stored function definitions follow replacement and creation SQL mode"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
               let execute session sql =
                   let next, result = handle session sql
                   Expect.equal result (Affected 0UL) sql
@@ -7209,7 +7259,7 @@ let tests =
 
           testCase "stored functions return typed scalar values"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
               let session, _ = handle session "CREATE TABLE function_source (value INT)"
               let session, _ = handle session "INSERT INTO function_source VALUES (8)"
 
@@ -7350,7 +7400,7 @@ let tests =
 
           testCase "stored functions validate bodies and calls"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
 
               for sql, code in
                   [ "CREATE FUNCTION missing_return(value INT) RETURNS INT BEGIN SET value = value + 1; END", 1320
@@ -7421,8 +7471,8 @@ let tests =
               Expect.equal dropped (Affected 0UL) "dropped stored function"
 
               match handle session "SELECT one_argument(1)" |> snd with
-              | Err(1046, _) -> ()
-              | other -> failtestf "expected dropped function without a selected database to fail, got %A" other
+              | Err(1305, "FUNCTION fsdb.one_argument does not exist") -> ()
+              | other -> failtestf "expected dropped function in the selected database to fail, got %A" other
 
               let session, _ = handle session "CREATE TABLE routine_commit (value INT)"
               let session, _ = handle session "BEGIN"
@@ -7441,7 +7491,7 @@ let tests =
 
           testCase "stored function writes share the invoking statement transaction"
           <| fun _ ->
-              let mutable session = create 1 (Fsdb.Storage.create ())
+              let mutable session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
 
               let execute sql =
                   let next, result = handle session sql
@@ -7625,7 +7675,7 @@ let tests =
 
           testCase "BINARY routine parameters retain exact comparison semantics"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
               let session, created =
                   handle session "CREATE FUNCTION exact_token(token VARCHAR(10) BINARY) RETURNS INT RETURN token = 'Secret'"
 
@@ -7637,7 +7687,7 @@ let tests =
 
           testCase "stored functions select into typed local variables"
           <| fun _ ->
-              let mutable session = create 1 (Fsdb.Storage.create ())
+              let mutable session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
 
               let execute sql =
                   let next, result = handle session sql
@@ -7836,7 +7886,7 @@ let tests =
 
           testCase "distinct procedure nesting stops before exhausting the process stack"
           <| fun _ ->
-              let mutable session = create 1 (Fsdb.Storage.create ())
+              let mutable session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
 
               let execute sql =
                   let next, result = handle session sql
@@ -8074,7 +8124,7 @@ let tests =
           testCase "procedure SQL SECURITY selects the execution account"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
-              let root = create 1 store
+              let root = { create 1 store with Database = Some "fsdb" }
 
               let apply session sql =
                   let next, result = handle session sql
@@ -8139,6 +8189,7 @@ let tests =
 
               let caller =
                   { create 2 store with
+                      Database = Some "fsdb"
                       User = "caller"
                       AccountHost = "%"
                       LoginUser = "caller"
@@ -12524,7 +12575,7 @@ let tests =
           testCase "stored functions cannot hide DirectOnly extension calls from generated expressions"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
-              let session = create 1 store
+              let session = { create 1 store with Database = Some "fsdb" }
               let session, created =
                   handle session "CREATE FUNCTION late_wrap(value VARCHAR(10)) RETURNS VARCHAR(10) RETURN LATE_EFFECT(value)"
 

@@ -27,7 +27,8 @@ let private promoteParent =
     "CREATE FUNCTION promote_parent() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE parent SET n=3 WHERE n=2; RETURN 3; END"
 
 let private routineUpdateSetup functionSql =
-    [ "CREATE TABLE parent(n INT PRIMARY KEY)"
+    [ "USE fsdb"
+      "CREATE TABLE parent(n INT PRIMARY KEY)"
       "INSERT INTO parent VALUES(1),(2)"
       "CREATE TABLE child(id INT PRIMARY KEY,n INT,CONSTRAINT fk FOREIGN KEY(n) REFERENCES parent(n))"
       "INSERT INTO child VALUES(1,1),(2,1),(3,1)"

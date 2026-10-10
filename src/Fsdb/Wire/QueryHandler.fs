@@ -2029,11 +2029,12 @@ let private handleMixedSet (session: Session) (sql: string) : Session * QueryRes
     applySetActions session parsed
 
 let private handleSet session sql =
-    match tryParseUserVariableSet (parserOptionsForSession session) sql with
-    | Some assignments ->
-        emitParseWarnings (Do(assignments |> List.map snd))
-        executeUserVariableSet session assignments
-    | None -> handleMixedSet session sql
+    Executor.withFunctionDatabase session.Database (fun () ->
+        match tryParseUserVariableSet (parserOptionsForSession session) sql with
+        | Some assignments ->
+            emitParseWarnings (Do(assignments |> List.map snd))
+            executeUserVariableSet session assignments
+        | None -> handleMixedSet session sql)
 
 // Transaction control stays outside the data-statement AST because it changes
 // connection state without entering Executor.
@@ -3739,7 +3740,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             TemporaryCatalog = temporaryCatalog },
         result
 
-let private executeParsedWithTemporaryAction (action: TemporaryAction option) (session: Session) (stmt: Statement) =
+let private executeParsedWithTemporaryActionCore (action: TemporaryAction option) (session: Session) (stmt: Statement) =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let usesTemporary = action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt
     let beforeKeys = temporaryKeys session.TemporaryCatalog
@@ -3838,12 +3839,17 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
 
     TableHandler.invalidate session stmt executed result, result
 
+let private executeParsedWithTemporaryAction action session stmt =
+    Executor.withFunctionDatabase session.Database (fun () ->
+        executeParsedWithTemporaryActionCore action session stmt)
+
 let private executeParsed session stmt =
     match stmt with
     | SetVariables assignments ->
-        InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.setOption
-        let session, result = executeVariableSet session assignments
-        { session with LastResultColumnMetadata = [] }, result
+        Executor.withFunctionDatabase session.Database (fun () ->
+            InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.setOption
+            let session, result = executeVariableSet session assignments
+            { session with LastResultColumnMetadata = [] }, result)
     | _ -> executeParsedWithTemporaryAction None session stmt
 
 let private parsedStatementCapacity = 16384

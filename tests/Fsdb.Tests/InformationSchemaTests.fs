@@ -1344,7 +1344,7 @@ let tests =
           <| fun _ ->
               let store = setup ()
               run store "CREATE TABLE usage_base (id INT)" |> ignore
-              let session = Fsdb.Session.create 1 store
+              let session = { Fsdb.Session.create 1 store with Database = Some "fsdb" }
 
               let session, createdFunction =
                   Fsdb.QueryHandler.handle

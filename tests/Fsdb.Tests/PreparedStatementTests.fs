@@ -258,7 +258,7 @@ let tests =
 
           testCase "stored literal definitions retain their creation collation"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
               let session = handle session "SET NAMES latin1 COLLATE latin1_bin" |> fst
               for sql in
                   [ "CREATE VIEW literal_view AS SELECT 'a' AS v"

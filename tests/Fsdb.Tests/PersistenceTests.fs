@@ -2029,7 +2029,7 @@ let tests =
                   let dir = tempDataDir ()
                   let store = load dir
                   attach dir store
-                  let mutable session = Fsdb.Session.create 1 store
+                  let mutable session = { Fsdb.Session.create 1 store with Database = Some "fsdb" }
                   let run sql =
                       let next, result = handle session sql
                       session <- next
@@ -2062,7 +2062,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              let session = Fsdb.Session.create 1 store
+              let session = { Fsdb.Session.create 1 store with Database = Some "fsdb" }
 
               let session, result = handle session "SET NAMES latin1 COLLATE latin1_bin"
               Expect.equal result (Affected 0UL) "set routine charset"
@@ -2109,7 +2109,7 @@ let tests =
                            [Some "topics"; Some "persisted procedure"; Some "READS SQL DATA"]])) context
 
               let reloaded = load dir
-              let recovered = Fsdb.Session.create 2 reloaded
+              let recovered = { Fsdb.Session.create 2 reloaded with Database = Some "fsdb" }
 
               let expectParameters session context =
                   match
@@ -2151,7 +2151,7 @@ let tests =
               snapshotNow dir reloaded
 
               let snapshotted = load dir
-              let recovered = Fsdb.Session.create 3 snapshotted
+              let recovered = { Fsdb.Session.create 3 snapshotted with Database = Some "fsdb" }
 
               expectParameters recovered "snapshot retains routine parameters"
               expectCharacteristics recovered "snapshot retains altered characteristics"
