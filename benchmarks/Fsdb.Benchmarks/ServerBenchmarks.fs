@@ -21,6 +21,8 @@ type ServerBenchmarks() =
 
     let concurrentConnectionCount = 16
     let mutable conn : MySqlConnection = Unchecked.defaultof<_>
+    let mutable preparedPk : MySqlCommand = Unchecked.defaultof<_>
+    let mutable preparedFunctional : MySqlCommand = Unchecked.defaultof<_>
     let mutable compressedConn : MySqlConnection = Unchecked.defaultof<_>
     // A second connection authenticated as the SELECT-only `bench_reader`
     // account (created in Setup) — statements on it exercise the db-level
@@ -56,6 +58,20 @@ type ServerBenchmarks() =
         conn <- new MySqlConnection(Schema.connectionString this.Target)
         conn.Open()
 
+        let preparePointLookup sql initialKey =
+            let command = conn.CreateCommand()
+            command.CommandText <- sql
+            command.Parameters.AddWithValue("@key", initialKey) |> ignore
+            command.Prepare()
+            command
+
+        preparedPk <- preparePointLookup "SELECT id FROM users WHERE id = @key" (box 1)
+        preparedFunctional <-
+            preparePointLookup "SELECT id FROM functional_users WHERE UPPER(TRIM(name)) = @key" (box "USER_0")
+
+        if Convert.ToInt32(preparedFunctional.ExecuteScalar()) <> 1 then
+            failwith "The prepared functional-index control must return user 1"
+
         let compressedConnection = MySqlConnectionStringBuilder(Schema.connectionString this.Target)
         compressedConnection.UseCompression <- true
         compressedConn <- new MySqlConnection(compressedConnection.ConnectionString)
@@ -84,6 +100,8 @@ type ServerBenchmarks() =
 
     [<GlobalCleanup>]
     member this.Cleanup() =
+        preparedFunctional.Dispose()
+        preparedPk.Dispose()
         concurrentConnections |> Array.iter _.Dispose()
         concurrentConnections <- [||]
         limitedConn.Dispose()
@@ -322,6 +340,20 @@ type ServerBenchmarks() =
     member this.FilterByComposedFunctionalIndex() =
         let user = randomUserId () - 1
         this.Query $"SELECT id FROM functional_users WHERE UPPER(TRIM(name)) = 'USER_{user}'"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member _.PreparedPointSelectIdByPk() =
+        preparedPk.Parameters[0].Value <- randomUserId ()
+        use reader = preparedPk.ExecuteReader()
+        while reader.Read() do ()
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member _.PreparedFilterByComposedFunctionalIndex() =
+        preparedFunctional.Parameters[0].Value <- $"USER_{randomUserId () - 1}"
+        use reader = preparedFunctional.ExecuteReader()
+        while reader.Read() do ()
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]

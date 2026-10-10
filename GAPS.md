@@ -822,6 +822,14 @@ primary-key lookup and 385 microseconds for the composed key; MySQL takes about
 and additional work in the functional-query path. The short runs and differing
 table shapes do not isolate which stage accounts for that additional work.
 
+The [prepared-statement control](benchmarks/results/2026-10-10-prepared-functional-index-baseline.md)
+reuses prepared commands for the same single-row primary-key and composed-key
+lookups. MySQL returns the functional row in about 42 microseconds, while fsdb
+takes about 49 milliseconds. A [repeat run](benchmarks/results/2026-10-10-prepared-functional-index-repeat.md)
+with a setup assertion that the prepared query returns the expected row still
+takes about 45 milliseconds on fsdb. This is a distinct parameterized functional
+lookup gap, consistent with a scan; the exact plan and cause remain to be traced.
+
 The constant-expression lookup pair records the
 [scan baseline](benchmarks/results/baa1b51-quick.md) and the
 [indexed implementation](benchmarks/results/ede0c8e-quick.md). Safe numeric
