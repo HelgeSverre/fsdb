@@ -4492,12 +4492,20 @@ let private exportSetFn: Scalar =
 let private bitCountFn: Scalar =
     function
     | [ v ] when not (anyNull [ v ]) ->
-        match v with
-        | VString text ->
-            let _, truncated = coerceLeadingDouble text
-            if truncated then Diagnostics.numericConversion "INTEGER" text
-        | _ -> ()
-        VInt(int64 (Numerics.BitOperations.PopCount(toUInt64 (roundNumeric v))))
+        let count =
+            match v with
+            | VBytes bytes | VEncodedString("binary", bytes) ->
+                bytes |> Array.sumBy (fun byte -> int64 (Numerics.BitOperations.PopCount(uint32 byte)))
+            | VBinaryLiteral bytes when bytes.Length > 8 ->
+                let literal = sprintf "x'%s'" (Convert.ToHexString(bytes).ToLowerInvariant())
+                Diagnostics.numericConversion "BINARY" literal
+                0L
+            | VString text ->
+                let _, truncated = coerceLeadingDouble text
+                if truncated then Diagnostics.numericConversion "INTEGER" text
+                int64 (Numerics.BitOperations.PopCount(toUInt64 v))
+            | _ -> int64 (Numerics.BitOperations.PopCount(toUInt64 (roundNumeric v)))
+        VInt count
     | _ -> VNull
 
 let private bitwiseUnary (operation: uint64 -> uint64) : Scalar =

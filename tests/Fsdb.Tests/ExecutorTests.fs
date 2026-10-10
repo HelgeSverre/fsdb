@@ -6411,6 +6411,36 @@ let tests =
                           1292, "Truncated incorrect INTEGER value: '12x'" ]
                         "indexed BIT_COUNT conversion warnings"
 
+                    let introducedResult, introducedWarnings =
+                        Fsdb.Diagnostics.capture (fun () -> runDefault store "SELECT BIT_COUNT(_utf8mb4'12x')")
+                    Expect.equal introducedResult (ResultSet([ "BIT_COUNT(_utf8mb4'12x')" ], [ [ Some "2" ] ])) "introduced text BIT_COUNT"
+                    Expect.equal
+                        (introducedWarnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1292, "Truncated incorrect INTEGER value: '12x'" ]
+                        "introduced text conversion warning"
+
+                    let binaryResult, binaryWarnings =
+                        Fsdb.Diagnostics.capture (fun () ->
+                            runDefault store "SELECT BIT_COUNT(_binary'12x'),BIT_COUNT(0x313278),BIT_COUNT(CAST('12x' AS BINARY))")
+                    Expect.equal binaryResult
+                        (ResultSet([ "BIT_COUNT(_binary'12x')"; "BIT_COUNT(0x313278)"; "BIT_COUNT(CAST('12x' AS BINARY))" ], [ [ Some "10"; Some "10"; Some "10" ] ]))
+                        "binary BIT_COUNT reads byte patterns"
+                    Expect.isEmpty binaryWarnings "binary arguments need no conversion warnings"
+                    Expect.equal
+                        (runDefault store "SELECT BIT_COUNT(_binary'123456789')")
+                        (ResultSet([ "BIT_COUNT(_binary'123456789')" ], [ [ Some "33" ] ]))
+                        "binary BIT_COUNT includes bytes beyond 64 bits"
+
+                    let wideLiteralResult, wideLiteralWarnings =
+                        Fsdb.Diagnostics.capture (fun () -> runDefault store "SELECT BIT_COUNT(0x010203040506070809)")
+                    Expect.equal wideLiteralResult
+                        (ResultSet([ "BIT_COUNT(0x010203040506070809)" ], [ [ Some "0" ] ]))
+                        "wide numeric binary literals coerce to zero"
+                    Expect.equal
+                        (wideLiteralWarnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1292, "Truncated incorrect BINARY value: 'x'010203040506070809''" ]
+                        "wide numeric binary literal warning"
+
                     Expect.equal
                         (runDefault store "SELECT label FROM numeric_bounds WHERE id=2.5")
                         (ResultSet([ "label" ], []))
