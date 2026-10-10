@@ -5075,6 +5075,22 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE numeric_bounds_empty"; "DROP TABLE numeric_bounds_scanned"; "DROP TABLE numeric_bounds" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private elidedWhereBindings =
+        { Name = "elided-where-bindings"
+          Setup =
+            [| "CREATE TABLE binding_rows(id INT PRIMARY KEY)"
+               "INSERT INTO binding_rows VALUES(1),(2)"
+               "CREATE TABLE binding_empty(id INT PRIMARY KEY)" |]
+          Steps =
+            [| Contract.query "false-and-rows" "SELECT id FROM binding_rows WHERE 0 AND missing_column" |> Contract.fails 1054 "42S22"
+               Contract.query "true-or-rows" "SELECT id FROM binding_rows WHERE 1 OR missing_column" |> Contract.fails 1054 "42S22"
+               Contract.query "false-and-empty" "SELECT id FROM binding_empty WHERE 0 AND missing_column" |> Contract.fails 1054 "42S22"
+               Contract.query "true-or-empty" "SELECT id FROM binding_empty WHERE 1 OR missing_column" |> Contract.fails 1054 "42S22"
+               Contract.query "aggregate-rows" "SELECT id FROM binding_rows WHERE 0 AND COUNT(id)" |> Contract.fails 1111 "HY000"
+               Contract.query "aggregate-empty" "SELECT id FROM binding_empty WHERE 0 AND COUNT(id)" |> Contract.fails 1111 "HY000" |]
+          Cleanup = [| "DROP TABLE binding_empty"; "DROP TABLE binding_rows" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private tableStatisticsCache =
         let rows =
             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
@@ -9715,6 +9731,7 @@ module ContractCatalog =
         [| roundedFunctionalIndexes
            numericComposedFunctionalIndexes
            numericConstantIndexBounds
+           elidedWhereBindings
            integralDoubleIndexProbes
            signFunctionalIndex
            isNullFunctionalIndex

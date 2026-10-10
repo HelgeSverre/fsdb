@@ -166,6 +166,30 @@ let tests =
               | Err(1046, _) -> ()
               | result -> failtestf "an eliminated branch still validates function names: %A" result
 
+          testCase "unreachable predicates still bind column and function names"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE binding_rows(id INT PRIMARY KEY)"
+                        "INSERT INTO binding_rows VALUES(1),(2)"
+                        "CREATE TABLE binding_empty(id INT PRIMARY KEY)"
+                        "USE fsdb" ]
+
+              for table in [ "binding_rows"; "binding_empty" ] do
+                  for predicate in [ "0 AND missing_column"; "1 OR missing_column" ] do
+                      match run (sprintf "SELECT id FROM %s WHERE %s" table predicate) with
+                      | Err(1054, _) -> ()
+                      | result -> failtestf "%s on %s should report 1054: %A" predicate table result
+
+                  for predicate in [ "0 AND no_such_function(id)"; "1 OR no_such_function(id)" ] do
+                      match run (sprintf "SELECT id FROM %s WHERE %s" table predicate) with
+                      | Err(1305, _) -> ()
+                      | result -> failtestf "%s on %s should report 1305: %A" predicate table result
+
+                  match run (sprintf "SELECT id FROM %s WHERE 0 AND COUNT(id)" table) with
+                  | Err(1111, _) -> ()
+                  | result -> failtestf "an elided aggregate on %s should report 1111: %A" table result
+
           testCase "unqualified missing functions require a selected database"
           <| fun _ ->
               let run = queryFixture []

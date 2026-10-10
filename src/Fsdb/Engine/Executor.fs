@@ -8564,6 +8564,37 @@ and private prepareWhereMatches
             (tryDirectColumnForExpr context >> Option.isSome)
             (isLiteralConstantExpression context.Registry)
 
+    let validateElidedPredicate expression =
+        let probe = { context with Row = Array.create context.ColumnsByPosition.Length VNull }
+        let evaluatorIntrinsics =
+            set [ "DEFAULT"; "COERCIBILITY"; "COLLATION"; "CHARSET"
+                  "SLEEP"; "BENCHMARK"; "WEIGHT_STRING" ]
+        let knownFunction (name: string) =
+            Set.contains (name.ToUpperInvariant()) evaluatorIntrinsics
+            || (Functions.lookup name context.Registry |> Option.isSome)
+            || (not (name.Contains('.', System.StringComparison.Ordinal))
+                && (Functions.lookup (context.DbName + "." + name) context.Registry |> Option.isSome))
+
+        let rec firstMissingFunction expression =
+            Expression.children expression
+            |> List.tryPick firstMissingFunction
+            |> Option.orElseWith (fun () ->
+                match expression with
+                | FuncCall _ when isAggregateCall context.Registry expression ->
+                    Some(1111, "Invalid use of group function")
+                | FuncCall(name, _) when not (knownFunction name) -> Some(unknownFunction name)
+                | _ -> None)
+
+        validateExpressionInContext probe expression
+        |> Result.bind (fun () ->
+            firstMissingFunction expression
+            |> Option.map Error
+            |> Option.defaultValue (Ok()))
+
+    let elidedResult truth expression =
+        let validated = validateElidedPredicate expression
+        fun _ -> validated |> Result.map (fun () -> truth)
+
     let directComparison eager op columnExpression constantExpression columnOnLeft =
         match tryDirectColumnForExpr context columnExpression with
         | Some(index, column)
@@ -8605,8 +8636,8 @@ and private prepareWhereMatches
 
     match where with
     | None -> fun _ -> Ok true
-    | Some _ when hasFalseLiteralConjunct canSkipComparedDivision where -> fun _ -> Ok false
-    | Some _ when hasTrueLiteralDisjunct canSkipComparedDivision where -> fun _ -> Ok true
+    | Some expression when hasFalseLiteralConjunct canSkipComparedDivision where -> elidedResult false expression
+    | Some expression when hasTrueLiteralDisjunct canSkipComparedDivision where -> elidedResult true expression
     | Some expression when isLiteralConstantExpression context.Registry expression ->
         let result = evaluate expression [||] |> Result.map (truthy >> (=) (Some true))
         fun _ -> result
