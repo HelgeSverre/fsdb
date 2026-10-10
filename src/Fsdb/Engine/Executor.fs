@@ -24707,23 +24707,31 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                 physicalFastPathTable store dbName joinedRef
                 |> Option.exists (fun joinedTable -> joinedTable.RowsArray.Count <= targetTable.RowsArray.Count)
 
-            match join.Table, predicate with
-            | FromTable joinedRef, BinOp(Eq, QualifiedCol(filterOwner, _), LiteralValue _)
-            | FromTable joinedRef, BinOp(Eq, LiteralValue _, QualifiedCol(filterOwner, _))
-                when equalsIgnoreCase filterOwner (tableQualifier joinedRef)
-                     && lookupCanDrive joinedRef ->
-                join.On
-                |> conjuncts
-                |> List.exists (function
-                    | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
-                        when equalsIgnoreCase leftOwner (tableQualifier targetRef)
-                             && equalsIgnoreCase rightOwner (tableQualifier joinedRef) ->
-                        hasLeadingIndexColumn targetTable leftName
-                    | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
-                        when equalsIgnoreCase rightOwner (tableQualifier targetRef)
-                             && equalsIgnoreCase leftOwner (tableQualifier joinedRef) ->
-                        hasLeadingIndexColumn targetTable rightName
-                    | _ -> false)
+            match join.Table with
+            | FromTable joinedRef when lookupCanDrive joinedRef ->
+                let joinedQualifier = tableQualifier joinedRef
+                let hasLookupFilter =
+                    predicate
+                    |> conjuncts
+                    |> List.exists (fun condition ->
+                        canPushIntoSource joinedQualifier condition
+                        && Expression.exists (function
+                            | QualifiedCol(owner, _) -> equalsIgnoreCase owner joinedQualifier
+                            | _ -> false) condition)
+
+                hasLookupFilter
+                && (join.On
+                    |> conjuncts
+                    |> List.exists (function
+                        | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
+                            when equalsIgnoreCase leftOwner (tableQualifier targetRef)
+                                 && equalsIgnoreCase rightOwner joinedQualifier ->
+                            hasLeadingIndexColumn targetTable leftName
+                        | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
+                            when equalsIgnoreCase rightOwner (tableQualifier targetRef)
+                                 && equalsIgnoreCase leftOwner joinedQualifier ->
+                            hasLeadingIndexColumn targetTable rightName
+                        | _ -> false))
             | _ -> false
         | _ -> false
 

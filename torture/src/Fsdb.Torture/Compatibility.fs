@@ -8286,14 +8286,26 @@ module ContractCatalog =
               mutationCase "key-delete" false "DELETE FROM safe_update_probe WHERE id=1"
               mutationCase "joined-target-scan" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE p.value=0"
               mutationCase "joined-lookup-filter" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
+              mutationCase "joined-lookup-between" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value BETWEEN 0 AND 0"
+              mutationCase "joined-lookup-in" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value IN (0,1)"
+              mutationCase "joined-lookup-range" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value>=0"
+              mutationCase "joined-lookup-null-test" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value IS NOT NULL"
+              mutationCase "joined-lookup-or" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0 OR l.value=1"
+              mutationCase "joined-mixed-or" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0 OR p.value=0"
+              mutationCase "joined-expression-filter" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value+0=0"
               mutationCase "straight-join-lookup-filter" true "UPDATE safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
               mutationCase "joined-lookup-write" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET l.value=1 WHERE l.value=0"
               mutationCase "joined-target-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
+              mutationCase "joined-between-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value BETWEEN 0 AND 0"
               mutationCase "straight-join-target-delete" true "DELETE p FROM safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               mutationCase "joined-lookup-delete" true "DELETE l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
+                            "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+              "joined-large-lookup-between", Some(8, 1175, "HY000"),
+                  reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
+                            "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value BETWEEN 0 AND 0"
                             "SELECT id,value FROM safe_update_probe ORDER BY id" ]
               "disabled", None,
                   reset @ [ "SET sql_safe_updates=OFF"

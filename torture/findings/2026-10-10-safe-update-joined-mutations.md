@@ -16,11 +16,22 @@ When `t` has two rows and `l` has one hundred, MySQL chooses the target scan
 and returns 1175 for the same ordinary inner join.
 
 Fsdb recognizes this two-table, inner-join form when the target's leading
-B-tree key is equated to a column of the other source and a literal equality
-filter applies to that source. It requires the lookup row count to be no
-larger than the target row count, matching the audited source choices.
+B-tree key is equated to a column of the other source and a qualified
+source-local filter applies to that source. Native MySQL 8.4.11 accepts lookup filters
+using `BETWEEN`, literal `IN`, ranges, `IS NOT NULL`, a self-comparison,
+`NOT`, `<>`, or an OR whose branches both belong to the lookup source. It
+rejects a cross-source OR and an arithmetic `l.value+0=0` filter in the
+audited fixture. The fsdb rule follows that source-local boundary and still
+requires the lookup row count to be no larger than the target row count,
+matching the audited source choices.
+
 Multi-target writes, broader filter shapes, and other optimizer-dependent
 source choices are still outside this rule. The
 `sql_safe_updates` Expecto regression and `safe-update-mode` differential
 contract cover the accepted and rejected forms, error code, and unchanged
 target rows after rejection.
+
+The expanded `safe-update-mode` contract passed every step against the pinned
+MySQL 8.4.11 image. The complete contract run reported nine differences,
+all in the previously documented identifier-case-policy cases on Linux mode
+0; none belonged to safe-update mode.
