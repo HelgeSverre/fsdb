@@ -8556,11 +8556,16 @@ module ContractCatalog =
                   [ "SET @calls=0"; "SELECT HEX(IF((@calls:=@calls+1),1e30,CAST('1e30' AS DOUBLE))) AS value"; "SHOW WARNINGS"; "SELECT @calls AS calls" ]
               yield "case-once", None,
                   [ "SET @calls=0"; "SELECT HEX(CASE (@calls:=@calls+1) WHEN 1 THEN 1e30 ELSE CAST('1e30' AS DOUBLE) END) AS value"; "SHOW WARNINGS"; "SELECT @calls AS calls" ]
+              yield "mixed-scalar-subquery", None,
+                  [ "CREATE TABLE hex_mixed_target(id INT PRIMARY KEY,n DOUBLE)"
+                    "INSERT INTO hex_mixed_target VALUES(1,1e20)"
+                    "SELECT HEX((SELECT IF(id=1,n,'x') FROM hex_mixed_target WHERE id=1)) AS value"
+                    "SHOW WARNINGS" ]
             ]
         { Name = "hex-expression-conversion"
           Setup = [||]
           Steps = isolatedScriptSteps cases
-          Cleanup = [| "DROP TABLE IF EXISTS target" |]
+          Cleanup = [| "DROP TABLE IF EXISTS target,hex_mixed_target" |]
           Coverage = [| "function:HEX", [| "text-differential" |] |] }
 
     let private hexNumericConversion =

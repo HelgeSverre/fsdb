@@ -679,6 +679,32 @@
       "stdout": "grouped\n7FFFFFFFFFFFFFFF\nunioned\n7FFFFFFFFFFFFFFF\nderived\n7FFFFFFFFFFFFFFF\nfiltered\n7FFFFFFFFFFFFFFF\nnegative_grouped\n8000000000000000\n",
       "stderr": "",
       "errors": []
+    },
+    {
+      "name": "mixed-scalar-subquery-type",
+      "statements": [
+        "USE probe",
+        "CREATE TABLE hex_mixed_probe(id INT PRIMARY KEY,n DOUBLE)",
+        "INSERT INTO hex_mixed_probe VALUES(1,1e20)",
+        "SELECT HEX((SELECT IF(id=1,n,'x') FROM hex_mixed_probe WHERE id=1)) AS mixed",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT CASE WHEN id=1 THEN n ELSE 0 END FROM hex_mixed_probe WHERE id=1)) AS conditional",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT COALESCE(n,0) FROM hex_mixed_probe WHERE id=1)) AS coalesced",
+        "SHOW WARNINGS",
+        "SELECT HEX((WITH q AS (SELECT n FROM hex_mixed_probe WHERE id=1) SELECT n FROM q)) AS cte",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT DISTINCT n FROM hex_mixed_probe WHERE id=1)) AS distinct_value",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_mixed_probe WHERE id=1 UNION ALL SELECT n FROM hex_mixed_probe WHERE 0)) AS union_all_value",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT MIN(n) OVER () FROM hex_mixed_probe WHERE id=1 LIMIT 1)) AS window_value",
+        "SHOW WARNINGS",
+        "DROP TABLE hex_mixed_probe"
+      ],
+      "stdout": "mixed\n31653230\nconditional\n7FFFFFFFFFFFFFFF\ncoalesced\n7FFFFFFFFFFFFFFF\ncte\n7FFFFFFFFFFFFFFF\ndistinct_value\n7FFFFFFFFFFFFFFF\nunion_all_value\n7FFFFFFFFFFFFFFF\nwindow_value\n7FFFFFFFFFFFFFFF\n",
+      "stderr": "",
+      "errors": []
     }
   ]
 }

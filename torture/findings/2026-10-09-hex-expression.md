@@ -6,7 +6,7 @@ deprecation warnings implemented.
 ## Native evidence
 
 The [native fixture](2026-10-09-hex-expression-native.json) records the original
-matrix and a materialized scalar-subquery follow-up. It runs on disposable
+matrix and scalar-subquery follow-ups. It runs on disposable
 MySQL 8.4.11 with a 64 MiB buffer pool and redo capacity. Reproduce:
 
 ```sh
@@ -37,6 +37,9 @@ No mismatch is enrolled in the known-gap allowlist.
   behavior, including selected IF and CASE branches. Grouped, UNION,
   derived, and filtered scalar subqueries also retain the stored DOUBLE
   conversion for positive and negative overflow values without warnings.
+- A scalar subquery projecting a mixed DOUBLE/string IF result materializes
+  its declared string result before HEX interprets the bytes. The selected
+  DOUBLE value `1e20` therefore produces `31653230`, without a warning.
 
 The executor shares IF/CASE branch selection between ordinary evaluation and
 HEX argument validation. Numeric HEX formatting remains in the existing scalar
@@ -63,5 +66,11 @@ preparation timing, warning order, and remaining unrelated diagnostics.
 - Materialized scalar-subquery follow-up: the expanded native fixture passes
   on MySQL 8.4.11, and `just check` passes 3,269 tests including its new
   focused regression.
+- Mixed-result scalar-subquery follow-up: the native fixture records the
+  string conversion and an Expecto regression covers it alongside numeric
+  grouped, CTE, DISTINCT, UNION ALL, and window forms. The expanded
+  `hex-expression-conversion` differential contract passes; the full
+  mode-0 Linux contract run still reports the documented identifier-case
+  policy differences outside this contract.
 
 Wire artifact: `torture/artifacts/runs/20261008T224244964-83002/contracts`.

@@ -377,6 +377,7 @@ type private RowEqualityMembership =
 type private ExpressionSubqueryResult =
     { Result: QueryResult
       Rows: Value[] list
+      Metadata: ColumnMetadata list
       ProjectionColumns: ColumnDef option list
       EqualityMembership: EqualityMembership option
       RowEqualityMembership: RowEqualityMembership option }
@@ -5647,6 +5648,12 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(_, []), _ -> Ok VNull
             | ResultSet(_, [ _ ]), [ row ] ->
                 let value = row |> Array.tryHead |> Option.defaultValue VNull
+                let value =
+                    match subquery.Metadata, value with
+                    | [ metadata ], (VInt _ | VUInt _ | VDecimal _ | VDouble _)
+                        when metadata.TypeId = TypeString || metadata.TypeId = TypeVarString ->
+                        Value.toText value |> Option.map VString |> Option.defaultValue value
+                    | _ -> value
                 if reducedProjection.IsNone then
                     Ok(Value.materialize value)
                 else
@@ -7000,10 +7007,11 @@ and private runExpressionSubquery
             rowsWithKeys [] false rows
 
     let execute outer =
-        let result, _, rows = runSelectStmt ctx.Store ctx.Registry ctx.DbName select outer
+        let result, metadata, rows = runSelectStmt ctx.Store ctx.Registry ctx.DbName select outer
 
         { Result = result
           Rows = rows
+          Metadata = metadata
           ProjectionColumns = selectProjectionColumns ctx.Store ctx.DbName select
           EqualityMembership = None
           RowEqualityMembership = None }

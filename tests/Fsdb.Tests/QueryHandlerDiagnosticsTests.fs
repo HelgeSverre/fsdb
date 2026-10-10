@@ -952,6 +952,23 @@ let tests =
                   Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) subquery
                   Expect.isEmpty actualSession.Diagnostics (subquery + " warnings")
 
+          testCase "HEX scalar subquery result types survive query boundaries"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE hex_scalar_probe(id INT PRIMARY KEY,n DOUBLE)"
+              let session, _ = handle session "INSERT INTO hex_scalar_probe VALUES(1,1e20),(2,-1e20)"
+              for subquery, expected in
+                  [ "SELECT IF(id=1,n,'x') FROM hex_scalar_probe WHERE id=1", "31653230"
+                    "SELECT CASE WHEN id=1 THEN n ELSE 0 END FROM hex_scalar_probe WHERE id=1", "7FFFFFFFFFFFFFFF"
+                    "SELECT COALESCE(n,0) FROM hex_scalar_probe WHERE id=1", "7FFFFFFFFFFFFFFF"
+                    "WITH q AS (SELECT n FROM hex_scalar_probe WHERE id=1) SELECT n FROM q", "7FFFFFFFFFFFFFFF"
+                    "SELECT DISTINCT n FROM hex_scalar_probe WHERE id=1", "7FFFFFFFFFFFFFFF"
+                    "SELECT n FROM hex_scalar_probe WHERE id=1 UNION ALL SELECT n FROM hex_scalar_probe WHERE 0", "7FFFFFFFFFFFFFFF"
+                    "SELECT MIN(n) OVER () FROM hex_scalar_probe WHERE id=1 LIMIT 1", "7FFFFFFFFFFFFFFF" ] do
+                  let actualSession, result = handle session (sprintf "SELECT HEX((%s)) AS value" subquery)
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) subquery
+                  Expect.isEmpty actualSession.Diagnostics (subquery + " warnings")
+
           testCase "ALTER converts complete rows in final column order"
           <| fun _ ->
               for mode in [ ""; "STRICT_ALL_TABLES" ] do
