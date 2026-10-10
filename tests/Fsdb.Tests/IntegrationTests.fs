@@ -4587,8 +4587,11 @@ let tests =
 
                   let slowQueries (text: string) =
                       text.Split("Slow queries: ").[1].Split(' ').[0] |> int64
+                  let questions (text: string) =
+                      text.Split("Questions: ").[1].Split(' ').[0] |> int64
 
                   let initialSlow = slowQueries status
+                  let initialQuestions = questions status
                   for sql in [ "SET SESSION long_query_time=0"; "DO 1" ] do
                       let command = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
                       do! writePacketAsync stream { SeqId = 0uy; Payload = command } |> Async.Ignore
@@ -4599,6 +4602,7 @@ let tests =
                   let! updated = readPacketAsync stream
                   let updatedStatus = Text.Encoding.UTF8.GetString updated.Value.Payload
                   Expect.equal (slowQueries updatedStatus) (initialSlow + 2L) "statistics reflects completed slow statements"
+                  Expect.equal (questions updatedStatus) (initialQuestions + 3L) "statistics request counts as a question"
               }
               |> Async.RunSynchronously
 

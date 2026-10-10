@@ -2050,6 +2050,7 @@ let private handleConnection
                                             return! loop session
                             | Some Statistics ->
                                 Session.recordGeneralCommand session "Statistics" ""
+                                InformationSchema.recordQuestion session.StatusCounters
                                 let uptime = max 0L (int64 (DateTime.Now - InformationSchema.serverStartedAt).TotalSeconds)
                                 let questions = InformationSchema.questions ()
                                 let rate = if uptime = 0L then 0.0 else float questions / float uptime

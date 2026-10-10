@@ -37,3 +37,5 @@ the global `Slow queries` count. Setting the session threshold to zero and
 running `SELECT 1` increased that field by two (the setting statement and the
 SELECT); a subsequent `SHOW GLOBAL STATUS` read reported one more after
 counting itself. Fsdb now reads the same global counter for its wire response.
+Repeated raw `COM_STATISTICS` requests also advanced MySQL's `Questions` field
+by one each. Fsdb now records the request before formatting that response.
