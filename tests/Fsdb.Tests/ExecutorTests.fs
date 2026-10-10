@@ -36,6 +36,22 @@ let tests =
                         Expect.equal rows [ [ Some "alice"; Some "30" ]; [ Some "carol"; Some "40" ] ] "filtered, sorted rows"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "examined-row scope counts source candidates before filtering"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE examined (id INT)" |> ignore
+                    runDefault store "INSERT INTO examined VALUES (1),(2),(3)" |> ignore
+
+                    let result, count = withExaminedRows (fun () -> runDefault store "SELECT id FROM examined WHERE id > 1")
+                    Expect.equal result (ResultSet([ "id" ], [ [ Some "2" ]; [ Some "3" ] ])) "filter returns two rows"
+                    Expect.equal count 3L "scan examines all three candidates"
+
+                    let _, constantCount = withExaminedRows (fun () -> runDefault store "SELECT 42")
+                    Expect.equal constantCount 1L "source-free SELECT examines one synthetic row"
+
+                    let _, doCount = withExaminedRows (fun () -> runDefault store "DO 1")
+                    Expect.equal doCount 1L "DO examines its scalar input"
+
                 testCase "SELECT * expands every column"
                 <| fun _ ->
                     let store = newStore ()

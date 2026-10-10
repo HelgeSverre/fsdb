@@ -90,6 +90,7 @@ let defaultVariables: Map<string, string option> =
           "max_execution_time", "0"
           "long_query_time", "10.000000"
           "general_log", "0"
+          "slow_query_log", "0"
           "log_output", "FILE"
           "div_precision_increment", "4"
           "information_schema_stats_expiry", "86400"
@@ -719,17 +720,20 @@ let currentStore (session: Session) : Store =
 
 /// General-log entries publish outside the issuing transaction, like MySQL's
 /// non-transactional log table. The destination setting is shared by sessions.
-let generalLogTableEnabled store =
+let private tableLogEnabled store variable =
     match globalVariablesByStore.TryGetValue store.Lock with
     | false, _ -> false
     | true, variables ->
-        match variables.TryGetValue "general_log", variables.TryGetValue "log_output" with
+        match variables.TryGetValue variable, variables.TryGetValue "log_output" with
         | (true, Some "1"), (true, Some output) ->
             let outputs = output.Split(',') |> Set.ofArray
             outputs.Contains "TABLE" && not (outputs.Contains "NONE")
         | _ -> false
 
-let recordGeneralCommand (session: Session) commandType (sql: string) =
+let internal generalLogTableEnabled store = tableLogEnabled store "general_log"
+let internal slowLogTableEnabled store = tableLogEnabled store "slow_query_log"
+
+let internal recordGeneralCommand (session: Session) commandType (sql: string) =
     if generalLogTableEnabled session.Store then
         let userHost = sprintf "%s[%s] @  [%s]" session.User session.LoginUser session.ClientHost
 
@@ -747,3 +751,32 @@ let recordGeneralCommand (session: Session) commandType (sql: string) =
         with
         | Result.Ok _ -> ()
         | Result.Error error -> Log.diagnostic "fsdb: general log write failed: %A" error
+
+let internal recordSlowCommand (session: Session) (sql: string) (elapsed: TimeSpan) rowsSent rowsExamined =
+    if slowLogTableEnabled session.Store then
+        let userHost = sprintf "%s[%s] @  [%s]" session.User session.LoginUser session.ClientHost
+        let startedAt = DateTime.UtcNow - elapsed
+
+        match
+            Storage.insertRows
+                session.Store
+                "mysql"
+                "slow_log"
+                (Some
+                    [ "start_time"; "user_host"; "query_time"; "lock_time"; "rows_sent"; "rows_examined"
+                      "db"; "last_insert_id"; "insert_id"; "server_id"; "sql_text"; "thread_id" ])
+                [ [ VTimestamp startedAt
+                    VString userHost
+                    VTime(timeValueOrClamp elapsed.Ticks)
+                    VTime(timeValueOrClamp 0L)
+                    VInt rowsSent
+                    VInt rowsExamined
+                    VString(session.Database |> Option.defaultValue "")
+                    VInt session.LastInsertId
+                    VInt session.LastGeneratedId
+                    VInt 1L
+                    VBytes(System.Text.Encoding.UTF8.GetBytes(Log.generalLogSql sql))
+                    VInt(int64 session.ConnectionId) ] ]
+        with
+        | Result.Ok _ -> ()
+        | Result.Error error -> Log.diagnostic "fsdb: slow log write failed: %A" error

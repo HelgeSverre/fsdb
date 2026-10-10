@@ -9470,6 +9470,50 @@ let tests =
                       "SELECT COUNT(*) FROM mysql.general_log WHERE argument='SELECT 141421 AS fsdb_general_log_none_file_probe'"
               Expect.equal absentFile (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) "NONE suppresses all destinations"
 
+          testCase "slow log table records completed scalar statements and examined rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let _, unsupportedFile = handle session "SET GLOBAL slow_query_log=ON"
+              Expect.equal
+                  unsupportedFile
+                  (Err(1231, "FILE slow query logging is unsupported; set log_output to TABLE or NONE"))
+                  "unsupported file output is refused"
+              let _, sessionSetting = handle session "SET SESSION slow_query_log=ON"
+              Expect.equal
+                  sessionSetting
+                  (Err(1229, "Variable 'slow_query_log' is a GLOBAL variable and should be set with SET GLOBAL"))
+                  "slow logging is a global setting"
+              let session, _ = handle session "SET GLOBAL log_output='TABLE'"
+              let session, enabled = handle session "SET GLOBAL slow_query_log=ON"
+              Expect.equal enabled (Affected 0UL) "slow table logging is enabled"
+              let session, _ = handle session "SET SESSION long_query_time=0"
+              let session, selected = handle session "SELECT 42 AS fsdb_slow_log_probe"
+              Expect.equal selected (ResultSet([ "fsdb_slow_log_probe" ], [ [ Some "42" ] ])) "SELECT completes"
+              let session, evaluated = handle session "DO 1"
+              Expect.equal evaluated (Affected 0UL) "DO completes"
+              let session, _ = handle session "CREATE TABLE slow_scan_probe (id INT)"
+              let session, _ = handle session "INSERT INTO slow_scan_probe VALUES (1),(2),(3)"
+              let session, scanned = handle session "SELECT id FROM slow_scan_probe WHERE id > 1"
+              Expect.equal scanned (ResultSet([ "id" ], [ [ Some "2" ]; [ Some "3" ] ])) "scan completes"
+              let session, missing = handle session "SELECT * FROM fsdb_missing_slow_probe"
+              Expect.equal missing (Err(1146, "Table 'fsdb.fsdb_missing_slow_probe' doesn't exist")) "failed SELECT completes with an error"
+
+              let _, logged =
+                  handle session
+                      "SELECT sql_text,rows_sent,rows_examined FROM mysql.slow_log WHERE sql_text IN ('SELECT 42 AS fsdb_slow_log_probe','DO 1','SELECT id FROM slow_scan_probe WHERE id > 1','SELECT * FROM fsdb_missing_slow_probe') ORDER BY sql_text"
+
+              Expect.equal
+                  logged
+                  (ResultSet(
+                      [ "sql_text"; "rows_sent"; "rows_examined" ],
+                      [ [ Some "DO 1"; Some "0"; Some "1" ]
+                        [ Some "SELECT * FROM fsdb_missing_slow_probe"; Some "0"; Some "0" ]
+                        [ Some "SELECT 42 AS fsdb_slow_log_probe"; Some "1"; Some "1" ]
+                        [ Some "SELECT id FROM slow_scan_probe WHERE id > 1"; Some "2"; Some "3" ] ]
+                  ))
+                  "slow table records observed statement metrics"
+
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -9485,9 +9529,9 @@ let tests =
               let session, result = handle session "SELECT 1"
               Expect.equal result (ResultSet([ "1" ], [ [ Some "1" ] ])) "query completes"
               let session, first = status session
-              Expect.equal first 2L "the completed query and current status read are counted"
+              Expect.equal first 3L "the threshold-setting query, SELECT, and status read are counted"
               let _, second = status session
-              Expect.equal second 3L "each status read includes itself"
+              Expect.equal second 4L "each status read includes itself"
 
               let other = create 2 session.Store
               let _, otherCount = status other
@@ -9509,7 +9553,7 @@ let tests =
               let session, preparedResult = executePrepared session prepared []
               Expect.equal preparedResult (ResultSet([ "2" ], [ [ Some "2" ] ])) "prepared query completes"
               let session, afterPrepared = status session
-              Expect.equal afterPrepared 5L "prepared execution and current status read were counted"
+              Expect.equal afterPrepared 6L "prepared execution and current status read were counted"
 
               let session, flushResult = handle session "FLUSH STATUS"
               Expect.equal flushResult (Affected 0UL) "status is flushed"

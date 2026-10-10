@@ -13,11 +13,16 @@ failed SELECT.
 | `SELECT 42 AS fsdb_slow_probe` | 1 | 1 | lock time was zero |
 | `DO 1` | 0 | 1 | lock time was zero |
 | `SELECT * FROM fsdb_missing_slow_probe` | 0 | 0 | error 1046, still logged |
+| `SELECT id FROM fsdb_slow_scan_probe WHERE id > 1` | 2 | 3 | three-row temporary table without an index |
 
 All rows had an empty `db`, zero `last_insert_id`/`insert_id`, and server ID
 1 for this connection. `query_time` and `lock_time` have microsecond `TIME`
-values. The existing fsdb `Slow_queries` counter measures elapsed time, but
-fsdb does not yet track rows examined across executor paths or publish
-`mysql.slow_log` rows. Those fields require an execution counter rather than
-guessing from result-row counts. The global log destination also needs an
-honest table/file policy before enabling slow logging.
+values.
+
+Fsdb now publishes table-backed slow-log rows from completed text and binary
+prepared statements. An execution scope counts source candidates before
+filtering for scalar and single-table scan paths, rather than guessing from
+result-row counts. `SET SESSION long_query_time=0` now counts itself, matching
+the oracle above. Broader join, full-text, and mutation accounting remains
+incomplete, and `lock_time` currently reports zero. FILE output is refused
+while enabled until there is a compatible sink.

@@ -691,6 +691,23 @@ let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>
 let private committedFullTextStore = System.Threading.AsyncLocal<Store option>()
 let private lockingReadStore = System.Threading.AsyncLocal<(unit -> Store) option>()
 let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
+let private examinedRows = System.Threading.AsyncLocal<int64 ref option>()
+
+let internal withExaminedRows body =
+    let count = ref 0L
+    let result = DynamicScope.withValue examinedRows (Some count) body
+    result, count.Value
+
+let private countExaminedRow () =
+    examinedRows.Value |> Option.iter (fun count -> count.Value <- count.Value + 1L)
+
+let private trackExaminedRows (rows: 'row seq) : 'row seq =
+    match examinedRows.Value with
+    | None -> rows
+    | Some count ->
+        rows |> Seq.map (fun row ->
+            count.Value <- count.Value + 1L
+            row)
 
 let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
     DynamicScope.withValue variableContext (Some variables) body
@@ -11648,7 +11665,9 @@ and private runUnlockedSelectStmt
     | Some(FromItem.Grouped(source, joins)) ->
         runUnlockedSelectStmt store registry dbName { select with From = Some source; Joins = joins @ select.Joins } outer
     | _ when not matchNodes.IsEmpty -> runFullTextSelect store registry dbName select matchNodes outer
-    | None -> runSelect store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
+    | None ->
+        countExaminedRow ()
+        runSelect store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
     | Some(FromItem.Qualified baseQualifier as fromItem) ->
         let runResolved
             groupInputOrder
@@ -11663,6 +11682,7 @@ and private runUnlockedSelectStmt
 
             let basePredicate = Map.tryFind (baseQualifier.ToLowerInvariant()) pushedWhere
             let baseRows = narrowPhysicalSourceRows store registry fromItem basePhysicalTable basePredicate baseRows
+            let baseRows = trackExaminedRows baseRows
 
             match prepareVirtualRows store registry dbName baseQualifier baseColumns baseRows with
             | Error error -> error, [], []
@@ -24284,6 +24304,7 @@ let rec executeAs
                 | Ok values -> replaceEvaluated db table (Some(values |> List.map fst)) [ values |> List.map snd ]
 
     | Do expressions ->
+        countExaminedRow ()
         let context = contextFactory store registry dbName Map.empty Map.empty None [||]
 
         match expressions |> traverse (evalExpr context) with

@@ -279,6 +279,7 @@ let private globalScopeOnlyVariables =
         [ "activate_all_roles_on_login"
           "connect_timeout"
           "general_log"
+          "slow_query_log"
           "log_output"
           "ft_query_expansion_limit"
           "innodb_ft_server_stopword_table"
@@ -1662,6 +1663,7 @@ let private systemSetAction
              && (name = "activate_all_roles_on_login"
                  || name = "event_scheduler"
                  || name = "general_log"
+                 || name = "slow_query_log"
                  || name = "log_output"
                  || name = "mandatory_roles"
                  || name = "protocol_compression_algorithms") ->
@@ -1687,7 +1689,7 @@ let private systemSetAction
     | Ok(value, sideEffects) when name = "sql_safe_updates" ->
         normalizeOnOff name value
         |> Result.map (fun value -> SetVarAction(name, Some(if value = "ON" then "1" else "0"), isGlobal), sideEffects)
-    | Ok(value, sideEffects) when name = "sql_log_bin" || name = "general_log" ->
+    | Ok(value, sideEffects) when name = "sql_log_bin" || name = "general_log" || name = "slow_query_log" ->
         normalizeOnOff name value
         |> Result.map (fun value -> SetVarAction(name, Some(if value = "ON" then "1" else "0"), isGlobal), sideEffects)
     | Ok(value, sideEffects) when name = "log_output" ->
@@ -1989,15 +1991,18 @@ let private validateSetActions session actions =
                     | _ -> current)
                 (Session.tryGlobalVariable session.Store name |> Option.flatten)
 
-        let enabled = globalValue "general_log" = Some "1"
+        let generalEnabled = globalValue "general_log" = Some "1"
+        let slowEnabled = globalValue "slow_query_log" = Some "1"
         let fileOutput =
             globalValue "log_output"
             |> Option.exists (fun value ->
                 let outputs = value.Split(',') |> Set.ofArray
                 outputs.Contains "FILE" && not (outputs.Contains "NONE"))
 
-        if enabled && fileOutput then
+        if generalEnabled && fileOutput then
             Error(Err(1231, "FILE general logging is unsupported; set log_output to TABLE or NONE"))
+        elif slowEnabled && fileOutput then
+            Error(Err(1231, "FILE slow query logging is unsupported; set log_output to TABLE or NONE"))
         else
             Ok())
 
@@ -8157,10 +8162,16 @@ let private recordSlowQueryIfNeeded (session: Session) startedAt =
         |> Option.map float
         |> Option.defaultValue 10.0
 
-    let isSlow = System.Diagnostics.Stopwatch.GetElapsedTime(startedAt).TotalSeconds >= threshold
+    let elapsed = System.Diagnostics.Stopwatch.GetElapsedTime startedAt
+    let isSlow = elapsed.TotalSeconds >= threshold
     if isSlow then
         InformationSchema.recordSlowQuery session.StatusCounters
-    isSlow
+    isSlow, elapsed
+
+let rec private rowsSent = function
+    | ResultSet(_, rows) -> int64 rows.Length
+    | MultipleResults results -> results |> List.sumBy (fst >> rowsSent)
+    | _ -> 0L
 
 let internal recordFailedLoadStartedAt startedAt session =
     recordSlowQueryIfNeeded session startedAt |> ignore
@@ -8194,7 +8205,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let resetsPassword = resetsOwnPassword session accountStatement
     let countsAsUpdate = accountStatementCountsAsUpdate accountStatement && accountUpdateIsAuthorized session accountStatement
 
-    let executed, result =
+    let executeStatement () =
         recordDiagnostics session (preservesDiagnostics parserOptions sql) (fun () ->
             if session.PasswordExpired && not resetsPassword then
                 session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
@@ -8231,7 +8242,15 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                         reraise ()
                     | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
 
-    let isSlow = recordSlowQueryIfNeeded session startedAt
+    let (executed, result), examinedRows =
+        if Session.slowLogTableEnabled session.Store then
+            Executor.withExaminedRows executeStatement
+        else
+            executeStatement (), 0L
+
+    let isSlow, elapsed = recordSlowQueryIfNeeded executed startedAt
+    if isSlow && Session.slowLogTableEnabled executed.Store then
+        Session.recordSlowCommand executed rawSql elapsed (rowsSent result) examinedRows
     let result = if isSlow && showStatusRe.IsMatch sql then includeCurrentSlowStatus result else result
     syncTransactionView executed, result
 
@@ -8440,8 +8459,14 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                 | :? OperationCanceledException -> reraise ()
                 | ex -> recoverExecutionError session "prepared statement" ex)
 
-        let executed, result = withPreparedDatabase session stmt execute
-        recordSlowQueryIfNeeded session startedAt |> ignore
+        let (executed, result), examinedRows =
+            if Session.slowLogTableEnabled session.Store then
+                Executor.withExaminedRows (fun () -> withPreparedDatabase session stmt execute)
+            else
+                withPreparedDatabase session stmt execute, 0L
+        let isSlow, elapsed = recordSlowQueryIfNeeded executed startedAt
+        if isSlow && Session.slowLogTableEnabled executed.Store then
+            Session.recordSlowCommand executed (expandedSql ()) elapsed (rowsSent result) examinedRows
         syncTransactionView executed, result
 
 /// Executes an unregistered prepared statement once.
