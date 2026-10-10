@@ -21,14 +21,19 @@ UPDATE of a three-row table without an index. A DELETE scanning the two rows
 left after a prior deletion reported `2`. MySQL counts candidate rows inspected
 by these mutations, not only rows changed.
 
+An `INSERT … SELECT` that read three source rows and inserted two reported
+`rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives
+the same result in a regression.
+
 All rows had an empty `db`, zero `last_insert_id`/`insert_id`, and server ID
 1 for this connection. `query_time` and `lock_time` have microsecond `TIME`
 values.
 
 Fsdb now publishes table-backed slow-log rows from completed text and binary
 prepared statements. An execution scope counts source candidates before
-filtering for scalar reads, single-table scans, and single-table UPDATE/DELETE,
-rather than guessing from result-row counts. `SET SESSION long_query_time=0`
+filtering for scalar reads, single-table scans, `INSERT … SELECT` source reads,
+and single-table UPDATE/DELETE, rather than guessing from result-row counts.
+`SET SESSION long_query_time=0`
 now counts itself, matching the oracle above. Broader join, full-text, and
 other mutation accounting remains
 incomplete, and `lock_time` currently reports zero. FILE output is refused

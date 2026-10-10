@@ -9496,6 +9496,9 @@ let tests =
               let session, _ = handle session "INSERT INTO slow_scan_probe VALUES (1),(2),(3)"
               let session, scanned = handle session "SELECT id FROM slow_scan_probe WHERE id > 1"
               Expect.equal scanned (ResultSet([ "id" ], [ [ Some "2" ]; [ Some "3" ] ])) "scan completes"
+              let session, _ = handle session "CREATE TABLE slow_insert_probe (id INT)"
+              let session, inserted = handle session "INSERT INTO slow_insert_probe SELECT id FROM slow_scan_probe WHERE id > 1"
+              Expect.equal inserted (Affected 2UL) "INSERT SELECT completes"
               let session, _ = handle session "UPDATE slow_scan_probe SET id=id+10 WHERE id=2"
               let session, _ = handle session "DELETE FROM slow_scan_probe WHERE id > 10"
               let session, missing = handle session "SELECT * FROM fsdb_missing_slow_probe"
@@ -9503,7 +9506,7 @@ let tests =
 
               let _, logged =
                   handle session
-                      "SELECT sql_text,rows_sent,rows_examined FROM mysql.slow_log WHERE sql_text IN ('SELECT 42 AS fsdb_slow_log_probe','DO 1','SELECT id FROM slow_scan_probe WHERE id > 1','UPDATE slow_scan_probe SET id=id+10 WHERE id=2','DELETE FROM slow_scan_probe WHERE id > 10','SELECT * FROM fsdb_missing_slow_probe') ORDER BY sql_text"
+                      "SELECT sql_text,rows_sent,rows_examined FROM mysql.slow_log WHERE sql_text IN ('SELECT 42 AS fsdb_slow_log_probe','DO 1','SELECT id FROM slow_scan_probe WHERE id > 1','INSERT INTO slow_insert_probe SELECT id FROM slow_scan_probe WHERE id > 1','UPDATE slow_scan_probe SET id=id+10 WHERE id=2','DELETE FROM slow_scan_probe WHERE id > 10','SELECT * FROM fsdb_missing_slow_probe') ORDER BY sql_text"
 
               Expect.equal
                   logged
@@ -9511,6 +9514,7 @@ let tests =
                       [ "sql_text"; "rows_sent"; "rows_examined" ],
                       [ [ Some "DELETE FROM slow_scan_probe WHERE id > 10"; Some "0"; Some "3" ]
                         [ Some "DO 1"; Some "0"; Some "1" ]
+                        [ Some "INSERT INTO slow_insert_probe SELECT id FROM slow_scan_probe WHERE id > 1"; Some "0"; Some "3" ]
                         [ Some "SELECT * FROM fsdb_missing_slow_probe"; Some "0"; Some "0" ]
                         [ Some "SELECT 42 AS fsdb_slow_log_probe"; Some "1"; Some "1" ]
                         [ Some "SELECT id FROM slow_scan_probe WHERE id > 1"; Some "2"; Some "3" ]
