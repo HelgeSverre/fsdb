@@ -248,7 +248,17 @@ let rec private run (store: Storage.Store) (state: State) (generation: Cancellat
         return! run store state generation
     }
 
+/// Event bodies are synchronous and may block on host-defined functions.
+/// Keep enough workers available for the bounded execution set and its scanner.
+let private reserveEventWorkers () =
+    let mutable workers = 0
+    let mutable completions = 0
+    ThreadPool.GetMinThreads(&workers, &completions) |> ignore
+    let required = Limits.maxConcurrentEventExecutions + 1
+    if workers < required then ThreadPool.SetMinThreads(required, completions) |> ignore
+
 let acquire (store: Storage.Store) (functions: Functions.Registry) : IDisposable =
+    reserveEventWorkers ()
     lock stateLock (fun () ->
         match states.TryGetValue store.Lock with
         | true, state when state.References > 0 ->
