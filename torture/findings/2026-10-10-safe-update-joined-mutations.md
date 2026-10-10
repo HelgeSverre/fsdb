@@ -70,6 +70,15 @@ indexed key on the deleted left target. Fsdb now accepts audited ON, USING,
 and NATURAL RIGHT JOIN links in that shape, including constant-true WHERE,
 while refusing unindexed links, unindexed targets, unfiltered LEFT JOIN
 DELETE, and unfiltered RIGHT JOIN UPDATE.
+For a RIGHT JOIN UPDATE or DELETE, MySQL also lets a source-local `ON`
+filter supply the lookup restriction when `WHERE` rejects a null-extended
+target row. Ordinary target comparisons, `IS NOT NULL`, `IN`, arithmetic,
+and a disjunction of null-rejecting comparisons are accepted in the audited
+cases. `IS NULL`, an OR arm accepting NULL, `<=>`, a target-only `ON` filter,
+and a non-pushable lookup expression remain rejected. Fsdb proves the
+null-rejecting condition with three-valued constant evaluation after
+substituting NULL for target columns; it keeps null-safe equality conservative
+to match the observed MySQL plan boundary.
 
 An `ON`-filtered lookup treats a constant-true `WHERE` like no `WHERE`.
 False or NULL conditions, including a false or NULL conjunct with an
@@ -80,8 +89,8 @@ row-dependent expressions.
 
 The `sql_safe_updates` Expecto regression and the pinned MySQL 8.4.11
 `safe-update-mode` contract cover the accepted and rejected forms, error
-codes, and unchanged rows after rejection. All 1176 safe-update steps passed
-in run `20261010T103434516-58597`; the complete contract run had only the
+codes, and unchanged rows after rejection. All 1354 safe-update steps passed
+in run `20261010T105059735-59357`; the complete contract run had only the
 nine documented identifier-case-policy differences on Linux mode 0. Other
 multi-target access paths, filter shapes, and optimizer-dependent source
 choices remain open.

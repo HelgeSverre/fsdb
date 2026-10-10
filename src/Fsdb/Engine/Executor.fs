@@ -24732,10 +24732,40 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                 |> List.distinct
                 |> List.length = sources.Length
             let whereConditions = predicate |> Option.map conjuncts |> Option.defaultValue []
+
+            let whereRejectsMissingTarget condition =
+                let nullTargetColumns =
+                    Expression.rewrite (function
+                        | QualifiedCol(owner, _) when equalsIgnoreCase owner targetQualifier -> Some(Lit VNull)
+                        | Col name when tableHasColumn targetTable name
+                                        && (sources |> List.filter (fun (_, table) -> tableHasColumn table name) |> List.length = 1) ->
+                            Some(Lit VNull)
+                        | _ -> None)
+                let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+
+                let rec rejects = function
+                    | BinOp(And, left, right) -> rejects left || rejects right
+                    | BinOp(Or, left, right) -> rejects left && rejects right
+                    // MySQL does not use null-safe equality to simplify this outer join.
+                    | expression when Expression.exists (function BinOp(NullSafeEq, _, _) -> true | _ -> false) expression -> false
+                    | expression ->
+                        expression
+                        |> nullTargetColumns
+                        |> possibleConditionTruths context
+                        |> Set.contains (Some true)
+                        |> not
+
+                rejects condition
+
             // An outer join's ON filter does not establish a safe target scan by itself.
             let filterConditions =
                 match predicate with
-                | Some _ -> whereConditions
+                | Some condition ->
+                    let rightJoinOnConditions =
+                        match joins with
+                        | [ join ] when join.Kind = RightJoin && whereRejectsMissingTarget condition -> conjuncts join.On
+                        | _ -> []
+                    whereConditions @ rightJoinOnConditions
                 | None when joins |> List.forall (fun join ->
                     match join.Kind with
                     | InnerJoin | CrossJoin | NaturalJoin -> true

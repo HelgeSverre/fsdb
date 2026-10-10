@@ -3762,6 +3762,45 @@ let tests =
                   safeUpdateRejection
                   "the target must have an indexed join key"
 
+          testCase "sql_safe_updates uses a RIGHT JOIN ON filter after null-rejecting WHERE"
+          <| fun _ ->
+              for sql, expected in
+                  [ "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload=0", Affected 2UL
+                    "DELETE t FROM t RIGHT JOIN l ON t.id=l.id AND l.flag=0 WHERE t.payload=0", Affected 2UL
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload IS NOT NULL", Affected 2UL
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload IN (0,1)", Affected 2UL
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload=0 OR t.payload=1", Affected 2UL
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload+0=0", Affected 2UL
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE NOT (t.payload IS NULL)", Affected 2UL
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE 1=1", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload IS NULL", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload <=> 0", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload=0 OR t.payload IS NULL", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND t.payload=0 SET t.payload=1 WHERE t.payload=0", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag+0=0 SET t.payload=1 WHERE t.payload=0", safeUpdateRejection
+                    "UPDATE t LEFT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload=0", safeUpdateRejection ] do
+                  let run =
+                      queryFixture
+                          [ "CREATE TABLE t(id INT PRIMARY KEY,payload INT)"
+                            "CREATE TABLE l(id INT PRIMARY KEY,flag INT)"
+                            "INSERT INTO t VALUES(1,0),(2,0)"
+                            "INSERT INTO l VALUES(1,0),(2,0)"
+                            "SET sql_safe_updates=ON" ]
+                  Expect.equal (run sql) expected sql
+
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE t(id INT,payload INT)"
+                        "CREATE TABLE l(id INT,flag INT)"
+                        "INSERT INTO t VALUES(1,0),(2,0)"
+                        "INSERT INTO l VALUES(1,0),(2,0)"
+                        "SET sql_safe_updates=ON" ]
+              Expect.equal
+                  (run "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE t.payload=0")
+                  safeUpdateRejection
+                  "null rejection cannot replace the indexed join key"
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
