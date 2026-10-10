@@ -7169,6 +7169,24 @@ and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collat
     let orderCtx = { ctx with Clause = OrderClause }
     evalExpr orderCtx expr |> Result.map (orderValueForExpr orderCtx expr)
 
+and private validateIndexHintNames (tableRef: TableRef) tableName known : Result<unit, QueryResult> =
+    tableRef.IndexHints
+    |> List.collect _.Indexes
+    |> List.tryFind (known >> not)
+    |> function
+        | None -> Ok()
+        | Some name -> Error(Err(1176, sprintf "Key '%s' doesn't exist in table '%s'" name tableName))
+
+and private validateUnindexedRelationHints tableRef tableName =
+    validateIndexHintNames tableRef tableName (fun _ -> false)
+
+and private validateTableIndexHints (tableRef: TableRef) (table: Table) : Result<unit, QueryResult> =
+    let known name =
+        (table.Indexes |> List.exists (fun index -> equalsIgnoreCase index.Name name))
+        || (equalsIgnoreCase name "PRIMARY" && not (Storage.primaryKeyColumns table).IsEmpty)
+
+    validateIndexHintNames tableRef table.OriginalName known
+
 /// Resolves one `TableRef` (a real table, or `information_schema`'s virtual
 /// one) to its columns and rows — the one place both the base `FROM` and
 /// every `JOIN` target resolve through, so there's exactly one
@@ -7573,33 +7591,52 @@ and private describeQueryColumnsInScope
                 |> requireDescription
                 |> Result.bind (fun (columns: Lazy<Result<ViewColumnDescriptor list, ColumnDescriptionError>>) -> columns.Value)
             elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-                InformationSchema.scan store.Catalog tableRef.Table None |> Option.map (fst >> List.map describeColumn) |> requireDescription
+                InformationSchema.scan store.Catalog tableRef.Table None
+                |> Option.map (fst >> List.map describeColumn)
+                |> requireDescription
+                |> Result.bind (fun columns ->
+                    validateUnindexedRelationHints tableRef tableRef.Table
+                    |> Result.mapError InvalidDescription
+                    |> Result.map (fun () -> columns))
             else
                 match tryStoredView store tableDb tableRef.Table with
                 | Some(view: StoredView) ->
-                    let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
+                    validateUnindexedRelationHints tableRef view.Name
+                    |> Result.mapError InvalidDescription
+                    |> Result.bind (fun () ->
+                        let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-                    if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
-                        Error DescriptionUnavailable
-                    else
-                        parseStoredViewStatement view
-                        |> Result.mapError (fun _ -> DescriptionUnavailable)
-                        |> Result.bind (function
-                            | Select select -> describeSelect (Set.add key seen) view.Schema Map.empty [] select
-                            | Union(first, rest, orderBy, limit, offset) ->
-                                describeBody (Set.add key seen) view.Schema Map.empty [] (UnionSelect(first, rest, orderBy, limit, offset))
-                            | _ -> Error DescriptionUnavailable)
-                        |> Result.bind (fun columns ->
-                            let declaredColumns: string list = view.Columns
+                        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
+                            Error DescriptionUnavailable
+                        else
+                            parseStoredViewStatement view
+                            |> Result.mapError (fun _ -> DescriptionUnavailable)
+                            |> Result.bind (function
+                                | Select select -> describeSelect (Set.add key seen) view.Schema Map.empty [] select
+                                | Union(first, rest, orderBy, limit, offset) ->
+                                    describeBody (Set.add key seen) view.Schema Map.empty [] (UnionSelect(first, rest, orderBy, limit, offset))
+                                | _ -> Error DescriptionUnavailable)
+                            |> Result.bind (fun columns ->
+                                let declaredColumns: string list = view.Columns
 
-                            renameColumns declaredColumns columns)
+                                renameColumns declaredColumns columns))
                 | None when tableRef.Database.IsNone && equalsIgnoreCase tableRef.Table "dual" -> Ok []
                 | None when equalsIgnoreCase tableDb defaultDatabase && store.VirtualTables.ContainsKey(normalizeTableName tableRef.Table) ->
                     store.VirtualTables.[normalizeTableName tableRef.Table].Columns |> List.map describeColumn |> Ok
                 | None ->
-                    scan store tableDb tableRef.Table
-                    |> Result.mapError (storageErr >> InvalidDescription)
-                    |> Result.map (fst >> List.map describeColumn)
+                    let validHints =
+                        if tableRef.IndexHints.IsEmpty then
+                            Ok()
+                        else
+                            Storage.tableSnapshot store tableDb tableRef.Table
+                            |> Result.mapError (storageErr >> InvalidDescription)
+                            |> Result.bind (validateTableIndexHints tableRef >> Result.mapError InvalidDescription)
+
+                    validHints
+                    |> Result.bind (fun () ->
+                        scan store tableDb tableRef.Table
+                        |> Result.mapError (storageErr >> InvalidDescription)
+                        |> Result.map (fst >> List.map describeColumn))
         | FromSubquery(body, _) -> describeBody seen dbName ctes outerScopes body |> Result.bind (renameColumns [])
         | FromLateral(body, _) -> describeBody seen dbName ctes (preceding :: outerScopes) body |> Result.bind (renameColumns [])
         | FromJsonTable(argument, _, columns, _) ->
@@ -8820,9 +8857,11 @@ and private tryPhysicalTableRef (store: Store) (dbName: string) (tableRef: Table
         Ok None
     else
         Storage.tableSnapshot store tableDb tableRef.Table
-        |> Result.map (filterLockingReadTable tableRef)
-        |> Result.map Some
         |> Result.mapError storageErr
+        |> Result.bind (fun table ->
+            validateTableIndexHints tableRef table
+            |> Result.map (fun () -> filterLockingReadTable tableRef table))
+        |> Result.map Some
 
 and private physicalFastPathTable (store: Store) (dbName: string) (tableRef: TableRef) =
     tryPhysicalTableRef store dbName tableRef
@@ -11389,7 +11428,27 @@ and private runSelectStmt
     let cteNames =
         Set.union (currentCteScope () |> Map.keys |> Set.ofSeq)
             (select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList)
-    match validateRelationNames dbName cteNames select.Ctes select.From select.Joins with
+    let validateHintedSource = function
+        | FromTable tableRef
+            when not tableRef.IndexHints.IsEmpty
+                 && not (tableRef.Database.IsNone && Set.contains (tableRef.Table.ToLowerInvariant()) cteNames) ->
+            let tableDb = tableRef.Database |> Option.defaultValue dbName
+            match tryStoredView store tableDb tableRef.Table with
+            | Some view -> validateUnindexedRelationHints tableRef view.Name
+            | None when equalsIgnoreCase tableDb "information_schema" ->
+                match InformationSchema.scan store.Catalog tableRef.Table None with
+                | Some _ -> validateUnindexedRelationHints tableRef tableRef.Table
+                | None -> Ok()
+            | None -> tryPhysicalTableRef store dbName tableRef |> Result.map ignore
+        | _ -> Ok()
+
+    let validateSources () =
+        (Option.toList select.From @ (select.Joins |> List.map _.Table))
+        |> List.collect FromItem.leaves
+        |> traverse validateHintedSource
+        |> Result.map ignore
+
+    match validateRelationNames dbName cteNames select.Ctes select.From select.Joins |> Result.bind (fun () -> validateSources ()) with
     | Error error -> error, [], []
     | Ok() ->
         if SelectStmt.hasDestination select then
@@ -24209,6 +24268,12 @@ let rec executeAs
 
         let tableRootResult = tableSnapshot store db table
         let tableRoot = tableRootResult |> Result.toOption
+        let hintError =
+            tableRoot
+            |> Option.bind (fun current ->
+                match validateTableIndexHints updateStmt.From current with
+                | Ok() -> None
+                | Error error -> Some error)
 
         let physicalCandidates =
             tableRoot
@@ -24237,10 +24302,11 @@ let rec executeAs
 
         let candidateRowsResult = mutationCandidateRows tableRootResult narrowed
 
-        match fullTextPlanResult, candidateRowsResult with
-        | Error(code, message), _ -> ids, Err(code, message)
-        | Ok _, Error e -> ids, storageErr e
-        | Ok _, Ok(columns, positionedRows) ->
+        match hintError, fullTextPlanResult, candidateRowsResult with
+        | Some error, _, _ -> ids, error
+        | None, Error(code, message), _ -> ids, Err(code, message)
+        | None, Ok _, Error e -> ids, storageErr e
+        | None, Ok _, Ok(columns, positionedRows) ->
             let columnIndex = columnIndexOf columns
 
             match updateStmt.Assignments |> traverse (fun a -> resolveAssignableColumn columns table a.Column |> Result.map (fun i -> i, a.Value)) with

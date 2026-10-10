@@ -13529,6 +13529,39 @@ let tests =
                         |> explainRow
                     Expect.equal ranged.Key (Some "ix_second") "FORCE INDEX can select a second range key"
 
+                testCase "table index hints reject unknown keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE hinted_name(id INT PRIMARY KEY,v INT,KEY ix_v(v))" |> ignore
+                    for statement in
+                        [ "SELECT id FROM hinted_name USE INDEX(no_such_index)"
+                          "SELECT id FROM hinted_name IGNORE INDEX(no_such_index)"
+                          "EXPLAIN SELECT id FROM hinted_name FORCE INDEX(no_such_index)"
+                          "UPDATE hinted_name USE INDEX(no_such_index) SET v=1"
+                          "EXPLAIN UPDATE hinted_name USE INDEX(no_such_index) SET v=1" ] do
+                        match runDefault store statement with
+                        | Err(1176, message) ->
+                            Expect.equal message "Key 'no_such_index' doesn't exist in table 'hinted_name'" statement
+                        | other -> failtestf "expected missing index error for %s, got %A" statement other
+                    runDefault store "CREATE VIEW hinted_view AS SELECT id,v FROM hinted_name" |> ignore
+                    match runDefault store "SELECT id FROM hinted_view USE INDEX(ix_v)" with
+                    | Err(1176, message) ->
+                        Expect.equal message "Key 'ix_v' doesn't exist in table 'hinted_view'" "views have no usable indexes"
+                    | other -> failtestf "expected missing view index error, got %A" other
+                    match runDefault store "SELECT id FROM hinted_name USE INDEX(PRIMARY)" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected implicit primary index to resolve, got %A" other
+                    match runDefault store "SELECT id FROM hinted_name USE INDEX(IX_V)" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected case-insensitive index name to resolve, got %A" other
+                    match runDefault store "SELECT TABLE_NAME FROM information_schema.TABLES USE INDEX(no_such_index) LIMIT 1" with
+                    | Err(1176, message) ->
+                        Expect.equal message "Key 'no_such_index' doesn't exist in table 'TABLES'" "virtual metadata has no indexes"
+                    | other -> failtestf "expected missing metadata index error, got %A" other
+                    match runDefault store "WITH c AS (SELECT 1 AS x) SELECT x FROM c USE INDEX(no_such_index)" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected CTE hint to remain accepted, got %A" other
+
                 testCase "integer writes reject overflow in strict mode and clamp it otherwise"
                 <| fun _ ->
                     let store = newStore ()
