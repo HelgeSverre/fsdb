@@ -83,6 +83,10 @@ categories do not. Supplementary Unicode scalars are another open boundary:
 MySQL `REGEXP_SUBSTR('😀','[x[:^alpha:]]')` returns the complete emoji, while
 the underlying .NET regex matches only its high UTF-16 surrogate. The same
 problem exists for a standalone negated POSIX class. Other ICU-only grammar
-and error-code distinctions remain open. MySQL accepts script properties such
-as `\p{Greek}` and `\p{Script=Greek}`. .NET's `IsGreek` is a narrower Unicode
-block, so direct property-name substitution would be incorrect.
+and error-code distinctions remain open. MySQL 8.4.11 matches Greek `α` with
+both `\p{Greek}` and `\p{Script=Greek}` when the probe client's character set
+is explicitly `utf8mb4`. The default `mysql` client character set on the pinned
+container instead converted the input and produced false negatives for both
+properties; `\p{L}` still matched that converted input. .NET's `IsGreek` is a
+Unicode block rather than a script property, so direct substitution would
+misclassify characters.
