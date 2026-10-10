@@ -24732,6 +24732,17 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                 | Some _ -> whereConditions
                 | None -> joins |> List.collect (fun join -> conjuncts join.On)
 
+            let probesIndexedKey earlierQualifier (earlierTable: Table) joinedQualifier = function
+                | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
+                    when equalsIgnoreCase leftOwner earlierQualifier
+                         && equalsIgnoreCase rightOwner joinedQualifier ->
+                    hasLeadingIndexColumn earlierTable leftName
+                | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
+                    when equalsIgnoreCase rightOwner earlierQualifier
+                         && equalsIgnoreCase leftOwner joinedQualifier ->
+                    hasLeadingIndexColumn earlierTable rightName
+                | _ -> false
+
             let edges =
                 joins
                 |> List.mapi (fun index join ->
@@ -24739,27 +24750,18 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                     [ for earlierRef, earlierTable in sources |> List.take (index + 1) do
                           let earlierQualifier = tableQualifier earlierRef
                           if (conjuncts join.On @ whereConditions)
-                             |> List.exists (function
-                                 | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
-                                     when equalsIgnoreCase leftOwner earlierQualifier
-                                          && equalsIgnoreCase rightOwner joinedQualifier ->
-                                     hasLeadingIndexColumn earlierTable leftName
-                                 | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
-                                     when equalsIgnoreCase rightOwner earlierQualifier
-                                          && equalsIgnoreCase leftOwner joinedQualifier ->
-                                     hasLeadingIndexColumn earlierTable rightName
-                                 | _ -> false) then
+                             |> List.exists (probesIndexedKey earlierQualifier earlierTable joinedQualifier) then
                               yield joinedQualifier, earlierQualifier ])
                 |> List.concat
 
-            let rec reachesTarget visited owner =
+            // Every edge points to an earlier join source, so this graph has no cycles.
+            let rec reachesTarget owner =
                 if equalsIgnoreCase owner targetQualifier then true
-                elif visited |> List.exists (equalsIgnoreCase owner) then false
                 else
                     edges
                     |> List.exists (fun (source, destination) ->
                         equalsIgnoreCase source owner
-                        && reachesTarget (owner :: visited) destination)
+                        && reachesTarget destination)
 
             let hasSourceFilter (joinedRef, joinedTable) =
                 let joinedQualifier = tableQualifier joinedRef
@@ -24771,7 +24773,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                         | _ -> None)
 
                 joinedTable.RowsArray.Count <= targetTable.RowsArray.Count
-                && reachesTarget [] joinedQualifier
+                && reachesTarget joinedQualifier
                 && (filterConditions
                     |> List.exists (fun condition ->
                         let condition = qualifyBareLookup condition

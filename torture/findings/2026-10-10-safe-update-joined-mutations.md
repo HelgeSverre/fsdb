@@ -44,51 +44,24 @@ recognized only one join. Fsdb now follows those links through ordinary inner
 joins. The pinned contract matches two accepted UPDATE filters and a DELETE,
 and rejects a target-only filter or forced target-first `STRAIGHT_JOIN`; a
 native probe also accepted the chain when the last lookup table had 100 rows.
-Other multi-target access paths, broader filter shapes, and optimizer-dependent
-source choices remain open. The
-`sql_safe_updates` Expecto regression and `safe-update-mode` differential
-contract cover the accepted and rejected forms, error code, and unchanged
-target rows after rejection.
+MySQL accepts an indexed equality in `WHERE` for ordinary JOIN, CROSS JOIN,
+comma join, and the audited three-table chain. An equality inside `OR`, or
+one on unindexed columns, does not supply the key probe. MySQL also accepts
+a source-local filter supplied only by `ON`, but rejects a target-only
+`WHERE` filter even when `ON` filters the lookup. Fsdb follows these same
+boundaries.
 
-The expanded `safe-update-mode` contract passed every step against the pinned
-MySQL 8.4.11 image. The complete contract run reported nine differences,
-all in the previously documented identifier-case-policy cases on Linux mode
-0; none belonged to safe-update mode.
-The expanded contract passed all 386 safe-update steps at
-`torture/artifacts/runs/20261010T091140255-45246/contracts`; the complete run
-again differed only in the nine identifier-case-policy steps.
-The three-table extension passed all 446 safe-update steps at
-`torture/artifacts/runs/20261010T091904371-46091/contracts`; the full run
-again retained the same nine identifier-case-policy differences.
-MySQL also accepts an indexed equality placed in `WHERE` for ordinary JOIN,
-CROSS JOIN, comma join, and a three-table chain. It rejects the equality
-inside an `OR` and an equality on unindexed columns in the audited fixture.
-Fsdb now treats top-level conjunctive `WHERE` equalities as possible indexed
-links between joined sources. The expanded pinned contract passed all 518
-safe-update steps at
-`torture/artifacts/runs/20261010T092632539-47054/contracts`; the full run
-still differed only on the nine documented identifier-case steps.
-MySQL also accepts a source-local lookup filter supplied only by `ON`, even
-through a three-table indexed chain. When the same statement has a `WHERE`
-filter only on the target, it returns 1175 in the audited fixture. Fsdb now
-checks `ON` filters when `WHERE` is absent and keeps the existing `WHERE`
-filter rule otherwise. The pinned contract passed all 578 safe-update steps
-at `torture/artifacts/runs/20261010T093429487-49404/contracts`; the complete
-run still retained only the nine identifier-case-policy differences.
-For an `ON`-filtered lookup, MySQL treats an audited constant-true `WHERE`
-like no `WHERE`; constant false or NULL produces a safe no-op. A plain
-constant-true `WHERE` without a key still returns 1175, and adding a
-target-only condition to the true constant does not make the joined write
-safe. Fsdb uses its three-valued condition analysis for these conditions.
-The pinned contract passed all 644 safe-update steps at
-`torture/artifacts/runs/20261010T094036048-50439/contracts`; the complete run
-again retained only the nine identifier-case-policy differences.
-Native MySQL 8.4.11 also accepts an unindexed predicate conjoined with a
-constant false or NULL because the condition cannot select a row; it rejects
-the corresponding false-OR and true-AND unindexed predicates. A true
-disjunct makes an `ON`-filtered keyed join behave like an absent `WHERE`.
-Fsdb's existing three-valued condition analysis now recognizes these
-boundaries without evaluating row-dependent expressions. The pinned contract
-passed all 722 safe-update steps at
-`torture/artifacts/runs/20261010T094631593-50877/contracts`; the complete run
-retained only the nine documented identifier-case-policy differences.
+An `ON`-filtered lookup treats a constant-true `WHERE` like no `WHERE`.
+False or NULL conditions, including a false or NULL conjunct with an
+unindexed predicate, cannot select a row and are accepted as no-ops.
+False-OR and true-AND unindexed predicates still return 1175. Fsdb uses its
+three-valued condition analysis to decide these cases without evaluating
+row-dependent expressions.
+
+The `sql_safe_updates` Expecto regression and the pinned MySQL 8.4.11
+`safe-update-mode` contract cover the accepted and rejected forms, error
+codes, and unchanged rows after rejection. All 722 safe-update steps passed
+in run `20261010T094631593-50877`; the complete contract run had only the
+nine documented identifier-case-policy differences on Linux mode 0. Other
+multi-target access paths, filter shapes, and optimizer-dependent source
+choices remain open.
