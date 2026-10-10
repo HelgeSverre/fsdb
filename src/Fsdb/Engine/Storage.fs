@@ -5690,6 +5690,7 @@ let private trySecondaryOrderSliceInTable
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     (requireBound: bool)
+    (allowed: string -> bool)
     : SecondaryOrderSlice option =
     let orderedIndex =
         resolveColumn table.Columns columnName
@@ -5704,6 +5705,7 @@ let private trySecondaryOrderSliceInTable
                 |> List.filter (fun group ->
                     group.ColumnIndex = index
                     && group.Transform = transform
+                    && allowed group.Group.Name
                     && Map.containsKey group.Group.Name table.SecondaryOrder)
 
             candidates
@@ -5825,17 +5827,22 @@ let private rangeLookup (table: Table) (slice: SecondaryOrderSlice) =
               RangeRows = lazy (rowsForRowIds table rowIds.Value) }
     | _ -> None
 
-let internal trySecondaryRangeLookupInTable
+let internal trySecondaryRangeLookupInTableWith
+    (allowed: string -> bool)
     (store: Store)
     (table: Table)
     (columnName: string)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     : RangeLookup option =
-    trySecondaryOrderSliceInTable store table columnName None StoredValues lower upper true
+    trySecondaryOrderSliceInTable store table columnName None StoredValues lower upper true allowed
     |> Option.bind (rangeLookup table)
 
-let internal tryProjectedSecondaryRangeLookupInTable
+let internal trySecondaryRangeLookupInTable store table columnName lower upper =
+    trySecondaryRangeLookupInTableWith (fun _ -> true) store table columnName lower upper
+
+let internal tryProjectedSecondaryRangeLookupInTableWith
+    (allowed: string -> bool)
     (store: Store)
     (table: Table)
     (columnName: string)
@@ -5843,8 +5850,11 @@ let internal tryProjectedSecondaryRangeLookupInTable
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     : RangeLookup option =
-    trySecondaryOrderSliceInTable store table columnName (Some transform) ProjectedValues lower upper true
+    trySecondaryOrderSliceInTable store table columnName (Some transform) ProjectedValues lower upper true allowed
     |> Option.bind (rangeLookup table)
+
+let internal tryProjectedSecondaryRangeLookupInTable store table columnName transform lower upper =
+    tryProjectedSecondaryRangeLookupInTableWith (fun _ -> true) store table columnName transform lower upper
 
 let trySecondaryRangeLookup
     (store: Store)
@@ -5936,7 +5946,7 @@ let private tryOrderedLookup
     : (string * int * ColumnDef list * int * Value[] seq) option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
-        trySecondaryOrderSliceInTable store table columnName transform StoredValues lower upper false
+        trySecondaryOrderSliceInTable store table columnName transform StoredValues lower upper false (fun _ -> true)
         |> Option.bind (fun slice ->
             slice.ColumnIndices
             |> List.tryExactlyOne

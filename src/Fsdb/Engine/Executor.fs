@@ -13179,12 +13179,13 @@ and private tryRangeAccessInTableWith
     if not (storedRowsMatchReadRows store table.Columns) then
         None
     else
+        let allowed = indexHintsFor IndexJoin tref |> indexAllowedBy
         let context = lazy (contextFactory store registry Storage.defaultDatabase Map.empty Map.empty None [||])
 
         let storedRanges =
             rangeLookupBounds scope store registry table tref whereExpr
             |> List.choose (fun bounds ->
-                Storage.trySecondaryRangeLookupInTable store table bounds.Column bounds.Lower bounds.Upper)
+                Storage.trySecondaryRangeLookupInTableWith allowed store table bounds.Column bounds.Lower bounds.Upper)
 
         let functionalColumn expression =
             let inScope =
@@ -13217,7 +13218,8 @@ and private tryRangeAccessInTableWith
                 |> Option.bind (fun _ ->
                     let values = functionalRangeValues bounds
 
-                    Storage.tryProjectedSecondaryRangeLookupInTable
+                    Storage.tryProjectedSecondaryRangeLookupInTableWith
+                        allowed
                         store
                         table
                         column

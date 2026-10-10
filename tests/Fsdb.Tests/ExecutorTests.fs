@@ -13524,6 +13524,10 @@ let tests =
                         runDefault store "EXPLAIN SELECT id FROM same_key_choice USE INDEX(ix_second) WHERE v IN (9,16)"
                         |> explainRow
                     Expect.equal membership.Key (Some "ix_second") "USE INDEX can select a second membership key"
+                    let ranged =
+                        runDefault store "EXPLAIN SELECT id FROM same_key_choice FORCE INDEX(ix_second) WHERE v BETWEEN 9 AND 16"
+                        |> explainRow
+                    Expect.equal ranged.Key (Some "ix_second") "FORCE INDEX can select a second range key"
 
                 testCase "integer writes reject overflow in strict mode and clamp it otherwise"
                 <| fun _ ->
