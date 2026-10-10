@@ -1,0 +1,54 @@
+name: Publish NuGet package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Check release version
+        shell: bash
+        run: |
+          version="$(dotnet msbuild src/Fsdb/Fsdb.fsproj -getProperty:Version)"
+          test "$GITHUB_REF_NAME" = "v$version" || {
+            echo "Tag $GITHUB_REF_NAME does not match package version $version" >&2
+            exit 1
+          }
+
+      - name: Build and test
+        run: |
+          dotnet build Fsdb.slnx -c Release --nologo
+          dotnet run --project tests/Fsdb.Tests -c Release --no-build -- --no-spinner
+
+      - name: Verify package consumer
+        run: bash scripts/verify-package.sh
+
+      - name: Pack release artifacts
+        run: dotnet pack src/Fsdb/Fsdb.fsproj -c Release --nologo -o artifacts/packages
+
+      - name: NuGet login
+        uses: NuGet/login@v1
+        id: nuget
+        with:
+          user: helgesverre
+
+      - name: Publish package and symbols
+        env:
+          NUGET_API_KEY: ${{ steps.nuget.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push "artifacts/packages/Fsdb.${GITHUB_REF_NAME#v}.nupkg" --source https://api.nuget.org/v3/index.json

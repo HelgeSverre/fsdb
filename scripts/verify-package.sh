@@ -13,16 +13,19 @@ if [ "$version" != "$cli_version" ]; then
 fi
 dotnet pack "$repo_root/src/Fsdb/Fsdb.fsproj" -c Release --nologo -o "$scratch/packages"
 package="$scratch/packages/Fsdb.$version.nupkg"
+package_entries="$(unzip -Z1 "$package")"
+nuspec="$(unzip -p "$package" Fsdb.nuspec)"
+symbol_entries="$(unzip -Z1 "$scratch/packages/Fsdb.$version.snupkg")"
 
-if unzip -Z1 "$package" | grep -Eq '(^examples/|Fsdb\.Cli|Program\.fs)'; then
+if grep -Eq '(^examples/|Fsdb\.Cli|Program\.fs)' <<< "$package_entries"; then
     echo "Library package contains an example or CLI entry point" >&2
     exit 1
 fi
-if unzip -p "$package" Fsdb.nuspec | grep -q 'dependency id="Argu"'; then
+if grep -q 'dependency id="Argu"' <<< "$nuspec"; then
     echo "Library package depends on the CLI argument parser" >&2
     exit 1
 fi
-if ! unzip -Z1 "$scratch/packages/Fsdb.$version.snupkg" | grep -q 'lib/net10.0/Fsdb.pdb'; then
+if ! grep -Fxq 'lib/net10.0/Fsdb.pdb' <<< "$symbol_entries"; then
     echo "Symbol package is missing Fsdb.pdb" >&2
     exit 1
 fi

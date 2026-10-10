@@ -22,8 +22,22 @@ before publication. The package should contain the library DLL, not the CLI
 entry point or its Argu dependency. The symbol package should contain
 `Fsdb.pdb`. The version in `Fsdb.fsproj` and `Fsdb.Cli.fsproj` should match.
 
-After reviewing and committing the exact release source, rebuild the package
-from that commit. Publishing to nuget.org and pushing the first `v0.1.0-preview.1`
-tag are separate release actions. The [NuGet CLI publish guide](https://learn.microsoft.com/en-us/nuget/quickstart/create-and-publish-a-package-using-the-dotnet-cli)
-describes account and API-key setup. Do not reuse a package version after it
-has been published; advance the preview number for later candidates.
+Releases use [NuGet trusted publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing).
+The NuGet account owner must register a GitHub Actions trusted-publishing policy:
+
+- Owner: `helgesverre`
+- Repository owner: `HelgeSverre`
+- Repository: `fsdb`
+- Workflow file: `publish-nuget.yml`
+- Environment: leave empty
+- Scope: push new packages and package versions, restricted to `Fsdb`
+
+After reviewing and committing the exact release source, push the tag matching
+the project version, starting with `v0.1.0-preview.1`. The tag runs
+`.github/workflows/publish-nuget.yml`, which checks the version, builds and tests,
+verifies package consumption, and packs from that commit. It then exchanges a
+GitHub OIDC token for a short-lived NuGet key and pushes the package and symbol
+package. No long-lived NuGet key is stored in the repository or GitHub Actions.
+
+NuGet package versions cannot be reused after publication. Advance the preview
+number in the library, CLI, and package consumer before tagging a later release.
