@@ -24756,19 +24756,30 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                         |> Option.map (fun table -> table, tableRef)
                     | _ -> None)
 
-            let ambiguousBareColumn predicate =
+            let columnBindingError predicate =
                 match joins with
-                | [ join ] when join.Kind = InnerJoin && join.Using.IsEmpty ->
-                    Expression.collect (function
+                | [ join ] when join.Kind = InnerJoin && join.Using.IsEmpty && tables.Length = 2 ->
+                    let sourceNames = tables |> List.map (snd >> tableQualifier)
+                    let distinctSources = sourceNames |> List.distinctBy (fun name -> name.ToLowerInvariant()) |> List.length = 2
+                    let unknown name = Some(1054, sprintf "Unknown column '%s' in 'where clause'" name)
+
+                    let resolve = function
                         | Col name ->
-                            let owners = tables |> List.filter (fun (table, _) -> tableHasColumn table name)
-                            if owners.Length > 1 then Some name else None
-                        | _ -> None) predicate
-                    |> List.tryHead
+                            match tables |> List.filter (fun (table, _) -> tableHasColumn table name) with
+                            | [] -> unknown name
+                            | [ _ ] -> None
+                            | _ -> Some(1052, sprintf "Column '%s' in where clause is ambiguous" name)
+                        | QualifiedCol(owner, name) ->
+                            match tables |> List.filter (fun (_, tableRef) -> equalsIgnoreCase (tableQualifier tableRef) owner) with
+                            | [ table, _ ] when tableHasColumn table name -> None
+                            | _ -> unknown (owner + "." + name)
+                        | _ -> None
+
+                    if distinctSources then Expression.collect resolve predicate |> List.tryHead else None
                 | _ -> None
 
-            match whereExpr |> Option.bind ambiguousBareColumn with
-            | Some name -> Error(1052, sprintf "Column '%s' in where clause is ambiguous" name)
+            match whereExpr |> Option.bind columnBindingError with
+            | Some error -> Error error
             | None ->
                 match whereExpr with
                 | Some predicate when tables |> List.exists (fun (table, tableRef) -> usesKey table tableRef predicate) -> Ok()

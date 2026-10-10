@@ -3593,6 +3593,11 @@ let tests =
               | Err(1052, _) -> ()
               | other -> failtestf "expected ambiguity even with no target rows, got %A" other
 
+              for predicate in [ "bogus=0"; "l.bogus=0"; "z.flag=0"; "t.v=0 AND bogus=0" ] do
+                  match handle session ("UPDATE t JOIN l ON l.id=t.id SET t.v=1 WHERE " + predicate) |> snd with
+                  | Err(1054, _) -> ()
+                  | other -> failtestf "expected an unknown-column error for %s, got %A" predicate other
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

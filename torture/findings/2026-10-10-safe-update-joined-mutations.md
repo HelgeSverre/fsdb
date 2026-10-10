@@ -28,6 +28,11 @@ the lookup table are resolved to that source; an ambiguous bare column still
 returns MySQL's 1052 (`23000`) before safe-update evaluation, even when the
 target has no rows.
 
+For the same two-table inner join, unknown bare or qualified `WHERE` columns
+return MySQL's 1054 (`42S22`) before safe-update error 1175, including when
+the target is empty. The validator shares this small binding check with its
+ambiguity handling.
+
 Multi-target writes, broader filter shapes, and other optimizer-dependent
 source choices are still outside this rule. The
 `sql_safe_updates` Expecto regression and `safe-update-mode` differential

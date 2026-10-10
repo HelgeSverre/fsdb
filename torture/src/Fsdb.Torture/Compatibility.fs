@@ -8323,6 +8323,19 @@ module ContractCatalog =
                                 "ALTER TABLE safe_update_probe ADD COLUMN flag INT DEFAULT 0"
                                 "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE flag=0"
                                 "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+              "bare-unknown", Some(7, 1054, "42S22"),
+                  bareReset @ [ "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE bogus=0"
+                                "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+              "qualified-unknown", Some(7, 1054, "42S22"),
+                  bareReset @ [ "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.bogus=0"
+                                "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+              "unknown-qualifier", Some(7, 1054, "42S22"),
+                  bareReset @ [ "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE z.flag=0"
+                                "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+              "bare-unknown-empty", Some(8, 1054, "42S22"),
+                  bareReset @ [ "DELETE FROM safe_update_probe WHERE id IN (1,2)"
+                                "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE bogus=0"
+                                "SELECT id,value FROM safe_update_probe ORDER BY id" ]
               mutationCase "straight-join-target-delete" true "DELETE p FROM safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               mutationCase "joined-lookup-delete" true "DELETE l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               "joined-large-lookup", Some(8, 1175, "HY000"),
