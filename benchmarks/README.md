@@ -105,6 +105,11 @@ primary-key hits. Build `src/Fsdb/Fsdb.fsproj` in Release before running it;
 `FSDB_PROFILE_ITERATIONS`, `FSDB_PROFILE_TRIALS`, and
 `FSDB_PROFILE_ACTION` can narrow a run.
 
+`scripts/functional-bound-pipeline.fsx` compares a constant-function bound
+with a literal bound and an identically seeded scan twin. Its
+[profile](results/2026-10-10-functional-bound-pipeline.md) asserts the access
+paths before measuring pre-parsed execution and text-session handling.
+
 ### Focused window snapshot
 
 `scripts/window-snapshot.fsx` measures grouped text SUM, prefix and sliding
