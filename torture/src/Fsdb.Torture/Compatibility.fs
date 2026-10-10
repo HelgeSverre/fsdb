@@ -8383,6 +8383,12 @@ module ContractCatalog =
               chainCase "on-lookup-where-lookup" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id AND l.value=0 SET p.value=1 WHERE l.value=0"
               chainCase "on-only-chain" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id JOIN safe_update_middle m ON m.id=l.id AND m.value=0 SET p.value=1"
               chainCase "on-chain-where-target" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id JOIN safe_update_middle m ON m.id=l.id AND m.value=0 SET p.value=1 WHERE p.value=0"
+              chainCase "on-where-true" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id AND l.value=0 SET p.value=1 WHERE 1=1"
+              chainCase "on-where-false" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id AND l.value=0 SET p.value=1 WHERE 1=0"
+              chainCase "on-where-null" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id AND l.value=0 SET p.value=1 WHERE NULL"
+              chainCase "on-where-true-target" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id AND l.value=0 SET p.value=1 WHERE 1=1 AND p.value=0"
+              mutationCase "constant-false-no-key" false "UPDATE safe_update_probe SET value=1 WHERE 1=0"
+              mutationCase "constant-true-no-key" true "UPDATE safe_update_probe SET value=1 WHERE 1=1"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"

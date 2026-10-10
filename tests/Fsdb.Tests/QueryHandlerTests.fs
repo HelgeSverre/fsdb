@@ -3664,6 +3664,25 @@ let tests =
                   let _, result = handle session sql
                   Expect.equal result expected sql
 
+          testCase "sql_safe_updates folds constant WHERE conditions"
+          <| fun _ ->
+              let unsafeError = Err(1175, "You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column. ")
+              for sql, expected in
+                  [ "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE 1=1", Affected 2UL
+                    "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE 1=0", Affected 0UL
+                    "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE NULL", Affected 0UL
+                    "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE 1=1 AND t.v=0", unsafeError
+                    "UPDATE t SET v=1 WHERE 1=0", Affected 0UL
+                    "UPDATE t SET v=1 WHERE 1=1", unsafeError ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "CREATE TABLE l(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "INSERT INTO t VALUES(1,0),(2,0)"
+                  let session, _ = handle session "INSERT INTO l VALUES(1,0),(2,0)"
+                  let session, _ = handle session "SET sql_safe_updates=ON"
+                  let _, result = handle session sql
+                  Expect.equal result expected sql
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

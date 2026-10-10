@@ -75,3 +75,11 @@ checks `ON` filters when `WHERE` is absent and keeps the existing `WHERE`
 filter rule otherwise. The pinned contract passed all 578 safe-update steps
 at `torture/artifacts/runs/20261010T093429487-49404/contracts`; the complete
 run still retained only the nine identifier-case-policy differences.
+For an `ON`-filtered lookup, MySQL treats an audited constant-true `WHERE`
+like no `WHERE`; constant false or NULL produces a safe no-op. A plain
+constant-true `WHERE` without a key still returns 1175, and adding a
+target-only condition to the true constant does not make the joined write
+safe. Fsdb now uses its safe planner constant evaluator for these conditions.
+The pinned contract passed all 644 safe-update steps at
+`torture/artifacts/runs/20261010T094036048-50439/contracts`; the complete run
+again retained only the nine identifier-case-policy differences.
