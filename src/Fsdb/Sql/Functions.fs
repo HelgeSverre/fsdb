@@ -5292,17 +5292,25 @@ let private isIpv4MappedFn =
 
 let private countAgg: Aggregate = fun vs -> VInt(int64 (List.length vs))
 
-let internal numericAggregateValue = function
+type private NumericAggregateWarnings = ReportWarnings | SuppressWarnings
+
+let private numericAggregateValueWith warnings = function
     | VBinaryLiteral bytes -> VUInt(Value.binaryLiteralNumber bytes)
     | VBit(_, value) -> VUInt value
     | (VNull | VInt _ | VUInt _ | VDecimal _ | VDouble _) as value -> value
     | (VString _ | VBytes _) as value ->
         let text = toText value |> Option.defaultValue ""
         let number, truncated = Value.coerceLeadingDouble text
-        if truncated then
+        if truncated && warnings = ReportWarnings then
             Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
         VDouble number
     | value -> VDouble(toDouble value)
+
+let internal numericAggregateValue = numericAggregateValueWith ReportWarnings
+
+/// DISTINCT numeric aggregates compare converted values but omit their
+/// conversion warnings; argument-expression warnings still reach the caller.
+let internal numericAggregateValueWithoutWarnings = numericAggregateValueWith SuppressWarnings
 
 /// MySQL promotes SUM over exact integer inputs to DECIMAL rather than
 /// preserving the integer runtime type. Besides avoiding BIGINT overflow,

@@ -14363,8 +14363,9 @@ and private evalAggregateUsing<'row>
                     let numericValue = if foldsNumerically then enumNumericOperand ctx innerExpr v else v
                     if isNumericBuiltin then
                         // MySQL's DISTINCT accumulator suppresses conversion diagnostics.
-                        let convert () = Functions.numericAggregateValue numericValue
-                        let value = if distinct then Diagnostics.suppress convert else convert ()
+                        let value =
+                            if distinct then Functions.numericAggregateValueWithoutWarnings numericValue
+                            else Functions.numericAggregateValue numericValue
                         value, value
                     else
                         numericValue, collationKeyOf ctx innerExpr v))

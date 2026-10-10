@@ -788,6 +788,18 @@ milliseconds respectively, so row preparation and aggregate evaluation still
 warrant profiling. The native MySQL 8.4.11 contract lane passed all 123 cases
 and 16,517 steps with zero differences after this change.
 
+The next profile found that DISTINCT numeric aggregates opened a diagnostic
+suppression scope for every converted value. A quiet conversion path preserves
+expression warnings while omitting only numeric-conversion warnings. In the
+[same-host baseline](benchmarks/results/2026-10-10-numeric-distinct-quiet-baseline.md)
+and [changed run](benchmarks/results/2026-10-10-numeric-distinct-quiet-fixed.md),
+`SUM(DISTINCT CAST(age AS CHAR))` falls from about 31 to 15 milliseconds,
+and the combined text-numeric query falls from about 54 to 38 milliseconds.
+The ordinary cast SUM and MySQL controls remain stable; DISTINCT input
+materialization and non-DISTINCT aggregate evaluation remain scale gaps. The
+native MySQL 8.4.11 contract lane again passed all 123 cases and 16,517 steps
+with zero differences.
+
 The [window snapshot](benchmarks/results/01e61930-windows.md) identifies offset
 RANGE boundary lookup and stored-function window inputs as profiling candidates.
 Smaller-size controls exceed the repeatability threshold under competing host
