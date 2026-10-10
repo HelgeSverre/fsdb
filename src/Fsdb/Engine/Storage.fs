@@ -2897,10 +2897,26 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
     else
         Some(encodeEqualityKey columns indices row)
 
+let private reportIndexExpressionIssue indexName row code message =
+    let shouldReport =
+        match row, reportedIndexExpressions.Value with
+        | Some values, Some reports ->
+            match reports.TryGetValue values with
+            | true, indexes -> indexes.Add indexName
+            | false, _ ->
+                reports.[values] <- HashSet([ indexName ])
+                true
+        | _ -> true
+
+    match indexExpressionDiagnostics.Value with
+    | IndexExpressionDiagnostics.Fail -> raise (IndexExpressionError(code, message))
+    | IndexExpressionDiagnostics.Warn when shouldReport -> Diagnostics.warning code message
+    | _ -> ()
+
 let private projectIndexValue indexName row (column: ColumnDef) prefixLength transform value =
     let value =
         match transform, column.NumericDisplay with
-        | (Some FirstByte | Some FirstCharacterCode), Some _ ->
+        | (Some FirstByte | Some FirstCharacterCode | Some DecodedHex), Some _ ->
             ColumnDisplay.renderStoredColumnValue column value
             |> Option.map VString
             |> Option.defaultValue VNull
@@ -2923,25 +2939,23 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
 
             raise (IndexExpressionError(1690, sprintf "BIGINT value is out of range in '%s'" expression))
 
+    let decodesHex =
+        match transform with
+        | Some DecodedHex -> true
+        | Some(Expression expression) ->
+            FunctionalIndex.tryPhysicalExpression expression
+            |> Option.exists (fun physical -> physical.Calls |> List.exists (snd >> (=) DecodedHex))
+        | _ -> false
+
+    if decodesHex && value <> VNull && transformed = VNull then
+        let message = sprintf "Incorrect string value: '%s' for function unhex" (SqlText.quoteIdentifier column.Name)
+        reportIndexExpressionIssue indexName row 1411 message
+
     truncated
     |> Option.iter (fun _ ->
         let rowNumber = Diagnostics.currentRowNumber ()
-        let shouldReport =
-            match row, reportedIndexExpressions.Value with
-            | Some values, Some reports ->
-                match reports.TryGetValue values with
-                | true, indexes -> indexes.Add indexName
-                | false, _ ->
-                    reports.[values] <- HashSet([ indexName ])
-                    true
-            | _ -> true
-
         let message = sprintf "Data truncated for functional index '%s' at row %d" indexName rowNumber
-
-        match indexExpressionDiagnostics.Value with
-        | IndexExpressionDiagnostics.Fail -> raise (IndexExpressionError(3751, message))
-        | IndexExpressionDiagnostics.Warn when shouldReport -> Diagnostics.warning 3751 message
-        | _ -> ())
+        reportIndexExpressionIssue indexName row 3751 message)
 
     match prefixLength, transformed with
     | Some length, VString text -> VString(truncateRunes length text |> Option.defaultValue text)

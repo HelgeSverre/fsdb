@@ -407,6 +407,7 @@ and IndexTransform =
     | BitLength
     | FirstByte
     | FirstCharacterCode
+    | DecodedHex
     | AbsoluteValue
     | IsNullResult
     | Expression of Expr

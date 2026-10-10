@@ -8609,6 +8609,79 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an ABS override reports a scan"
                     Expect.equal overriddenPlan.Key None "an ABS override does not claim the functional index"
 
+                testCase "UNHEX functional keys index bytes and validate writes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE decoded_keys(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_unhex ((UNHEX(value))))" |> ignore
+                    runDefault store "INSERT INTO decoded_keys VALUES(1,'41'),(2,'4'),(3,NULL),(4,'61')" |> ignore
+
+                    Expect.equal
+                        (runDefault store "SELECT id,HEX(UNHEX(value)) FROM decoded_keys WHERE UNHEX(value)=X'41'")
+                        (ResultSet([ "id"; "HEX(UNHEX(value))" ], [ [ Some "1"; Some "41" ] ]))
+                        "decoded byte values support equality"
+
+                    let plan = runDefault store "EXPLAIN SELECT id FROM decoded_keys WHERE UNHEX(value)=X'41'" |> explainRow
+                    Expect.equal plan.Key (Some "ix_unhex") "decoded byte equality uses its key"
+
+                    match runDefault store "INSERT INTO decoded_keys VALUES(5,'GG')" with
+                    | Err(1411, _) -> ()
+                    | other -> failtestf "expected invalid indexed hex to reject strict writes with 1411, got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT COUNT(*) FROM decoded_keys")
+                        (ResultSet([ "COUNT(*)" ], [ [ Some "4" ] ]))
+                        "invalid strict writes publish no row"
+
+                    runDefault store "CREATE TABLE existing_hex(value VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO existing_hex VALUES('GG')" |> ignore
+
+                    match runDefault store "CREATE INDEX ix_unhex ON existing_hex ((UNHEX(value)))" with
+                    | Err(1411, _) -> ()
+                    | other -> failtestf "expected invalid existing hex to reject index creation with 1411, got %A" other
+
+                    runDefault store "CREATE TABLE trimmed_hex(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_unhex ((UNHEX(TRIM(value)))))" |> ignore
+                    runDefault store "INSERT INTO trimmed_hex VALUES(1,' 41 '),(2,'61')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM trimmed_hex WHERE UNHEX(TRIM(value))=X'41'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "a composed decoder keeps its byte key"
+
+                    let composedPlan = runDefault store "EXPLAIN SELECT id FROM trimmed_hex WHERE UNHEX(TRIM(value))=X'41'" |> explainRow
+                    Expect.equal composedPlan.Key (Some "ix_unhex") "composed decoded bytes use their key"
+
+                    let overridden = builtins |> registerScalar "UNHEX" (fun _ -> VBytes [| 0x99uy |])
+                    let overridePlan = run store overridden "EXPLAIN SELECT id FROM decoded_keys WHERE UNHEX(value)=X'99'" |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden decoder cannot claim its stored key"
+
+                    let permissive = newStore ()
+                    permissive.ExecutionSettings <-
+                        { permissive.ExecutionSettings with
+                            SqlMode = { permissive.ExecutionSettings.SqlMode with Strict = false } }
+
+                    runDefault permissive "CREATE TABLE decoded_keys(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_unhex ((UNHEX(value))))" |> ignore
+                    Expect.equal
+                        (runDefault permissive "INSERT INTO decoded_keys VALUES(1,'GG')")
+                        (Affected 1UL)
+                        "non-strict writes keep invalid source text"
+                    Expect.equal
+                        (runDefault permissive "SELECT id FROM decoded_keys WHERE UNHEX(value) IS NULL")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the invalid decoded result indexes as NULL"
+
+                    runDefault store "CREATE TABLE padded_hex(id INT PRIMARY KEY, value INT(4) ZEROFILL, KEY ix_unhex ((UNHEX(value))))" |> ignore
+                    runDefault store "INSERT INTO padded_hex VALUES(1,12),(2,1)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id,HEX(UNHEX(value)) FROM padded_hex WHERE UNHEX(value)=X'0012'")
+                        (ResultSet([ "id"; "HEX(UNHEX(value))" ], [ [ Some "1"; Some "0012" ] ]))
+                        "zero-filled numeric text supplies every decoded byte"
+
+                    runDefault store "CREATE TABLE unicode_hex(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_unhex ((UNHEX(value))))" |> ignore
+                    runDefault store "INSERT INTO unicode_hex VALUES(1,'C3A9')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM unicode_hex WHERE UNHEX(value)='é'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "a decoded value still compares correctly with Unicode text"
+
                 testCase "ORD functional keys retain character bytes and source charset"
                 <| fun _ ->
                     let store = newStore ()

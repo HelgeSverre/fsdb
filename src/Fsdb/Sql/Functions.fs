@@ -3679,20 +3679,6 @@ let internal hexFn: Scalar =
             | _ -> VString((value |> roundNumeric |> integerArgument).ToString "X")
     | _ -> VNull
 
-let private unhexFn: Scalar =
-    function
-    | [ v ] when not (anyNull [ v ]) ->
-        let s = req v
-
-        if not (s |> Seq.forall Uri.IsHexDigit) then
-            VNull
-        else
-            let digits = if s.Length % 2 = 0 then s else "0" + s
-
-            [| for i in 0 .. 2 .. digits.Length - 1 -> Convert.ToByte(digits.Substring(i, 2), 16) |]
-            |> VBytes
-    | _ -> VNull
-
 type private AesCipherMode =
     | AesEcb
     | AesCbc
@@ -6520,6 +6506,13 @@ let private registerFunctionalEncodedText transform registry =
         (fun registry name -> registerEncodedTextScalar name firstArgument (exactArity name 1 (functionalIndexScalar transform)) registry)
         registry
 
+let private registerFunctionalBinaryString transform registry =
+    FunctionalIndex.names transform
+    |> List.fold
+        (fun registry name ->
+            registerStringScalar name firstArgument binaryResult (exactArity name 1 (functionalIndexScalar transform)) registry)
+        registry
+
 let private registerFunctionalScalar transform registry =
     FunctionalIndex.names transform
     |> List.fold (fun registry name -> registerScalar name (exactArity name 1 (functionalIndexScalar transform)) registry) registry
@@ -6623,7 +6616,7 @@ let private registerStringBuiltins registry =
     |> registerFunctionalEncodedText FirstCharacterCode
     |> registerScalarResult "CHAR" binaryResult charFn
     |> registerByteScalar "HEX" firstArgument (exactArity "HEX" 1 hexFn)
-    |> registerStringScalar "UNHEX" firstArgument binaryResult (exactArity "UNHEX" 1 unhexFn)
+    |> registerFunctionalBinaryString DecodedHex
     |> registerStringScalar "AES_ENCRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesEncrypt "aes-128-ecb")
     |> registerStringScalar "AES_DECRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesDecrypt "aes-128-ecb")
     |> registerByteTextScalar "MD5" firstArgument (exactArity "MD5" 1 md5Fn)

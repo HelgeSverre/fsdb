@@ -443,8 +443,8 @@ different access pattern:
 
 - **Functional keys.** Composite indexes may contain `LOWER`/`LCASE`,
   `UPPER`/`UCASE`, `TRIM`, `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`,
-  `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, `ASCII`, `ORD`, `ISNULL`, or
-  numeric/text/binary `ABS`, `SIGN`, `FLOOR`, and `CEIL`/`CEILING` parts.
+  `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, `ASCII`, `ORD`, `UNHEX`, `ISNULL`,
+  or numeric/text/binary `ABS`, `SIGN`, `FLOOR`, and `CEIL`/`CEILING` parts.
   Compatible unary parts can be composed, such as `UPPER(TRIM(name))` or
   `BIT_LENGTH(REVERSE(name))`. These keys participate in equality,
   uniqueness, ordering, grouping, mutation, recovery, and correlated probes.

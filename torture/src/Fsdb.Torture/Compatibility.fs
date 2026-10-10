@@ -4841,6 +4841,39 @@ module ContractCatalog =
                "DROP TABLE ord_numeric_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private unhexFunctionalIndex =
+        { Name = "unhex-functional-index"
+          Setup =
+            [| "CREATE TABLE unhex_probe(id INT PRIMARY KEY,v VARCHAR(20),KEY ix_unhex ((UNHEX(v))))"
+               "INSERT INTO unhex_probe VALUES(1,'41'),(2,'4'),(3,NULL),(4,'61')"
+               "CREATE TABLE unhex_invalid_probe(v VARCHAR(20))"
+               "INSERT INTO unhex_invalid_probe VALUES('GG')"
+               "CREATE TABLE unhex_numeric_probe(id INT PRIMARY KEY,v INT(4) ZEROFILL,KEY ix_unhex ((UNHEX(v))))"
+               "INSERT INTO unhex_numeric_probe VALUES(1,12),(2,1)"
+               "CREATE TABLE unhex_unicode_probe(id INT PRIMARY KEY,v VARCHAR(20),KEY ix_unhex ((UNHEX(v))))"
+               "INSERT INTO unhex_unicode_probe VALUES(1,'C3A9')" |]
+          Steps =
+            [| Contract.query "decoded-values" "SELECT id,HEX(UNHEX(v)) FROM unhex_probe ORDER BY id"
+               Contract.query "decoded-key" "SELECT id FROM unhex_probe WHERE UNHEX(v)=X'41' ORDER BY id"
+               Contract.query "decoded-null" "SELECT id FROM unhex_probe WHERE UNHEX(v) IS NULL ORDER BY id"
+               Contract.query "padded-numeric-key" "SELECT id,HEX(UNHEX(v)) FROM unhex_numeric_probe WHERE UNHEX(v)=X'0012' ORDER BY id"
+               Contract.query "unicode-comparison" "SELECT id FROM unhex_unicode_probe WHERE UNHEX(v)='é'"
+               Contract.execute "invalid-strict-insert" "INSERT INTO unhex_probe VALUES(5,'GG')" |> Contract.fails 1411 "HY000"
+               Contract.query "strict-insert-atomic" "SELECT COUNT(*) FROM unhex_probe"
+               Contract.execute "invalid-strict-index" "CREATE INDEX ix_unhex ON unhex_invalid_probe ((UNHEX(v)))" |> Contract.fails 1411 "HY000"
+               Contract.query "failed-index-absent" "SHOW INDEX FROM unhex_invalid_probe"
+               Contract.execute "non-strict-mode" "SET sql_mode='NO_ENGINE_SUBSTITUTION'"
+               Contract.execute "invalid-non-strict-insert" "INSERT INTO unhex_probe VALUES(5,'GG')"
+               Contract.query "invalid-non-strict-warning" "SHOW WARNINGS"
+               Contract.query "invalid-null-key" "SELECT id FROM unhex_probe WHERE UNHEX(v) IS NULL ORDER BY id"
+               Contract.execute "restore-mode" "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" |]
+          Cleanup =
+            [| "DROP TABLE unhex_probe"
+               "DROP TABLE unhex_invalid_probe"
+               "DROP TABLE unhex_numeric_probe"
+               "DROP TABLE unhex_unicode_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private signFunctionalIndex =
         { Name = "sign-functional-index"
           Setup =
@@ -9232,6 +9265,7 @@ module ContractCatalog =
            isNullFunctionalIndex
            asciiFunctionalIndex
            ordFunctionalIndex
+           unhexFunctionalIndex
            constantNullFallbackIndexes
            tableStatisticsCache
            missingTableDiagnostics

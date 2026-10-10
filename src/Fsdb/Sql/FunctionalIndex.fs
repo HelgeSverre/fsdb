@@ -41,6 +41,9 @@ let private definitions =
       { CanonicalName = "ORD"
         Aliases = []
         Transform = FirstCharacterCode }
+      { CanonicalName = "UNHEX"
+        Aliases = []
+        Transform = DecodedHex }
       { CanonicalName = "ABS"
         Aliases = []
         Transform = AbsoluteValue }
@@ -142,6 +145,7 @@ let rec hasTextResult = function
     | BitLength
     | FirstByte
     | FirstCharacterCode
+    | DecodedHex
     | AbsoluteValue
     | IsNullResult
     | Signum
@@ -201,7 +205,8 @@ let private supportsSingleTransform transform columnType =
     | ByteLength
     | BitLength
     | FirstByte
-    | FirstCharacterCode ->
+    | FirstCharacterCode
+    | DecodedHex ->
         match columnType with
         | TGeometry _
         | TVector _ -> false
@@ -237,9 +242,11 @@ let supportsColumnType transform columnType =
             let transforms = physical.Calls |> List.map snd
 
             match transforms, List.rev transforms with
-            | first :: _, textToInteger :: inner when isTextToIntegerTransform textToInteger && List.forall isTextTransform inner ->
+            | first :: _, textResult :: inner
+                when (isTextToIntegerTransform textResult || textResult = DecodedHex)
+                     && List.forall isTextTransform inner ->
                 if inner.IsEmpty then
-                    supportsSingleTransform textToInteger columnType
+                    supportsSingleTransform textResult columnType
                 else
                     supportsSingleTransform first columnType
             | first :: _, _ when List.forall isTextTransform transforms -> supportsSingleTransform first columnType
@@ -358,6 +365,14 @@ let private tryRoundedProbe columnType value =
         Some(VDouble number)
     | _ -> None
 
+let private tryBinaryProbe = function
+    | VBytes bytes
+    | VBinaryLiteral bytes -> Some(VBytes bytes)
+    | VEncodedString(_, bytes) -> Some(VBytes bytes)
+    | VString text when text |> Seq.forall (fun character -> character <= '\u007f') ->
+        Some(VBytes(Text.Encoding.ASCII.GetBytes text))
+    | _ -> None
+
 let rec tryNormalizeProbe columnType transform normalizeStored value =
     match transform, value with
     | Some _, VNull -> Some VNull
@@ -387,6 +402,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some FirstCharacterCode, _
     | Some IsNullResult, _
     | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
+    | Some DecodedHex, _ -> tryBinaryProbe value
     | Some(Expression expression), _ ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical ->
@@ -394,6 +410,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
 
             match List.tryLast transforms with
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
+            | Some DecodedHex -> tryBinaryProbe value
             | Some _ when List.contains Signum transforms -> tryExactInt64 value |> Option.map VInt
             | Some AbsoluteValue when List.forall ((=) AbsoluteValue) transforms ->
                 tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
@@ -456,6 +473,16 @@ let rec projectValueWithStatus encodeText transform value =
 
         firstByteValue bytes, None
     | Some FirstCharacterCode, value -> firstCharacterCode encodeText value, None
+    | Some DecodedHex, value ->
+        let text = value |> toText |> Option.defaultValue ""
+
+        if text |> Seq.forall Uri.IsHexDigit |> not then
+            VNull, None
+        else
+            let digits = if text.Length % 2 = 0 then text else "0" + text
+            [| for index in 0 .. 2 .. digits.Length - 1 -> Convert.ToByte(digits.Substring(index, 2), 16) |]
+            |> VBytes,
+            None
     | Some Floored, value -> roundFunctionalValue Math.Floor Math.Floor value
     | Some Ceiled, value -> roundFunctionalValue Math.Ceiling Math.Ceiling value
     | Some Signum, ((VString _ | VBytes _) as value) ->
