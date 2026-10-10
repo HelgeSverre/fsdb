@@ -13479,6 +13479,31 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
                     | other -> failtestf "unexpected hinted query result: %A" other
 
+                testCase "table index hints control functional lookup access"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE hint_access(id INT PRIMARY KEY,v INT,KEY ix_sqrt ((SQRT(v))))" |> ignore
+                    runDefault store "INSERT INTO hint_access VALUES(1,4),(2,9),(3,16)" |> ignore
+                    let explain source =
+                        runDefault store ("EXPLAIN SELECT id FROM hint_access " + source + " WHERE SQRT(v)=SQRT(9)")
+                        |> explainRow
+                    Expect.equal (explain "").Key (Some "ix_sqrt") "unhinted lookup uses the functional key"
+                    for hint in [ "IGNORE INDEX(ix_sqrt)"; "USE INDEX()" ] do
+                        let plan = explain hint
+                        Expect.equal plan.Key None (sprintf "%s excludes the functional key" hint)
+                        Expect.equal plan.AccessType (Some "ALL") (sprintf "%s scans the table" hint)
+                    runDefault store "CREATE TABLE direct_hint_access(id INT PRIMARY KEY,v INT,KEY ix_v(v))" |> ignore
+                    runDefault store "INSERT INTO direct_hint_access VALUES(1,4),(2,9),(3,16)" |> ignore
+                    for predicate in [ "v=9"; "v IN (9,16)"; "v BETWEEN 9 AND 16" ] do
+                        let plan =
+                            runDefault store (sprintf "EXPLAIN SELECT id FROM direct_hint_access IGNORE INDEX(ix_v) WHERE %s" predicate)
+                            |> explainRow
+                        Expect.equal plan.Key None (sprintf "IGNORE INDEX excludes %s access" predicate)
+                    let forced =
+                        runDefault store "EXPLAIN SELECT id FROM direct_hint_access FORCE INDEX(ix_v) WHERE v>=4"
+                        |> explainRow
+                    Expect.equal forced.Key (Some "ix_v") "FORCE INDEX keeps a broad range on the named key"
+
                 testCase "integer writes reject overflow in strict mode and clamp it otherwise"
                 <| fun _ ->
                     let store = newStore ()

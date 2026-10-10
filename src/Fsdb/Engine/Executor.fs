@@ -13420,7 +13420,25 @@ and private directPhysicalAccessCandidatesInTableWith
       |> Option.map RangeAccess ]
     |> List.choose id
 
+and private indexHintsFor scope (tref: TableRef) =
+    tref.IndexHints
+    |> List.filter (fun hint -> hint.Scope |> Option.forall ((=) scope))
+
+and private indexAllowedBy (hints: TableIndexHint list) name =
+    let included =
+        hints |> List.filter (fun hint -> hint.Kind = UseIndex || hint.Kind = ForceIndex)
+    let named (hint: TableIndexHint) = hint.Indexes |> List.exists (equalsIgnoreCase name)
+    (included.IsEmpty || included |> List.exists named)
+    && not (hints |> List.exists (fun hint -> hint.Kind = IgnoreIndex && named hint))
+
 and private physicalAccessCandidatesInTableWith policy store registry table tref whereExpr =
+    let joinHints = indexHintsFor IndexJoin tref
+    let policy =
+        if policy = CostedRead
+           && (joinHints |> List.exists (fun hint -> hint.Kind = ForceIndex)) then
+            CandidateNarrowing
+        else
+            policy
     let isKnownColumn expression =
         storedIndexedColumnFor registry tref expression
         |> Option.exists (fun (name, transform) ->
@@ -13433,7 +13451,10 @@ and private physicalAccessCandidatesInTableWith policy store registry table tref
        || hasTrueLiteralDisjunct canSkipComparedDivision whereExpr then
         []
     else
-        let direct = directPhysicalAccessCandidatesInTableWith policy store registry table tref whereExpr
+        let allowed access = physicalAccessKeyNames access |> List.forall (indexAllowedBy joinHints)
+        let direct =
+            directPhysicalAccessCandidatesInTableWith policy store registry table tref whereExpr
+            |> List.filter allowed
         if direct |> List.exists (physicalAccessCandidateCount >> (=) 0) then
             direct
         else
@@ -13442,7 +13463,8 @@ and private physicalAccessCandidatesInTableWith policy store registry table tref
                  |> Option.map IndexMergeAccess
                  tryIndexIntersectionAccessInTableWith policy store registry table tref whereExpr
                  |> Option.map IndexMergeAccess ]
-               |> List.choose id)
+               |> List.choose id
+               |> List.filter allowed)
 
 and private choosePhysicalAccess candidates =
     match candidates with
