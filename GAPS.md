@@ -730,6 +730,11 @@ routines, events, and administrative probes.
 
 ## 15. Differential-testing and performance tails
 
+The [line-interpolation wire snapshot](benchmarks/results/2026-10-10-line-interpolation.md)
+compares the recent spatial functions with a simple-query control on native
+fsdb and MySQL 8.4.11. Fixed overhead dominates the short cases, but the
+control's variation prevents a precise relative-performance claim.
+
 The [BIT/binary foreign-key update snapshot](benchmarks/results/2026-10-09-foreign-key-bit-binary.md)
 adds a same-type control for the recently corrected byte-key path. Its short
 run is too noisy to identify a lookup penalty; a durability-matched scaling
