@@ -5025,6 +5025,24 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE integer_function_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private numericFunctionalBounds =
+        { Name = "numeric-functional-bounds"
+          Setup =
+            [| "CREATE TABLE numeric_function_probe(id INT PRIMARY KEY,v DECIMAL(8,2),KEY ix_floor ((FLOOR(v))),KEY ix_round ((ROUND(v))),KEY ix_sqrt ((SQRT(v))),KEY ix_sin ((SIN(v))),KEY ix_log ((LOG(v))))"
+               "INSERT INTO numeric_function_probe VALUES(1,4),(2,9),(3,16)" |]
+          Steps =
+            [| Contract.query "floor" "SELECT id FROM numeric_function_probe WHERE FLOOR(v)=FLOOR(4.5) ORDER BY id"
+               Contract.query "round" "SELECT id FROM numeric_function_probe WHERE ROUND(v)=ROUND(4.4) ORDER BY id"
+               Contract.query "sqrt" "SELECT id FROM numeric_function_probe WHERE SQRT(v)=SQRT(4) ORDER BY id"
+               Contract.query "sine" "SELECT id FROM numeric_function_probe WHERE SIN(v)=SIN(4) ORDER BY id"
+               Contract.query "log" "SELECT id FROM numeric_function_probe WHERE LOG(v)=LOG(4) ORDER BY id"
+               Contract.query "membership" "SELECT id FROM numeric_function_probe WHERE SQRT(v) IN (SQRT(4),SQRT(9)) ORDER BY id"
+               Contract.execute "update" "UPDATE numeric_function_probe SET v=25 WHERE SQRT(v)=SQRT(4)"
+               Contract.query "old-key" "SELECT id FROM numeric_function_probe WHERE SQRT(v)=SQRT(4) ORDER BY id"
+               Contract.query "new-key" "SELECT id FROM numeric_function_probe WHERE SQRT(v)=SQRT(25) ORDER BY id" |]
+          Cleanup = [| "DROP TABLE numeric_function_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private roundedFunctionalIndexes =
         { Name = "rounded-functional-indexes"
           Setup =
@@ -9988,6 +10006,7 @@ module ContractCatalog =
            bitCountFunctionalIndex
            crc32FunctionalIndex
            exactIntegerFunctionalBounds
+           numericFunctionalBounds
            isNullFunctionalIndex
            asciiFunctionalIndex
            ordFunctionalIndex

@@ -9185,6 +9185,31 @@ let tests =
                         |> explainRow
                     Expect.equal overriddenPlan.Key None "overridden functions do not use stored projections"
 
+                testCase "constant numeric expressions probe rounded and double functional keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE numeric_function_keys(id INT PRIMARY KEY,v DECIMAL(8,2),KEY ix_floor ((FLOOR(v))),KEY ix_round ((ROUND(v))),KEY ix_sqrt ((SQRT(v))),KEY ix_sin ((SIN(v))),KEY ix_log ((LOG(v))))" |> ignore
+                    runDefault store "INSERT INTO numeric_function_keys VALUES(1,4),(2,9),(3,16)" |> ignore
+                    for predicate, key in
+                        [ "FLOOR(v)=FLOOR(4.5)", "ix_floor"
+                          "ROUND(v)=ROUND(4.4)", "ix_round"
+                          "SQRT(v)=SQRT(4)", "ix_sqrt"
+                          "SIN(v)=SIN(4)", "ix_sin"
+                          "LOG(v)=LOG(4)", "ix_log" ] do
+                        let sql = "SELECT id FROM numeric_function_keys WHERE " + predicate
+                        Expect.equal (runDefault store sql) (ResultSet([ "id" ], [ [ Some "1" ] ])) predicate
+                        let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
+                        Expect.equal plan.Key (Some key) predicate
+                    let membershipPlan =
+                        runDefault store "EXPLAIN SELECT id FROM numeric_function_keys WHERE SQRT(v) IN (SQRT(4),SQRT(9))"
+                        |> explainRow
+                    Expect.equal membershipPlan.Key (Some "ix_sqrt") "constant double IN bounds use the functional key"
+                    let overridden = builtins |> registerScalar "SQRT" (fun _ -> VDouble 99.0)
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM numeric_function_keys WHERE SQRT(v)=SQRT(4)"
+                        |> explainRow
+                    Expect.equal overriddenPlan.Key None "overridden numeric built-ins do not claim stored keys"
+
                 testCase "FLOOR and CEIL functional keys retain exact and text values"
                 <| fun _ ->
                     let store = newStore ()

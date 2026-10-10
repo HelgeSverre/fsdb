@@ -396,7 +396,16 @@ let rec private integerKeyLength = function
     | _ -> None
 
 let fixedKeyLength = integerKeyLength
-let hasExactIntegerResult transform = integerKeyLength transform |> Option.isSome
+
+let rec hasNumericResult = function
+    | Expression expression ->
+        tryPhysicalExpression expression
+        |> Option.bind (_.Calls >> List.tryLast)
+        |> Option.exists (snd >> hasNumericResult)
+    | transform ->
+        match transformFamily transform with
+        | IntegerFromText | NumericGeneral | NumericDoubleResult | NullIndicator -> true
+        | _ -> false
 
 let private trimBinarySpaces (bytes: byte[]) =
     let mutable first = 0
