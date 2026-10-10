@@ -891,6 +891,17 @@ and the expected two rows for a disjunction with a second ID; focused fsdb
 regressions cover those four shapes.
 The residual difference is part of the broader lookup overhead above.
 
+A [native quick run](benchmarks/results/2026-10-10-mutation-quick-first.md)
+and [repeat](benchmarks/results/36185ad2-quick.md) at `36185ad2` put the
+six-column primary-key read at 437–461 microseconds for fsdb and 44–45
+microseconds for MySQL 8.4.11. The same runs put single-row updates at
+472–501 microseconds for fsdb and 132–135 for MySQL, and secondary-range
+updates at 650–668 versus 127–137 microseconds. The write comparisons use
+in-memory fsdb against durable MySQL, so they are directional latency
+measurements rather than deployment write-parity claims. The stable read gap
+keeps shared request and query setup worth profiling before another
+micro-optimization.
+
 The constant-expression lookup pair records the
 [scan baseline](benchmarks/results/baa1b51-quick.md) and the
 [indexed implementation](benchmarks/results/ede0c8e-quick.md). Safe numeric
