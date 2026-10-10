@@ -9021,6 +9021,54 @@ let tests =
                         |> explainRow
                     Expect.equal overridePlan.Key None "an overridden FLOOR cannot claim its stored key"
 
+                testCase "ROUND functional keys retain exact and approximate halves"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE round_keys(id INT PRIMARY KEY, exact_value DECIMAL(8,2), approximate DOUBLE, text_value VARCHAR(20), KEY ix_round_exact ((ROUND(exact_value))), KEY ix_round_approx ((ROUND(approximate))), KEY ix_round_text ((ROUND(text_value))))"
+                    |> ignore
+                    runDefault store "INSERT INTO round_keys VALUES(1,1.50,1.5,'1.5'),(2,2.50,2.5,'2.5'),(3,-1.50,-1.5,'-1.5'),(4,-2.50,-2.5,'-2.5')"
+                    |> ignore
+
+                    for sql, expected, key in
+                        [ "SELECT id FROM round_keys WHERE ROUND(exact_value)=2", [ [ Some "1" ] ], "ix_round_exact"
+                          "SELECT id FROM round_keys WHERE ROUND(approximate)=2 ORDER BY id", [ [ Some "1" ]; [ Some "2" ] ], "ix_round_approx"
+                          "SELECT id FROM round_keys WHERE ROUND(text_value)=2 ORDER BY id", [ [ Some "1" ]; [ Some "2" ] ], "ix_round_text" ] do
+                        Expect.equal (runDefault store sql) (ResultSet([ "id" ], expected)) sql
+                        let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
+                        Expect.equal plan.Key (Some key) (sprintf "ROUND uses its functional key: %A" plan)
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM round_keys ORDER BY ROUND(exact_value)")
+                        (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "3" ]; [ Some "1" ]; [ Some "2" ] ]))
+                        "the exact rounded key orders its values"
+                    let orderedPlan = runDefault store "EXPLAIN SELECT id FROM round_keys ORDER BY ROUND(exact_value)" |> explainRow
+                    Expect.equal orderedPlan.Key (Some "ix_round_exact") "ROUND streams its stored order"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM round_keys WHERE ROUND(exact_value)>=-2 ORDER BY ROUND(exact_value),id")
+                        (ResultSet([ "id" ], [ [ Some "3" ]; [ Some "1" ]; [ Some "2" ] ]))
+                        "the rounded range excludes the lower bucket"
+                    let rangePlan = runDefault store "EXPLAIN SELECT id FROM round_keys WHERE ROUND(exact_value)>2" |> explainRow
+                    Expect.equal rangePlan.AccessType (Some "range") "ROUND probes its ordered range"
+                    Expect.equal rangePlan.Key (Some "ix_round_exact") "ROUND reports the range key"
+
+                    runDefault store "CREATE TABLE unique_round(id INT PRIMARY KEY, value DECIMAL(8,2), UNIQUE KEY ux_round ((ROUND(value))))"
+                    |> ignore
+                    runDefault store "INSERT INTO unique_round VALUES(1,1.40)" |> ignore
+                    match runDefault store "INSERT INTO unique_round VALUES(2,1.49)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected rounded-key uniqueness to reject a duplicate, got %A" other
+
+                    runDefault store "UPDATE round_keys SET exact_value=4.50 WHERE id=2" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM round_keys WHERE ROUND(exact_value)=3")
+                        (ResultSet([ "id" ], []))
+                        "updates remove the old rounded key"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM round_keys WHERE ROUND(exact_value)=5")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "updates insert the new rounded key"
+
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->
                     let store = newStore ()

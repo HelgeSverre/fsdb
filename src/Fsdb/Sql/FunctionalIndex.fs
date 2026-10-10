@@ -67,7 +67,10 @@ let private definitions =
         Transform = Floored }
       { CanonicalName = "CEIL"
         Aliases = [ "CEILING" ]
-        Transform = Ceiled } ]
+        Transform = Ceiled }
+      { CanonicalName = "ROUND"
+        Aliases = []
+        Transform = Rounded } ]
 
 let private namesOf definition =
     definition.CanonicalName :: definition.Aliases
@@ -162,7 +165,8 @@ let rec hasTextResult = function
     | IsNullResult
     | Signum
     | Floored
-    | Ceiled -> false
+    | Ceiled
+    | Rounded -> false
 
 let tryRebaseColumn column = function
     | Expression expression ->
@@ -229,7 +233,8 @@ let private supportsSingleTransform transform columnType =
     | AbsoluteValue
     | Signum
     | Floored
-    | Ceiled ->
+    | Ceiled
+    | Rounded ->
         isNumeric columnType || isTextOrBinary columnType
     | IsNullResult -> true
     | Expression _ -> false
@@ -418,9 +423,9 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             |> Option.filter (fun value -> value <= maximum)
             |> Option.map VUInt
         | _ -> normalizeStored value
-    | (Some Floored | Some Ceiled), _ when isTextOrBinary columnType || (match columnType with TBit _ -> true | _ -> false) ->
+    | (Some Floored | Some Ceiled | Some Rounded), _ when isTextOrBinary columnType || (match columnType with TBit _ -> true | _ -> false) ->
         value |> toDouble |> VDouble |> Some
-    | (Some Floored | Some Ceiled), _ ->
+    | (Some Floored | Some Ceiled | Some Rounded), _ ->
         tryRoundedProbe columnType value |> Option.orElseWith (fun () -> normalizeStored value)
     | Some CharacterLength, _
     | Some ByteLength, _
@@ -557,6 +562,12 @@ let rec projectValueWithStatus encodeText transform value =
         digestValueWith encodeText System.Security.Cryptography.SHA1.HashData value, None
     | Some Floored, value -> roundFunctionalValue Math.Floor Math.Floor value
     | Some Ceiled, value -> roundFunctionalValue Math.Ceiling Math.Ceiling value
+    | Some Rounded, VUInt value -> narrowUnsigned (decimal value), None
+    | Some Rounded, value ->
+        roundFunctionalValue
+            (fun number -> Math.Round(number, MidpointRounding.AwayFromZero))
+            (fun number -> Math.Round(number, MidpointRounding.ToEven))
+            value
     | Some Signum, ((VString _ | VBytes _) as value) ->
         let text = value |> toText |> Option.defaultValue ""
         let number, truncated = coerceLeadingDouble text

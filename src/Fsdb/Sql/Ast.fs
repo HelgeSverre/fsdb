@@ -417,6 +417,7 @@ and IndexTransform =
     | Signum
     | Floored
     | Ceiled
+    | Rounded
 
 and IndexColumn =
     { Name: string

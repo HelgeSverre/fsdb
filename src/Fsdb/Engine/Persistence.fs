@@ -746,6 +746,7 @@ let private isNullResultIndexColumnPrefix = "\u0000J:"
 let private signumIndexColumnPrefix = "\u0000G:"
 let private flooredIndexColumnPrefix = "\u0000F:"
 let private ceiledIndexColumnPrefix = "\u0000H:"
+let private roundedIndexColumnPrefix = "\u0000Z:"
 let private expressionIndexColumnPrefix = "\u0000E:"
 let private descendingIndexColumnPrefix = "\u0000D:"
 let private literalIndexColumnPrefix = "\u0000N:"
@@ -782,6 +783,7 @@ let private encodeIndexColumn (format: SnapshotFormat) column =
         | Some Signum, _ -> signumIndexColumnPrefix + column.Name
         | Some Floored, _ -> flooredIndexColumnPrefix + column.Name
         | Some Ceiled, _ -> ceiledIndexColumnPrefix + column.Name
+        | Some Rounded, _ -> roundedIndexColumnPrefix + column.Name
         | Some(Expression expression), _ ->
             let expressionBytes = Writer()
             encodeExpr expressionBytes expression
@@ -831,6 +833,7 @@ let private decodeIndexColumn (format: SnapshotFormat) (columnNames: Set<string>
         | Prefixed signumIndexColumnPrefix name -> column direction name None (Some Signum)
         | Prefixed flooredIndexColumnPrefix name -> column direction name None (Some Floored)
         | Prefixed ceiledIndexColumnPrefix name -> column direction name None (Some Ceiled)
+        | Prefixed roundedIndexColumnPrefix name -> column direction name None (Some Rounded)
         | Prefixed expressionIndexColumnPrefix expression ->
             try
                 let expression = expression |> Convert.FromBase64String |> Reader |> decodeExpr

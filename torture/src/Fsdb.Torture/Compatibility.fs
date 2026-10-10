@@ -4967,7 +4967,9 @@ module ContractCatalog =
         { Name = "rounded-functional-indexes"
           Setup =
             [| "CREATE TABLE rounded_probe(id INT PRIMARY KEY,exact_value DECIMAL(8,2),text_value VARCHAR(20),KEY ix_floor ((FLOOR(exact_value))),KEY ix_ceil ((CEILING(exact_value))),KEY ix_floor_text ((FLOOR(text_value))))"
-               "INSERT INTO rounded_probe VALUES(1,-2.50,'-2.5'),(2,0.01,'0.01'),(3,2.99,'2.99')" |]
+               "INSERT INTO rounded_probe VALUES(1,-2.50,'-2.5'),(2,0.01,'0.01'),(3,2.99,'2.99')"
+               "CREATE TABLE round_probe(id INT PRIMARY KEY,exact_value DECIMAL(8,2),approximate DOUBLE,text_value VARCHAR(20),UNIQUE KEY ux_round_exact ((ROUND(exact_value))),KEY ix_round_approx ((ROUND(approximate))),KEY ix_round_text ((ROUND(text_value))))"
+               "INSERT INTO round_probe VALUES(1,1.50,1.5,'1.5'),(2,2.50,2.5,'2.5'),(3,-1.50,-1.5,'-1.5'),(4,-2.50,-2.5,'-2.5')" |]
           Steps =
             [| Contract.query "floor-decimal" "SELECT id FROM rounded_probe WHERE FLOOR(exact_value)=2"
                Contract.query "ceil-alias" "SELECT id FROM rounded_probe WHERE CEIL(exact_value)=1"
@@ -4983,8 +4985,18 @@ module ContractCatalog =
                    "INSERT INTO rounded_probe VALUES(4,12.00,'12x')"
                Contract.query "truncated-index-warning" "SHOW WARNINGS"
                Contract.query "truncated-index-lookup"
-                   "SELECT id FROM rounded_probe WHERE FLOOR(text_value)=12" |]
-          Cleanup = [| "DROP TABLE rounded_probe" |]
+                   "SELECT id FROM rounded_probe WHERE FLOOR(text_value)=12"
+               Contract.query "round-values" "SELECT id,ROUND(exact_value),ROUND(approximate),ROUND(text_value) FROM round_probe ORDER BY id"
+               Contract.query "round-decimal" "SELECT id FROM round_probe WHERE ROUND(exact_value)=2"
+               Contract.query "round-double" "SELECT id FROM round_probe WHERE ROUND(approximate)=2 ORDER BY id"
+               Contract.query "round-text" "SELECT id FROM round_probe WHERE ROUND(text_value)=2 ORDER BY id"
+               Contract.query "round-range" "SELECT id FROM round_probe WHERE ROUND(exact_value)>=-2 ORDER BY ROUND(exact_value),id"
+               Contract.query "round-groups" "SELECT ROUND(approximate),COUNT(*) FROM round_probe GROUP BY ROUND(approximate) ORDER BY ROUND(approximate)"
+               Contract.execute "round-unique-duplicate" "INSERT INTO round_probe VALUES(5,1.51,5.0,'5.0')" |> Contract.fails 1062 "23000"
+               Contract.execute "round-update" "UPDATE round_probe SET exact_value=4.50 WHERE id=2"
+               Contract.query "round-old-key" "SELECT id FROM round_probe WHERE ROUND(exact_value)=3"
+               Contract.query "round-new-key" "SELECT id FROM round_probe WHERE ROUND(exact_value)=5" |]
+          Cleanup = [| "DROP TABLE round_probe"; "DROP TABLE rounded_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private tableStatisticsCache =
