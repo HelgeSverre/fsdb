@@ -3730,6 +3730,38 @@ let tests =
                             "SET sql_safe_updates=ON" ]
                   Expect.equal (run sql) expected sql
 
+          testCase "sql_safe_updates probes a RIGHT JOIN delete target without a filter"
+          <| fun _ ->
+              for sql, expected in
+                  [ "DELETE t FROM t RIGHT JOIN l ON t.id=l.id", Affected 2UL
+                    "DELETE t FROM t RIGHT JOIN l ON t.id=l.id WHERE 1=1", Affected 2UL
+                    "DELETE t FROM t RIGHT JOIN l USING(id)", Affected 2UL
+                    "DELETE t FROM t NATURAL RIGHT JOIN l", Affected 2UL
+                    "DELETE t FROM t RIGHT JOIN l ON t.payload=l.flag", safeUpdateRejection
+                    "DELETE t FROM t RIGHT JOIN l ON 1=1", safeUpdateRejection
+                    "DELETE t FROM t LEFT JOIN l ON t.id=l.id", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id SET t.payload=1", safeUpdateRejection ] do
+                  let run =
+                      queryFixture
+                          [ "CREATE TABLE t(id INT PRIMARY KEY,payload INT)"
+                            "CREATE TABLE l(id INT,flag INT)"
+                            "INSERT INTO t VALUES(1,0),(2,0)"
+                            "INSERT INTO l VALUES(1,0),(2,0)"
+                            "SET sql_safe_updates=ON" ]
+                  Expect.equal (run sql) expected sql
+
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE t(id INT,payload INT)"
+                        "CREATE TABLE l(id INT,flag INT)"
+                        "INSERT INTO t VALUES(1,0),(2,0)"
+                        "INSERT INTO l VALUES(1,0),(2,0)"
+                        "SET sql_safe_updates=ON" ]
+              Expect.equal
+                  (run "DELETE t FROM t RIGHT JOIN l ON t.id=l.id")
+                  safeUpdateRejection
+                  "the target must have an indexed join key"
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -24704,13 +24704,16 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         | _ -> tryPhysicalCandidatesInTable store registry table tableRef (Some predicate) |> Option.isSome
 
     let hasKeyedJoinFilter (targetRef: TableRef) (joins: Join list) (predicate: Expr option) =
+        let canProbeThrough = function
+            | InnerJoin | CrossJoin | NaturalJoin -> true
+            | LeftJoin | RightJoin | NaturalLeftJoin | NaturalRightJoin -> true
+            | _ -> false
+
         let joinedRefs =
             joins
             |> List.choose (fun join ->
                 match join.Kind, join.Table with
-                | (InnerJoin | CrossJoin | NaturalJoin
-                   | LeftJoin | RightJoin | NaturalLeftJoin | NaturalRightJoin), FromTable tableRef ->
-                    Some tableRef
+                | kind, FromTable tableRef when canProbeThrough kind -> Some tableRef
                 | _ -> None)
 
         let sources =
@@ -24802,7 +24805,15 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                             | QualifiedCol(owner, _) -> equalsIgnoreCase owner joinedQualifier
                             | _ -> false) condition))
 
-            distinctQualifiers && (sources.Tail |> List.exists hasSourceFilter)
+            let unfilteredRightDelete =
+                match statement, predicate, joins with
+                | Delete _, None, [ join ] when join.Kind = RightJoin || join.Kind = NaturalRightJoin ->
+                    // The preserved right source can probe the indexed delete target.
+                    reachesTarget (sources.[1] |> fst |> tableQualifier)
+                | _ -> false
+
+            distinctQualifiers
+            && (unfilteredRightDelete || (sources.Tail |> List.exists hasSourceFilter))
 
     let check (targetRef: TableRef) (joins: Join list) (whereExpr: Expr option) (limit: Expr option) (singleTarget: bool) =
         if limit.IsSome then Ok()

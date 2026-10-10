@@ -8314,6 +8314,16 @@ module ContractCatalog =
               "INSERT INTO safe_update_middle VALUES(1,0),(2,0)"
               "SET sql_safe_updates=ON" ]
 
+        let unindexedRightReset =
+            [ "DROP TABLE IF EXISTS safe_update_middle"
+              "DROP TABLE IF EXISTS safe_update_lookup"
+              "DROP TABLE IF EXISTS safe_update_probe"
+              "CREATE TABLE safe_update_probe(id INT, value INT)"
+              "CREATE TABLE safe_update_lookup(id INT, flag INT)"
+              "INSERT INTO safe_update_probe VALUES(1,0),(2,0)"
+              "INSERT INTO safe_update_lookup VALUES(1,0),(2,0)"
+              "SET sql_safe_updates=ON" ]
+
         let cases =
             let mutationCaseWith (setup: string list) name rejected sql =
                 name,
@@ -8324,6 +8334,7 @@ module ContractCatalog =
             let bareCase = mutationCaseWith bareReset
             let chainCase = mutationCaseWith chainReset
             let naturalCase = mutationCaseWith naturalReset
+            let unindexedRightCase = mutationCaseWith unindexedRightReset
 
             [ mutationCase "unrestricted-update" true "UPDATE safe_update_probe SET value=1"
               mutationCase "unindexed-update" true "UPDATE safe_update_probe SET value=1 WHERE value=0"
@@ -8440,6 +8451,14 @@ module ContractCatalog =
               naturalCase "natural-right-target-update" true "UPDATE safe_update_probe p NATURAL RIGHT JOIN safe_update_lookup l SET p.value=1 WHERE p.value=0"
               naturalCase "natural-right-no-filter" true "UPDATE safe_update_probe p NATURAL RIGHT JOIN safe_update_lookup l SET p.value=1"
               naturalCase "natural-right-lookup-delete" false "DELETE p FROM safe_update_probe p NATURAL RIGHT JOIN safe_update_lookup l WHERE l.flag=0"
+              naturalCase "right-unfiltered-delete" false "DELETE p FROM safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.id=l.id"
+              naturalCase "right-true-delete" false "DELETE p FROM safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.id=l.id WHERE 1=1"
+              naturalCase "right-using-unfiltered-delete" false "DELETE p FROM safe_update_probe p RIGHT JOIN safe_update_lookup l USING(id)"
+              naturalCase "natural-right-unfiltered-delete" false "DELETE p FROM safe_update_probe p NATURAL RIGHT JOIN safe_update_lookup l"
+              naturalCase "right-unindexed-link-delete" true "DELETE p FROM safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.value=l.flag"
+              naturalCase "right-cartesian-delete" true "DELETE p FROM safe_update_probe p RIGHT JOIN safe_update_lookup l ON 1=1"
+              naturalCase "left-unfiltered-delete" true "DELETE p FROM safe_update_probe p LEFT JOIN safe_update_lookup l ON p.id=l.id"
+              unindexedRightCase "right-unindexed-target-delete" true "DELETE p FROM safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.id=l.id"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
