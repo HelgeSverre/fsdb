@@ -9136,6 +9136,33 @@ let tests =
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected duplicate BIT_COUNT key, got %A" other
 
+                testCase "CRC32 functional keys use source bytes and maintain mutations"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE crc_keys(id INT PRIMARY KEY, text_value VARCHAR(20), binary_value VARBINARY(8), number_value INT, KEY ix_text ((CRC32(text_value))), KEY ix_binary ((CRC32(binary_value))), KEY ix_number ((CRC32(number_value))))" |> ignore
+                    runDefault store "INSERT INTO crc_keys VALUES(1,'abc',X'616263',123),(2,'def',X'646566',456),(3,NULL,NULL,NULL)" |> ignore
+                    for expression, key, probe in
+                        [ "CRC32(text_value)", "ix_text", "CRC32('abc')"
+                          "CRC32(binary_value)", "ix_binary", "CRC32(X'616263')"
+                          "CRC32(number_value)", "ix_number", "CRC32(123)" ] do
+                        let sql = sprintf "SELECT id FROM crc_keys WHERE %s=%s" expression probe
+                        Expect.equal (runDefault store sql) (ResultSet([ "id" ], [ [ Some "1" ] ])) expression
+                        Expect.equal (runDefault store ("EXPLAIN " + sql) |> explainRow).Key (Some key) expression
+                    runDefault store "UPDATE crc_keys SET text_value='xyz' WHERE id=1" |> ignore
+                    Expect.equal (runDefault store "SELECT id FROM crc_keys WHERE CRC32(text_value)=CRC32('abc')") (ResultSet([ "id" ], [])) "old checksum removed"
+                    Expect.equal (runDefault store "SELECT id FROM crc_keys WHERE CRC32(text_value)=CRC32('xyz')") (ResultSet([ "id" ], [ [ Some "1" ] ])) "new checksum stored"
+                    runDefault store "CREATE TABLE unique_crcs(id INT PRIMARY KEY,v VARCHAR(20),UNIQUE KEY uq_crc ((CRC32(v))))" |> ignore
+                    runDefault store "INSERT INTO unique_crcs VALUES(1,'abc')" |> ignore
+                    match runDefault store "INSERT INTO unique_crcs VALUES(2,'abc')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected duplicate CRC32 key, got %A" other
+
+                    let overridden = builtins |> registerScalar "CRC32" (fun _ -> VInt 1L)
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM crc_keys WHERE CRC32(text_value)=CRC32('abc')"
+                        |> explainRow
+                    Expect.equal overriddenPlan.Key None "an overridden CRC32 cannot claim its stored key"
+
                 testCase "FLOOR and CEIL functional keys retain exact and text values"
                 <| fun _ ->
                     let store = newStore ()

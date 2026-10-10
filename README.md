@@ -444,7 +444,7 @@ different access pattern:
 - **Functional keys.** Composite indexes may contain `LOWER`/`LCASE`,
   `UPPER`/`UCASE`, `TRIM`, `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`,
   `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, `ASCII`, `ORD`, `HEX`, `UNHEX`,
-  `MD5`, `SHA1`/`SHA`, `ISNULL`,
+  `MD5`, `SHA1`/`SHA`, `ISNULL`, `CRC32`,
   or numeric/text/binary `ABS`, `SIGN`, `BIT_COUNT`, `FLOOR`, `CEIL`/`CEILING`, `ROUND`, `SQRT`,
   `EXP`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, unary `ATAN`/`ATAN2`, `COT`, `DEGREES`,
   `RADIANS`, `LOG`, `LN`, `LOG2`, and `LOG10` parts.

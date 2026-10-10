@@ -68,6 +68,9 @@ let private definitions =
       { CanonicalName = "BIT_COUNT"
         Aliases = []
         Transform = BitCounted }
+      { CanonicalName = "CRC32"
+        Aliases = []
+        Transform = Checksum32 }
       { CanonicalName = "FLOOR"
         Aliases = []
         Transform = Floored }
@@ -222,6 +225,7 @@ let private transformFamily = function
     | AbsoluteValue
     | Signum
     | BitCounted
+    | Checksum32
     | Floored
     | Ceiled
     | Rounded -> NumericGeneral
@@ -346,7 +350,7 @@ let private numericKeyResult columnType transforms =
     |> List.fold
         (fun result transform ->
             match transform with
-            | Signum | BitCounted -> SignedInteger
+            | Signum | BitCounted | Checksum32 -> SignedInteger
             | transform when producesDoubleResult transform -> Approximate
             | _ -> result)
         sourceResult
@@ -382,6 +386,7 @@ let rec fixedKeyLength = function
     | Signum
     | BitCounted -> Some 8
     | FirstByte
+    | Checksum32
     | IsNullResult -> Some 4
     | Expression expression ->
         tryPhysicalExpression expression
@@ -528,7 +533,8 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some FirstCharacterCode, _
     | Some IsNullResult, _
     | Some Signum, _
-    | Some BitCounted, _ -> tryExactInt64 value |> Option.map VInt
+    | Some BitCounted, _
+    | Some Checksum32, _ -> tryExactInt64 value |> Option.map VInt
     | Some DecodedHex, _ -> tryBinaryProbe value
     | Some transform, _ when isEncodedTextTransform transform -> tryTextResultProbe value
     | Some(Expression expression), _ ->
@@ -645,6 +651,24 @@ let bitCountValueWithStatus value =
         | _ -> int64 (Numerics.BitOperations.PopCount(integerBitPattern value)), None
     VInt bits, warning
 
+/// MySQL's CRC32 uses the reflected IEEE polynomial over the source bytes.
+let private crc32Table =
+    Array.init 256 (fun index ->
+        let mutable crc = uint32 index
+        for _ in 0 .. 7 do
+            crc <- if crc &&& 1u <> 0u then 0xEDB88320u ^^^ (crc >>> 1) else crc >>> 1
+        crc)
+
+let crc32ValueWith encodeText value =
+    let bytes =
+        value
+        |> tryRawBytes
+        |> Option.defaultWith (fun () -> value |> toText |> Option.defaultValue "" |> encodeText)
+    let mutable crc = 0xFFFFFFFFu
+    for byte in bytes do
+        crc <- crc32Table.[int ((crc ^^^ uint32 byte) &&& 0xFFu)] ^^^ (crc >>> 8)
+    VInt(int64 (crc ^^^ 0xFFFFFFFFu))
+
 let hexValueWithStatus encodeText value =
     let encodedBytes (bytes: byte[]) = VString(Convert.ToHexString bytes), false
 
@@ -751,6 +775,7 @@ let rec projectValueWithStatus encodeText transform value =
     | Some BitCounted, value ->
         let counted, warning = bitCountValueWithStatus value
         counted, (warning |> Option.map (function TextConversion text | BinaryConversion text -> text))
+    | Some Checksum32, value -> crc32ValueWith encodeText value, None
     | Some AbsoluteValue, VInt Int64.MinValue -> raise SignedOutOfRange
     | Some AbsoluteValue, VInt value -> VInt(abs value), None
     | Some AbsoluteValue, VUInt value -> VUInt value, None

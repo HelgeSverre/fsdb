@@ -747,6 +747,7 @@ let private directIndexColumnPrefixes =
       IsNullResult, "\u0000J:"
       Signum, "\u0000G:"
       BitCounted, "\u0000q:"
+      Checksum32, "\u0000r:"
       Floored, "\u0000F:"
       Ceiled, "\u0000H:"
       Rounded, "\u0000Z:"

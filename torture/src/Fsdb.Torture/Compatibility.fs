@@ -4984,6 +4984,31 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE bit_count_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private crc32FunctionalIndex =
+        { Name = "crc32-functional-index"
+          Setup =
+            [| "CREATE TABLE crc32_probe(id INT PRIMARY KEY,text_value VARCHAR(20),binary_value VARBINARY(8),number_value INT,KEY ix_text ((CRC32(text_value))),KEY ix_binary ((CRC32(binary_value))),KEY ix_number ((CRC32(number_value))))"
+               "INSERT INTO crc32_probe VALUES(1,'abc',X'616263',123),(2,'def',X'646566',456),(3,NULL,NULL,NULL)"
+               "CREATE TABLE crc32_latin1_probe(id INT PRIMARY KEY,v VARCHAR(20) CHARACTER SET latin1,KEY ix_crc ((CRC32(v))))"
+               "INSERT INTO crc32_latin1_probe VALUES(1,_latin1 X'E9'),(2,'a')"
+               "CREATE TABLE crc32_unique_probe(id INT PRIMARY KEY,v VARCHAR(20),UNIQUE KEY uq_crc ((CRC32(v))))"
+               "INSERT INTO crc32_unique_probe VALUES(1,'abc')" |]
+          Steps =
+            [| Contract.query "text" "SELECT id FROM crc32_probe WHERE CRC32(text_value)=CRC32('abc') ORDER BY id"
+               Contract.query "binary" "SELECT id FROM crc32_probe WHERE CRC32(binary_value)=CRC32(X'616263') ORDER BY id"
+               Contract.query "numeric" "SELECT id FROM crc32_probe WHERE CRC32(number_value)=CRC32(123) ORDER BY id"
+               Contract.query "null" "SELECT id FROM crc32_probe WHERE CRC32(text_value) IS NULL ORDER BY id"
+               Contract.query "latin1" "SELECT id FROM crc32_latin1_probe WHERE CRC32(v)=CRC32(_latin1 X'E9') ORDER BY id"
+               Contract.execute "duplicate" "INSERT INTO crc32_unique_probe VALUES(2,'abc')" |> Contract.fails 1062 "23000"
+               Contract.execute "update" "UPDATE crc32_probe SET text_value='xyz' WHERE id=1"
+               Contract.query "old-key" "SELECT id FROM crc32_probe WHERE CRC32(text_value)=CRC32('abc') ORDER BY id"
+               Contract.query "new-key" "SELECT id FROM crc32_probe WHERE CRC32(text_value)=CRC32('xyz') ORDER BY id" |]
+          Cleanup =
+            [| "DROP TABLE crc32_probe"
+               "DROP TABLE crc32_latin1_probe"
+               "DROP TABLE crc32_unique_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private roundedFunctionalIndexes =
         { Name = "rounded-functional-indexes"
           Setup =
@@ -9945,6 +9970,7 @@ module ContractCatalog =
            integralDoubleIndexProbes
            signFunctionalIndex
            bitCountFunctionalIndex
+           crc32FunctionalIndex
            isNullFunctionalIndex
            asciiFunctionalIndex
            ordFunctionalIndex

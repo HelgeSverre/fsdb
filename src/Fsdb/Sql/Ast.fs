@@ -416,6 +416,7 @@ and IndexTransform =
     | Expression of Expr
     | Signum
     | BitCounted
+    | Checksum32
     | Floored
     | Ceiled
     | Rounded

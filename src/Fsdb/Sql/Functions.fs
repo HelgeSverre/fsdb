@@ -5081,27 +5081,10 @@ let private octFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> VString(toBase (toUInt64 v) 8)
     | _ -> VNull
 
-/// The zlib/IEEE-802.3 CRC-32 MySQL's `CRC32()` implements — the standard
-/// bit-reflected table-driven form, not a shortcut worth swapping for a
-/// library dependency.
-let private crc32Table =
-    Array.init 256 (fun i ->
-        let mutable c = uint32 i
-
-        for _ in 0..7 do
-            c <- if c &&& 1u <> 0u then 0xEDB88320u ^^^ (c >>> 1) else c >>> 1
-
-        c)
-
-let private crc32 (bytes: byte[]) : uint32 =
-    let mutable crc = 0xFFFFFFFFu
-    for b in bytes do
-        crc <- crc32Table.[int ((crc ^^^ uint32 b) &&& 0xFFu)] ^^^ (crc >>> 8)
-    crc ^^^ 0xFFFFFFFFu
-
 let private crc32Fn: Scalar =
     function
-    | [ value ] when not (anyNull [ value ]) -> VInt(int64 (crc32 (stringBytes value)))
+    | [ value ] when not (anyNull [ value ]) ->
+        FunctionalIndex.crc32ValueWith Text.Encoding.UTF8.GetBytes value
     | _ -> VNull
 
 let private uuidFn: Scalar = fun _ -> VString(Guid.NewGuid().ToString())

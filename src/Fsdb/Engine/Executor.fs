@@ -11805,21 +11805,23 @@ and private isDirectNumericIndexColumn (table: Table) (column: string, transform
         |> List.tryFind (fun candidate -> equalsIgnoreCase candidate.Name column)
         |> Option.exists (fun candidate -> isNumericIndexType candidate.Type))
 
-and private isDigestIndexColumn (_, transform) =
-    let isDigest = function
-        | Md5Digest | Sha1Digest -> true
-        | _ -> false
-
+and private finalIndexTransform (_, transform) =
     match transform with
     | Some(Expression expression) ->
         FunctionalIndex.tryPhysicalExpression expression
         |> Option.bind (_.Calls >> List.tryLast)
-        |> Option.exists (snd >> isDigest)
-    | Some transform -> isDigest transform
-    | None -> false
+        |> Option.map snd
+    | transform -> transform
+
+and private isDigestIndexColumn column =
+    match finalIndexTransform column with
+    | Some Md5Digest | Some Sha1Digest -> true
+    | _ -> false
+
+and private isChecksumIndexColumn column = finalIndexTransform column = Some Checksum32
 
 and private plannerIndexedConstantValue store registry table column expression =
-    if isDirectNumericIndexColumn table column then
+    if isDirectNumericIndexColumn table column || isChecksumIndexColumn column then
         numericPlannerConstantEvaluator store registry expression
     elif isDigestIndexColumn column then
         plannerConstantEvaluator store registry expression
@@ -11841,7 +11843,10 @@ and private pointLookupEqualities
 
     let tryIndexedColumn expression =
         storedIndexedColumnFor registry tref expression
-        |> Option.filter (fun column -> isDirectNumericIndexColumn table column || isDigestIndexColumn column)
+        |> Option.filter (fun column ->
+            isDirectNumericIndexColumn table column
+            || isChecksumIndexColumn column
+            || isDigestIndexColumn column)
 
     let tryPair indexed constant =
         tryIndexedColumn indexed
