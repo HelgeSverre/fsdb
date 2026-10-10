@@ -420,6 +420,10 @@ and IndexTransform =
     | Rounded
     | SquareRooted
     | Exponentiated
+    | Logarithm
+    | NaturalLogarithm
+    | BinaryLogarithm
+    | DecimalLogarithm
 
 and IndexColumn =
     { Name: string

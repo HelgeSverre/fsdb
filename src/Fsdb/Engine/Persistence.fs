@@ -750,7 +750,11 @@ let private directIndexColumnPrefixes =
       Ceiled, "\u0000H:"
       Rounded, "\u0000Z:"
       SquareRooted, "\u0000V:"
-      Exponentiated, "\u0000W:" ]
+      Exponentiated, "\u0000W:"
+      Logarithm, "\u0000a:"
+      NaturalLogarithm, "\u0000b:"
+      BinaryLogarithm, "\u0000c:"
+      DecimalLogarithm, "\u0000d:" ]
 let private expressionIndexColumnPrefix = "\u0000E:"
 let private descendingIndexColumnPrefix = "\u0000D:"
 let private literalIndexColumnPrefix = "\u0000N:"

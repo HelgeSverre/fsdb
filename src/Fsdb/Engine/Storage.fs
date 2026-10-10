@@ -2951,6 +2951,8 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
         try
             FunctionalIndex.projectValueWithStatus encodeText transform value
         with
+        | FunctionalIndex.InvalidLogarithmArgument ->
+            raise (IndexExpressionError(3020, "Invalid argument for logarithm"))
         | FunctionalIndex.ExponentialOutOfRange ->
             let rec failingExp = function
                 | FuncCall(name, [ argument ]) as expression ->

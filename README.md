@@ -445,7 +445,8 @@ different access pattern:
   `UPPER`/`UCASE`, `TRIM`, `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`,
   `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, `ASCII`, `ORD`, `HEX`, `UNHEX`,
   `MD5`, `SHA1`/`SHA`, `ISNULL`,
-  or numeric/text/binary `ABS`, `SIGN`, `FLOOR`, `CEIL`/`CEILING`, `ROUND`, `SQRT`, and `EXP` parts.
+  or numeric/text/binary `ABS`, `SIGN`, `FLOOR`, `CEIL`/`CEILING`, `ROUND`, `SQRT`,
+  `EXP`, `LOG`, `LN`, `LOG2`, and `LOG10` parts.
   Compatible unary parts can be composed, such as `UPPER(TRIM(name))`,
   `BIT_LENGTH(REVERSE(name))`, or `SQRT(ABS(amount))`. These keys participate in equality,
   uniqueness, ordering, grouping, mutation, recovery, and correlated probes.

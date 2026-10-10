@@ -9206,6 +9206,50 @@ let tests =
                         (ResultSet([ "id" ], []))
                         "updates remove the old EXP key"
 
+                testCase "logarithm functional keys keep distinct function identities"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE log_keys(id INT PRIMARY KEY,n DECIMAL(8,2),d DOUBLE,s VARCHAR(20),KEY ix_log ((LOG(n))),KEY ix_ln ((LN(d))),KEY ix_log2 ((LOG2(n))),KEY ix_log10 ((LOG10(n))),KEY ix_log_text ((LOG(s))))"
+                    |> ignore
+                    runDefault store "INSERT INTO log_keys VALUES(1,1,1,'1'),(2,2,2,'2'),(3,10,10,'10'),(4,NULL,NULL,NULL)"
+                    |> ignore
+
+                    for expression, probe, key, id in
+                        [ "LOG(n)", "0e0", "ix_log", "1"
+                          "LN(d)", "0e0", "ix_ln", "1"
+                          "LOG2(n)", "1e0", "ix_log2", "2"
+                          "LOG10(n)", "1e0", "ix_log10", "3"
+                          "LOG(s)", "0e0", "ix_log_text", "1" ] do
+                        let query = sprintf "SELECT id FROM log_keys WHERE %s=%s" expression probe
+                        Expect.equal (runDefault store query) (ResultSet([ "id" ], [ [ Some id ] ])) query
+                        let plan = runDefault store ("EXPLAIN " + query) |> explainRow
+                        Expect.equal plan.Key (Some key) (sprintf "%s uses its own functional key" expression)
+
+                    let crossPlan = runDefault store "EXPLAIN SELECT id FROM log_keys WHERE LN(n)=0e0" |> explainRow
+                    Expect.equal crossPlan.Key None "LN does not claim a LOG key"
+                    let rangePlan = runDefault store "EXPLAIN SELECT id FROM log_keys WHERE LOG(n)>1e0" |> explainRow
+                    Expect.equal rangePlan.Key (Some "ix_log") "LOG range uses its key"
+                    let groupedPlan =
+                        runDefault store "EXPLAIN SELECT LOG(n),COUNT(*) FROM log_keys GROUP BY LOG(n) ORDER BY LOG(n)"
+                        |> explainRow
+                    Expect.equal groupedPlan.Key (Some "ix_log") "LOG grouping uses its key"
+
+                    runDefault store "CREATE TABLE unique_log(id INT PRIMARY KEY,n DECIMAL(8,2),UNIQUE KEY ux_log ((LOG(n))))"
+                    |> ignore
+                    runDefault store "INSERT INTO unique_log VALUES(1,1),(2,NULL),(3,NULL)" |> ignore
+                    match runDefault store "INSERT INTO unique_log VALUES(4,1)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected LOG uniqueness violation, got %A" other
+                    Expect.equal
+                        (runDefault store "INSERT INTO unique_log VALUES(5,0)")
+                        (Err(3020, "Invalid argument for logarithm"))
+                        "non-positive indexed input is rejected"
+                    runDefault store "UPDATE log_keys SET n=4 WHERE id=2" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM log_keys WHERE LOG2(n)=1e0")
+                        (ResultSet([ "id" ], []))
+                        "updates remove old logarithm keys"
+
                 testCase "numeric unary compositions keep their functional keys"
                 <| fun _ ->
                     let store = newStore ()

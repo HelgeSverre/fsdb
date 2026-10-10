@@ -9,6 +9,7 @@ open Fsdb.Ast
 open Fsdb.Value
 
 exception ExponentialOutOfRange
+exception InvalidLogarithmArgument
 
 type private Builtin =
     { CanonicalName: string
@@ -78,7 +79,20 @@ let private definitions =
         Transform = SquareRooted }
       { CanonicalName = "EXP"
         Aliases = []
-        Transform = Exponentiated } ]
+        Transform = Exponentiated }
+      // MySQL stores LOG and LN as distinct functional expressions.
+      { CanonicalName = "LOG"
+        Aliases = []
+        Transform = Logarithm }
+      { CanonicalName = "LN"
+        Aliases = []
+        Transform = NaturalLogarithm }
+      { CanonicalName = "LOG2"
+        Aliases = []
+        Transform = BinaryLogarithm }
+      { CanonicalName = "LOG10"
+        Aliases = []
+        Transform = DecimalLogarithm } ]
 
 let private namesOf definition =
     definition.CanonicalName :: definition.Aliases
@@ -176,7 +190,11 @@ let rec hasTextResult = function
     | Ceiled
     | Rounded
     | SquareRooted
-    | Exponentiated -> false
+    | Exponentiated
+    | Logarithm
+    | NaturalLogarithm
+    | BinaryLogarithm
+    | DecimalLogarithm -> false
 
 let tryRebaseColumn column = function
     | Expression expression ->
@@ -246,7 +264,11 @@ let private supportsSingleTransform transform columnType =
     | Ceiled
     | Rounded
     | SquareRooted
-    | Exponentiated ->
+    | Exponentiated
+    | Logarithm
+    | NaturalLogarithm
+    | BinaryLogarithm
+    | DecimalLogarithm ->
         isNumeric columnType || isTextOrBinary columnType
     | IsNullResult -> true
     | Expression _ -> false
@@ -279,7 +301,20 @@ let private isNumericTransform = function
     | Ceiled
     | Rounded
     | SquareRooted
-    | Exponentiated -> true
+    | Exponentiated
+    | Logarithm
+    | NaturalLogarithm
+    | BinaryLogarithm
+    | DecimalLogarithm -> true
+    | _ -> false
+
+let private hasApproximateResult = function
+    | SquareRooted
+    | Exponentiated
+    | Logarithm
+    | NaturalLogarithm
+    | BinaryLogarithm
+    | DecimalLogarithm -> true
     | _ -> false
 
 type private NumericKeyResult =
@@ -304,8 +339,7 @@ let private numericKeyResult columnType transforms =
         (fun result transform ->
             match transform with
             | Signum -> SignedInteger
-            | SquareRooted
-            | Exponentiated -> Approximate
+            | transform when hasApproximateResult transform -> Approximate
             | _ -> result)
         sourceResult
 
@@ -476,8 +510,8 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
         value |> toDouble |> VDouble |> Some
     | (Some Floored | Some Ceiled | Some Rounded), _ ->
         tryRoundedProbe columnType value |> Option.orElseWith (fun () -> normalizeStored value)
-    | (Some SquareRooted | Some Exponentiated), VDouble number when Double.IsFinite number -> Some(VDouble number)
-    | (Some SquareRooted | Some Exponentiated), _ -> None
+    | Some transform, VDouble number when hasApproximateResult transform && Double.IsFinite number -> Some(VDouble number)
+    | Some transform, _ when hasApproximateResult transform -> None
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _
@@ -535,6 +569,11 @@ let private numericInputWithStatus = function
         let number, truncated = coerceLeadingDouble text
         number, (if truncated then Some text else None)
     | value -> toDouble value, None
+
+let private logarithmValue logarithm value =
+    let number, truncated = numericInputWithStatus value
+    if number <= 0.0 then raise InvalidLogarithmArgument
+    (if Double.IsNaN number then VNull else VDouble(logarithm number)), truncated
 
 let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble: float -> float) value =
     match value with
@@ -635,6 +674,10 @@ let rec projectValueWithStatus encodeText transform value =
         let result = Math.Exp number
         if Double.IsInfinity result then raise ExponentialOutOfRange
         (if Double.IsNaN result then VNull else VDouble result), truncated
+    | Some Logarithm, value
+    | Some NaturalLogarithm, value -> logarithmValue Math.Log value
+    | Some BinaryLogarithm, value -> logarithmValue Math.Log2 value
+    | Some DecimalLogarithm, value -> logarithmValue Math.Log10 value
     | Some Signum, value ->
         let number, truncated = numericInputWithStatus value
         VInt(int64 (sign number)), truncated

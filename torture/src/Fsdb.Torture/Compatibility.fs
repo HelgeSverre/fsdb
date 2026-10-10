@@ -5056,6 +5056,29 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE exp_nested_probe"; "DROP TABLE exp_composed_probe"; "DROP TABLE exp_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private logarithmFunctionalIndexes =
+        { Name = "logarithm-functional-indexes"
+          Setup =
+            [| "CREATE TABLE log_probe(id INT PRIMARY KEY,n DECIMAL(8,2),d DOUBLE,s VARCHAR(20),UNIQUE KEY ux_log ((LOG(n))),KEY ix_ln ((LN(d))),KEY ix_log2 ((LOG2(n))),KEY ix_log10 ((LOG10(n))),KEY ix_log_text ((LOG(s))))"
+               "INSERT INTO log_probe VALUES(1,1,1,'1'),(2,2,2,'2'),(3,10,10,'10'),(4,NULL,NULL,NULL)" |]
+          Steps =
+            [| Contract.query "values" "SELECT id,LOG(n),LN(d),LOG2(n),LOG10(n),LOG(s) FROM log_probe ORDER BY id"
+               Contract.query "log" "SELECT id FROM log_probe WHERE LOG(n)=0e0"
+               Contract.query "ln" "SELECT id FROM log_probe WHERE LN(d)=0e0"
+               Contract.query "log2" "SELECT id FROM log_probe WHERE LOG2(n)=1e0"
+               Contract.query "log10" "SELECT id FROM log_probe WHERE LOG10(n)=1e0"
+               Contract.query "text" "SELECT id FROM log_probe WHERE LOG(s)=0e0"
+               Contract.query "range" "SELECT id FROM log_probe WHERE LOG(n)>1e0 ORDER BY LOG(n)"
+               Contract.query "grouping" "SELECT LOG(n),COUNT(*) FROM log_probe GROUP BY LOG(n) ORDER BY LOG(n)"
+               Contract.execute "duplicate" "INSERT INTO log_probe VALUES(5,1,5,'5')" |> Contract.fails 1062 "23000"
+               Contract.execute "zero" "INSERT INTO log_probe VALUES(6,0,1,'1')" |> Contract.fails 3020 "2201E"
+               Contract.execute "negative" "INSERT INTO log_probe VALUES(7,-1,1,'1')" |> Contract.fails 3020 "2201E"
+               Contract.execute "update" "UPDATE log_probe SET n=4 WHERE id=2"
+               Contract.query "old-key" "SELECT id FROM log_probe WHERE LOG2(n)=1e0"
+               Contract.query "new-key" "SELECT id FROM log_probe WHERE LOG2(n)=2e0" |]
+          Cleanup = [| "DROP TABLE log_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private numericConstantIndexBounds =
         { Name = "numeric-constant-index-bounds"
           Setup =
@@ -9800,6 +9823,7 @@ module ContractCatalog =
         [| roundedFunctionalIndexes
            numericComposedFunctionalIndexes
            expFunctionalIndexes
+           logarithmFunctionalIndexes
            numericConstantIndexBounds
            elidedWhereBindings
            missingFunctionMutations

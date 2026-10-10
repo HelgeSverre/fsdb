@@ -3774,6 +3774,11 @@ let tests =
               let store = load dir
               attach dir store
               let session = Fsdb.Session.create 1 store
+              let logarithmProbes =
+                  [ "LOG(value)", "0e0", "1"
+                    "LN(value)", "0e0", "1"
+                    "LOG2(value)", "1e0", "2"
+                    "LOG10(value)", "1e0", "3" ]
 
               let run (session: Fsdb.Session.Session) (sql: string) =
                   match handle session sql with
@@ -3821,6 +3826,8 @@ let tests =
                     "INSERT INTO lookup_digest VALUES (1, 'A'), (2, 'B')"
                     "CREATE TABLE lookup_round (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_floor_value ((FLOOR(value))), INDEX ix_ceil_value ((CEIL(value))), INDEX ix_round_value ((ROUND(value))), INDEX ix_sqrt_value ((SQRT(value))), INDEX ix_sqrt_abs ((SQRT(ABS(value)))), INDEX ix_exp_value ((EXP(value))))"
                     "INSERT INTO lookup_round VALUES (1, -2.50), (2, 0.01), (3, 2.99)"
+                    "CREATE TABLE lookup_log (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_log_value ((LOG(value))), INDEX ix_ln_value ((LN(value))), INDEX ix_log2_value ((LOG2(value))), INDEX ix_log10_value ((LOG10(value))))"
+                    "INSERT INTO lookup_log VALUES (1, 1), (2, 2), (3, 10), (4, NULL)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
                     "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
                     "INSERT INTO lookup_abs_text VALUES (1, '12x'), (2, 'Other')"
@@ -3999,6 +4006,12 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "WAL recovery rebuilds the exponential index"
               | other -> failtestf "expected recovered exponential lookup rows, got %A" other
 
+              for expression, probe, id in logarithmProbes do
+                  let sql = sprintf "SELECT id FROM lookup_log WHERE %s=%s" expression probe
+                  match handle (Fsdb.Session.create 60 reloaded) sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows [ [ Some id ] ] (sprintf "WAL recovery rebuilds %s" expression)
+                  | other -> failtestf "expected recovered %s lookup rows, got %A" expression other
+
               match handle (Fsdb.Session.create 56 reloaded) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "WAL recovery rebuilds the composed numeric index"
               | other -> failtestf "expected recovered composed numeric lookup rows, got %A" other
@@ -4089,6 +4102,12 @@ let tests =
               match handle (Fsdb.Session.create 59 fromSnapshot) "SELECT id FROM lookup_round WHERE EXP(value) > 2e0" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "the snapshot restores the exponential index"
               | other -> failtestf "expected snapshot exponential lookup rows, got %A" other
+
+              for expression, probe, id in logarithmProbes do
+                  let sql = sprintf "SELECT id FROM lookup_log WHERE %s=%s" expression probe
+                  match handle (Fsdb.Session.create 61 fromSnapshot) sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows [ [ Some id ] ] (sprintf "snapshot restores %s" expression)
+                  | other -> failtestf "expected snapshot %s lookup rows, got %A" expression other
 
               match handle (Fsdb.Session.create 57 fromSnapshot) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "the snapshot restores the composed numeric index"
