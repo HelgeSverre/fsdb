@@ -392,8 +392,17 @@ let private numericSystemVariables =
           "unique_checks"
           "wait_timeout" ]
 
+let private tryParseLongQueryTime (value: string) =
+    match Decimal.TryParse(value, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+    | true, seconds -> Some seconds
+    | _ -> None
+
 let private systemVariableValue (name: string) =
     function
+    | Some(value: string) when name.Equals("long_query_time", StringComparison.OrdinalIgnoreCase) ->
+        match tryParseLongQueryTime value with
+        | Some seconds -> Some(VDecimal seconds)
+        | None -> Some(VString value)
     | Some(value: string) when Set.contains (name.ToLowerInvariant()) numericSystemVariables ->
         match value.ToUpperInvariant(), UInt64.TryParse value with
         | "ON", _ -> Some(VUInt 1UL)
@@ -1235,6 +1244,13 @@ let private normalizeBoundedInteger name maximum =
     | VUInt value -> bounded (string value) value
     | _ -> Error(Err(1232, sprintf "Incorrect argument type to variable '%s'" name))
 
+let private normalizeLongQueryTime value =
+    match value |> toText |> Option.bind tryParseLongQueryTime with
+    | Some seconds ->
+        let bounded = seconds |> max 0M |> min 31536000M
+        Ok(bounded.ToString("F6", Globalization.CultureInfo.InvariantCulture))
+    | None -> Error(Err(1232, "Incorrect argument type to variable 'long_query_time'"))
+
 let private normalizeGeometryPointLimit =
     let bounded value =
         value
@@ -1521,6 +1537,11 @@ let private systemSetAction
             if isGlobal then Session.defaultVariables.[name]
             else Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
         Ok(SetVarAction(name, value, isGlobal), sideEffects)
+    | Ok(_, sideEffects) when usesDefault && name = "long_query_time" ->
+        let value =
+            if isGlobal then Session.defaultVariables.[name]
+            else Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
+        Ok(SetVarAction(name, value, isGlobal), sideEffects)
     | Ok(_, sideEffects) when usesDefault && name = "max_points_in_geometry" ->
         let limit =
             if isGlobal then
@@ -1587,6 +1608,9 @@ let private systemSetAction
         normalizeBoundedInteger name boundedIntegerVariables.[name] value
         |> Result.map (fun (value, warning) ->
             SetBoundedIntegerAction(name, value, isGlobal, warning), sideEffects)
+    | Ok(value, sideEffects) when name = "long_query_time" ->
+        normalizeLongQueryTime value
+        |> Result.map (fun seconds -> SetVarAction(name, Some seconds, isGlobal), sideEffects)
     | Ok(value, sideEffects) when name = "max_points_in_geometry" ->
         normalizeGeometryPointLimit value
         |> Result.map (fun limit -> SetVarAction(name, Some(string limit), isGlobal), sideEffects)
@@ -7962,7 +7986,31 @@ let private resolveMissingFunctionWithoutDatabase parserOptions sql result =
         | _ -> result
     | _ -> result
 
+let private recordSlowQueryIfNeeded (session: Session) startedAt =
+    let threshold =
+        sessionValue session "long_query_time"
+        |> Option.bind tryParseLongQueryTime
+        |> Option.map float
+        |> Option.defaultValue 10.0
+
+    let isSlow = System.Diagnostics.Stopwatch.GetElapsedTime(startedAt).TotalSeconds >= threshold
+    if isSlow then
+        InformationSchema.recordSlowQuery session.StatusCounters
+    isSlow
+
+let private includeCurrentSlowStatus = function
+    | ResultSet(columns, rows) ->
+        ResultSet(
+            columns,
+            rows
+            |> List.map (function
+                | [ Some "Slow_queries"; Some count ] -> [ Some "Slow_queries"; Some(string (Int64.Parse count + 1L)) ]
+                | row -> row)
+        )
+    | result -> result
+
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
+    let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
     let session = Session.clearSessionStateChanges session
     let parserOptions = parserOptionsForSession session
     let sql = normalizeDispatchedSql parserOptions rawSql
@@ -8017,6 +8065,8 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                         reraise ()
                     | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
 
+    let isSlow = recordSlowQueryIfNeeded session startedAt
+    let result = if isSlow && showStatusRe.IsMatch sql then includeCurrentSlowStatus result else result
     syncTransactionView executed, result
 
 let executeEventBody (session: Session) (body: string) : Session * QueryResult =
@@ -8114,6 +8164,7 @@ let tryPrepareLoad (session: Session) (sql: string) : Result<Parser.LoadRequest 
 /// Keeps the parsed field and SET mappings until the client upload has been
 /// decoded; an ordinary INSERT AST cannot represent either mapping.
 let executeLoadedData (session: Session) (load: Parser.LoadRequest) (rows: Value list list) : Session * QueryResult =
+    let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
     let session = Session.clearSessionStateChanges session
     let statement =
         LoadData
@@ -8133,6 +8184,7 @@ let executeLoadedData (session: Session) (load: Parser.LoadRequest) (rows: Value
             | :? OperationCanceledException -> reraise ()
             | ex -> recoverExecutionError session "LOAD DATA" ex)
 
+    recordSlowQueryIfNeeded session startedAt |> ignore
     syncTransactionView executed, result
 
 let executeServerLoad (session: Session) (load: Parser.LoadRequest) : Session * QueryResult =
@@ -8146,6 +8198,7 @@ let executeServerLoad (session: Session) (load: Parser.LoadRequest) : Session * 
 /// (SET/SHOW/transaction control, which have no AST) still substitute into
 /// `Sql` and go through the ordinary text path.
 let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (values: Value list) : Session * QueryResult =
+    let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
     let session = Session.clearSessionStateChanges session
 
     // The AST path calls `executeParsed` directly, which — unlike `handle` —
@@ -8208,6 +8261,7 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                 | :? OperationCanceledException -> reraise ()
                 | ex -> recoverExecutionError session "prepared statement" ex)
 
+        recordSlowQueryIfNeeded session startedAt |> ignore
         syncTransactionView executed, result
 
 /// Executes an unregistered prepared statement once.

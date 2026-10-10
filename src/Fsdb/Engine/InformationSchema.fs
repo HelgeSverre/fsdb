@@ -1232,6 +1232,7 @@ let private reportedCommandNames =
 
 type StatusCounters internal (id: int64) =
     let questionCount = AtomicCounter()
+    let slowQueryCount = AtomicCounter()
 
     let commandCounters =
         reportedCommandNames
@@ -1241,6 +1242,8 @@ type StatusCounters internal (id: int64) =
     member internal _.RecordQuestion() = questionCount.Increment()
     member internal _.Id = id
     member internal _.Questions = questionCount.Value
+    member internal _.SlowQueries = slowQueryCount.Value
+    member internal _.RecordSlowQuery() = slowQueryCount.Increment()
     member internal _.RecordCommand name = commandCounters.[name].Increment()
     member internal _.CommandCount name = commandCounters.[name].Value
 
@@ -1252,6 +1255,7 @@ type StatusCounters internal (id: int64) =
     member internal this.Reset() =
         this.ResetQuestions()
         this.ResetCommands()
+        slowQueryCount.Reset()
 
 let private processStatusCounters = StatusCounters 0L
 let private statusCounterId = ref 0L
@@ -1278,6 +1282,10 @@ let resetSessionStatuses () =
 let recordQuestion (sessionCounters: StatusCounters) =
     processStatusCounters.RecordQuestion()
     sessionCounters.RecordQuestion()
+
+let recordSlowQuery (sessionCounters: StatusCounters) =
+    processStatusCounters.RecordSlowQuery()
+    sessionCounters.RecordSlowQuery()
 
 let questions () = processStatusCounters.Questions
 
@@ -4265,6 +4273,7 @@ let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) (connection: C
           |> Map.tryFind Authentication.Sha256Password
           |> Option.defaultValue ""
           "Questions", string statusCounters.Questions
+          "Slow_queries", string statusCounters.SlowQueries
           "Threads_connected", string (connectedThreads ())
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
         @ compressionRows

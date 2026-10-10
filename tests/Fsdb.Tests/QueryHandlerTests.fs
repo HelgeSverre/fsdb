@@ -8721,6 +8721,67 @@ let tests =
                   | ResultSet(_, [ [ Some actual; Some value ] ]) when actual = name && int64 value > 0L -> ()
                   | other -> failtestf "expected a positive %s counter, got %A" name other
 
+          testCase "long_query_time counts completed slow statements per session"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let status session =
+                  match handle session "SHOW SESSION STATUS LIKE 'Slow_queries'" with
+                  | updated, ResultSet(_, [ [ Some "Slow_queries"; Some value ] ]) -> updated, int64 value
+                  | _, other -> failtestf "expected Slow_queries status, got %A" other
+
+              let session, initial = status session
+              Expect.equal initial 0L "new session has no slow queries"
+              let session, setting = handle session "SET SESSION long_query_time=0"
+              Expect.equal setting (Affected 0UL) "zero threshold is accepted"
+              let session, result = handle session "SELECT 1"
+              Expect.equal result (ResultSet([ "1" ], [ [ Some "1" ] ])) "query completes"
+              let session, first = status session
+              Expect.equal first 2L "the completed query and current status read are counted"
+              let _, second = status session
+              Expect.equal second 3L "each status read includes itself"
+
+              let other = create 2 session.Store
+              let _, otherCount = status other
+              Expect.equal otherCount 0L "another session has its own counter"
+
+              let prepared =
+                  match prepareStatementForSession session "SELECT 2" with
+                  | Ok(Some statement, 0) ->
+                      { Ast = Some statement
+                        Sql = "SELECT 2"
+                        ParamCount = 0
+                        LastParamTypes = None
+                        ParameterTypes = None
+                        SchemaDependencies = Map.empty
+                        DivisionPrecisionIncrement = 4 }
+                  | other -> failtestf "expected prepared query, got %A" other
+
+              let session, preparedResult = executePrepared session prepared []
+              Expect.equal preparedResult (ResultSet([ "2" ], [ [ Some "2" ] ])) "prepared query completes"
+              let session, afterPrepared = status session
+              Expect.equal afterPrepared 5L "prepared execution and current status read were counted"
+
+              let session, flushResult = handle session "FLUSH STATUS"
+              Expect.equal flushResult (Affected 0UL) "status is flushed"
+              let _, afterFlush = status session
+              Expect.equal afterFlush 2L "flush resets the session count before itself and the status read"
+
+          testCase "long_query_time preserves fractional session and global values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "SET SESSION long_query_time=0.125"
+              Expect.equal result (Affected 0UL) "fractional threshold is accepted"
+              Expect.equal
+                  (handle session "SELECT @@SESSION.long_query_time" |> snd)
+                  (ResultSet([ "@@SESSION.long_query_time" ], [ [ Some "0.125000" ] ]))
+                  "session value has six decimal places"
+              let session, result = handle session "SET SESSION long_query_time=-1"
+              Expect.equal result (Affected 0UL) "negative threshold clamps to zero"
+              Expect.equal
+                  (handle session "SELECT @@SESSION.long_query_time" |> snd)
+                  (ResultSet([ "@@SESSION.long_query_time" ], [ [ Some "0.000000" ] ]))
+                  "clamped value retains decimal display"
+
           TestSupport.processGlobalCase "SHOW STATUS reports transaction and FLUSH command counters"
           <| fun _ ->
               Fsdb.InformationSchema.resetCommandCounts ()
