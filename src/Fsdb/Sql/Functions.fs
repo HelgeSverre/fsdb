@@ -4502,7 +4502,8 @@ let private bitCountFn: Scalar =
                 0L
             | VString text ->
                 let _, truncated = coerceLeadingDouble text
-                if truncated then Diagnostics.numericConversion "INTEGER" text
+                if truncated || String.IsNullOrWhiteSpace text then
+                    Diagnostics.numericConversion "INTEGER" text
                 int64 (Numerics.BitOperations.PopCount(toUInt64 v))
             | _ -> int64 (Numerics.BitOperations.PopCount(toUInt64 (roundNumeric v)))
         VInt count

@@ -6484,6 +6484,20 @@ let tests =
                         (Affected 1UL)
                         "CRC32 bounds delete one key"
 
+                testCase "BIT_COUNT warns for empty and whitespace text"
+                <| fun _ ->
+                    let result, warnings =
+                        Fsdb.Diagnostics.capture (fun () ->
+                            runDefault (newStore ()) "SELECT BIT_COUNT(''),BIT_COUNT(' ')")
+                    Expect.equal result
+                        (ResultSet([ "BIT_COUNT('')"; "BIT_COUNT(' ')" ], [ [ Some "0"; Some "0" ] ]))
+                        "empty text converts to zero"
+                    Expect.equal
+                        (warnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1292, "Truncated incorrect INTEGER value: ''"
+                          1292, "Truncated incorrect INTEGER value: ' '" ]
+                        "both empty and whitespace text warn"
+
                 testCase "a one-column B-tree range matches a scan twin and retains residual predicates"
                 <| fun _ ->
                     let store = newStore ()

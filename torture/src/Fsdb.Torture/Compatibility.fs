@@ -5176,6 +5176,8 @@ module ContractCatalog =
                Contract.query "bit-count-wide-binary" "SELECT BIT_COUNT(_binary'123456789'),BIT_COUNT(_binary'12345678901234567890')"
                Contract.query "bit-count-wide-literal" "SELECT BIT_COUNT(0x010203040506070809)"
                Contract.query "bit-count-wide-literal-warnings" "SHOW WARNINGS"
+               Contract.query "bit-count-empty-text" "SELECT BIT_COUNT(''),BIT_COUNT(' ')"
+               Contract.query "bit-count-empty-text-warnings" "SHOW WARNINGS"
                Contract.query "crc32-utf8" "SELECT CRC32('é')"
                Contract.query "integral-decimal" "SELECT label FROM numeric_bounds WHERE id=2.0"
                Contract.query "fractional-decimal" "SELECT label FROM numeric_bounds WHERE id=2.5"
