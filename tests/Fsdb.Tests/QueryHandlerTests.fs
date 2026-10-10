@@ -2106,6 +2106,37 @@ let tests =
                     "'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead" ]
                   "VALUES warnings do not require a duplicate row"
 
+          testCase "constant indexed bounds retain MySQL conversion warning counts"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE bound_warnings (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO bound_warnings VALUES (1),(2),(3)"
+
+              let session, result = handle session "SELECT id FROM bound_warnings WHERE id=IF(1,ABS('2x'),3)"
+              Expect.equal result (ResultSet([ "id" ], [ [ Some "2" ] ])) "matching bound"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292; 1292 ] "matching bound warnings"
+
+              let session, result = handle session "SELECT id FROM bound_warnings WHERE id=IF(1,ABS('9x'),3)"
+              Expect.equal result (ResultSet([ "id" ], [])) "missing bound"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292 ] "missing bound warning"
+
+          testCase "floating integer probes preserve out-of-range and rounded neighbors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE narrow_probe (id TINYINT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO narrow_probe VALUES (127)"
+
+              let session, result = handle session "SELECT id FROM narrow_probe WHERE id=1000e0"
+              Expect.equal result (ResultSet([ "id" ], [])) "coercion must not turn 1000 into key 127"
+
+              let session, _ = handle session "CREATE TABLE wide_probe (id BIGINT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO wide_probe VALUES (9007199254740992),(9007199254740993)"
+              let _, result = handle session "SELECT id FROM wide_probe WHERE id=9007199254740992e0 ORDER BY id"
+              Expect.equal
+                  result
+                  (ResultSet([ "id" ], [ [ Some "9007199254740992" ] ]))
+                  "the neighboring BIGINT must not compare equal to the DOUBLE bound"
+
           testCase "text ABS indexes report conversion conditions without partial writes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

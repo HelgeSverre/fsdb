@@ -5140,8 +5140,30 @@ let tryEqualityIndex (table: Table) (columnName: string) : EqualityIndex option 
     tryEqualityIndexForTransform table columnName None
 
 let private exactProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
+    let integerColumn =
+        match table.Columns.[index].Type with
+        | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear -> true
+        | _ -> false
+
+    let exactIntegralDouble =
+        match value with
+        // Join probes can still use approximate integer/DOUBLE comparison.
+        // Above this range a DOUBLE can tie neighboring BIGINT values, so
+        // only values in the injective range may become one stored key.
+        | VDouble number ->
+            integerColumn
+            && System.Double.IsFinite number
+            && number = truncate number
+            && abs number < 9007199254740991.0
+        | _ -> false
+
     match Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value) with
     | Ok coerced when coerced = Value.materialize value -> Some coerced
+    | Ok coerced when exactIntegralDouble ->
+        match coerced, value with
+        | VInt integer, VDouble bound when Value.compareIntegerToDouble (bigint integer) bound = 0 -> Some coerced
+        | VUInt integer, VDouble bound when Value.compareIntegerToDouble (bigint integer) bound = 0 -> Some coerced
+        | _ -> None
     | _ -> None
 
 let private acceptsExactSingleColumnProbe (store: Store) (table: Table) (literal: Value) (index: EqualityIndex) =

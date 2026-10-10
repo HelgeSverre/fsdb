@@ -4731,9 +4731,29 @@ module ContractCatalog =
                    "SELECT v FROM constant_null_fallback WHERE id=LEAST(2,3)"
                Contract.query "negative-if-equality"
                    "SELECT v FROM constant_null_fallback WHERE id=-IF(1,-2,3)"
+               Contract.query "warning-bound-hit"
+                   "SELECT v FROM constant_null_fallback WHERE id=IF(1,ABS('2x'),3)"
+               Contract.query "warning-bound-hit-conditions" "SHOW WARNINGS"
+               Contract.query "warning-bound-miss"
+                   "SELECT v FROM constant_null_fallback WHERE id=IF(1,ABS('9x'),3)"
+               Contract.query "warning-bound-miss-conditions" "SHOW WARNINGS"
                Contract.query "coalesce-range"
                    "SELECT id FROM constant_null_fallback WHERE id BETWEEN IFNULL(NULL,2) AND COALESCE(NULL,3) ORDER BY id" |]
           Cleanup = [| "DROP TABLE constant_null_fallback" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
+    let private integralDoubleIndexProbes =
+        { Name = "integral-double-index-probes"
+          Setup =
+            [| "CREATE TABLE narrow_double_probe(id TINYINT PRIMARY KEY)"
+               "INSERT INTO narrow_double_probe VALUES(127)"
+               "CREATE TABLE wide_double_probe(id BIGINT PRIMARY KEY)"
+               "INSERT INTO wide_double_probe VALUES(9007199254740992),(9007199254740993)" |]
+          Steps =
+            [| Contract.query "out-of-range" "SELECT id FROM narrow_double_probe WHERE id=1000e0"
+               Contract.query "rounded-neighbors"
+                   "SELECT id FROM wide_double_probe WHERE id=9007199254740992e0 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE wide_double_probe"; "DROP TABLE narrow_double_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private signFunctionalIndex =
@@ -9122,6 +9142,7 @@ module ContractCatalog =
 
     let all =
         [| roundedFunctionalIndexes
+           integralDoubleIndexProbes
            signFunctionalIndex
            constantNullFallbackIndexes
            tableStatisticsCache

@@ -1867,6 +1867,17 @@ let rec private compareJsonNodes (x: JsonNode) (y: JsonNode) : int =
         | c -> c
     | _ -> 0
 
+/// Compare an integer key with a DOUBLE bound without rounding the key first.
+let compareIntegerToDouble (integer: bigint) (floating: float) =
+    if Double.IsFinite floating then
+        let whole = bigint floating
+
+        match Operators.compare integer whole with
+        | 0 when floating <> truncate floating -> if floating > 0.0 then -1 else 1
+        | result -> result
+    else
+        Operators.compare (float integer) floating
+
 /// Total order over values for ORDER BY: NULL sorts first, numbers compare
 /// numerically (a number vs. a string coerces the string to a number, so
 /// `'10' < '9'` numerically even though it's false as a string compare),

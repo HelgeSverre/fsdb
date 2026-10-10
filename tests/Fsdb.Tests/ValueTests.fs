@@ -1200,6 +1200,15 @@ let tests =
                     Expect.isLessThan (compare (VUInt first) (VString(string second))) 0 "adjacent unsigned ids remain distinct"
                     Expect.isGreaterThan (compare (VString(string second)) (VInt(int64 first))) 0 "comparison is symmetric"
 
+                testCase "integer and DOUBLE comparison keeps distinct high-precision keys"
+                <| fun _ ->
+                    let bound = VDouble 9007199254740992.0
+                    Expect.equal (compareIntegerToDouble 9007199254740992I 9007199254740992.0) 0 "exact integer key"
+                    Expect.isGreaterThan (compareIntegerToDouble 9007199254740993I 9007199254740992.0) 0 "adjacent integer key"
+                    Expect.equal (compare (VInt 9007199254740993L) bound) 0 "generic DOUBLE comparison remains approximate"
+                    Expect.isLessThan (compareIntegerToDouble 1I 1.5) 0 "fractional positive bound"
+                    Expect.isGreaterThan (compareIntegerToDouble -1I -1.5) 0 "fractional negative bound"
+
                 testCase "numeric-string coercion beats lexical string ordering"
                 <| fun _ ->
                     // '9' < '10' lexically but 9 > 10 is false numerically.

@@ -4375,6 +4375,25 @@ let private comparisonName = function
     | Gte -> ">="
     | _ -> "="
 
+let private isIntegerColumn = function
+    | Some column ->
+        match column.Type with
+        | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear -> true
+        | _ -> false
+    | None -> false
+
+let private compareWithColumnDomain (leftColumn: ColumnDef option) left (rightColumn: ColumnDef option) right =
+    match left, right with
+    | VInt integer, VDouble bound when isIntegerColumn leftColumn && rightColumn.IsNone ->
+        Value.compareIntegerToDouble (bigint integer) bound
+    | VUInt integer, VDouble bound when isIntegerColumn leftColumn && rightColumn.IsNone ->
+        Value.compareIntegerToDouble (bigint integer) bound
+    | VDouble bound, VInt integer when isIntegerColumn rightColumn && leftColumn.IsNone ->
+        -(Value.compareIntegerToDouble (bigint integer) bound)
+    | VDouble bound, VUInt integer when isIntegerColumn rightColumn && leftColumn.IsNone ->
+        -(Value.compareIntegerToDouble (bigint integer) bound)
+    | _ -> Value.compare left right
+
 let private resolvedCompareWithColumns
     (ctx: EvalContext)
     (leftExpr: Expr)
@@ -4391,7 +4410,7 @@ let private resolvedCompareWithColumns
     | VString sa, VString sb ->
         comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
         |> Result.map (fun collation -> collation.ComparePrimary sa sb)
-    | _ -> Ok(Value.compare pa pb)
+    | _ -> Ok(compareWithColumnDomain leftColumn pa rightColumn pb)
 
 let private resolvedCompare (ctx: EvalContext) (operation: string) (leftExpr: Expr) (left: Value) (rightExpr: Expr) (right: Value) : Result<int, EvalError> =
     resolvedCompareWithColumns
@@ -4460,7 +4479,7 @@ let private comparisonResult
                     (collation.ComparePrimary leftText rightText)
                     (collation.Equals leftText rightText))
         | _ ->
-            let compared = Value.compare comparedLeft comparedRight
+            let compared = compareWithColumnDomain leftColumn comparedLeft rightColumn comparedRight
             Ok(finish compared (compared = 0))
 
 let private comparisonResultWithNulls
