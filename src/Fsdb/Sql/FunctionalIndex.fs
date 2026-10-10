@@ -308,7 +308,7 @@ let private isNumericTransform = function
     | DecimalLogarithm -> true
     | _ -> false
 
-let private hasApproximateResult = function
+let private producesDoubleResult = function
     | SquareRooted
     | Exponentiated
     | Logarithm
@@ -339,7 +339,7 @@ let private numericKeyResult columnType transforms =
         (fun result transform ->
             match transform with
             | Signum -> SignedInteger
-            | transform when hasApproximateResult transform -> Approximate
+            | transform when producesDoubleResult transform -> Approximate
             | _ -> result)
         sourceResult
 
@@ -510,8 +510,8 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
         value |> toDouble |> VDouble |> Some
     | (Some Floored | Some Ceiled | Some Rounded), _ ->
         tryRoundedProbe columnType value |> Option.orElseWith (fun () -> normalizeStored value)
-    | Some transform, VDouble number when hasApproximateResult transform && Double.IsFinite number -> Some(VDouble number)
-    | Some transform, _ when hasApproximateResult transform -> None
+    | Some transform, VDouble number when producesDoubleResult transform && Double.IsFinite number -> Some(VDouble number)
+    | Some transform, _ when producesDoubleResult transform -> None
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _

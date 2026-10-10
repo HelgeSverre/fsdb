@@ -3779,6 +3779,13 @@ let tests =
                     "LN(value)", "0e0", "1"
                     "LOG2(value)", "1e0", "2"
                     "LOG10(value)", "1e0", "3" ]
+              let verifyLogarithmLookups source recovered =
+                  for expression, probe, id in logarithmProbes do
+                      let sql = sprintf "SELECT id FROM lookup_log WHERE %s=%s" expression probe
+                      Expect.equal
+                          (handle (Fsdb.Session.create 60 recovered) sql |> snd)
+                          (ResultSet([ "id" ], [ [ Some id ] ]))
+                          (sprintf "%s restores %s" source expression)
 
               let run (session: Fsdb.Session.Session) (sql: string) =
                   match handle session sql with
@@ -4006,11 +4013,7 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "WAL recovery rebuilds the exponential index"
               | other -> failtestf "expected recovered exponential lookup rows, got %A" other
 
-              for expression, probe, id in logarithmProbes do
-                  let sql = sprintf "SELECT id FROM lookup_log WHERE %s=%s" expression probe
-                  match handle (Fsdb.Session.create 60 reloaded) sql |> snd with
-                  | ResultSet(_, rows) -> Expect.equal rows [ [ Some id ] ] (sprintf "WAL recovery rebuilds %s" expression)
-                  | other -> failtestf "expected recovered %s lookup rows, got %A" expression other
+              verifyLogarithmLookups "WAL replay" reloaded
 
               match handle (Fsdb.Session.create 56 reloaded) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "WAL recovery rebuilds the composed numeric index"
@@ -4103,11 +4106,7 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "the snapshot restores the exponential index"
               | other -> failtestf "expected snapshot exponential lookup rows, got %A" other
 
-              for expression, probe, id in logarithmProbes do
-                  let sql = sprintf "SELECT id FROM lookup_log WHERE %s=%s" expression probe
-                  match handle (Fsdb.Session.create 61 fromSnapshot) sql |> snd with
-                  | ResultSet(_, rows) -> Expect.equal rows [ [ Some id ] ] (sprintf "snapshot restores %s" expression)
-                  | other -> failtestf "expected snapshot %s lookup rows, got %A" expression other
+              verifyLogarithmLookups "snapshot" fromSnapshot
 
               match handle (Fsdb.Session.create 57 fromSnapshot) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "the snapshot restores the composed numeric index"
