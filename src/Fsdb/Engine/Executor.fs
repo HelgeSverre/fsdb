@@ -11639,7 +11639,9 @@ and private isNumericIndexValue = function
     | _ -> false
 
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
-    let safeFallbacks = set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST" ]
+    let foldableBuiltins =
+        set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST"
+              "MOD"; "TRUNCATE"; "POW"; "POWER" ]
 
     let rec isSafe expression =
         let safeChildren () = Expression.children expression |> List.forall isSafe
@@ -11652,7 +11654,7 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
             safeChildren ()
         | FuncCall(name, _)
             when ((FunctionalIndex.tryBuiltin name |> Option.isSome)
-                  || Set.contains (name.ToUpperInvariant()) safeFallbacks)
+                  || Set.contains (name.ToUpperInvariant()) foldableBuiltins)
                  && Functions.isUnmodifiedBuiltinScalar name registry ->
             safeChildren ()
         | _ -> false
@@ -11666,7 +11668,7 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
 
 and private numericPlannerConstantEvaluator store registry =
     let evaluate = plannerConstantEvaluator store registry
-    fun expression -> evaluate expression |> Option.filter isNumericIndexValue
+    fun expression -> evaluate expression |> Option.filter (fun value -> value = VNull || isNumericIndexValue value)
 
 and private isDirectNumericIndexColumn (table: Table) (column: string, transform: IndexTransform option) =
     transform.IsNone

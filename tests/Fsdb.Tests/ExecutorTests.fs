@@ -6380,6 +6380,60 @@ let tests =
                         ()
                     | other -> failtestf "expected a composite const plan, got %A" other
 
+                testCase "original numeric builtins fold into indexed bounds"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE numeric_bounds(id INT PRIMARY KEY, label VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO numeric_bounds VALUES(-2,'minus two'),(1,'one'),(2,'two'),(3,'three'),(4,'four'),(20,'twenty')" |> ignore
+
+                    for expression, expected in
+                        [ "MOD(5,3)", "two"
+                          "MOD(-5,3)", "minus two"
+                          "TRUNCATE(2.9,0)", "two"
+                          "TRUNCATE(29,-1)", "twenty"
+                          "POW(2,2)", "four"
+                          "POWER(2,2)", "four"
+                          "2.0", "two" ] do
+                        let sql = sprintf "SELECT label FROM numeric_bounds WHERE id=%s" expression
+                        Expect.equal (runDefault store sql) (ResultSet([ "label" ], [ [ Some expected ] ])) sql
+                        let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
+                        Expect.equal plan.Key (Some "PRIMARY") (sprintf "constant %s uses the primary key" expression)
+
+                    Expect.equal
+                        (runDefault store "SELECT label FROM numeric_bounds WHERE id=2.5")
+                        (ResultSet([ "label" ], []))
+                        "fractional decimal probes do not match integer keys"
+                    let fractionalPlan = runDefault store "EXPLAIN SELECT label FROM numeric_bounds WHERE id=2.5" |> explainRow
+                    Expect.equal fractionalPlan.Key None "a fractional decimal does not claim an integer key"
+
+                    runDefault store "CREATE TABLE wide_numeric_bound(id BIGINT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO wide_numeric_bound VALUES(9007199254740993)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM wide_numeric_bound WHERE id=9007199254740993.0")
+                        (ResultSet([ "id" ], [ [ Some "9007199254740993" ] ]))
+                        "integral decimal probes retain bits beyond double precision"
+                    let widePlan =
+                        runDefault store "EXPLAIN SELECT id FROM wide_numeric_bound WHERE id=9007199254740993.0"
+                        |> explainRow
+                    Expect.equal widePlan.Key (Some "PRIMARY") "the exact wide decimal uses the integer key"
+
+                    let rangePlan =
+                        runDefault store "EXPLAIN SELECT label FROM numeric_bounds WHERE id>=TRUNCATE(29,-1)"
+                        |> explainRow
+                    Expect.equal rangePlan.AccessType (Some "range") "TRUNCATE supplies a range bound"
+                    Expect.equal rangePlan.Key (Some "PRIMARY") "the range reports its primary key"
+
+                    Expect.equal
+                        (runDefault store "SELECT label FROM numeric_bounds WHERE id=MOD(5,0)")
+                        (ResultSet([ "label" ], []))
+                        "a zero divisor yields no matching integer key"
+
+                    let overridden = builtins |> registerScalar "MOD" (fun _ -> VInt 3L)
+                    let overridePlan =
+                        run store overridden "EXPLAIN SELECT label FROM numeric_bounds WHERE id=MOD(5,3)"
+                        |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden MOD cannot be folded into an index bound"
+
                 testCase "a one-column B-tree range matches a scan twin and retains residual predicates"
                 <| fun _ ->
                     let store = newStore ()

@@ -5199,12 +5199,22 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
             && abs number < 9007199254740991.0
         | _ -> false
 
+    let exactIntegralDecimal =
+        match value with
+        | VDecimal number -> integerColumn && System.Decimal.Truncate number = number
+        | _ -> false
+
     match Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value) with
     | Ok coerced when coerced = Value.materialize value -> Some coerced
     | Ok coerced when exactIntegralDouble ->
         match coerced, value with
         | VInt integer, VDouble bound when Value.compareIntegerToDouble (bigint integer) bound = 0 -> Some coerced
         | VUInt integer, VDouble bound when Value.compareIntegerToDouble (bigint integer) bound = 0 -> Some coerced
+        | _ -> None
+    | Ok coerced when exactIntegralDecimal ->
+        match coerced, value with
+        | VInt integer, VDecimal bound when decimal integer = bound -> Some coerced
+        | VUInt integer, VDecimal bound when decimal integer = bound -> Some coerced
         | _ -> None
     | _ -> None
 

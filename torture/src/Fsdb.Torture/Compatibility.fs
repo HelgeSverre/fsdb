@@ -5030,6 +5030,25 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE numeric_compositions" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private numericConstantIndexBounds =
+        { Name = "numeric-constant-index-bounds"
+          Setup =
+            [| "CREATE TABLE numeric_bounds(id INT PRIMARY KEY,label VARCHAR(20))"
+               "INSERT INTO numeric_bounds VALUES(-2,'minus two'),(1,'one'),(2,'two'),(3,'three'),(4,'four'),(20,'twenty')" |]
+          Steps =
+            [| Contract.query "mod-positive" "SELECT label FROM numeric_bounds WHERE id=MOD(5,3)"
+               Contract.query "mod-negative" "SELECT label FROM numeric_bounds WHERE id=MOD(-5,3)"
+               Contract.query "truncate-decimal" "SELECT label FROM numeric_bounds WHERE id=TRUNCATE(2.9,0)"
+               Contract.query "truncate-negative-precision" "SELECT label FROM numeric_bounds WHERE id=TRUNCATE(29,-1)"
+               Contract.query "pow" "SELECT label FROM numeric_bounds WHERE id=POW(2,2)"
+               Contract.query "power" "SELECT label FROM numeric_bounds WHERE id=POWER(2,2)"
+               Contract.query "integral-decimal" "SELECT label FROM numeric_bounds WHERE id=2.0"
+               Contract.query "fractional-decimal" "SELECT label FROM numeric_bounds WHERE id=2.5"
+               Contract.query "range" "SELECT id FROM numeric_bounds WHERE id>=TRUNCATE(29,-1) ORDER BY id"
+               Contract.query "zero-divisor" "SELECT label FROM numeric_bounds WHERE id=MOD(5,0)" |]
+          Cleanup = [| "DROP TABLE numeric_bounds" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private tableStatisticsCache =
         let rows =
             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
@@ -9669,6 +9688,7 @@ module ContractCatalog =
     let all =
         [| roundedFunctionalIndexes
            numericComposedFunctionalIndexes
+           numericConstantIndexBounds
            integralDoubleIndexProbes
            signFunctionalIndex
            isNullFunctionalIndex
