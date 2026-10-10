@@ -2136,13 +2136,21 @@ let private handleConnection
                                 Session.recordGeneralCommand session "Field List" (table + " " + wildcard)
                                 // Deprecated in MySQL 8.0, but PDO/mysqlnd's
                                 // metadata probing can still send it —
-                                // reply with the table's columns, EOF-terminated,
-                                // or a 1146 ERR if the table doesn't exist.
+                                // reply with the table or view's columns,
+                                // EOF-terminated, or a 1146 ERR if absent.
                                 let session = QueryHandler.startTransactionStatement session
                                 activeSession <- Some session
                                 let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-                                match Storage.tableSnapshot (Session.currentStore session) dbName table with
+                                let columns =
+                                    match Storage.tableSnapshot (Session.currentStore session) dbName table with
+                                    | Result.Ok storedTable -> Ok(storedTable.Columns, storedTable.Indexes)
+                                    | Result.Error error ->
+                                        match QueryHandler.viewColumnsForSession session dbName table with
+                                        | Some viewColumns -> Ok(viewColumns, [])
+                                        | None -> Error error
+
+                                match columns with
                                 | Result.Error e ->
                                     let code, message = Storage.toMySqlError e
 
@@ -2151,7 +2159,7 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
-                                | Result.Ok storedTable ->
+                                | Result.Ok(tableColumns, indexes) ->
                                     let matchesColumn =
                                         if wildcard = "" then fun (_: string) -> true
                                         else
@@ -2159,11 +2167,11 @@ let private handleConnection
                                             fun name -> likeMatch '\\' equalsIgnoreCase name wildcard
 
                                     let payloads =
-                                        (storedTable.Columns
+                                        (tableColumns
                                          |> List.filter (fun column -> matchesColumn column.Name)
                                          |> List.map (fun column ->
                                              let metadata =
-                                                 { ColumnWire.metadataOfTableColumn storedTable.Indexes column with
+                                                 { ColumnWire.metadataOfTableColumn indexes column with
                                                      Origin =
                                                          Some
                                                              { Schema = dbName

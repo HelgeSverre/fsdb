@@ -848,6 +848,9 @@ let private registryFor (session: Session) : Functions.Registry =
             cache.Entry <- Some(inputs, registry)
             registry)
 
+let internal viewColumnsForSession (session: Session) database table =
+    Executor.viewColumns (Session.currentStore session) (registryFor session) database table
+
 let private storedFunctionEntries store =
     match Storage.scanList store "mysql" "functions" with
     | Ok(_, rows) -> rows |> List.choose SystemCatalog.StoredFunction.tryRead

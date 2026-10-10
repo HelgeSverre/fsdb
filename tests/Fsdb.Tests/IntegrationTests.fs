@@ -3244,6 +3244,26 @@ let tests =
                   let! filteredEnd = readPacketAsync stream
                   Expect.equal filteredEnd.Value.Payload.[0] 0xfeuy "filtered field list contains no other columns"
 
+                  let! _ = query "CREATE VIEW v AS SELECT n AS view_n FROM t"
+                  let! _ = readPacketAsync stream
+                  let viewFields =
+                      Array.concat
+                          [ [| 0x04uy |]
+                            Text.Encoding.UTF8.GetBytes "v"
+                            [| 0uy |]
+                            Text.Encoding.UTF8.GetBytes "%" ]
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = viewFields } |> Async.Ignore
+                  let! viewField = readPacketAsync stream
+                  let viewMetadata = Reader(viewField.Value.Payload)
+                  Expect.equal (viewMetadata.ReadLenEncString()) (Some "def") "view field catalog"
+                  Expect.equal (viewMetadata.ReadLenEncString()) (Some "app") "view field schema"
+                  Expect.equal (viewMetadata.ReadLenEncString()) (Some "v") "view field table"
+                  Expect.equal (viewMetadata.ReadLenEncString()) (Some "v") "view field original table"
+                  Expect.equal (viewMetadata.ReadLenEncString()) (Some "view_n") "view field name"
+                  Expect.equal (viewMetadata.ReadLenEncString()) (Some "view_n") "view field original name"
+                  let! viewEnd = readPacketAsync stream
+                  Expect.equal viewEnd.Value.Payload.[0] 0xfeuy "view field list ends after its column"
+
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x04uy |] (Array.append (Text.Encoding.UTF8.GetBytes "ghost") [| 0uy |]) }
                   let! fieldListErr = readPacketAsync stream
                   Expect.equal fieldListErr.Value.Payload.[0] 0xffuy "missing table: ERR"
