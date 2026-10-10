@@ -9206,6 +9206,48 @@ let tests =
                         (ResultSet([ "id" ], []))
                         "updates remove the old EXP key"
 
+                testCase "trigonometric functional keys serve equality range grouping and uniqueness"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE trig_keys(id INT PRIMARY KEY,n DOUBLE,KEY ix_sin ((SIN(n))),KEY ix_cos ((COS(n))),KEY ix_tan ((TAN(n))))"
+                    |> ignore
+                    runDefault store "INSERT INTO trig_keys VALUES(1,0),(2,1),(3,-1),(4,NULL)" |> ignore
+
+                    for expression, probe, key, expected in
+                        [ "SIN(n)", "0e0", "ix_sin", [ [ Some "1" ] ]
+                          "COS(n)", "1e0", "ix_cos", [ [ Some "1" ] ]
+                          "TAN(n)", "0e0", "ix_tan", [ [ Some "1" ] ] ] do
+                        let query = sprintf "SELECT id FROM trig_keys WHERE %s=%s" expression probe
+                        Expect.equal (runDefault store query) (ResultSet([ "id" ], expected)) query
+                        Expect.equal ((runDefault store ("EXPLAIN " + query) |> explainRow).Key) (Some key) query
+
+                    let range = "SELECT id FROM trig_keys WHERE SIN(n)>0e0 ORDER BY id"
+                    Expect.equal
+                        (runDefault store range)
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "SIN range"
+                    Expect.equal
+                        ((runDefault store "EXPLAIN SELECT id FROM trig_keys WHERE SIN(n)>0e0" |> explainRow).Key)
+                        (Some "ix_sin")
+                        "SIN range key"
+                    Expect.equal
+                        ((runDefault store "EXPLAIN SELECT SIN(n),COUNT(*) FROM trig_keys GROUP BY SIN(n) ORDER BY SIN(n)" |> explainRow).Key)
+                        (Some "ix_sin")
+                        "SIN grouping key"
+
+                    runDefault store "CREATE TABLE unique_trig(id INT PRIMARY KEY,n DOUBLE,UNIQUE KEY ux_sin ((SIN(n))))"
+                    |> ignore
+                    runDefault store "INSERT INTO unique_trig VALUES(1,0),(2,NULL),(3,NULL)" |> ignore
+                    match runDefault store "INSERT INTO unique_trig VALUES(4,0)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected duplicate SIN key, got %A" other
+
+                    runDefault store "UPDATE trig_keys SET n=2 WHERE id=1" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM trig_keys WHERE SIN(n)=0e0")
+                        (ResultSet([ "id" ], []))
+                        "updates remove the old SIN key"
+
                 testCase "logarithm functional keys keep distinct function identities"
                 <| fun _ ->
                     let store = newStore ()

@@ -3786,6 +3786,13 @@ let tests =
                           (handle (Fsdb.Session.create 60 recovered) sql |> snd)
                           (ResultSet([ "id" ], [ [ Some id ] ]))
                           (sprintf "%s restores %s" source expression)
+              let verifyTrigonometricLookups source recovered =
+                  for functionName, probe in [ "SIN", "0e0"; "COS", "1e0"; "TAN", "0e0" ] do
+                      let sql = sprintf "SELECT id FROM lookup_trig WHERE %s(value)=%s" functionName probe
+                      Expect.equal
+                          (handle (Fsdb.Session.create 62 recovered) sql |> snd)
+                          (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                          (sprintf "%s restores %s" source functionName)
 
               let run (session: Fsdb.Session.Session) (sql: string) =
                   match handle session sql with
@@ -3835,6 +3842,8 @@ let tests =
                     "INSERT INTO lookup_round VALUES (1, -2.50), (2, 0.01), (3, 2.99)"
                     "CREATE TABLE lookup_log (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_log_value ((LOG(value))), INDEX ix_ln_value ((LN(value))), INDEX ix_log2_value ((LOG2(value))), INDEX ix_log10_value ((LOG10(value))))"
                     "INSERT INTO lookup_log VALUES (1, 1), (2, 2), (3, 10), (4, NULL)"
+                    "CREATE TABLE lookup_trig (id INT PRIMARY KEY, value DOUBLE, INDEX ix_sin ((SIN(value))), INDEX ix_cos ((COS(value))), INDEX ix_tan ((TAN(value))))"
+                    "INSERT INTO lookup_trig VALUES (1, 0), (2, 1), (3, -1), (4, NULL)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
                     "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
                     "INSERT INTO lookup_abs_text VALUES (1, '12x'), (2, 'Other')"
@@ -4014,6 +4023,7 @@ let tests =
               | other -> failtestf "expected recovered exponential lookup rows, got %A" other
 
               verifyLogarithmLookups "WAL replay" reloaded
+              verifyTrigonometricLookups "WAL replay" reloaded
 
               match handle (Fsdb.Session.create 56 reloaded) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "WAL recovery rebuilds the composed numeric index"
@@ -4107,6 +4117,7 @@ let tests =
               | other -> failtestf "expected snapshot exponential lookup rows, got %A" other
 
               verifyLogarithmLookups "snapshot" fromSnapshot
+              verifyTrigonometricLookups "snapshot" fromSnapshot
 
               match handle (Fsdb.Session.create 57 fromSnapshot) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "the snapshot restores the composed numeric index"

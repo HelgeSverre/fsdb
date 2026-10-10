@@ -80,6 +80,15 @@ let private definitions =
       { CanonicalName = "EXP"
         Aliases = []
         Transform = Exponentiated }
+      { CanonicalName = "SIN"
+        Aliases = []
+        Transform = Sine }
+      { CanonicalName = "COS"
+        Aliases = []
+        Transform = Cosine }
+      { CanonicalName = "TAN"
+        Aliases = []
+        Transform = Tangent }
       // MySQL stores LOG and LN as distinct functional expressions.
       { CanonicalName = "LOG"
         Aliases = []
@@ -191,6 +200,9 @@ let rec hasTextResult = function
     | Rounded
     | SquareRooted
     | Exponentiated
+    | Sine
+    | Cosine
+    | Tangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -265,6 +277,9 @@ let private supportsSingleTransform transform columnType =
     | Rounded
     | SquareRooted
     | Exponentiated
+    | Sine
+    | Cosine
+    | Tangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -302,6 +317,9 @@ let private isNumericTransform = function
     | Rounded
     | SquareRooted
     | Exponentiated
+    | Sine
+    | Cosine
+    | Tangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -311,6 +329,9 @@ let private isNumericTransform = function
 let private producesDoubleResult = function
     | SquareRooted
     | Exponentiated
+    | Sine
+    | Cosine
+    | Tangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -575,6 +596,11 @@ let private logarithmValue logarithm value =
     if number <= 0.0 then raise InvalidLogarithmArgument
     (if Double.IsNaN number then VNull else VDouble(logarithm number)), truncated
 
+let private trigonometricValue operation value =
+    let number, truncated = numericInputWithStatus value
+    let result = operation number
+    (if Double.IsNaN result then VNull else VDouble result), truncated
+
 let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble: float -> float) value =
     match value with
     | VInt _ | VUInt _ -> value, None
@@ -674,6 +700,9 @@ let rec projectValueWithStatus encodeText transform value =
         let result = Math.Exp number
         if Double.IsInfinity result then raise ExponentialOutOfRange
         (if Double.IsNaN result then VNull else VDouble result), truncated
+    | Some Sine, value -> trigonometricValue Math.Sin value
+    | Some Cosine, value -> trigonometricValue Math.Cos value
+    | Some Tangent, value -> trigonometricValue Math.Tan value
     | Some Logarithm, value
     | Some NaturalLogarithm, value -> logarithmValue Math.Log value
     | Some BinaryLogarithm, value -> logarithmValue Math.Log2 value

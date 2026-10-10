@@ -5056,6 +5056,24 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE exp_nested_probe"; "DROP TABLE exp_composed_probe"; "DROP TABLE exp_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private trigonometricFunctionalIndexes =
+        { Name = "trigonometric-functional-indexes"
+          Setup =
+            [| "CREATE TABLE trig_probe(id INT PRIMARY KEY,n DOUBLE,UNIQUE KEY ux_sin ((SIN(n))),KEY ix_cos ((COS(n))),KEY ix_tan ((TAN(n))))"
+               "INSERT INTO trig_probe VALUES(1,0),(2,1),(3,-1),(4,NULL)" |]
+          Steps =
+            [| Contract.query "sine" "SELECT id FROM trig_probe WHERE SIN(n)=0e0"
+               Contract.query "cosine" "SELECT id FROM trig_probe WHERE COS(n)=1e0"
+               Contract.query "tangent" "SELECT id FROM trig_probe WHERE TAN(n)=0e0"
+               Contract.query "range" "SELECT id FROM trig_probe WHERE SIN(n)>0e0 ORDER BY id"
+               Contract.query "grouping" "SELECT SIN(n),COUNT(*) FROM trig_probe GROUP BY SIN(n) ORDER BY SIN(n)"
+               Contract.execute "duplicate" "INSERT INTO trig_probe VALUES(5,0)" |> Contract.fails 1062 "23000"
+               Contract.execute "update" "UPDATE trig_probe SET n=2 WHERE id=1"
+               Contract.query "old-key" "SELECT id FROM trig_probe WHERE SIN(n)=0e0"
+               Contract.query "new-key" "SELECT id FROM trig_probe WHERE SIN(n)>0e0 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE trig_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private logarithmFunctionalIndexes =
         { Name = "logarithm-functional-indexes"
           Setup =
@@ -9823,6 +9841,7 @@ module ContractCatalog =
         [| roundedFunctionalIndexes
            numericComposedFunctionalIndexes
            expFunctionalIndexes
+           trigonometricFunctionalIndexes
            logarithmFunctionalIndexes
            numericConstantIndexBounds
            elidedWhereBindings

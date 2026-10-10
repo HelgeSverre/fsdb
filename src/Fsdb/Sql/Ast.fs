@@ -420,6 +420,9 @@ and IndexTransform =
     | Rounded
     | SquareRooted
     | Exponentiated
+    | Sine
+    | Cosine
+    | Tangent
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
