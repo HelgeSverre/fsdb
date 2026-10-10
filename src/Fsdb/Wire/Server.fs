@@ -2049,6 +2049,7 @@ let private handleConnection
                                             processEntry.Db <- session.Database
                                             return! loop session
                             | Some Statistics ->
+                                Session.recordGeneralCommand session "Statistics" ""
                                 let uptime = max 0L (int64 (DateTime.Now - InformationSchema.serverStartedAt).TotalSeconds)
                                 let questions = InformationSchema.questions ()
                                 let rate = if uptime = 0L then 0.0 else float questions / float uptime
@@ -2111,6 +2112,7 @@ let private handleConnection
 
                                     return! loop session
                             | Some Debug ->
+                                Session.recordGeneralCommand session "Debug" ""
                                 Log.diagnostic
                                     "fsdb: COM_DEBUG: uptime=%d threads=%d questions=%d"
                                     (max 0L (int64 (DateTime.Now - InformationSchema.serverStartedAt).TotalSeconds))

@@ -38,6 +38,9 @@ MySQL recorded `Field List` with argument `user %` for an existing table and
 `fsdb_missing_field_list_probe %` for a missing table (which returned 1146).
 `COM_RESET_CONNECTION` and `COM_SET_OPTION` produced no general-log entries
 in the same probe.
+Another raw-protocol probe recorded empty-argument `Statistics` and `Debug`
+entries for `COM_STATISTICS` and `COM_DEBUG`; `COM_PROCESS_INFO` returned
+1047 on the pinned MySQL server.
 
 `log_output='NONE,FILE'` is accepted while `general_log=ON`; the `NONE`
 destination suppresses output despite the `FILE` member. fsdb permits this
@@ -55,6 +58,7 @@ remove the log entry. Bound values are rendered in `Execute` arguments while
 credential statements remain redacted. The `NONE` destination suppresses
 output as in MySQL. With the default `FILE` destination, enabling general
 logging is refused explicitly because there is no compatible file sink yet.
-`COM_FIELD_LIST` is also recorded with its wildcard, including a failed lookup.
+`COM_FIELD_LIST` is also recorded with its wildcard, including a failed lookup;
+`COM_STATISTICS` and `COM_DEBUG` record their empty-argument events.
 Other wire commands remain outside this path. These boundaries remain open in
 `GAPS.md`.
