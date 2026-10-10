@@ -249,6 +249,12 @@ let private isTextToIntegerTransform = function
     | FirstCharacterCode -> true
     | _ -> false
 
+let private isEncodedTextTransform = function
+    | EncodedHex
+    | Md5Digest
+    | Sha1Digest -> true
+    | _ -> false
+
 let supportsColumnType transform columnType =
     match transform with
     | Expression expression ->
@@ -260,9 +266,7 @@ let supportsColumnType transform columnType =
             | first :: _, textResult :: inner
                 when (isTextToIntegerTransform textResult
                       || textResult = DecodedHex
-                      || textResult = EncodedHex
-                      || textResult = Md5Digest
-                      || textResult = Sha1Digest)
+                      || isEncodedTextTransform textResult)
                      && List.forall isTextTransform inner ->
                 if inner.IsEmpty then
                     supportsSingleTransform textResult columnType
@@ -426,9 +430,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some IsNullResult, _
     | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
     | Some DecodedHex, _ -> tryBinaryProbe value
-    | Some EncodedHex, _ -> tryTextResultProbe value
-    | Some Md5Digest, _
-    | Some Sha1Digest, _ -> tryTextResultProbe value
+    | Some transform, _ when isEncodedTextTransform transform -> tryTextResultProbe value
     | Some(Expression expression), _ ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical ->
@@ -437,9 +439,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             match List.tryLast transforms with
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
-            | Some EncodedHex -> tryTextResultProbe value
-            | Some Md5Digest
-            | Some Sha1Digest -> tryTextResultProbe value
+            | Some transform when isEncodedTextTransform transform -> tryTextResultProbe value
             | Some _ when List.contains Signum transforms -> tryExactInt64 value |> Option.map VInt
             | Some AbsoluteValue when List.forall ((=) AbsoluteValue) transforms ->
                 tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value

@@ -4933,6 +4933,7 @@ module ContractCatalog =
                Contract.query "null-digest" "SELECT id FROM digest_text_probe WHERE MD5(v) IS NULL ORDER BY id"
                Contract.query "binary-sha-alias" "SELECT id FROM digest_binary_probe WHERE SHA1(v)=SHA1(X'00FF') ORDER BY id"
                Contract.query "binary-uppercase-probe" "SELECT id FROM digest_binary_probe WHERE SHA(v)='AA3E5DCDD77B153F2E59BD0D8794FDE33CB4E486' ORDER BY id"
+               Contract.query "sha-arity" "SELECT SHA('a','b')" |> Contract.fails 1582 "42000"
                Contract.query "latin1-bytes" "SELECT id,MD5(v) FROM digest_latin1_probe WHERE MD5(v)='3406877694691ddd1dfb0aca54681407' ORDER BY id"
                Contract.query "numeric-display" "SELECT id,MD5(v) FROM digest_numeric_probe WHERE MD5(v)=MD5('0012') ORDER BY id"
                Contract.query "composed-sha1" "SELECT id FROM digest_composed_probe WHERE SHA1(TRIM(v))=SHA1('A') ORDER BY id" |]

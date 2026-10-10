@@ -4400,6 +4400,7 @@ let tests =
                     "SELECT BIT_COUNT()", "BIT_COUNT"
                     "SELECT OCT()", "OCT"
                     "SELECT CRC32()", "CRC32"
+                    "SELECT SHA('a','b')", "SHA"
                     "SELECT PI(1)", "PI"
                     "SELECT COT()", "COT"
                     "SELECT NAME_CONST('answer')", "NAME_CONST"

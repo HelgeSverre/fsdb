@@ -4113,16 +4113,6 @@ let aesDecrypt (blockEncryptionMode: string) : Scalar =
                 CryptographicOperations.ZeroMemory key
                 CryptographicOperations.ZeroMemory initializationVector
 
-let private md5Fn: Scalar =
-    function
-    | [ value ] -> FunctionalIndex.projectValue (Some Md5Digest) value
-    | _ -> VNull
-
-let private sha1Fn: Scalar =
-    function
-    | [ value ] -> FunctionalIndex.projectValue (Some Sha1Digest) value
-    | _ -> VNull
-
 let private makeSetFn: Scalar =
     function
     | VNull :: _ -> VNull
@@ -6607,9 +6597,8 @@ let private registerStringBuiltins registry =
     |> registerFunctionalBinaryString DecodedHex
     |> registerStringScalar "AES_ENCRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesEncrypt "aes-128-ecb")
     |> registerStringScalar "AES_DECRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesDecrypt "aes-128-ecb")
-    |> registerByteTextScalar "MD5" firstArgument (exactArity "MD5" 1 md5Fn)
-    |> registerByteTextScalar "SHA1" firstArgument (exactArity "SHA1" 1 sha1Fn)
-    |> registerByteTextScalar "SHA" firstArgument sha1Fn
+    |> registerFunctionalByteText Md5Digest
+    |> registerFunctionalByteText Sha1Digest
     |> registerByteTextScalar "SHA2" firstArgument (exactArity "SHA2" 2 sha2Fn)
     |> registerScalar "FORMAT" formatFn
     |> registerStringScalar
