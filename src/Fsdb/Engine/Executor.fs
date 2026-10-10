@@ -4316,12 +4316,11 @@ let private comparisonName = function
     | Gte -> ">="
     | _ -> "="
 
-let private isIntegerColumn = function
-    | Some column ->
-        match column.Type with
-        | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear -> true
-        | _ -> false
-    | None -> false
+let private isIntegerColumnType = function
+    | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear -> true
+    | _ -> false
+
+let private isIntegerColumn column = column |> Option.exists (_.Type >> isIntegerColumnType)
 
 let private compareWithColumnDomain (leftColumn: ColumnDef option) left (rightColumn: ColumnDef option) right =
     match left, right with
@@ -6695,39 +6694,53 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Star _ -> None
 
 and private outputFormatOfExpr ctx expr =
-    let decimalScale =
+    // Direct integer columns have no computed scale. Their column format also
+    // retains ZEROFILL without repeating expression metadata work per row.
+    let directIntegerColumn =
         match expr with
-        | Neg _
-        | BinOp((Add | Sub | SignedSub | Mul | Div), _, _)
-        | NamedFunction "MOD" _
-        | NamedFunction "ABS" _
-        | NamedFunction "ROUND" _
-        | NamedFunction "TRUNCATE" _
-        | NamedFunction "COALESCE" _
-        | NamedFunction "AVG" _
-        | NamedFunction "IFNULL" _ ->
-            metadataOfExpr ctx expr
-            |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
-            |> Option.map (fun metadata -> int metadata.Decimals)
+        | Col _ | QualifiedCol _ ->
+            displayColumnForExpr ctx expr
+            |> Option.filter (_.Type >> isIntegerColumnType)
         | _ -> None
-    let fsp =
-        match expr with
-        | NamedFunction "ADDTIME" _ | NamedFunction "SUBTIME" _ ->
+
+    let regularFormat () =
+        let decimalScale =
+            match expr with
+            | Neg _
+            | BinOp((Add | Sub | SignedSub | Mul | Div), _, _)
+            | NamedFunction "MOD" _
+            | NamedFunction "ABS" _
+            | NamedFunction "ROUND" _
+            | NamedFunction "TRUNCATE" _
+            | NamedFunction "COALESCE" _
+            | NamedFunction "AVG" _
+            | NamedFunction "IFNULL" _ ->
+                metadataOfExpr ctx expr
+                |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
+                |> Option.map (fun metadata -> int metadata.Decimals)
+            | _ -> None
+        let fsp =
+            match expr with
+            | NamedFunction "ADDTIME" _ | NamedFunction "SUBTIME" _ ->
+                metadataOfExpr ctx expr
+                |> Option.bind (fun metadata ->
+                    if metadata.TypeId = TypeTime || metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp then
+                        Some(int metadata.Decimals)
+                    else None)
+            | _ -> fspOfExpr ctx expr
+        let approximateScale =
             metadataOfExpr ctx expr
-            |> Option.bind (fun metadata ->
-                if metadata.TypeId = TypeTime || metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp then
-                    Some(int metadata.Decimals)
-                else None)
-        | _ -> fspOfExpr ctx expr
-    let approximateScale =
-        metadataOfExpr ctx expr
-        |> Option.filter (fun metadata ->
-            (metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat) && metadata.Decimals < 31uy)
-        |> Option.map (fun metadata -> int metadata.Decimals)
-    { Fsp = fsp
-      DecimalScale = decimalScale
-      ApproximateScale = approximateScale
-      Column = displayColumnForExpr ctx expr }
+            |> Option.filter (fun metadata ->
+                (metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat) && metadata.Decimals < 31uy)
+            |> Option.map (fun metadata -> int metadata.Decimals)
+        { Fsp = fsp
+          DecimalScale = decimalScale
+          ApproximateScale = approximateScale
+          Column = displayColumnForExpr ctx expr }
+
+    directIntegerColumn
+    |> Option.map outputFormatOfColumn
+    |> Option.defaultWith regularFormat
 
 and private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : OutputColumnFormat list =
     projections

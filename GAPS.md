@@ -755,6 +755,21 @@ text-to-number aggregate scan costs. Its repeatability check passes, but
 between-run variation and the absence of a pre-change baseline limit it to
 profiling guidance rather than a regression claim.
 
+The [numeric aggregate decomposition](benchmarks/results/2026-10-10-numeric-aggregate-components-baseline.md)
+isolates most of the 10,000-row gap to text casts feeding SUM/AVG rather than
+the integer SUM or COUNT control. In an [A/B baseline](benchmarks/results/2026-10-10-numeric-cast-ab-baseline.md)
+and [fixed run](benchmarks/results/2026-10-10-numeric-cast-ab-fixed.md),
+skipping repeated expression-metadata inference for a direct integer column
+reduces `SUM(CAST(age AS CHAR))` from about 52 to 32 milliseconds (38%). The
+[combined follow-up](benchmarks/results/2026-10-10-numeric-aggregate-components-fixed.md)
+falls from about 166 to 117 milliseconds (30%); the plain `SUM(age)` control
+remains about 4 milliseconds. MySQL stays near 1.15 milliseconds for the
+single cast aggregate and 2.25 milliseconds for the combined query, so
+text-to-number conversion and aggregate execution remain large scale gaps.
+The mode-matched native MySQL 8.4.11 contract run passed 123 cases and
+16,517 steps after the change; the pinned Linux mode-0 run reported only its
+nine previously documented identifier-case differences.
+
 The [window snapshot](benchmarks/results/01e61930-windows.md) identifies offset
 RANGE boundary lookup and stored-function window inputs as profiling candidates.
 Smaller-size controls exceed the repeatability threshold under competing host

@@ -787,6 +787,31 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Numeric")>]
+    member this.CountUsers() =
+        this.Query "SELECT COUNT(*) FROM users"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
+    member this.SumAge() =
+        this.Query "SELECT SUM(age) FROM users"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
+    member this.SumCastAgeAsChar() =
+        this.Query "SELECT SUM(CAST(age AS CHAR)) FROM users"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
+    member this.AvgCastAgeAsChar() =
+        this.Query "SELECT AVG(CAST(age AS CHAR)) FROM users"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
+    member this.SumDistinctCastAgeAsChar() =
+        this.Query "SELECT SUM(DISTINCT CAST(age AS CHAR)) FROM users"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Numeric")>]
     member this.PreparedNumericExpressions() =
         use cmd = conn.CreateCommand()
         cmd.CommandText <- "SELECT CAST(@value AS DECIMAL(10,2))/3,SUM(b'01'),AVG((SELECT b'01'))"

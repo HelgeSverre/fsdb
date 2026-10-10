@@ -5345,12 +5345,21 @@ let tests =
                 testCase "text predicates preserve numeric ZEROFILL display"
                 <| fun _ ->
                     let store = newStore ()
-                    runDefault store "CREATE TABLE t (n INT(4) ZEROFILL, s VARCHAR(4))" |> ignore
-                    runDefault store "INSERT INTO t VALUES (7,'007')" |> ignore
+                    runDefault store "CREATE TABLE t (n INT(4) ZEROFILL, s VARCHAR(4), p INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (7,'007',7)" |> ignore
 
                     match runDefault store "SELECT REGEXP_LIKE(n,'^000'),n LIKE '000%',REGEXP_LIKE(s,'^00'),s LIKE '00%' FROM t" with
                     | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected numeric ZEROFILL and text operands to match their display forms, got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT CAST(n AS CHAR),CAST(p AS CHAR) FROM t")
+                        (ResultSet([ "CAST(n AS CHAR)"; "CAST(p AS CHAR)" ], [ [ Some "0007"; Some "7" ] ]))
+                        "integer text casts retain zero fill only where declared"
+                    Expect.equal
+                        (runDefault store "SELECT SUM(CAST(p AS CHAR)) FROM t")
+                        (ResultSet([ "SUM(CAST(p AS CHAR))" ], [ [ Some "7" ] ]))
+                        "the plain integer text cast feeds numeric aggregation"
 
                 testCase "REGEXP row patterns and match types remain independent"
                 <| fun _ ->
