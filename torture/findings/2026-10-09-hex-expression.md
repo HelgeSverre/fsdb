@@ -40,6 +40,9 @@ No mismatch is enrolled in the known-gap allowlist.
 - A scalar subquery projecting a mixed DOUBLE/string IF result materializes
   its declared string result before HEX interprets the bytes. The selected
   DOUBLE value `1e20` therefore produces `31653230`, without a warning.
+- The same byte interpretation applies to audited CASE, COALESCE, IFNULL,
+  and IF results mixing DOUBLE with text or binary values, including a
+  VARBINARY column. Their selected `1e20` value produces `31653230`.
 
 The executor shares IF/CASE branch selection between ordinary evaluation and
 HEX argument validation. Numeric HEX formatting remains in the existing scalar
@@ -72,5 +75,9 @@ preparation timing, warning order, and remaining unrelated diagnostics.
   `hex-expression-conversion` differential contract passes; the full
   mode-0 Linux contract run still reports the documented identifier-case
   policy differences outside this contract.
+- Binary/text compound follow-up: the expanded native fixture records seven
+  no-warning cases, with an Expecto regression. The additional binary IF wire
+  case passes within `hex-expression-conversion`; the full mode-0 run retains
+  only the previously documented identifier-case differences.
 
 Wire artifact: `torture/artifacts/runs/20261008T224244964-83002/contracts`.

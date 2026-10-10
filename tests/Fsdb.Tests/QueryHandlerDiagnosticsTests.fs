@@ -969,6 +969,24 @@ let tests =
                   Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) subquery
                   Expect.isEmpty actualSession.Diagnostics (subquery + " warnings")
 
+          testCase "HEX honors binary and text compound scalar results"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE hex_compound_probe(id INT PRIMARY KEY,n DOUBLE,b VARBINARY(2))"
+              let session, _ = handle session "INSERT INTO hex_compound_probe VALUES(1,1e20,X'61')"
+              for expression in
+                  [ "CASE WHEN id=1 THEN n ELSE 'x' END"
+                    "COALESCE(n,'x')"
+                    "IFNULL(n,'x')"
+                    "IF(id=1,n,X'78')"
+                    "CASE WHEN id=1 THEN n ELSE X'78' END"
+                    "COALESCE(n,X'78')"
+                    "IF(id=1,n,b)" ] do
+                  let sql = sprintf "SELECT HEX((SELECT %s FROM hex_compound_probe WHERE id=1)) AS value" expression
+                  let actualSession, result = handle session sql
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some "31653230" ] ])) sql
+                  Expect.isEmpty actualSession.Diagnostics (sql + " warnings")
+
           testCase "ALTER converts complete rows in final column order"
           <| fun _ ->
               for mode in [ ""; "STRICT_ALL_TABLES" ] do

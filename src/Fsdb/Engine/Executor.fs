@@ -5651,7 +5651,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let value =
                     match subquery.Metadata, value with
                     | [ metadata ], (VInt _ | VUInt _ | VDecimal _ | VDouble _)
-                        when metadata.TypeId = TypeString || metadata.TypeId = TypeVarString ->
+                        when metadata.TypeId = TypeString
+                             || metadata.TypeId = TypeVarString
+                             || metadata.TypeId = TypeBlob ->
                         Value.toText value |> Option.map VString |> Option.defaultValue value
                     | _ -> value
                 if reducedProjection.IsNone then

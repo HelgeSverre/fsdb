@@ -705,6 +705,32 @@
       "stdout": "mixed\n31653230\nconditional\n7FFFFFFFFFFFFFFF\ncoalesced\n7FFFFFFFFFFFFFFF\ncte\n7FFFFFFFFFFFFFFF\ndistinct_value\n7FFFFFFFFFFFFFFF\nunion_all_value\n7FFFFFFFFFFFFFFF\nwindow_value\n7FFFFFFFFFFFFFFF\n",
       "stderr": "",
       "errors": []
+    },
+    {
+      "name": "binary-and-text-compound-scalar-subquery",
+      "statements": [
+        "USE probe",
+        "CREATE TABLE hex_compound_probe(id INT PRIMARY KEY,n DOUBLE,b VARBINARY(2))",
+        "INSERT INTO hex_compound_probe VALUES(1,1e20,X'61')",
+        "SELECT HEX((SELECT CASE WHEN id=1 THEN n ELSE 'x' END FROM hex_compound_probe WHERE id=1)) AS case_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT COALESCE(n,'x') FROM hex_compound_probe WHERE id=1)) AS coalesce_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT IFNULL(n,'x') FROM hex_compound_probe WHERE id=1)) AS ifnull_text",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT IF(id=1,n,X'78') FROM hex_compound_probe WHERE id=1)) AS if_binary",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT CASE WHEN id=1 THEN n ELSE X'78' END FROM hex_compound_probe WHERE id=1)) AS case_binary",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT COALESCE(n,X'78') FROM hex_compound_probe WHERE id=1)) AS coalesce_binary",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT IF(id=1,n,b) FROM hex_compound_probe WHERE id=1)) AS if_column_binary",
+        "SHOW WARNINGS",
+        "DROP TABLE hex_compound_probe"
+      ],
+      "stdout": "case_text\n31653230\ncoalesce_text\n31653230\nifnull_text\n31653230\nif_binary\n31653230\ncase_binary\n31653230\ncoalesce_binary\n31653230\nif_column_binary\n31653230\n",
+      "stderr": "",
+      "errors": []
     }
   ]
 }

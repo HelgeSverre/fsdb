@@ -8561,11 +8561,16 @@ module ContractCatalog =
                     "INSERT INTO hex_mixed_target VALUES(1,1e20)"
                     "SELECT HEX((SELECT IF(id=1,n,'x') FROM hex_mixed_target WHERE id=1)) AS value"
                     "SHOW WARNINGS" ]
+              yield "binary-scalar-subquery", None,
+                  [ "CREATE TABLE hex_binary_target(id INT PRIMARY KEY,n DOUBLE)"
+                    "INSERT INTO hex_binary_target VALUES(1,1e20)"
+                    "SELECT HEX((SELECT IF(id=1,n,X'78') FROM hex_binary_target WHERE id=1)) AS value"
+                    "SHOW WARNINGS" ]
             ]
         { Name = "hex-expression-conversion"
           Setup = [||]
           Steps = isolatedScriptSteps cases
-          Cleanup = [| "DROP TABLE IF EXISTS target,hex_mixed_target" |]
+          Cleanup = [| "DROP TABLE IF EXISTS target,hex_mixed_target,hex_binary_target" |]
           Coverage = [| "function:HEX", [| "text-differential" |] |] }
 
     let private hexNumericConversion =
