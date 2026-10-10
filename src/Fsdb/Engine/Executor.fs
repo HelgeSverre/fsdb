@@ -11636,6 +11636,19 @@ and private isDirectNumericIndexColumn (table: Table) (column: string, transform
         |> List.tryFind (fun candidate -> equalsIgnoreCase candidate.Name column)
         |> Option.exists (fun candidate -> isNumericIndexType candidate.Type))
 
+and private isDigestIndexColumn (_, transform) =
+    let isDigest = function
+        | Md5Digest | Sha1Digest -> true
+        | _ -> false
+
+    match transform with
+    | Some(Expression expression) ->
+        FunctionalIndex.tryPhysicalExpression expression
+        |> Option.bind (_.Calls >> List.tryLast)
+        |> Option.exists (snd >> isDigest)
+    | Some transform -> isDigest transform
+    | None -> false
+
 and private pointLookupEqualities
     (store: Store)
     (registry: Registry)
@@ -11644,24 +11657,29 @@ and private pointLookupEqualities
     (whereExpr: Expr option)
     : PointEquality list =
     let tryNumericConstant = numericPlannerConstantEvaluator store registry
+    let tryConstant = plannerConstantEvaluator store registry
 
-    let tryNonLiteralConstant expression =
+    let tryNonLiteralConstant column expression =
         match expression with
         | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> None
-        | _ -> tryNumericConstant expression
+        | _ when isDirectNumericIndexColumn table column -> tryNumericConstant expression
+        | _ when isDigestIndexColumn column ->
+            tryConstant expression
+            |> Option.filter (function VString _ -> true | _ -> false)
+        | _ -> None
 
-    let tryNumericColumn expression =
+    let tryIndexedColumn expression =
         storedIndexedColumnFor registry tref expression
-        |> Option.filter (isDirectNumericIndexColumn table)
+        |> Option.filter (fun column -> isDirectNumericIndexColumn table column || isDigestIndexColumn column)
 
     let tryPair indexed constant =
-        Option.map2
-            (fun (column, transform) value ->
+        tryIndexedColumn indexed
+        |> Option.bind (fun ((column, transform) as indexedColumn) ->
+            tryNonLiteralConstant indexedColumn constant
+            |> Option.map (fun value ->
                 { Column = column
                   Transform = transform
-                  Value = value })
-            (tryNumericColumn indexed)
-            (tryNonLiteralConstant constant)
+                  Value = value }))
 
     let tryEquality = function
         | BinOp(Eq, left, right) ->
@@ -11754,6 +11772,9 @@ and private plannerInProbes
     let plannerValue column = function
         | LiteralValue value -> Some value
         | expression when isDirectNumericIndexColumn table column -> tryNumericConstant expression
+        | expression when isDigestIndexColumn column ->
+            plannerConstantEvaluator store registry expression
+            |> Option.filter (function VString _ -> true | _ -> false)
         | _ -> None
 
     inProbesWith (storedIndexedColumnFor registry tref) plannerValue whereExpr

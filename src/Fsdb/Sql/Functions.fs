@@ -4115,12 +4115,12 @@ let aesDecrypt (blockEncryptionMode: string) : Scalar =
 
 let private md5Fn: Scalar =
     function
-    | [ value ] when not (anyNull [ value ]) -> VString(Convert.ToHexString(MD5.HashData(stringBytes value)).ToLowerInvariant())
+    | [ value ] -> FunctionalIndex.projectValue (Some Md5Digest) value
     | _ -> VNull
 
 let private sha1Fn: Scalar =
     function
-    | [ value ] when not (anyNull [ value ]) -> VString(Convert.ToHexString(SHA1.HashData(stringBytes value)).ToLowerInvariant())
+    | [ value ] -> FunctionalIndex.projectValue (Some Sha1Digest) value
     | _ -> VNull
 
 let private makeSetFn: Scalar =

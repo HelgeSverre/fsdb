@@ -409,6 +409,8 @@ and IndexTransform =
     | FirstCharacterCode
     | DecodedHex
     | EncodedHex
+    | Md5Digest
+    | Sha1Digest
     | AbsoluteValue
     | IsNullResult
     | Expression of Expr

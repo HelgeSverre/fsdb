@@ -739,6 +739,8 @@ let private firstByteIndexColumnPrefix = "\u0000Q:"
 let private firstCharacterCodeIndexColumnPrefix = "\u0000K:"
 let private decodedHexIndexColumnPrefix = "\u0000X:"
 let private encodedHexIndexColumnPrefix = "\u0000Y:"
+let private md5IndexColumnPrefix = "\u0000M:"
+let private sha1IndexColumnPrefix = "\u0000P:"
 let private absoluteValueIndexColumnPrefix = "\u0000A:"
 let private isNullResultIndexColumnPrefix = "\u0000J:"
 let private signumIndexColumnPrefix = "\u0000G:"
@@ -773,6 +775,8 @@ let private encodeIndexColumn (format: SnapshotFormat) column =
         | Some FirstCharacterCode, _ -> firstCharacterCodeIndexColumnPrefix + column.Name
         | Some DecodedHex, _ -> decodedHexIndexColumnPrefix + column.Name
         | Some EncodedHex, _ -> encodedHexIndexColumnPrefix + column.Name
+        | Some Md5Digest, _ -> md5IndexColumnPrefix + column.Name
+        | Some Sha1Digest, _ -> sha1IndexColumnPrefix + column.Name
         | Some AbsoluteValue, _ -> absoluteValueIndexColumnPrefix + column.Name
         | Some IsNullResult, _ -> isNullResultIndexColumnPrefix + column.Name
         | Some Signum, _ -> signumIndexColumnPrefix + column.Name
@@ -820,6 +824,8 @@ let private decodeIndexColumn (format: SnapshotFormat) (columnNames: Set<string>
         | Prefixed firstCharacterCodeIndexColumnPrefix name -> column direction name None (Some FirstCharacterCode)
         | Prefixed decodedHexIndexColumnPrefix name -> column direction name None (Some DecodedHex)
         | Prefixed encodedHexIndexColumnPrefix name -> column direction name None (Some EncodedHex)
+        | Prefixed md5IndexColumnPrefix name -> column direction name None (Some Md5Digest)
+        | Prefixed sha1IndexColumnPrefix name -> column direction name None (Some Sha1Digest)
         | Prefixed absoluteValueIndexColumnPrefix name -> column direction name None (Some AbsoluteValue)
         | Prefixed isNullResultIndexColumnPrefix name -> column direction name None (Some IsNullResult)
         | Prefixed signumIndexColumnPrefix name -> column direction name None (Some Signum)

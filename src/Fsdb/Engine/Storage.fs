@@ -2916,7 +2916,7 @@ let private reportIndexExpressionIssue indexName row code message =
 let private projectIndexValue indexName row (column: ColumnDef) prefixLength transform value =
     let value =
         match transform, column.NumericDisplay with
-        | (Some FirstByte | Some FirstCharacterCode | Some DecodedHex), Some _ ->
+        | (Some FirstByte | Some FirstCharacterCode | Some DecodedHex | Some Md5Digest | Some Sha1Digest), Some _ ->
             ColumnDisplay.renderStoredColumnValue column value
             |> Option.map VString
             |> Option.defaultValue VNull

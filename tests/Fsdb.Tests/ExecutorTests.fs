@@ -8609,6 +8609,65 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an ABS override reports a scan"
                     Expect.equal overriddenPlan.Key None "an ABS override does not claim the functional index"
 
+                testCase "MD5 and SHA1 functional keys hash source bytes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE digest_keys(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_md5 ((MD5(value))), KEY ix_sha ((SHA1(value))))" |> ignore
+                    runDefault store "INSERT INTO digest_keys VALUES(1,'A'),(2,'B'),(3,NULL)" |> ignore
+
+                    let md5Plan = runDefault store "EXPLAIN SELECT id FROM digest_keys WHERE MD5(value)=MD5('A')" |> explainRow
+                    Expect.equal md5Plan.Key (Some "ix_md5") "MD5 equality uses its key"
+                    let shaPlan = runDefault store "EXPLAIN SELECT id FROM digest_keys WHERE SHA1(value)=SHA1('A')" |> explainRow
+                    Expect.equal shaPlan.Key (Some "ix_sha") "SHA1 equality uses its key"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM digest_keys WHERE MD5(value)=MD5('A') AND SHA1(value)=SHA1('A')")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "digest keys select the matching text row"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM digest_keys WHERE MD5(value) IN (MD5('A'),MD5('B')) ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "stable digest members use the same lookup semantics"
+
+                    runDefault store "CREATE TABLE digest_binary(id INT PRIMARY KEY, value VARBINARY(8), KEY ix_sha ((SHA(value))))" |> ignore
+                    runDefault store "INSERT INTO digest_binary VALUES(1,X'00FF'),(2,X'41')" |> ignore
+                    let aliasPlan = runDefault store "EXPLAIN SELECT id FROM digest_binary WHERE SHA1(value)=SHA1(X'00FF')" |> explainRow
+                    Expect.equal aliasPlan.Key (Some "ix_sha") "SHA and SHA1 share a functional key"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM digest_binary WHERE SHA(value)=SHA(X'00FF')")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "SHA hashes the original binary bytes"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM digest_binary WHERE SHA(value)='AA3E5DCDD77B153F2E59BD0D8794FDE33CB4E486'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "digest text uses its result collation even for binary input"
+                    let uppercasePlan =
+                        runDefault store "EXPLAIN SELECT id FROM digest_binary WHERE SHA(value)='AA3E5DCDD77B153F2E59BD0D8794FDE33CB4E486'"
+                        |> explainRow
+                    Expect.equal uppercasePlan.Key (Some "ix_sha") "an uppercase text probe still uses the digest key"
+
+                    runDefault store "CREATE TABLE digest_latin1(id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1, KEY ix_md5 ((MD5(value))))" |> ignore
+                    runDefault store "INSERT INTO digest_latin1 VALUES(1,_latin1 X'E9'),(2,'A')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM digest_latin1 WHERE MD5(value)='3406877694691ddd1dfb0aca54681407'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "MD5 hashes the column charset bytes"
+
+                    runDefault store "CREATE TABLE digest_numeric(id INT PRIMARY KEY, value INT(4) ZEROFILL, KEY ix_md5 ((MD5(value))))" |> ignore
+                    runDefault store "INSERT INTO digest_numeric VALUES(1,12),(2,1)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM digest_numeric WHERE MD5(value)=MD5('0012')")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "MD5 hashes numeric display padding"
+
+                    runDefault store "CREATE TABLE digest_trimmed(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_sha ((SHA1(TRIM(value)))))" |> ignore
+                    runDefault store "INSERT INTO digest_trimmed VALUES(1,' A '),(2,' B ')" |> ignore
+                    let composedPlan = runDefault store "EXPLAIN SELECT id FROM digest_trimmed WHERE SHA1(TRIM(value))=SHA1('A')" |> explainRow
+                    Expect.equal composedPlan.Key (Some "ix_sha") "composed SHA1 uses its key"
+
+                    let overridden = builtins |> registerScalar "MD5" (fun _ -> VString "override")
+                    let overridePlan = run store overridden "EXPLAIN SELECT id FROM digest_keys WHERE MD5(value)='override'" |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden digest cannot claim its stored key"
+
                 testCase "HEX functional keys index text, bytes, and numbers"
                 <| fun _ ->
                     let store = newStore ()

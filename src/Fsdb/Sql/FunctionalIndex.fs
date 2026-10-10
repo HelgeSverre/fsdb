@@ -47,6 +47,12 @@ let private definitions =
       { CanonicalName = "HEX"
         Aliases = []
         Transform = EncodedHex }
+      { CanonicalName = "MD5"
+        Aliases = []
+        Transform = Md5Digest }
+      { CanonicalName = "SHA1"
+        Aliases = [ "SHA" ]
+        Transform = Sha1Digest }
       { CanonicalName = "ABS"
         Aliases = []
         Transform = AbsoluteValue }
@@ -139,7 +145,9 @@ let rec hasTextResult = function
     | Uppercase
     | Trimmed
     | Reversed
-    | EncodedHex -> true
+    | EncodedHex
+    | Md5Digest
+    | Sha1Digest -> true
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.bind (_.Calls >> List.tryLast)
@@ -211,7 +219,9 @@ let private supportsSingleTransform transform columnType =
     | FirstByte
     | FirstCharacterCode
     | DecodedHex
-    | EncodedHex ->
+    | EncodedHex
+    | Md5Digest
+    | Sha1Digest ->
         match columnType with
         | TGeometry _
         | TVector _ -> false
@@ -248,7 +258,11 @@ let supportsColumnType transform columnType =
 
             match transforms, List.rev transforms with
             | first :: _, textResult :: inner
-                when (isTextToIntegerTransform textResult || textResult = DecodedHex || textResult = EncodedHex)
+                when (isTextToIntegerTransform textResult
+                      || textResult = DecodedHex
+                      || textResult = EncodedHex
+                      || textResult = Md5Digest
+                      || textResult = Sha1Digest)
                      && List.forall isTextTransform inner ->
                 if inner.IsEmpty then
                     supportsSingleTransform textResult columnType
@@ -378,7 +392,7 @@ let private tryBinaryProbe = function
         Some(VBytes(Text.Encoding.ASCII.GetBytes text))
     | _ -> None
 
-let private tryHexProbe = function
+let private tryTextResultProbe = function
     | VString text -> Some(VString text)
     | _ -> None
 
@@ -412,7 +426,9 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some IsNullResult, _
     | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
     | Some DecodedHex, _ -> tryBinaryProbe value
-    | Some EncodedHex, _ -> tryHexProbe value
+    | Some EncodedHex, _ -> tryTextResultProbe value
+    | Some Md5Digest, _
+    | Some Sha1Digest, _ -> tryTextResultProbe value
     | Some(Expression expression), _ ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical ->
@@ -421,7 +437,9 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             match List.tryLast transforms with
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
-            | Some EncodedHex -> tryHexProbe value
+            | Some EncodedHex -> tryTextResultProbe value
+            | Some Md5Digest
+            | Some Sha1Digest -> tryTextResultProbe value
             | Some _ when List.contains Signum transforms -> tryExactInt64 value |> Option.map VInt
             | Some AbsoluteValue when List.forall ((=) AbsoluteValue) transforms ->
                 tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
@@ -490,6 +508,14 @@ let hexValueWithStatus encodeText value =
 
         VString(bounded.ToString "X"), false
 
+let private digestValueWith encodeText (hash: byte[] -> byte[]) value =
+    let bytes =
+        value
+        |> tryRawBytes
+        |> Option.defaultWith (fun () -> value |> toText |> Option.defaultValue "" |> encodeText)
+
+    hash bytes |> Convert.ToHexString |> fun text -> VString(text.ToLowerInvariant())
+
 let rec projectValueWithStatus encodeText transform value =
     match transform, value with
     | Some IsNullResult, VNull -> VInt 1L, None
@@ -525,6 +551,10 @@ let rec projectValueWithStatus encodeText transform value =
     | Some EncodedHex, value ->
         let encoded, overflow = hexValueWithStatus encodeText value
         encoded, (if overflow then toText value else None)
+    | Some Md5Digest, value ->
+        digestValueWith encodeText System.Security.Cryptography.MD5.HashData value, None
+    | Some Sha1Digest, value ->
+        digestValueWith encodeText System.Security.Cryptography.SHA1.HashData value, None
     | Some Floored, value -> roundFunctionalValue Math.Floor Math.Floor value
     | Some Ceiled, value -> roundFunctionalValue Math.Ceiling Math.Ceiling value
     | Some Signum, ((VString _ | VBytes _) as value) ->

@@ -4913,6 +4913,37 @@ module ContractCatalog =
                "DROP TABLE hex_decimal_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private digestFunctionalIndexes =
+        { Name = "digest-functional-indexes"
+          Setup =
+            [| "CREATE TABLE digest_text_probe(id INT PRIMARY KEY,v VARCHAR(20),KEY ix_md5 ((MD5(v))),KEY ix_sha ((SHA1(v))))"
+               "INSERT INTO digest_text_probe VALUES(1,'A'),(2,'B'),(3,NULL)"
+               "CREATE TABLE digest_binary_probe(id INT PRIMARY KEY,v VARBINARY(8),KEY ix_sha ((SHA(v))))"
+               "INSERT INTO digest_binary_probe VALUES(1,X'00FF'),(2,X'41')"
+               "CREATE TABLE digest_latin1_probe(id INT PRIMARY KEY,v VARCHAR(20) CHARACTER SET latin1,KEY ix_md5 ((MD5(v))))"
+               "INSERT INTO digest_latin1_probe VALUES(1,_latin1 X'E9'),(2,'A')"
+               "CREATE TABLE digest_numeric_probe(id INT PRIMARY KEY,v INT(4) ZEROFILL,KEY ix_md5 ((MD5(v))))"
+               "INSERT INTO digest_numeric_probe VALUES(1,12),(2,1)"
+               "CREATE TABLE digest_composed_probe(id INT PRIMARY KEY,v VARCHAR(20),KEY ix_sha ((SHA1(TRIM(v)))))"
+               "INSERT INTO digest_composed_probe VALUES(1,' A '),(2,' B ')" |]
+          Steps =
+            [| Contract.query "md5-key" "SELECT id FROM digest_text_probe WHERE MD5(v)=MD5('A') ORDER BY id"
+               Contract.query "sha1-key" "SELECT id FROM digest_text_probe WHERE SHA1(v)=SHA1('A') ORDER BY id"
+               Contract.query "digest-members" "SELECT id FROM digest_text_probe WHERE MD5(v) IN (MD5('A'),MD5('B')) ORDER BY id"
+               Contract.query "null-digest" "SELECT id FROM digest_text_probe WHERE MD5(v) IS NULL ORDER BY id"
+               Contract.query "binary-sha-alias" "SELECT id FROM digest_binary_probe WHERE SHA1(v)=SHA1(X'00FF') ORDER BY id"
+               Contract.query "binary-uppercase-probe" "SELECT id FROM digest_binary_probe WHERE SHA(v)='AA3E5DCDD77B153F2E59BD0D8794FDE33CB4E486' ORDER BY id"
+               Contract.query "latin1-bytes" "SELECT id,MD5(v) FROM digest_latin1_probe WHERE MD5(v)='3406877694691ddd1dfb0aca54681407' ORDER BY id"
+               Contract.query "numeric-display" "SELECT id,MD5(v) FROM digest_numeric_probe WHERE MD5(v)=MD5('0012') ORDER BY id"
+               Contract.query "composed-sha1" "SELECT id FROM digest_composed_probe WHERE SHA1(TRIM(v))=SHA1('A') ORDER BY id" |]
+          Cleanup =
+            [| "DROP TABLE digest_text_probe"
+               "DROP TABLE digest_binary_probe"
+               "DROP TABLE digest_latin1_probe"
+               "DROP TABLE digest_numeric_probe"
+               "DROP TABLE digest_composed_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private signFunctionalIndex =
         { Name = "sign-functional-index"
           Setup =
@@ -9306,6 +9337,7 @@ module ContractCatalog =
            ordFunctionalIndex
            unhexFunctionalIndex
            hexFunctionalIndex
+           digestFunctionalIndexes
            constantNullFallbackIndexes
            tableStatisticsCache
            missingTableDiagnostics
