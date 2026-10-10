@@ -1,6 +1,6 @@
 """Check fsdb startup and recovery against the ngram-size-oracle.py contract.
 
-Run after building src/Fsdb in Debug. Requires the native mysql client on PATH.
+Run after building src/Fsdb.Cli in Debug. Requires the native mysql client on PATH.
 """
 
 import pathlib
@@ -11,7 +11,7 @@ import time
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-COMMAND = ["dotnet", str(ROOT / "src/Fsdb/bin/Debug/net10.0/Fsdb.dll")]
+COMMAND = ["dotnet", str(ROOT / "src/Fsdb.Cli/bin/Debug/net10.0/Fsdb.Cli.dll")]
 
 
 def run():

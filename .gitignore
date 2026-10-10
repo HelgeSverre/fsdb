@@ -5,6 +5,7 @@ obj/
 .DS_Store
 coverage/
 test-results/
+artifacts/packages/
 spike/
 .claude/worktrees/
 BenchmarkDotNet.Artifacts/

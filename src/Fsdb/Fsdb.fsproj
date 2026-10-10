@@ -1,9 +1,21 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <Version>0.1.0</Version>
+    <Version>0.1.0-preview.1</Version>
+    <PackageId>Fsdb</PackageId>
+    <Authors>Helge Sverre</Authors>
+    <Description>An embeddable F# database with a MySQL-compatible SQL engine and wire protocol.</Description>
+    <PackageTags>FSharp;database;SQL;MySQL;embedded</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/HelgeSverre/fsdb</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>portable</DebugType>
   </PropertyGroup>
 
   <ItemGroup>
@@ -76,12 +88,15 @@
     <Compile Include="Engine/EventScheduler.fs" />
     <Compile Include="Wire/Server.fs" />
     <Compile Include="Db.fs" />
-    <Compile Include="Program.fs" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Argu" Version="6.2.5" />
+    <None Include="PackageReadme.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="FParsec" Version="1.1.1" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.401" PrivateAssets="all" />
     <PackageReference Include="NetTopologySuite" Version="2.6.0" />
     <PackageReference Include="NJsonSchema" Version="11.6.1" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />

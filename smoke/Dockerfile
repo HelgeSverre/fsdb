@@ -4,12 +4,13 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS fsdb-build
 WORKDIR /source
 COPY global.json ./
 COPY src/Fsdb/ src/Fsdb/
-RUN dotnet publish src/Fsdb -c Release -o /output --no-self-contained -v minimal
+COPY src/Fsdb.Cli/ src/Fsdb.Cli/
+RUN dotnet publish src/Fsdb.Cli -c Release -o /output --no-self-contained -v minimal
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS fsdb
 WORKDIR /app
 COPY --from=fsdb-build /output/ ./
-ENTRYPOINT ["dotnet", "Fsdb.dll", "--listen", "0.0.0.0", "--port", "3306"]
+ENTRYPOINT ["dotnet", "Fsdb.Cli.dll", "--listen", "0.0.0.0", "--port", "3306"]
 
 FROM golang:1.27-bookworm AS gitea-build
 RUN apt-get update \

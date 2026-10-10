@@ -10,7 +10,7 @@ open System.Threading
 open MySqlConnector
 open Fsdb.Benchmarks.Schema
 
-/// The path to the prebuilt Fsdb.dll under test, from the justfile recipe.
+/// The path to the prebuilt Fsdb.Cli.dll under test, from the justfile recipe.
 let benchBin () =
     Environment.GetEnvironmentVariable "FSDB_BENCH_BIN"
     |> Option.ofObj

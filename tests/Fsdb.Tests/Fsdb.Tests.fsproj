@@ -51,6 +51,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Fsdb\Fsdb.fsproj" />
+    <ProjectReference Include="..\..\src\Fsdb.Cli\Fsdb.Cli.fsproj" />
   </ItemGroup>
 
 </Project>

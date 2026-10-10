@@ -130,7 +130,7 @@ new `.fs` file before every file that consumes it or the build fails with
   and execution
 - `src/Fsdb/Wire/` — MySQL protocol and connection lifecycle
 - `src/Fsdb/Db.fs` — public embedding facade
-- `src/Fsdb/Program.fs` — executable entry point
+- `src/Fsdb.Cli/Program.fs` — executable entry point
 - `tests/Fsdb.Tests/` — Expecto unit and wire-level integration tests
 - `benchmarks/Fsdb.Benchmarks/` — BenchmarkDotNet comparisons with MySQL 8.4
 - `torture/` — separate differential and failure-injection solution

@@ -16,7 +16,7 @@ default:
 # Run server (--port, --listen, etc.)
 [group('server')]
 run *ARGS:
-    dotnet run --project src/Fsdb -- {{ ARGS }}
+    dotnet run --project src/Fsdb.Cli -- {{ ARGS }}
 
 # Open mysql client shell
 [group('server')]
@@ -132,16 +132,21 @@ build:
 [group('build')]
 clean:
     dotnet clean -v q
-    rm -rf src/Fsdb/bin src/Fsdb/obj tests/Fsdb.Tests/bin tests/Fsdb.Tests/obj
+    rm -rf src/Fsdb/bin src/Fsdb/obj src/Fsdb.Cli/bin src/Fsdb.Cli/obj tests/Fsdb.Tests/bin tests/Fsdb.Tests/obj
+
+# Pack the library and consume it from a clean F# project
+[group('qa')]
+package-check:
+    bash scripts/verify-package.sh
 
 # === Install ===
 
 # Install standalone binary
 [group('install')]
 install dest="~/.local/bin":
-    dotnet publish src/Fsdb -c Release -o src/Fsdb/bin/dist -p:PublishSingleFile=true --self-contained true -v q
+    dotnet publish src/Fsdb.Cli -c Release -o src/Fsdb.Cli/bin/dist -p:PublishSingleFile=true --self-contained true -v q
     mkdir -p {{ dest }}
-    install -m 0755 src/Fsdb/bin/dist/Fsdb {{ dest }}/fsdb
+    install -m 0755 src/Fsdb.Cli/bin/dist/Fsdb.Cli {{ dest }}/fsdb
     @echo "Installed {{ dest }}/fsdb — try: fsdb --help"
 
 # Uninstall binary
@@ -222,9 +227,9 @@ _bench-run *ARGS: bench-mysql-start
         exit 1
     fi
     trap 'just bench-mysql-stop' EXIT
-    dotnet build src/Fsdb -c Release -v q
+    dotnet build src/Fsdb.Cli -c Release -v q
     dotnet build benchmarks/Fsdb.Benchmarks -c Release -v q
-    export FSDB_BENCH_BIN="$(pwd)/src/Fsdb/bin/Release/net10.0/Fsdb.dll"
+    export FSDB_BENCH_BIN="$(pwd)/src/Fsdb.Cli/bin/Release/net10.0/Fsdb.Cli.dll"
     dotnet exec benchmarks/Fsdb.Benchmarks/bin/Release/net10.0/Fsdb.Benchmarks.dll {{ ARGS }}
 
 # Run durability matrix
@@ -239,9 +244,9 @@ _bench-durable-run *ARGS: bench-mysql-start bench-mysql-start-nofsync
         exit 1
     fi
     trap 'just bench-mysql-stop; just bench-mysql-stop-nofsync' EXIT
-    dotnet build src/Fsdb -c Release -v q
+    dotnet build src/Fsdb.Cli -c Release -v q
     dotnet build benchmarks/Fsdb.Benchmarks -c Release -v q
-    export FSDB_BENCH_BIN="$(pwd)/src/Fsdb/bin/Release/net10.0/Fsdb.dll"
+    export FSDB_BENCH_BIN="$(pwd)/src/Fsdb.Cli/bin/Release/net10.0/Fsdb.Cli.dll"
     export FSDB_BENCH_TARGETS=durable
     dotnet exec benchmarks/Fsdb.Benchmarks/bin/Release/net10.0/Fsdb.Benchmarks.dll {{ ARGS }}
 

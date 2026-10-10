@@ -50,7 +50,7 @@ also uses a MySQL client. [`just`](https://github.com/casey/just) is optional,
 but provides the repository's standard commands.
 
 ```sh
-dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
+dotnet run --project src/Fsdb.Cli    # listens on 127.0.0.1:3307
 mysql --protocol=tcp -h127.0.0.1 -P3307 -uroot -e 'SELECT 1'
 ```
 
@@ -641,6 +641,15 @@ rotation threshold is crossed, and during graceful shutdown. Set those
 thresholds with `wal_rotate_bytes` and `wal_rotate_entries`.
 
 ## Embedding & extensibility
+
+`Fsdb` is also built as a .NET 10 library package. The first NuGet candidate is
+`0.1.0-preview.1`; it is not published yet. Run `just package-check` to pack it
+and exercise it through the package-only F# example with an isolated NuGet
+cache. The command-line server lives in the separate `Fsdb.Cli` project. See
+[distribution](docs/distribution.md) for the
+release process and package contents, and
+[`examples/PackageConsumer`](examples/PackageConsumer/README.md) for a standalone
+package consumer.
 
 The [`Fsdb.Db` facade](src/Fsdb/Db.fs) owns an engine instance, its extension
 registry, and its transport settings. Register extensions before opening
