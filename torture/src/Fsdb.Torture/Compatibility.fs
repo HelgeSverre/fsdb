@@ -5112,6 +5112,28 @@ module ContractCatalog =
                         "statement:update", [| "text-differential" |]
                         "statement:delete", [| "text-differential" |] |] }
 
+    let private missingFunctionViewDefinitions =
+        { Name = "missing-function-view-definitions"
+          Setup =
+            [| "CREATE TABLE function_ddl_source(id INT PRIMARY KEY)"
+               "INSERT INTO function_ddl_source VALUES(1)" |]
+          Steps =
+            [| Contract.execute "create-table-as" "CREATE TABLE function_ddl_target AS SELECT no_such_function() AS v" |> Contract.fails 1305 "42000"
+               Contract.execute "view-projection" "CREATE VIEW function_ddl_view AS SELECT no_such_function() AS v" |> Contract.fails 1305 "42000"
+               Contract.execute "view-where" "CREATE VIEW function_ddl_where AS SELECT id FROM function_ddl_source WHERE no_such_function(id)" |> Contract.fails 1305 "42000"
+               Contract.execute "view-derived" "CREATE VIEW function_ddl_nested AS SELECT x FROM (SELECT no_such_function() AS x) AS q" |> Contract.fails 1305 "42000"
+               Contract.execute "valid-builtin" "CREATE VIEW function_ddl_valid AS SELECT ABS(id) AS v FROM function_ddl_source"
+               Contract.execute "create-stored-function" "CREATE FUNCTION function_ddl_doubled(v INT) RETURNS INT DETERMINISTIC RETURN v*2"
+               Contract.execute "valid-stored-function" "CREATE VIEW function_ddl_stored AS SELECT function_ddl_doubled(id) AS v FROM function_ddl_source"
+               Contract.query "stored-function-result" "SELECT v FROM function_ddl_stored" |]
+          Cleanup =
+            [| "DROP VIEW IF EXISTS function_ddl_stored"
+               "DROP VIEW IF EXISTS function_ddl_valid"
+               "DROP FUNCTION IF EXISTS function_ddl_doubled"
+               "DROP TABLE function_ddl_source" |]
+          Coverage = [| "statement:create-view", [| "text-differential" |]
+                        "statement:create-table", [| "text-differential" |] |] }
+
     let private tableStatisticsCache =
         let rows =
             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
@@ -9754,6 +9776,7 @@ module ContractCatalog =
            numericConstantIndexBounds
            elidedWhereBindings
            missingFunctionMutations
+           missingFunctionViewDefinitions
            integralDoubleIndexProbes
            signFunctionalIndex
            isNullFunctionalIndex

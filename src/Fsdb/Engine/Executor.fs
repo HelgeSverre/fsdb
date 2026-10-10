@@ -1868,7 +1868,7 @@ let private aliasNodeDiagnostic resolveAlias expression =
         | _ -> expression
     Expression.tryLiteralNodeDiagnostic resolved
 
-let rec private validateExpressionBindings resolve validateSubquery nodeDiagnostic diagnosticError expression =
+let rec private validateExpressionBindings resolve validateSubquery nodeDiagnostic diagnosticError validateCall expression =
     let children =
         match expression with
         | WindowOver(fn, over) ->
@@ -1880,11 +1880,12 @@ let rec private validateExpressionBindings resolve validateSubquery nodeDiagnost
             Expression.windowExpressions fn @ frameExpressions
         | _ -> Expression.children expression
     children
-    |> traverse (validateExpressionBindings resolve validateSubquery nodeDiagnostic diagnosticError)
+    |> traverse (validateExpressionBindings resolve validateSubquery nodeDiagnostic diagnosticError validateCall)
     |> Result.bind (fun _ ->
         match expression with
         | Col name -> resolve (None, name)
         | QualifiedCol(qualifier, name) -> resolve (Some qualifier, name)
+        | FuncCall(name, _) -> validateCall name
         | _ -> Ok())
     |> Result.bind (fun () ->
         Expression.subqueries expression |> traverse validateSubquery |> Result.map ignore)
@@ -1909,12 +1910,27 @@ let rec private validateExpressionBindings resolve validateSubquery nodeDiagnost
 let private directAggregateNames =
     set [ "GROUP_CONCAT"; "JSON_ARRAYAGG"; "JSON_OBJECTAGG" ]
 
+let private isAggregateFunctionName (registry: Registry) (name: string) =
+    directAggregateNames.Contains(name.ToUpperInvariant())
+    || Functions.lookupAggregate name registry |> Option.isSome
+
 let private isAggregateCall (registry: Registry) (expr: Expr) : bool =
     match expr with
-    | FuncCall(name, _) ->
-        directAggregateNames.Contains(name.ToUpperInvariant())
-        || Functions.lookupAggregate name registry |> Option.isSome
+    | FuncCall(name, _) -> isAggregateFunctionName registry name
     | _ -> false
+
+let private intrinsicFunctionNames =
+    set [ "DEFAULT"; "COERCIBILITY"; "COLLATION"; "CHARSET"
+          "SLEEP"; "BENCHMARK"; "WEIGHT_STRING"; "GROUPING" ]
+
+let private validateFunctionName (registry: Registry) (dbName: string) (name: string) : Result<unit, EvalError> =
+    let known =
+        intrinsicFunctionNames.Contains(name.ToUpperInvariant())
+        || isAggregateFunctionName registry name
+        || (Functions.lookup name registry |> Option.isSome)
+        || (not (name.Contains('.', System.StringComparison.Ordinal))
+            && (Functions.lookup (dbName + "." + name) registry |> Option.isSome))
+    if known then Ok() else Error(unknownFunction name)
 
 /// Whether `expr` contains an aggregate call *anywhere*, not just at the
 /// top level — `SELECT COUNT(*) + 1 FROM t` or a `WHERE`-style predicate
@@ -4892,7 +4908,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Some _ ->
                 validateExpressionBindings
                     (validateColumnReference ctx)
-                    (fun _ -> Ok()) Expression.tryLiteralNodeDiagnostic id expr
+                    (fun _ -> Ok()) Expression.tryLiteralNodeDiagnostic id (fun _ -> Ok()) expr
                 |> Result.bind (fun () -> evalExprCore ctx expr)
         with
         | Value.UnsignedOutOfRange ->
@@ -5717,10 +5733,10 @@ and private validateExpressionInContext ctx expression =
     validateExpressionBindings
         (validateColumnReference ctx)
         (fun nested ->
-            match describeQueryColumnsInScope ctx.Store ctx.Registry ctx.DbName (QueryBody(PlainSelect nested)) (Some ctx) with
+            match describeQueryColumnsInScope ctx.Store ctx.Registry ctx.DbName (QueryBody(PlainSelect nested)) (Some ctx) (fun _ -> Ok()) with
             | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
             | _ -> Ok())
-        Expression.tryLiteralNodeDiagnostic id expression
+        Expression.tryLiteralNodeDiagnostic id (fun _ -> Ok()) expression
 
 and private evalCaseResult ctx caseExpression subject whens elseBranch evaluateResult =
     let eval = evalExpr ctx
@@ -7301,6 +7317,7 @@ and private describeQueryColumnsInScope
     (schema: string)
     (source: ColumnDescriptionSource)
     (outer: EvalContext option)
+    (validateCall: string -> Result<unit, ColumnDescriptionError>)
     : Result<ColumnDef list, ColumnDescriptionError> =
     let requireDescription = function
         | Some value -> Ok value
@@ -7620,7 +7637,9 @@ and private describeQueryColumnsInScope
                 | Error(InvalidDescription error) -> Error(InvalidDescription error)
                 | _ -> Ok())
             (aliasNodeDiagnostic (fun name -> aliasSource name scopes))
-            (Err >> InvalidDescription) expression
+            (Err >> InvalidDescription)
+            validateCall
+            expression
 
     and describeSelect seen dbName inheritedCtes outerScopes (select: SelectStmt) =
 
@@ -7920,7 +7939,11 @@ and private describeQueryColumnsInScope
     |> Result.map (List.map _.Column)
 
 and private describeQueryColumnsChecked store registry schema source =
+    describeQueryColumnsInScope store registry schema source None (fun _ -> Ok())
+
+and private describeQueryColumnsCheckingFunctions functionDatabase store registry schema source =
     describeQueryColumnsInScope store registry schema source None
+        (validateFunctionName registry functionDatabase >> Result.mapError (Err >> InvalidDescription))
 
 and private describeQueryColumns store registry schema source =
     describeQueryColumnsChecked store registry schema source |> Result.toOption
@@ -8421,7 +8444,7 @@ and private materializeRelationValue columnName rowNumber value =
     | _ -> Value.materialize value
 
 and private resolveRelationBody store registry dbName columnNames body outer : Result<ColumnDef list * Value[] list, QueryResult> =
-    let describedColumns = describeQueryColumnsInScope store registry dbName (QueryBody body) outer |> Result.toOption
+    let describedColumns = describeQueryColumnsInScope store registry dbName (QueryBody body) outer (fun _ -> Ok()) |> Result.toOption
     let columnNamesAreValid =
         match describedColumns with
         | Some columns ->
@@ -8566,15 +8589,6 @@ and private prepareWhereMatches
 
     let validateElidedPredicate expression =
         let probe = { context with Row = Array.create context.ColumnsByPosition.Length VNull }
-        let evaluatorIntrinsics =
-            set [ "DEFAULT"; "COERCIBILITY"; "COLLATION"; "CHARSET"
-                  "SLEEP"; "BENCHMARK"; "WEIGHT_STRING" ]
-        let knownFunction (name: string) =
-            Set.contains (name.ToUpperInvariant()) evaluatorIntrinsics
-            || (Functions.lookup name context.Registry |> Option.isSome)
-            || (not (name.Contains('.', System.StringComparison.Ordinal))
-                && (Functions.lookup (context.DbName + "." + name) context.Registry |> Option.isSome))
-
         let rec firstMissingFunction expression =
             Expression.children expression
             |> List.tryPick firstMissingFunction
@@ -8582,7 +8596,10 @@ and private prepareWhereMatches
                 match expression with
                 | FuncCall _ when isAggregateCall context.Registry expression ->
                     Some(1111, "Invalid use of group function")
-                | FuncCall(name, _) when not (knownFunction name) -> Some(unknownFunction name)
+                | FuncCall(name, _) ->
+                    match validateFunctionName context.Registry context.DbName name with
+                    | Error error -> Some error
+                    | Ok() -> None
                 | _ -> None)
 
         validateExpressionInContext probe expression
@@ -17863,7 +17880,7 @@ and private runSelect
     let orderingValidation =
         aggregateOrdering
         |> Result.mapError (fun error ->
-            match describeQueryColumnsInScope store registry dbName (QueryBody(PlainSelect select)) outer with
+            match describeQueryColumnsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
             | Error(InvalidDescription(Err(code, message))) -> code, message
             | _ -> error)
 
@@ -19862,15 +19879,16 @@ let statementColumns (store: Store) (registry: Registry) (schema: string) (state
     | _ -> None
 
 /// Binds references and literal diagnostics without evaluating prepared statements.
-let validatePreparedBindings store registry schema statement =
+let private validateBindingsWith describeColumns store registry schema statement =
     let validateBody body =
-        match describeQueryColumnsChecked store registry schema (QueryBody body) with
+        match describeColumns store registry schema (QueryBody body) with
         | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
         | _ -> Ok()
 
     let validateExpressions expressions =
         expressions
-        |> traverse (validateExpressionBindings (fun _ -> Ok()) (PlainSelect >> validateBody) Expression.tryLiteralNodeDiagnostic id)
+        |> traverse (validateExpressionBindings (fun _ -> Ok()) (PlainSelect >> validateBody)
+                         Expression.tryLiteralNodeDiagnostic id (fun _ -> Ok()))
         |> Result.map ignore
 
     let rec validate = function
@@ -19897,6 +19915,12 @@ let validatePreparedBindings store registry schema statement =
         | _ -> Ok()
 
     validate statement
+
+let validatePreparedBindings store registry schema statement =
+    validateBindingsWith describeQueryColumnsChecked store registry schema statement
+
+let private validateViewBindings store registry schema functionDatabase statement =
+    validateBindingsWith (describeQueryColumnsCheckingFunctions functionDatabase) store registry schema statement
 
 let private statementSources store schema (select: SelectStmt) =
     (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
@@ -23327,7 +23351,7 @@ let rec executeAs
                 else
                     algorithm
 
-            match validatePreparedBindings store registry db view with
+            match validateViewBindings store registry db dbName view with
             | _ when viewContainsDestination view ->
                 ids, Err(1350, "View's SELECT contains a 'INTO' clause")
             | _ when viewContainsSessionVariable view ->

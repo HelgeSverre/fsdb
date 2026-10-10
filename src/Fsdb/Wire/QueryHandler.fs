@@ -7978,7 +7978,8 @@ let private accountUpdateIsAuthorized session = function
 let private resolveMissingFunctionDatabase selectedDatabase parserOptions sql result =
     let prefix, suffix = "FUNCTION ", " does not exist"
     let resolvesFunctionNames = function
-        | Select _ | Union _ | Insert _ | InsertSelect _
+        | Select _ | Union _ | CreateTableAs _ | CreateView _
+        | Insert _ | InsertSelect _
         | Replace _ | ReplaceSelect _ | ReplaceSet _
         | Update _ | Delete _ | Do _ | SetVariables _ -> true
         | _ -> false

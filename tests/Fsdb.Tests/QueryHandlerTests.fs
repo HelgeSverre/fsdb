@@ -251,6 +251,50 @@ let tests =
                     "SET @x=no_such_function()" ] do
                   Expect.equal (run sql) (Err(1046, "No database selected")) sql
 
+          testCase "expression DDL resolves missing functions against the selected database"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "USE fsdb"
+                        "CREATE TABLE function_ddl_source(id INT PRIMARY KEY)"
+                        "INSERT INTO function_ddl_source VALUES(1)" ]
+              for sql in
+                  [ "CREATE TABLE function_ddl_target AS SELECT no_such_function() AS v"
+                    "CREATE VIEW function_ddl_view AS SELECT no_such_function() AS v"
+                    "CREATE VIEW function_ddl_where AS SELECT id FROM function_ddl_source WHERE no_such_function(id)"
+                    "CREATE VIEW function_ddl_nested AS SELECT x FROM (SELECT no_such_function() AS x) AS q" ] do
+                  Expect.equal
+                      (run sql)
+                      (Err(1305, "FUNCTION fsdb.no_such_function does not exist"))
+                      sql
+              Expect.equal
+                  (run "CREATE VIEW function_ddl_valid AS SELECT ABS(id) AS v FROM function_ddl_source")
+                  (Affected 0UL)
+                  "registered scalar functions remain valid in views"
+              Expect.equal
+                  (run "CREATE FUNCTION function_ddl_doubled(v INT) RETURNS INT DETERMINISTIC RETURN v*2")
+                  (Affected 0UL)
+                  "create a stored function for a valid view"
+              Expect.equal
+                  (run "CREATE VIEW function_ddl_stored AS SELECT function_ddl_doubled(id) AS v FROM function_ddl_source")
+                  (Affected 0UL)
+                  "stored functions remain valid in views"
+              Expect.equal (run "CREATE DATABASE function_ddl_other") (Affected 1UL) "create target schema"
+              Expect.equal
+                  (run "CREATE FUNCTION function_ddl_other.only_there() RETURNS INT DETERMINISTIC RETURN 7")
+                  (Affected 0UL)
+                  "create a routine in the view target schema"
+              Expect.equal
+                  (run "CREATE VIEW function_ddl_other.view_probe AS SELECT only_there() AS v")
+                  (Err(1305, "FUNCTION fsdb.only_there does not exist"))
+                  "unqualified functions resolve in the selected schema, not the view target schema"
+
+              let withoutDatabase = queryFixture []
+              for sql in
+                  [ "CREATE TABLE fsdb.function_ddl_target AS SELECT no_such_function() AS v"
+                    "CREATE VIEW fsdb.function_ddl_view AS SELECT no_such_function() AS v" ] do
+                  Expect.equal (withoutDatabase sql) (Err(1046, "No database selected")) sql
+
           testCase "maximum execution time retains unsigned settings and scope defaults"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

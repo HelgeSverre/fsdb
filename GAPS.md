@@ -670,6 +670,9 @@ The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-f
 now resolve unqualified calls against the selected database in common
 expression-bearing reads, mutations, `DO`, and `SET`; absent database context
 returns 1046 even for qualified-table mutations.
+[View-definition and CTAS function binding](torture/findings/2026-10-10-view-function-binding.md)
+now rejects missing functions before publication while preserving valid builtin
+and stored-function calls.
 
 ## 13. Authentication and privileges
 
