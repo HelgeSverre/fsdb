@@ -26,6 +26,13 @@ For `PREPARE p FROM 'SELECT ? AS fsdb_log_prepared_probe'` followed by
 `SELECT 42 AS fsdb_log_prepared_probe`. It also records the outer SQL
 `EXECUTE p USING @v` as a `Query` entry.
 
+A raw-protocol client produces `Connect` with an argument such as
+`root@192.168.97.1 on mysql using TCP/IP`, `Init DB` with the selected
+database name, and an empty `Quit` entry for `COM_QUIT`. A failed `COM_INIT_DB`
+request did not create an `Init DB` row. Closing the TCP socket without
+`COM_QUIT` also did not create a `Quit` row in the observed session. The
+client's `COM_PING` did not create a general-log row.
+
 A separate `CREATE USER ... IDENTIFIED BY 'fixture_secret_314159'` probe
 produced a log argument with `IDENTIFIED BY <secret>` rather than the cleartext
 password. fsdb conservatively replaces the whole credential statement with
@@ -38,5 +45,5 @@ remove the log entry. Bound values are rendered in `Execute` arguments while
 credential statements remain redacted. The `NONE` destination suppresses
 output as in MySQL. With the default `FILE` destination, enabling general
 logging is refused explicitly because there is no compatible file sink yet.
-Non-query wire commands remain outside this path. These boundaries remain
-open in `GAPS.md`.
+Other wire commands remain outside this path. These boundaries remain open in
+`GAPS.md`.

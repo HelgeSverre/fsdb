@@ -327,6 +327,50 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "general log records wire connection, database selection, and quit"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  Fsdb.Session.setGlobalVariable store "log_output" (Some "TABLE")
+                  Fsdb.Session.setGlobalVariable store "general_log" (Some "1")
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+
+                  let missingDb = Array.append [| 0x02uy |] (Text.Encoding.UTF8.GetBytes "fsdb_missing_log_database")
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = missingDb } |> Async.Ignore
+                  let! rejected = readPacketAsync stream
+                  Expect.equal rejected.Value.Payload.[0] 0xffuy "missing database is rejected"
+
+                  let initDb = Array.append [| 0x02uy |] (Text.Encoding.UTF8.GetBytes "mysql")
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = initDb } |> Async.Ignore
+                  let! selected = readPacketAsync stream
+                  Expect.equal selected.Value.Payload.[0] 0uy "COM_INIT_DB succeeds"
+
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = [| 0x01uy |] } |> Async.Ignore
+                  let! closed = readPacketAsync stream
+                  Expect.isNone closed "COM_QUIT closes the connection"
+
+                  let admin = Fsdb.Session.create 99 store
+                  let _, entries =
+                      Fsdb.QueryHandler.handle
+                          admin
+                          "SELECT command_type, argument FROM mysql.general_log WHERE command_type IN ('Connect','Init DB','Quit')"
+
+                  match entries with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows.Length 3 "only successful wire events are logged"
+                      Expect.isTrue (List.contains [ Some "Init DB"; Some "mysql" ] rows) "successful database selection is logged"
+                      Expect.isTrue (List.contains [ Some "Quit"; Some "" ] rows) "explicit quit is logged"
+                      let connection =
+                          rows
+                          |> List.tryPick (function [ Some "Connect"; Some value ] -> Some value | _ -> None)
+                          |> Option.defaultWith (fun () -> failtest "connection event is present")
+                      Expect.stringContains connection "root@127.0.0.1 on  using TCP/IP" "connection entry includes peer and transport"
+                  | other -> failtestf "expected Connect, Init DB, Quit entries, got %A" other
+              }
+              |> Async.RunSynchronously
+
           testCase "MySqlConnector reads procedure resultsets and OUT parameters"
           <| fun _ ->
               async {

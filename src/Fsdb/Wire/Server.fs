@@ -1640,6 +1640,14 @@ let private handleConnection
                     | Ok() ->
                         databaseAccepted <- true
 
+                        let source = clientHost |> Option.defaultValue "unknown"
+                        let database = resp.Database |> Option.defaultValue ""
+                        let transport = if tlsVersion.IsSome then "SSL/TLS" else "TCP/IP"
+                        Session.recordGeneralCommand
+                            session
+                            "Connect"
+                            (sprintf "%s@%s on %s using %s" resp.Username source database transport)
+
                         do!
                             writePacketAsync
                                 stream
@@ -1699,8 +1707,8 @@ let private handleConnection
                             |> Option.iter (InformationSchema.recordCommand session.StatusCounters)
 
                             match command with
-                            | None
-                            | Some Quit -> ()
+                            | None -> ()
+                            | Some Quit -> Session.recordGeneralCommand session "Quit" ""
                             | Some Ping ->
                                 do!
                                     writePacketAsync
@@ -1824,6 +1832,7 @@ let private handleConnection
 
                                 match validateDatabaseSelection currentStore account session.ActiveRoles db with
                                 | Ok() ->
+                                    Session.recordGeneralCommand session "Init DB" db
                                     let session =
                                         Session.clearSessionStateChanges session
                                         |> fun session -> Session.trackSchemaAssignment db { session with Database = Some db }
