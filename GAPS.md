@@ -812,6 +812,16 @@ about forty-four times faster than its correlated scan. MySQL strongly favors
 the direct functional key but does not profit from the correlated spelling in
 this short run.
 
+The [composed-key equality and scan snapshot](benchmarks/results/2026-10-10-functional-index-baseline.md)
+and [one-column primary-key control](benchmarks/results/2026-10-10-functional-index-id-pk-control.md)
+use native fsdb and MySQL 8.4.11 on the same host. At 10,000 users, fsdb's
+indexed lookup takes about 385 microseconds versus about 70 milliseconds for
+its forced scan. The one-column control takes about 292 microseconds for a
+primary-key lookup and 385 microseconds for the composed key; MySQL takes about
+39 and 49 microseconds respectively. This points to both shared request cost
+and additional work in the functional-query path. The short runs and differing
+table shapes do not isolate which stage accounts for that additional work.
+
 The constant-expression lookup pair records the
 [scan baseline](benchmarks/results/baa1b51-quick.md) and the
 [indexed implementation](benchmarks/results/ede0c8e-quick.md). Safe numeric

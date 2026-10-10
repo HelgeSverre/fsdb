@@ -314,6 +314,11 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
+    member this.PointSelectIdByPk() =
+        this.Query $"SELECT id FROM users WHERE id = {randomUserId ()}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "FunctionalIndex")>]
     member this.FilterByComposedFunctionalIndex() =
         let user = randomUserId () - 1
         this.Query $"SELECT id FROM functional_users WHERE UPPER(TRIM(name)) = 'USER_{user}'"
