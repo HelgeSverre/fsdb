@@ -11576,6 +11576,34 @@ let tests =
                                 | Err(1452, _) -> ()
                                 | other -> failtestf "expected 1452 for %s(%d) to %s(%d), got %A" kind parentPrecision kind childPrecision other
 
+                testCase "temporal foreign-key cascades retain fractional storage keys"
+                <| fun _ ->
+                    for kind, baseValue in
+                        [ "TIME", "12:00:00"
+                          "DATETIME", "2024-01-02 12:00:00"
+                          "TIMESTAMP", "2024-01-02 12:00:00" ] do
+                        let store = newStore ()
+                        runDefault store $"CREATE TABLE temporal_parent(k {kind}(2) PRIMARY KEY)" |> ignore
+                        runDefault store $"CREATE TABLE temporal_child(id INT PRIMARY KEY,k {kind}(1),payload INT,CONSTRAINT fk_temporal FOREIGN KEY(k) REFERENCES temporal_parent(k) ON UPDATE CASCADE ON DELETE CASCADE)" |> ignore
+                        runDefault store $"INSERT INTO temporal_parent VALUES('{baseValue}.10')" |> ignore
+                        runDefault store $"INSERT INTO temporal_child VALUES(1,'{baseValue}.10',0)" |> ignore
+                        Expect.equal (runDefault store $"UPDATE temporal_parent SET k='{baseValue}.12'") (Affected 1UL) $"{kind} update cascades"
+                        match runDefault store $"INSERT INTO temporal_child VALUES(2,'{baseValue}.12',1)" with
+                        | Err(1452, _) -> ()
+                        | other -> failtestf "expected 1452 for a directly inserted %s child, got %A" kind other
+                        match runDefault store $"INSERT INTO temporal_child VALUES(1,'{baseValue}.12',2) ON DUPLICATE KEY UPDATE payload=2" with
+                        | Affected _ -> ()
+                        | other -> failtestf "expected %s duplicate-key payload update to retain the cascade, got %A" kind other
+                        match runDefault store $"UPDATE temporal_child SET k='{baseValue}.12'" with
+                        | Err(1452, _) -> ()
+                        | other -> failtestf "expected 1452 for an explicitly assigned %s child key, got %A" kind other
+                        Expect.equal (runDefault store "UPDATE temporal_child SET payload=1") (Affected 1UL) $"{kind} unrelated child update"
+                        match runDefault store "UPDATE temporal_child SET k=k" with
+                        | Affected _ -> ()
+                        | other -> failtestf "expected %s key no-op to retain the cascade, got %A" kind other
+                        Expect.equal (runDefault store "DELETE FROM temporal_parent") (Affected 1UL) $"{kind} delete cascades"
+                        Expect.equal (runDefault store "SELECT COUNT(*) FROM temporal_child") (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) $"{kind} child follows the parent"
+
                 testCase "DECIMAL foreign keys compare packed storage bytes"
                 <| fun _ ->
                     for parentType, childType, parentValue, childValue, matches in

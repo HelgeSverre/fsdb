@@ -18308,6 +18308,11 @@ let private mutationCandidateRows
     | Some(columns, rows) -> Ok(columns, rows)
     | None -> tableResult |> Result.map (fun table -> table.Columns, table.RowsArray.Indexed)
 
+let private isSelfAssignment allowBare qualifier column = function
+    | Col name when allowBare -> equalsIgnoreCase name column
+    | QualifiedCol(owner, name) -> equalsIgnoreCase owner qualifier && equalsIgnoreCase name column
+    | _ -> false
+
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, left-to-right — each right-hand side is evaluated against the row
 /// *as mutated by every earlier assignment in the same statement*, matching
@@ -18323,6 +18328,8 @@ let private applyAssignments
     (dbName: string)
     (columnIndex: Map<string, int list>)
     (qualifiers: Map<string, ColumnDef list * int>)
+    (qualifier: string)
+    (columns: ColumnDef list)
     (assignments: (int * Expr) list)
     (row: Value[])
     : Result<Value[], StorageError> =
@@ -18331,12 +18338,14 @@ let private applyAssignments
         (fun acc (idx, expr) ->
             acc
             |> Result.bind (fun current ->
-                evalExpr (contextFactory store registry dbName columnIndex qualifiers None current) expr
-                |> Result.mapError ExpressionError
-                |> Result.map (fun v ->
-                    let newRow = Array.copy current
-                    newRow.[idx] <- v
-                    newRow)))
+                if isSelfAssignment true qualifier columns.[idx].Name expr then Ok current
+                else
+                    evalExpr (contextFactory store registry dbName columnIndex qualifiers None current) expr
+                    |> Result.mapError ExpressionError
+                    |> Result.map (fun v ->
+                        let newRow = Array.copy current
+                        newRow.[idx] <- v
+                        newRow)))
         (Ok(Array.copy row))
 
 /// `ON UPDATE CURRENT_TIMESTAMP` columns not named in this statement's own
@@ -21735,13 +21744,13 @@ let rec executeAs
         | Some(Err(code, message)) -> Error(ExpressionError(code, message))
         | Some _ -> Error(ExpressionError(1105, "Trigger execution failed"))
 
-    let applyUpdateRows (statement: UpdateStmt) (runStore: Store) db table candidates predicate updater
+    let applyUpdateRows (statement: UpdateStmt) (runStore: Store) db table candidates predicate assignedColumns updater
         (triggerRows: ResizeArray<Value[] option * Value[] option>) beforeTriggers afterTriggers =
         let ignoreErrors = statement.Ignore
         let callsCustomFunction = updateCallsCustomFunction registry statement
         let write candidates predicate updater =
             Storage.withPermissiveIndexExpressions ignoreErrors (fun () ->
-                updateRows runStore db table candidates predicate updater)
+                updateRowsWithAssignments runStore db table candidates predicate assignedColumns updater)
         let fireAfter changed =
             triggerStorageResult (fireTriggers runStore db table After TriggerUpdate afterTriggers (List.ofSeq triggerRows))
             |> Result.map (fun () -> changed)
@@ -21760,7 +21769,7 @@ let rec executeAs
              && not callsCustomFunction
              && Storage.canBatchIgnoredUpdates runStore db table then
             Storage.withPermissiveIndexExpressions true (fun () ->
-                updateRowsIgnoringConstraints runStore db table candidates predicate updater)
+                updateRowsIgnoringConstraintsWithAssignments runStore db table candidates predicate assignedColumns updater)
         else
             let selected =
                 match candidates with
@@ -22079,9 +22088,12 @@ let rec executeAs
                     expr
                     |> substituteValuesFunc columnIndex candidate
 
-                match evalExpr ctx expression with
-                | Ok v -> Ok(idx, v)
-                | Error err -> Error(ExpressionError err))
+                if isSelfAssignment true table tableColumns.[idx].Name expression then
+                    Ok(idx, existing.[idx])
+                else
+                    match evalExpr ctx expression with
+                    | Ok v -> Ok(idx, v)
+                    | Error err -> Error(ExpressionError err))
         |> Result.map (fun idxVals ->
             let newRow = Array.copy existing
             for idx, v in idxVals do
@@ -22101,6 +22113,13 @@ let rec executeAs
         | Error e -> ids, storageErr e
         | Ok(tableColumns, _) ->
             let columnIndex = columnIndexOf tableColumns
+            let coercedAssignments =
+                onDuplicateUpdate
+                |> List.choose (fun (name, expression) ->
+                    tableColumns
+                    |> List.tryFindIndex (fun column -> equalsIgnoreCase column.Name name)
+                    |> Option.filter (fun index -> not (isSelfAssignment true table tableColumns.[index].Name expression)))
+                |> Set.ofList
 
             finishInsert db table (fun s ->
                 let prepare omitted candidate =
@@ -22119,7 +22138,7 @@ let rec executeAs
                     |> Result.bind computeGenerated
 
                 if not (Storage.dynamicWriteRebaseActive s) then
-                    upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows
+                    upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate (Some coercedAssignments) foundRows
                 else
                     rowsValues
                     |> List.indexed
@@ -22150,6 +22169,7 @@ let rec executeAs
                             (candidates |> List.map Array.toList)
                             (fun _ row -> Ok row)
                             (fun ordinal existing row -> applyUpdate (fst prepared.[ordinal]) existing row)
+                            (Some coercedAssignments)
                             foundRows
                         |> Result.map (fun outcome ->
                             let generatedId =
@@ -24087,10 +24107,16 @@ let rec executeAs
                                 |> Result.map (fun matches -> matches && targetSet.Contains row)
                             | None, None -> Ok(targetSet.Contains row)
                         let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
+                        let coercedAssignments =
+                            indexedAssignments
+                            |> List.choose (fun (index, expression) ->
+                                if isSelfAssignment true tableAlias columns.[index].Name expression then None
+                                else Some index)
+                            |> Set.ofList
 
                         let updater row =
                             let updated =
-                                applyAssignments targetStore registry dbName columnIndex qualifiers indexedAssignments row
+                                applyAssignments targetStore registry dbName columnIndex qualifiers tableAlias columns indexedAssignments row
                                 |> Result.map (applyOnUpdateTimestamps (temporalCoercionMode targetStore) columns assignedIdxs row)
                                 |> Result.bind (computeGeneratedRow targetStore registry db table columns)
 
@@ -24120,7 +24146,7 @@ let rec executeAs
                             | Error error -> Error error
 
                         match
-                            applyUpdateRows updateStmt targetStore db table (Some targetRows) predicate updater changedRows beforeTriggers afterTriggers
+                            applyUpdateRows updateStmt targetStore db table (Some targetRows) predicate coercedAssignments updater changedRows beforeTriggers afterTriggers
                         with
                         | Ok changed ->
                             if useSnapshot then
@@ -24235,7 +24261,9 @@ let rec executeAs
                                     match assignments with
                                     | [] -> Ok()
                                     | (srcIdx, colIdx, expr) :: rest ->
-                                        evalExpr (ctxFor working) expr
+                                        (if isSelfAssignment false sources.[srcIdx].Qualifier sources.[srcIdx].Columns.[colIdx].Name expr then
+                                             Ok working.[sourceOffsets.[srcIdx] + colIdx]
+                                         else evalExpr (ctxFor working) expr)
                                         |> Result.bind (fun v ->
                                             working.[sourceOffsets.[srcIdx] + colIdx] <- v
 
@@ -24270,6 +24298,17 @@ let rec executeAs
                             |> Array.mapi (fun i _ ->
                                 resolvedAssignments
                                 |> List.choose (fun (srcIdx, colIdx, _) -> if sourceGroups.[srcIdx] = Some i then Some colIdx else None)
+                                |> Set.ofList)
+
+                        let coercedAssignmentsByGroup =
+                            grouped.Tables
+                            |> Array.mapi (fun i _ ->
+                                resolvedAssignments
+                                |> List.choose (fun (sourceIndex, columnIndex, expression) ->
+                                    if sourceGroups.[sourceIndex] <> Some i
+                                       || isSelfAssignment false sources.[sourceIndex].Qualifier sources.[sourceIndex].Columns.[columnIndex].Name expression then
+                                        None
+                                    else Some columnIndex)
                                 |> Set.ofList)
 
                         let invocationTables = grouped.Tables |> Array.map (physicalTableKey dbName) |> Set.ofArray
@@ -24343,7 +24382,7 @@ let rec executeAs
                                                         changedRows.Add(Some(Array.copy row), Some candidate)
                                                         Ok candidate)
 
-                                        applyUpdateRows updateStmt snapshot tdb tname None predicate updater changedRows beforeTriggers afterTriggers)
+                                        applyUpdateRows updateStmt snapshot tdb tname None predicate coercedAssignmentsByGroup.[i] updater changedRows beforeTriggers afterTriggers)
                                 |> Array.toList
                                 |> traverse id)
 

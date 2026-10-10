@@ -31,7 +31,20 @@ The `time-date-foreign-keys` contract covers declaration and nonmatching
 ordinary and zero-value inserts in both directions for these pairs. fsdb
 accepts those declarations and compares their distinct physical key domains
 rather than equating zero date-time values across DATETIME and TIMESTAMP.
-Other physical-key combinations and referential actions remain unverified.
+
+A later native MySQL 8.4.11 probe covers `TIME`, `DATETIME`, and `TIMESTAMP`
+parents with fractional precision 2 and children with precision 1. Updating
+the parent from fraction `.10` to `.12` cascades a physical child key that
+displays as `.1`; changing only the child's payload or assigning `k=k` keeps
+that key valid. An `INSERT ... ON DUPLICATE KEY UPDATE` that changes only the
+payload also succeeds, and deleting the parent cascades to the child. A direct
+insert or literal reassignment of `.12` in the child returns 1452 because ordinary
+column coercion reduces it to precision 1. Fsdb now preserves the untouched
+stored key during SQL UPDATE and duplicate-key updates while coercing
+explicitly assigned values. The expanded `time-date-foreign-keys` contract
+and focused regression cover these
+same-family referential actions. Other temporal physical-key combinations
+remain unverified.
 
 Within each of `TIME`, `DATETIME`, and `TIMESTAMP`, MySQL 8.4.11 accepts
 foreign keys with different fractional precisions but matches values by the

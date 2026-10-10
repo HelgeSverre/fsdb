@@ -2665,6 +2665,26 @@ let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (ro
     |> traverse (fun (column, value) -> coerceAndCheck mode column value)
     |> Result.map Array.ofList
 
+let private coerceUpdatedRow
+    (mode: TemporalCoercionMode)
+    (columns: ColumnDef list)
+    (assignedColumns: Set<int>)
+    (before: Value[])
+    (candidate: Value[])
+    : Result<Value[], StorageError> =
+    columns
+    |> List.mapi (fun index column ->
+        let value = candidate.[index]
+        if not (Set.contains index assignedColumns) && value = before.[index] then Ok value
+        else coerceAndCheck mode column value)
+    |> traverse id
+    |> Result.map List.toArray
+
+let private coerceMutationRow mode columns assignedColumns before candidate =
+    match assignedColumns with
+    | Some assigned -> coerceUpdatedRow mode columns assigned before candidate
+    | None -> coerceRow mode columns candidate
+
 /// The key projection shared by unique checks and equality buckets.
 type private IndexKeyGroup =
     { Name: string
@@ -9599,6 +9619,7 @@ let rec upsertRows
         rowsIn
         prepare
         (fun _ existing candidate -> applyUpdate existing candidate)
+        None
         foundRows
 
 and upsertRowsWithOrdinal
@@ -9609,6 +9630,7 @@ and upsertRowsWithOrdinal
     (rowsIn: Value list list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
+    (assignedColumns: Set<int> option)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
         let key = normalizeTableName tableName
@@ -9633,7 +9655,7 @@ and upsertRowsWithOrdinal
             withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable dbName db tableName)
-                |> Result.bind (fun table -> upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate foundRows)
+                |> Result.bind (fun table -> upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate assignedColumns foundRows)
                 |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
 
         let result =
@@ -9666,6 +9688,7 @@ and private upsertRowsInTable
     (rowsIn: Value list list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
+    (assignedColumns: Set<int> option)
     (foundRows: bool)
     : Result<Catalog * Map<TableAddress, RowUpdate list> * UpsertSummary, StorageError> =
                 let checkFks = store.ForeignKeyChecks
@@ -9716,7 +9739,7 @@ and private upsertRowsInTable
                                         |> Result.bind (function
                                             | candidate, Some(pos, existing) ->
                                                 applyUpdate ordinal existing candidate
-                                                |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
+                                                |> Result.bind (coerceMutationRow (temporalCoercionMode store) table.Columns assignedColumns existing)
                                                 |> Result.bind (validateUpdatedUniqueKeys table uniqueGroups state.UniqueIndex pos)
                                                 |> Result.bind (fun applied ->
                                                     // ODKU validates child references and applies
@@ -10916,6 +10939,7 @@ let internal canBatchIgnoredUpdates (store: Store) database table =
 // Candidate IDs are refreshed under publication locks; fatal failures discard the builder.
 let private updateRowsCore
     (onConstraintError: StorageError -> bool)
+    (assignedColumns: Set<int> option)
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -10974,7 +10998,7 @@ let private updateRowsCore
                                         Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, visited, cascaded)
                                     else
                                         updater row
-                                        |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
+                                        |> Result.bind (coerceMutationRow (temporalCoercionMode store) table.Columns assignedColumns row)
                                         |> Result.bind (fun newRow ->
                                             validateUpdatedUniqueKeys table uniqueGroups index rowId newRow
                                             |> Result.bind (fun newRow ->
@@ -11052,11 +11076,17 @@ let private updateRowsCore
 
 /// Updates matching rows atomically, failing the statement on a constraint violation.
 let updateRows store database table candidates predicate updater =
-    updateRowsCore (fun _ -> false) store database table candidates predicate updater
+    updateRowsCore (fun _ -> false) None store database table candidates predicate updater
+
+let internal updateRowsWithAssignments store database table candidates predicate assignedColumns updater =
+    updateRowsCore (fun _ -> false) (Some assignedColumns) store database table candidates predicate updater
 
 /// Skips ignorable constraint failures while retaining accepted rows in one publication.
 let internal updateRowsIgnoringConstraints store database table candidates predicate updater =
-    updateRowsCore tryIgnoreUpdateConstraintError store database table candidates predicate updater
+    updateRowsCore tryIgnoreUpdateConstraintError None store database table candidates predicate updater
+
+let internal updateRowsIgnoringConstraintsWithAssignments store database table candidates predicate assignedColumns updater =
+    updateRowsCore tryIgnoreUpdateConstraintError (Some assignedColumns) store database table candidates predicate updater
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the
 /// `Table` instance itself: `Executor`'s row pipeline is list-based and
