@@ -376,7 +376,24 @@ and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (
         let partitionText =
             if table.Partitions.IsEmpty then "" else sprintf " partition (%s)" (identifiers table.Partitions)
 
-        tableText + aliasText + partitionText,
+        let hintText =
+            table.IndexHints
+            |> List.map (fun hint ->
+                let kind =
+                    match hint.Kind with
+                    | UseIndex -> "use"
+                    | ForceIndex -> "force"
+                    | IgnoreIndex -> "ignore"
+                let scope =
+                    match hint.Scope with
+                    | None -> ""
+                    | Some IndexJoin -> " for join"
+                    | Some IndexOrderBy -> " for order by"
+                    | Some IndexGroupBy -> " for group by"
+                sprintf " %s index%s (%s)" kind scope (identifiers hint.Indexes))
+            |> String.concat ""
+
+        tableText + partitionText + aliasText + hintText,
         [ { Qualifier = qualifier
             Reference = table.Alias |> Option.map quoteIdentifier |> Option.defaultValue tableText
             Columns = columns } ]

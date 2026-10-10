@@ -512,12 +512,28 @@ and SelectFileDestination =
     | Outfile of fileName: string * options: SelectOutfileOptions
     | Dumpfile of fileName: string
 
+and TableIndexHintKind =
+    | UseIndex
+    | ForceIndex
+    | IgnoreIndex
+
+and TableIndexHintScope =
+    | IndexJoin
+    | IndexOrderBy
+    | IndexGroupBy
+
+and TableIndexHint =
+    { Kind: TableIndexHintKind
+      Scope: TableIndexHintScope option
+      Indexes: string list }
+
 /// `FROM [db.]table [[AS] alias]`, preserving qualification and aliasing.
 and TableRef =
     { Database: string option
       Table: string
       Alias: string option
-      Partitions: string list }
+      Partitions: string list
+      IndexHints: TableIndexHint list }
 
 /// A derived table's body: a plain `SELECT`, or `(SELECT ...) UNION
 /// (SELECT ...) ...` — MySQL allows a `UNION` directly inside `FROM (...)

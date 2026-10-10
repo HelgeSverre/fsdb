@@ -1328,7 +1328,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 { Database = Some database
                                   Table = table
                                   Alias = source.Alias
-                                  Partitions = [] }
+                                  Partitions = []
+                                  IndexHints = [] }
 
                         let allowedInsertTargets =
                             underlying
@@ -7951,7 +7952,7 @@ and private describeQueryColumnsInScope
             scope :: enclosingScopes context.Outer
 
     (match source with
-     | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = [] })
+     | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = []; IndexHints = [] })
      | QueryBody body -> describeBody Set.empty schema Map.empty (enclosingScopes outer) body)
     |> Result.map (List.map _.Column)
 
@@ -10669,7 +10670,8 @@ and private tryMergeDirectView
                         { Database = Some direct.Database
                           Table = direct.Table
                           Alias = None
-                          Partitions = [] }
+                          Partitions = []
+                          IndexHints = [] }
 
                     let aliasesHiddenPhysicalColumn (physicalTable: Table) =
                         let exposed = direct.OrderedColumns |> List.map _.ToLowerInvariant() |> Set.ofList
@@ -12369,7 +12371,8 @@ and private correlatedSourceRef qualifier =
     { Database = None
       Table = qualifier
       Alias = None
-      Partitions = [] }
+      Partitions = []
+      IndexHints = [] }
 
 and private tryCorrelatedInnerColumn source = function
     | Col name when source.ColumnNames.Contains(name.ToLowerInvariant()) -> Some name
@@ -19660,7 +19663,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     let checkTableExists (table: string) : Result<unit, QueryResult> =
         let db, tname = splitQualified dbName table
         withPlanningProbe (fun () ->
-            resolveTableRef store validationRegistry dbName { Database = Some db; Table = tname; Alias = None; Partitions = [] })
+            resolveTableRef store validationRegistry dbName { Database = Some db; Table = tname; Alias = None; Partitions = []; IndexHints = [] })
         |> Result.map ignore
 
     let checkSelect (select: SelectStmt) : Result<unit, QueryResult> =

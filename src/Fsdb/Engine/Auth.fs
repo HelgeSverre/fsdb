@@ -2822,7 +2822,8 @@ let private targetSource store defaultDb table =
         { Database = Some database
           Table = table
           Alias = None
-          Partitions = [] }
+          Partitions = []
+          IndexHints = [] }
 
 let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
     let cteNames =

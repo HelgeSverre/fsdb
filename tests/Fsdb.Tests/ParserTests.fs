@@ -54,7 +54,7 @@ let private mkSelect
           Distinct = false
           CalculateFoundRows = false
           StraightJoin = false
-          From = from |> Option.map (fun t -> FromTable { Database = None; Table = t; Alias = None; Partitions = [] })
+          From = from |> Option.map (fun t -> FromTable { Database = None; Table = t; Alias = None; Partitions = []; IndexHints = [] })
           Joins = []
           Where = where
           GroupBy = []
@@ -189,6 +189,20 @@ let tests =
                             | Select { Joins = [ { Kind = StraightJoin } ] } -> ()
                             | other -> failtestf "expected preserved straight join, got %A" other
 
+                testCase "table index hints retain kind and scope through SQL rendering"
+                <| fun _ ->
+                    let statement =
+                        parseOk "SELECT x.id FROM t PARTITION (p0) AS x USE INDEX (PRIMARY) IGNORE KEY FOR ORDER BY (ix_sqrt) JOIN u AS y FORCE KEY FOR JOIN (ix_n) ON y.id=x.id"
+                    let options: SqlText.ViewRenderOptions =
+                        { DefaultSchema = "test"; IncludeSchema = false; RelationColumns = fun _ _ -> Some [ "id" ] }
+                    let rendered = SqlText.viewDefinition options statement |> Option.defaultWith (fun () -> failtest "expected rendered SELECT")
+                    for parsed in [ statement; parseOk rendered ] do
+                        match parsed with
+                        | Select
+                            { From = Some(FromTable { Partitions = [ "p0" ]; IndexHints = [ { Kind = UseIndex; Scope = None; Indexes = [ "PRIMARY" ] }; { Kind = IgnoreIndex; Scope = Some IndexOrderBy; Indexes = [ "ix_sqrt" ] } ] })
+                              Joins = [ { Table = FromTable { IndexHints = [ { Kind = ForceIndex; Scope = Some IndexJoin; Indexes = [ "ix_n" ] } ] } } ] } -> ()
+                        | other -> failtestf "expected preserved table index hints, got %A" other
+
                 testCase "grouped right joins retain association through SQL rendering"
                 <| fun _ ->
                     let statement = parseOk "SELECT a.id,b.id,c.id FROM a LEFT JOIN (b JOIN c ON b.id=c.id) ON a.id=b.id"
@@ -217,7 +231,7 @@ let tests =
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
-                              From = Some(FromTable { Database = Some "information_schema"; Table = "tables"; Alias = Some "t"; Partitions = [] })
+                              From = Some(FromTable { Database = Some "information_schema"; Table = "tables"; Alias = Some "t"; Partitions = []; IndexHints = [] })
                               Joins = []
                               Where = None
                               GroupBy = []
@@ -242,7 +256,7 @@ let tests =
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
-                              From = Some(FromTable { Database = None; Table = "t"; Alias = Some "x"; Partitions = [] })
+                              From = Some(FromTable { Database = None; Table = "t"; Alias = Some "x"; Partitions = []; IndexHints = [] })
                               Joins = []
                               Where = None
                               GroupBy = []
@@ -1747,7 +1761,7 @@ let tests =
                             { Ctes = []
                               Ignore = false
                               Targets = [ "t" ]
-                              From = { Database = Some "app"; Table = "t"; Alias = None; Partitions = [] }
+                              From = { Database = Some "app"; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Joins = []
                               Where = None
                               OrderBy = []
@@ -1895,7 +1909,7 @@ let tests =
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
-                              From = Some(FromTable { Database = None; Table = "u"; Alias = None; Partitions = [] })
+                              From = Some(FromTable { Database = None; Table = "u"; Alias = None; Partitions = []; IndexHints = [] })
                               Joins = []
                               Where = Some(BinOp(Gt, col "x", Lit(VInt 1L)))
                               GroupBy = []
@@ -2065,7 +2079,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Joins = []
                               Assignments =
                                 [ { Table = None; Column = "a"; Value = Lit(VInt 1L) }
@@ -2082,7 +2096,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
                               Where = None
@@ -2098,7 +2112,7 @@ let tests =
                             { Ctes = []
                               Ignore = false
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Joins = []
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
                               OrderBy = []
@@ -2113,7 +2127,7 @@ let tests =
                             { Ctes = []
                               Ignore = false
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Joins = []
                               Where = None
                               OrderBy = []
@@ -2128,7 +2142,7 @@ let tests =
                             { Ctes = []
                               Ignore = false
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Joins = []
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
                               OrderBy = []
@@ -2142,7 +2156,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "t"; Alias = Some "x"; Partitions = [] }
+                              From = { Database = None; Table = "t"; Alias = Some "x"; Partitions = []; IndexHints = [] }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
@@ -2157,7 +2171,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "t"; Alias = Some "x"; Partitions = [] }
+                              From = { Database = None; Table = "t"; Alias = Some "x"; Partitions = []; IndexHints = [] }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
                               Where = None
@@ -2172,7 +2186,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "chatbots"; Alias = None; Partitions = [] }
+                              From = { Database = None; Table = "chatbots"; Alias = None; Partitions = []; IndexHints = [] }
                               Joins = []
                               Assignments =
                                 [ { Table = None; Column = "restrict_allowed_origins"; Value = Lit(VInt 1L) }

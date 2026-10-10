@@ -70,7 +70,7 @@ let private mutationSource (name: string) =
     let database, table =
         if separator < 0 then None, name
         else Some(name.Substring(0, separator)), name.Substring(separator + 1)
-    FromTable { Database = database; Table = table; Alias = None; Partitions = [] }
+    FromTable { Database = database; Table = table; Alias = None; Partitions = []; IndexHints = [] }
 
 let collect querySource statement =
     // Hint scope expansion is advisory. Bound repeated CTE instantiation so a

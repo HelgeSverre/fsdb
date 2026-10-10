@@ -3845,28 +3845,32 @@ let private limitClause: Parser<Expr option * Expr option, unit> =
 /// same as MySQL; `identifier` already backtracks cleanly off a reserved
 /// word (e.g. `WHERE`), so no `attempt` is needed around the bare-alias
 /// alternative.
-let private indexHint: Parser<unit, unit> =
-    ((keyword "USE" <|> keyword "FORCE" <|> keyword "IGNORE")
-     >>. (keyword "INDEX" <|> keyword "KEY")
-     >>. optional (
-         keyword "FOR"
-         >>. (keyword "JOIN" <|> attempt (keyword "ORDER" >>. keyword "BY") <|> attempt (keyword "GROUP" >>. keyword "BY"))
-     )
-     >>. between
-         (sym "(")
-         (sym ")")
-         (sepBy ((keyword "PRIMARY" >>% "PRIMARY") <|> identifier) (sym ",")))
-    >>% ()
+let private indexHint: Parser<TableIndexHint, unit> =
+    let kind =
+        (keyword "USE" >>% UseIndex)
+        <|> (keyword "FORCE" >>% ForceIndex)
+        <|> (keyword "IGNORE" >>% IgnoreIndex)
+    let scope =
+        keyword "FOR"
+        >>. ((keyword "JOIN" >>% IndexJoin)
+             <|> attempt (keyword "ORDER" >>. keyword "BY" >>% IndexOrderBy)
+             <|> attempt (keyword "GROUP" >>. keyword "BY" >>% IndexGroupBy))
+    let indexes =
+        between (sym "(") (sym ")") (sepBy ((keyword "PRIMARY" >>% "PRIMARY") <|> identifier) (sym ","))
+    pipe3 (kind .>> (keyword "INDEX" <|> keyword "KEY")) (opt scope) indexes (fun kind scope indexes ->
+        { Kind = kind
+          Scope = scope
+          Indexes = indexes })
 
 let private tableRef: Parser<TableRef, unit> =
     (identifier .>>. opt (sym "." >>. qualifiedIdentifier))
     .>>. opt (keyword "PARTITION" >>. between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
     .>>. opt ((keyword "AS" >>. identifierWord .>> ws) <|> identifier)
-    .>> many indexHint
-    |>> fun (((first, second), partitions), alias) ->
+    .>>. many indexHint
+    |>> fun ((((first, second), partitions), alias), hints) ->
         match second with
-        | Some table -> { Database = Some first; Table = table; Alias = alias; Partitions = Option.defaultValue [] partitions }
-        | None -> { Database = None; Table = first; Alias = alias; Partitions = Option.defaultValue [] partitions }
+        | Some table -> { Database = Some first; Table = table; Alias = alias; Partitions = Option.defaultValue [] partitions; IndexHints = hints }
+        | None -> { Database = None; Table = first; Alias = alias; Partitions = Option.defaultValue [] partitions; IndexHints = hints }
 
 let private withClause: Parser<CommonTableExpr list, unit> =
     let capturedBody =
