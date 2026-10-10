@@ -219,6 +219,38 @@ let tests =
                   (Some "42000")
                   "missing function uses the MySQL SQLSTATE"
 
+          testCase "mutations qualify missing functions with the selected database"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE function_dml_probe(id INT PRIMARY KEY,v INT)"
+                        "INSERT INTO function_dml_probe VALUES(1,1)"
+                        "USE fsdb" ]
+              for sql in
+                  [ "INSERT INTO function_dml_probe VALUES(2,no_such_function())"
+                    "INSERT INTO function_dml_probe SELECT 2,no_such_function()"
+                    "REPLACE INTO function_dml_probe VALUES(1,no_such_function())"
+                    "REPLACE INTO function_dml_probe SELECT 2,no_such_function()"
+                    "UPDATE function_dml_probe SET v=no_such_function() WHERE id=1"
+                    "DELETE FROM function_dml_probe WHERE no_such_function(id)"
+                    "DO no_such_function()"
+                    "SET @x=no_such_function()" ] do
+                  Expect.equal
+                      (run sql)
+                      (Err(1305, "FUNCTION fsdb.no_such_function does not exist"))
+                      sql
+
+          testCase "unqualified functions in mutations require a selected database"
+          <| fun _ ->
+              let run = queryFixture [ "CREATE TABLE fsdb.function_dml_probe(id INT PRIMARY KEY,v INT)" ]
+              for sql in
+                  [ "INSERT INTO fsdb.function_dml_probe VALUES(1,no_such_function())"
+                    "UPDATE fsdb.function_dml_probe SET v=no_such_function()"
+                    "DELETE FROM fsdb.function_dml_probe WHERE no_such_function(id)"
+                    "DO no_such_function()"
+                    "SET @x=no_such_function()" ] do
+                  Expect.equal (run sql) (Err(1046, "No database selected")) sql
+
           testCase "maximum execution time retains unsigned settings and scope defaults"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

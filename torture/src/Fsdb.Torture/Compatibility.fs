@@ -5093,6 +5093,25 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE binding_empty"; "DROP TABLE binding_rows" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private missingFunctionMutations =
+        { Name = "missing-function-mutations"
+          Setup =
+            [| "CREATE TABLE function_dml_probe(id INT PRIMARY KEY,v INT)"
+               "INSERT INTO function_dml_probe VALUES(1,1)" |]
+          Steps =
+            [| Contract.execute "insert-values" "INSERT INTO function_dml_probe VALUES(2,no_such_function())" |> Contract.fails 1305 "42000"
+               Contract.execute "insert-select" "INSERT INTO function_dml_probe SELECT 2,no_such_function()" |> Contract.fails 1305 "42000"
+               Contract.execute "replace-values" "REPLACE INTO function_dml_probe VALUES(1,no_such_function())" |> Contract.fails 1305 "42000"
+               Contract.execute "replace-select" "REPLACE INTO function_dml_probe SELECT 2,no_such_function()" |> Contract.fails 1305 "42000"
+               Contract.execute "update" "UPDATE function_dml_probe SET v=no_such_function() WHERE id=1" |> Contract.fails 1305 "42000"
+               Contract.execute "delete" "DELETE FROM function_dml_probe WHERE no_such_function(id)" |> Contract.fails 1305 "42000"
+               Contract.execute "do" "DO no_such_function()" |> Contract.fails 1305 "42000"
+               Contract.execute "set" "SET @x=no_such_function()" |> Contract.fails 1305 "42000" |]
+          Cleanup = [| "DROP TABLE function_dml_probe" |]
+          Coverage = [| "statement:insert", [| "text-differential" |]
+                        "statement:update", [| "text-differential" |]
+                        "statement:delete", [| "text-differential" |] |] }
+
     let private tableStatisticsCache =
         let rows =
             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
@@ -9734,6 +9753,7 @@ module ContractCatalog =
            numericComposedFunctionalIndexes
            numericConstantIndexBounds
            elidedWhereBindings
+           missingFunctionMutations
            integralDoubleIndexProbes
            signFunctionalIndex
            isNullFunctionalIndex

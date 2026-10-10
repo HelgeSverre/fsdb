@@ -7977,19 +7977,29 @@ let private accountUpdateIsAuthorized session = function
 
 let private resolveMissingFunctionDatabase selectedDatabase parserOptions sql result =
     let prefix, suffix = "FUNCTION ", " does not exist"
+    let resolvesFunctionNames = function
+        | Select _ | Union _ | Insert _ | InsertSelect _
+        | Replace _ | ReplaceSelect _ | ReplaceSet _
+        | Update _ | Delete _ | Do _ | SetVariables _ -> true
+        | _ -> false
     match result with
     | Err(1305, message) when
         message.StartsWith(prefix, StringComparison.Ordinal)
         && message.EndsWith(suffix, StringComparison.Ordinal) ->
         let name = message.Substring(prefix.Length, message.Length - prefix.Length - suffix.Length)
-        match parseStatement parserOptions sql with
-        | Ok(Select _ | Union _) when not (name.Contains('.')) ->
-            match selectedDatabase with
-            | Some database -> Err(1305, sprintf "FUNCTION %s.%s does not exist" database name)
-            | None ->
-                // MySQL records one condition during resolution and one terminal error.
-                Diagnostics.error 1046 "No database selected"
-                Err(1046, "No database selected")
+        let resolvesUnqualifiedFunction =
+            if name.Contains('.') then false
+            else
+                match parseStatement parserOptions sql with
+                | Ok statement -> resolvesFunctionNames statement
+                | Error _ -> sql.TrimStart().StartsWith("SET ", StringComparison.OrdinalIgnoreCase)
+        match selectedDatabase with
+        | Some database when resolvesUnqualifiedFunction ->
+            Err(1305, sprintf "FUNCTION %s.%s does not exist" database name)
+        | None when resolvesUnqualifiedFunction ->
+            // MySQL records one condition during resolution and one terminal error.
+            Diagnostics.error 1046 "No database selected"
+            Err(1046, "No database selected")
         | _ -> result
     | _ -> result
 
