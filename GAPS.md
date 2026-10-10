@@ -484,6 +484,14 @@ views; recursive references return 1462. Definer privileges are checked when a
 view is read, so later revocation takes effect. Definitions persist through the
 WAL and snapshots and appear in `SHOW CREATE VIEW` and `I_S.VIEWS`.
 
+[Invalid stored-view dependencies](torture/findings/2026-10-10-view-dependency-errors.md)
+now report MySQL's 1356 view diagnostic after a base table or referenced
+projection/predicate column is removed, including direct views that would
+otherwise merge into the outer query. Nested invalid dependencies name the
+outer view requested by the client. A
+[focused direct-view benchmark](benchmarks/results/2026-10-10-view-binding-check.md)
+found no supported regression from the added binding check in a short run.
+
 Single-table and nested views accept updates and deletes through direct columns,
 including predicates over computed projections. Insertable views also accept
 the supported INSERT, REPLACE, and ODKU forms with required, repeated, exposed,

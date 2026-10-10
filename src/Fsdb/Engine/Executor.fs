@@ -7245,7 +7245,7 @@ and private resolveTableRef
                         withFunctionDatabase (Some view.Schema) (fun () ->
                             resolveRelationBody viewStore viewRegistry view.Schema view.Columns body None)
                         |> Result.mapError (function
-                            | Err(1305, _) ->
+                            | Err(1054, _) | Err(1146, _) | Err(1305, _) | Err(1356, _) ->
                                 Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them" view.Schema view.Name)
                             | result -> result)
 
@@ -10682,10 +10682,21 @@ and private tryMergeDirectView
                         |> List.exists (fun projection ->
                             Set.contains ((projectionLabel projection).ToLowerInvariant()) hidden)
 
+                    let viewBindingsValid () =
+                        describeQueryColumnsInScope
+                            (storeForStoredView store)
+                            registry
+                            view.Schema
+                            (QueryBody(PlainSelect definition))
+                            None
+                            (fun _ -> Ok())
+                        |> Result.isOk
+
                     match tryPhysicalTableRef store direct.Database source with
                     | Error _
                     | Ok None -> Ok None
                     | Ok(Some physicalTable) when aliasesHiddenPhysicalColumn physicalTable -> Ok None
+                    | Ok(Some _) when not (viewBindingsValid ()) -> Ok None
                     | Ok(Some _) ->
                         match
                             registryForViewSecurity

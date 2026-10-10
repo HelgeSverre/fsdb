@@ -383,6 +383,40 @@ let tests =
                   invalidView
                   "the view error does not depend on the reader's selected database"
 
+          testCase "stored views report invalid dependencies after table changes"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "USE fsdb"
+                    "CREATE TABLE dep_table(id INT)"
+                    "CREATE VIEW dep_view AS SELECT id FROM dep_table"
+                    "DROP TABLE dep_table"
+                    "CREATE TABLE col_table(id INT,other INT)"
+                    "CREATE VIEW col_view AS SELECT id FROM col_table"
+                    "ALTER TABLE col_table DROP COLUMN id"
+                    "CREATE TABLE predicate_table(id INT,flag INT)"
+                    "CREATE VIEW predicate_view AS SELECT id FROM predicate_table WHERE flag=1"
+                    "ALTER TABLE predicate_table DROP COLUMN flag"
+                    "CREATE TABLE nested_base(id INT)"
+                    "CREATE VIEW nested_inner AS SELECT id FROM nested_base"
+                    "CREATE VIEW nested_outer AS SELECT id FROM nested_inner"
+                    "DROP TABLE nested_base" ] do
+                  match run sql with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+              for view in [ "dep_view"; "col_view"; "predicate_view" ] do
+                  let expected =
+                      Err(1356, sprintf "View 'fsdb.%s' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them" view)
+                  Expect.equal (run ("SELECT * FROM " + view)) expected view
+              Expect.equal
+                  (run "SELECT * FROM nested_outer")
+                  (Err(1356, "View 'fsdb.nested_outer' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them"))
+                  "a nested invalid dependency names the requested view"
+
           testCase "qualified routines use their definition schema without a selected database"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
