@@ -6916,13 +6916,14 @@ let rec private invokeStoredFunction
         | Error error -> raiseFunctionError error
 
     let run () =
-        runRoutineStatements
-            executionStore
-            executeParsed
-            executeText
-            executionSession
-            locals
-            statements
+        Executor.withFunctionDatabase (Some routine.Schema) (fun () ->
+            runRoutineStatements
+                executionStore
+                executeParsed
+                executeText
+                executionSession
+                locals
+                statements)
 
     use nesting =
         match Limits.tryAcquireStoredProgramFrame () with

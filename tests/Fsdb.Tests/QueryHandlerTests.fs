@@ -342,6 +342,38 @@ let tests =
                   (ResultSet([ "v" ], [ [ Some "7" ] ]))
                   "the qualified view uses its definition's function schema"
 
+          testCase "qualified routines use their definition schema without a selected database"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              for sql in
+                  [ "CREATE FUNCTION fsdb.routine_inner() RETURNS INT DETERMINISTIC RETURN 7"
+                    "CREATE FUNCTION fsdb.routine_outer() RETURNS INT DETERMINISTIC RETURN routine_inner()+1"
+                    "CREATE PROCEDURE fsdb.routine_caller() SELECT routine_inner() AS value" ] do
+                  let next, result = handle session sql
+                  session <- next
+                  Expect.equal result (Affected 0UL) sql
+              Expect.equal
+                  (handle session "SELECT fsdb.routine_outer()" |> snd)
+                  (ResultSet([ "fsdb.routine_outer()" ], [ [ Some "8" ] ]))
+                  "nested function resolves in its definition schema"
+              match handle session "CALL fsdb.routine_caller()" |> snd with
+              | ProcedureResult(_, [ [ Some "7" ] ]) -> ()
+              | other -> failtestf "expected qualified routine result, got %A" other
+              let session, created = handle session "CREATE DATABASE routine_other"
+              Expect.equal created (Affected 1UL) "create caller schema"
+              let session, created =
+                  handle session "CREATE FUNCTION routine_other.routine_inner() RETURNS INT DETERMINISTIC RETURN 9"
+              Expect.equal created (Affected 0UL) "create same-named caller function"
+              let session, selected = handle session "USE routine_other"
+              Expect.equal selected (Affected 0UL) "select caller schema"
+              Expect.equal
+                  (handle session "SELECT fsdb.routine_outer()" |> snd)
+                  (ResultSet([ "fsdb.routine_outer()" ], [ [ Some "8" ] ]))
+                  "the caller's same-named function does not replace the definition's"
+              match handle session "CALL fsdb.routine_caller()" |> snd with
+              | ProcedureResult(_, [ [ Some "7" ] ]) -> ()
+              | other -> failtestf "expected routine definition schema from another database, got %A" other
+
           testCase "maximum execution time retains unsigned settings and scope defaults"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

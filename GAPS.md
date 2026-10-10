@@ -676,6 +676,9 @@ and stored-function calls.
 [Existing stored functions without a selected database](torture/findings/2026-10-10-existing-function-no-database.md)
 also follow MySQL's 1046 rule in the audited expression statements, while
 qualified calls and qualified view reads remain valid.
+Qualified stored routines now resolve their nested unqualified function calls
+in the routine definition schema, including calls from a session with no
+selected database or another selected schema.
 [Prepared stored-function schema binding](torture/findings/2026-10-10-prepared-function-schema.md)
 now validates names at preparation and retains the preparation schema across
 later `USE` changes in the audited text and binary paths.
