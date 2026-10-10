@@ -22,9 +22,14 @@ and after three inserts, then 3 and 2 after setting
 These small-table observations establish the cache lifecycle, not a general
 InnoDB row-estimation algorithm or physical page accounting.
 
-fsdb currently computes `INFORMATION_SCHEMA.TABLES.TABLE_ROWS` from
-`RowsArray.Length` on each read. Its `ANALYZE TABLE` branch only returns a
-status row. Closing this gap requires a per-table statistics snapshot whose
-lifecycle is explicit across DML, ANALYZE, session expiry policy, and
-persistence; changing the display expression alone would give inconsistent
-results.
+fsdb now stores an optional per-table row estimate. The first metadata read
+populates it, ordinary row writes retain it, and `ANALYZE TABLE` refreshes it.
+The session's `information_schema_stats_expiry=0` reads the live row count;
+positive expiry values refresh an expired estimate. The estimate survives WAL
+and snapshot recovery. A native differential contract covers first-read
+timing, stale counts after writes, ANALYZE refresh, and the zero-expiry path.
+
+The remaining divergence is InnoDB's approximate row sampling, page-derived
+`DATA_LENGTH`/`INDEX_LENGTH` and `AVG_ROW_LENGTH`, and per-index cardinality
+estimates. fsdb's row estimate is an exact snapshot of its live row count at
+refresh time; it does not imitate InnoDB's sampling error or physical pages.

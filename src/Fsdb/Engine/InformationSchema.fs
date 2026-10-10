@@ -296,7 +296,15 @@ let private tablesColumns =
 
 let private truncateToSecond (d: DateTime) = d.AddTicks(-(d.Ticks % TimeSpan.TicksPerSecond))
 
-let private tablesRows (catalog: Catalog) : Value[] list =
+let private tableRowEstimate expirySeconds (table: Table) =
+    match table.Statistics with
+    | Some statistics
+        when expirySeconds > 0L
+             && (DateTime.UtcNow - statistics.RefreshedAt).TotalSeconds < float expirySeconds ->
+        statistics.RowEstimate
+    | _ -> table.RowsArray.Length
+
+let private tablesRows expirySeconds (catalog: Catalog) : Value[] list =
     let baseTables =
         allTables catalog
         |> List.map (fun (dbName, t) ->
@@ -314,7 +322,7 @@ let private tablesRows (catalog: Catalog) : Value[] list =
                vs "InnoDB"
                vi 10
                vs "Dynamic"
-               vi (t.RowsArray.Length)
+               vi (tableRowEstimate expirySeconds t)
                vi 0
                vi 16384
                vi 0
@@ -3208,7 +3216,7 @@ let private schemataExtensionsRows catalog =
     |> List.map (fun row -> [| row.[SchemataRow.catalogName]; row.[SchemataRow.schemaName]; vs "" |])
 
 let private tablesExtensionsRows catalog =
-    tablesRows catalog @ selfTablesRows ()
+    tablesRows 86400L catalog @ selfTablesRows ()
     |> List.map (fun row ->
         [| row.[TablesRow.tableCatalog]
            row.[TablesRow.tableSchema]
@@ -3364,14 +3372,19 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the
 /// virtual tables this module knows about (a real 1146 from `Executor`, same
 /// as any other unknown table).
-let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (ColumnDef list * Value[] list) option =
+let scanWithStatisticsExpiry
+    (expirySeconds: int64)
+    (catalog: Catalog)
+    (name: string)
+    (viewColumns: ViewColumns option)
+    : (ColumnDef list * Value[] list) option =
     let upper = name.ToUpperInvariant()
 
     let rows =
         match upper with
         | "ADMINISTRABLE_ROLE_AUTHORIZATIONS" -> Some(administrableRoleAuthorizationsRows ())
         | "APPLICABLE_ROLES" -> Some(applicableRolesRows ())
-        | "TABLES" -> Some(tablesRows catalog @ selfTablesRows ())
+        | "TABLES" -> Some(tablesRows expirySeconds catalog @ selfTablesRows ())
         | "COLUMNS" -> Some(columnsRows catalog viewColumns @ selfColumnsRowsCached.Value)
         | "COLUMNS_EXTENSIONS" -> Some(columnsExtensionsRows catalog viewColumns)
         | "COLUMN_STATISTICS" -> Some []
@@ -3428,6 +3441,8 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         virtualTableDefs
         |> List.tryFind (fst >> (=) upper)
         |> Option.map (fun (_, cols) -> cols, scopeRowsToViewer upper cols rows))
+
+let scan catalog name viewColumns = scanWithStatisticsExpiry 86400L catalog name viewColumns
 
 /// Projects one table's COLUMNS rows without constructing the rest of the
 /// catalog or the entire information_schema self-description.
@@ -4053,7 +4068,12 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
         rows)
 
 /// `SHOW TABLE STATUS [FROM db] [LIKE 'pattern']`.
-let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option) : ShowResult =
+let showTableStatusWithStatisticsExpiry
+    (expirySeconds: int64)
+    (catalog: Catalog)
+    (dbName: string)
+    (likeOpt: string option)
+    : ShowResult =
     match Map.tryFind dbName catalog with
     | None when dbName.ToLowerInvariant() = "information_schema" ->
         // SYSTEM VIEWs: name plus NULL storage stats, like real MySQL.
@@ -4093,7 +4113,7 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
                   Some "InnoDB"
                   Some "10"
                   Some "Dynamic"
-                  Some(string (t.RowsArray.Length))
+                  Some(string (tableRowEstimate expirySeconds t))
                   Some(string avgRowLength)
                   Some(string dataLength)
                   Some "0"

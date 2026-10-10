@@ -40,7 +40,8 @@ let private partitionHintSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Cuy |] //
 let private partitionTablespaceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Duy |] // "FSNM" (format 22)
 
 let private generatedForeignKeySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Euy |] // "FSNN" (format 23)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Fuy |] // "FSNO" (format 24)
+let private previousSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Fuy |] // "FSNO" (format 24)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x50uy |] // "FSNP" (format 25)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -63,7 +64,8 @@ type private SnapshotFormat =
       FullTextTokenizers: bool
       FullTextStopwords: bool
       FullTextDocumentRules: bool
-      FullTextStopwordSources: bool }
+      FullTextStopwordSources: bool
+      TableStatistics: bool }
 
 let private legacySnapshotFormat =
     { GeneratedForeignKeyIndexes = false
@@ -86,7 +88,8 @@ let private legacySnapshotFormat =
       FullTextTokenizers = false
       FullTextStopwords = false
       FullTextDocumentRules = false
-      FullTextStopwordSources = false }
+      FullTextStopwordSources = false
+      TableStatistics = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -149,7 +152,7 @@ let private generatedForeignKeySnapshotFormat =
     { partitionTablespaceSnapshotFormat with GeneratedForeignKeyIndexes = true }
 
 let private currentSnapshotFormat =
-    { generatedForeignKeySnapshotFormat with PreparedXaCatalogRefs = true }
+    { generatedForeignKeySnapshotFormat with PreparedXaCatalogRefs = true; TableStatistics = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -158,6 +161,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = previousSnapshotMagic then
+        Some { currentSnapshotFormat with TableStatistics = false }
     elif header = generatedForeignKeySnapshotMagic then
         Some generatedForeignKeySnapshotFormat
     elif header = partitionTablespaceSnapshotMagic then
@@ -1190,6 +1195,7 @@ let private KindSchemaChangedAtV12 = 0x28uy
 let private KindSchemaChangedV13 = 0x29uy
 let private KindSchemaChangedAtV13 = 0x2Auy
 let private KindWithDdlAllowInvalidDates = 0x2Buy
+let private KindTableStatisticsRefreshed = 0x2Cuy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1368,6 +1374,12 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteLenEncString db
         w.WriteLenEncString table
         w.WriteInt64LE nextId
+    | TableStatisticsRefreshed(db, table, statistics) ->
+        w.WriteByte KindTableStatisticsRefreshed
+        writeStr w db
+        writeStr w table
+        w.WriteInt32LE statistics.RowEstimate
+        w.WriteInt64LE statistics.RefreshedAt.Ticks
     | SchemaChanged(db, stmt) ->
         w.WriteByte KindSchemaChangedV13
         w.WriteLenEncString db
@@ -1479,6 +1491,12 @@ let rec private decodeEventAt
         RowsDeletedById(db, table, rows)
     | k when k = KindAutoIncrementAdvanced ->
         AutoIncrementAdvanced(str (), str (), r.ReadInt64LE())
+    | k when k = KindTableStatisticsRefreshed ->
+        TableStatisticsRefreshed(
+            str (),
+            str (),
+            { RowEstimate = r.ReadInt32LE(); RefreshedAt = DateTime(r.ReadInt64LE(), DateTimeKind.Utc) }
+        )
     | k when k = KindSchemaChanged ->
         let db = str ()
         SchemaChanged(db, decodeStatement legacyFormat (columnsForTable db) r)
@@ -1695,6 +1713,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         deleteRowsByIdForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
     | AutoIncrementAdvanced(db, table, nextId) ->
         advanceAutoIncrementForReplay store db table nextId (Log.diagnostic "fsdb: WAL replay warning: %s")
+    | TableStatisticsRefreshed(db, table, statistics) ->
+        setTableStatisticsForReplay store db table statistics (Log.diagnostic "fsdb: WAL replay warning: %s")
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
     | SchemaChangedAt(db, stmt, createTime) ->
         applyDdl store db stmt
@@ -1832,6 +1852,11 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
     w.WriteInt64LE t.NextAutoId
     if format.StableRowIds then w.WriteInt32LE t.RowsArray.NextRowId
     w.WriteInt32LE t.RowsArray.Length
+    if format.TableStatistics then
+        writeBool w t.Statistics.IsSome
+        t.Statistics |> Option.iter (fun statistics ->
+            w.WriteInt32LE statistics.RowEstimate
+            w.WriteInt64LE statistics.RefreshedAt.Ticks)
     if format.FullTextStopwords then
         for index in t.Indexes |> List.filter (fun index -> index.Kind.IsFullText) do
             encodeStopwordPolicy w (FullText.storedRules t.FullTextIndexes.[index.Name]).Stopwords
@@ -1952,6 +1977,14 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let nextAutoId = r.ReadInt64LE()
     let nextRowId = if format.StableRowIds then Some(r.ReadInt32LE()) else None
     let rowCount = r.ReadInt32LE()
+    let statistics =
+        if format.TableStatistics then
+            if readBool r then
+                Some { RowEstimate = r.ReadInt32LE(); RefreshedAt = DateTime(r.ReadInt64LE(), DateTimeKind.Utc) }
+            else
+                None
+        else
+            None
 
     let fullTextNames = indexes |> List.filter (fun index -> index.Kind.IsFullText) |> List.map _.Name
     let stopwords =
@@ -2006,6 +2039,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
           TableComment = tableComment
           Partitioning = partitioning
           CreateTime = createTime
+          Statistics = statistics
           RowsArray = rows
           NextAutoId = nextAutoId
           UniqueIndex = Map.empty

@@ -239,6 +239,12 @@ let private tryIndexTraversal requested stored =
     else
         None
 
+/// Cached metadata is separate from the live row store and advances only when
+/// the cache is first populated, expires, or `ANALYZE TABLE` runs.
+type TableStatistics =
+    { RowEstimate: int
+      RefreshedAt: DateTime }
+
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
 /// lowercased name. `Indexes`' `UNIQUE` entries (plus the primary key) are
@@ -268,6 +274,7 @@ type Table =
       /// `information_schema.tables.CREATE_TIME` and retained by both WAL
       /// and snapshot recovery.
       CreateTime: DateTime
+      Statistics: TableStatistics option
       /// Primary and unique keys resolve to stable row identities. Persistent
       /// maps preserve catalog snapshots; keys containing NULL are absent,
       /// matching MySQL uniqueness semantics.
@@ -356,6 +363,7 @@ type CommitEvent =
     | RowsUpdatedById of db: string * table: string * changes: RowUpdate list
     | RowsDeletedById of db: string * table: string * rows: RowRemoval list
     | AutoIncrementAdvanced of db: string * table: string * nextId: int64
+    | TableStatisticsRefreshed of db: string * table: string * statistics: TableStatistics
     | SchemaChanged of db: string * Statement
     | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
     | TransactionCommitted of CommitEvent list
@@ -643,6 +651,7 @@ let rec private eventRollbackWork = function
     | XaPrepared(_, _, _, events)
     | XaCommitted(_, events) -> events |> List.sumBy eventRollbackWork
     | AutoIncrementAdvanced _
+    | TableStatisticsRefreshed _
     | SchemaChanged _
     | SchemaChangedAt _
     | XaRolledBack _ -> 0L
@@ -4547,6 +4556,7 @@ let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexe
           TableComment = ""
           Partitioning = None
           CreateTime = DateTime.Now
+          Statistics = None
           UniqueIndex = Map.empty
           SecondaryIndex = Map.empty
           SecondaryOrder = Map.empty
@@ -6092,6 +6102,48 @@ let private setCatalogTable address table (catalog: Catalog) =
         catalog |> Map.add databaseName (database |> Map.add address.Table table)
     | None -> catalog
 
+/// Refreshes the table-statistics snapshot exposed by metadata queries.
+/// Ordinary row changes intentionally retain the previous estimate.
+let analyzeTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
+    withDatabasePublishing store dbName
+        (fun statistics -> [ TableStatisticsRefreshed(dbName, tableName, statistics) ])
+        (fun database ->
+            tryGetTable dbName database tableName
+            |> Result.map (fun table ->
+                let statistics = { RowEstimate = table.RowsArray.Count; RefreshedAt = DateTime.UtcNow }
+                let key = normalizeTableName tableName
+                Map.add key { table with Statistics = Some statistics } database, statistics))
+    |> Result.map ignore
+
+/// Materializes missing or expired metadata estimates on the first read.
+/// The refreshed roots and their WAL events are published together, so later
+/// row writes cannot silently turn an uncached first read into a live count.
+let ensureTableStatistics (store: Store) (expirySeconds: int64) : unit =
+    if expirySeconds > 0L then
+        let expired (now: DateTime) (table: Table) : bool =
+            match table.Statistics with
+            | None -> true
+            | Some statistics -> (now - statistics.RefreshedAt).TotalSeconds >= float expirySeconds
+
+        let now = DateTime.UtcNow
+
+        for KeyValue(dbName, database) in store.Catalog do
+            if database |> Map.exists (fun _ table -> expired now table) then
+                let refresh (current: Database) : Result<Database * CommitEvent list, StorageError> =
+                    let mutable updated = current
+                    let events = ResizeArray<CommitEvent>()
+                    let now = DateTime.UtcNow
+
+                    for KeyValue(tableName, table) in current do
+                        if expired now table then
+                            let statistics = { RowEstimate = table.RowsArray.Count; RefreshedAt = now }
+                            updated <- Map.add tableName { table with Statistics = Some statistics } updated
+                            events.Add(TableStatisticsRefreshed(dbName, table.OriginalName, statistics))
+
+                    Ok(updated, List.ofSeq events)
+
+                withDatabasePublishing store dbName id refresh |> ignore
+
 let private catalogTableIdentity (catalog: Catalog) address =
     let database = catalogDatabaseName address.Database catalog
 
@@ -6970,6 +7022,7 @@ let createTableSeeded
                                               TableComment = tableComment
                                               Partitioning = partitioning
                                               CreateTime = createTime
+                                              Statistics = None
                                               UniqueIndex = Map.empty
                                               SecondaryIndex = Map.empty
                                               SecondaryOrder = Map.empty
@@ -11317,6 +11370,9 @@ let setTableCreateTimeForReplay
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
         | Some table -> slot.Value <- slot.Value |> Map.add key { table with CreateTime = createTime }
+
+let setTableStatisticsForReplay (store: Store) dbName tableName statistics (onMissing: string -> unit) =
+    changeTableForReplay store dbName tableName (fun table -> { table with Statistics = Some statistics }) onMissing
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
 /// Deliberately not `insertRows`: these rows passed validation when committed,

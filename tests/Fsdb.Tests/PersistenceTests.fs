@@ -290,7 +290,48 @@ let private rowsOf (store: Store) (dbName: string) (table: string) : Value[] lis
 let tests =
     testList
         "persistence"
-        [ testCase "renamed foreign-key columns retain enforcement across schemas and recovery"
+        [ testCase "ANALYZE TABLE estimates survive WAL and snapshot recovery"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  TestSupport.withDirectory "table-statistics" (fun directory ->
+                      let store = load directory
+                      attach directory store
+                      let mutable session = Fsdb.Session.create 1 store
+                      let run sql =
+                          let next, result = handle session sql
+                          session <- next
+                          TestSupport.Sql.expectOk result sql
+                          result
+                      for sql in
+                          [ "CREATE TABLE statistics_recovery(id INT PRIMARY KEY)"
+                            "CREATE TABLE first_read_recovery(id INT PRIMARY KEY)"
+                            "INSERT INTO first_read_recovery VALUES(1),(2)"
+                            "INSERT INTO statistics_recovery VALUES(1),(2),(3)"
+                            "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='first_read_recovery'"
+                            "INSERT INTO first_read_recovery VALUES(3)"
+                            "ANALYZE TABLE statistics_recovery"
+                            "DELETE FROM statistics_recovery WHERE id=3" ] do
+                          run sql |> ignore
+                      if checkpoint then snapshotNow directory store
+                      let recovered = load directory
+                      let table = recovered.Catalog.[defaultDatabase].["statistics_recovery"]
+                      Expect.equal (table.Statistics |> Option.map _.RowEstimate) (Some 3) "analyzed estimate survives recovery"
+                      Expect.equal table.RowsArray.Count 2 "live rows survive recovery"
+                      let firstRead = recovered.Catalog.[defaultDatabase].["first_read_recovery"]
+                      Expect.equal (firstRead.Statistics |> Option.map _.RowEstimate) (Some 2) "first-read estimate survives recovery"
+                      Expect.equal firstRead.RowsArray.Count 3 "later row write survives recovery"
+                      session <- Fsdb.Session.create 2 recovered
+                      let query =
+                          "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='statistics_recovery'"
+                      match run query with
+                      | ResultSet(_, [ [ Some "3" ] ]) -> ()
+                      | result -> failtestf "expected cached count after recovery, got %A" result
+                      run "SET SESSION information_schema_stats_expiry=0" |> ignore
+                      match run query with
+                      | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                      | result -> failtestf "expected live count after recovery, got %A" result)
+
+          testCase "renamed foreign-key columns retain enforcement across schemas and recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do
                   let directory = tempDataDir()
@@ -1429,12 +1470,8 @@ let tests =
               setCatalog store (Map.ofList [ defaultDatabase, Map.ofList [ "stable", store.Catalog.[defaultDatabase].["stable"] ] ])
               snapshotNow dir store
 
-              let previousFormat = File.ReadAllBytes(snapshotPath dir)
-              previousFormat.[3] <- 0x42uy
-              File.WriteAllBytes(snapshotPath dir, previousFormat)
-
               let recovered = load dir
-              Expect.equal (rowIds recovered.Catalog) [ 0; 2 ] "the FSNB snapshot retains live row identities"
+              Expect.equal (rowIds recovered.Catalog) [ 0; 2 ] "the current snapshot retains live row identities"
               insertRows recovered defaultDatabase "stable" None [ [ VInt 40L ] ] |> ignore
               Expect.equal (rowIds recovered.Catalog) [ 0; 2; 3 ] "new rows continue after the persisted identity"
 
@@ -3153,10 +3190,15 @@ let tests =
               snapshotNow dir recovered
               let bytes = File.ReadAllBytes(snapshotPath dir)
               let payload = bytes.[4 .. bytes.Length - 13]
-              // One empty, non-FULLTEXT table leaves 24 metadata bytes and a 4-byte XA count after the names flag.
-              let namesOffset = payload.Length - 29
+              // This unqueried table has only the one-byte absent-statistics marker.
+              let namesOffset = payload.Length - 30
               Expect.equal payload.[namesOffset] 0uy "the fixture uses generated names"
-              let oldPayload = Array.append payload.[.. namesOffset - 1] payload.[namesOffset + 1 ..]
+              let statisticsOffset = payload.Length - 5
+              let oldPayload =
+                  Array.concat
+                      [ payload.[.. namesOffset - 1]
+                        payload.[namesOffset + 1 .. statisticsOffset - 1]
+                        payload.[statisticsOffset + 1 ..] ]
               let oldSnapshot = Writer()
               oldSnapshot.WriteBytes (System.Text.Encoding.ASCII.GetBytes "FSNI")
               oldSnapshot.WriteBytes oldPayload
@@ -3166,7 +3208,7 @@ let tests =
               let table = (load dir).Catalog.[defaultDatabase].[normalizeTableName "old_hash"]
               Expect.equal (table.Partitioning |> Option.map _.OrderedNames) (Some [ "p0"; "p1"; "p2" ]) "count-only snapshots retain generated names"
 
-          testCase "FSNC snapshots retain rows without tokenizer metadata"
+          testCase "current snapshots retain rows without tokenizer metadata"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -3175,15 +3217,11 @@ let tests =
               handle session "INSERT INTO docs VALUES(1,'legacy row')" |> ignore
               setCatalog store (Map.ofList [ defaultDatabase, Map.ofList [ "docs", store.Catalog.[defaultDatabase].["docs"] ] ])
               snapshotNow dir store
-              // This index-free table retains the FSNC encoding.
-              let bytes = File.ReadAllBytes(snapshotPath dir)
-              bytes.[3] <- byte 'C'
-              File.WriteAllBytes(snapshotPath dir, bytes)
               let session = Fsdb.Session.create 2 (load dir)
               Expect.equal
                   (handle session "SELECT id,body FROM docs" |> snd)
                   (ResultSet([ "id"; "body" ], [ [ Some "1"; Some "legacy row" ] ]))
-                  "previous format remains readable"
+                  "current format remains readable"
 
           testCase "FSNA snapshots remain readable after stable row identities"
           <| fun _ ->

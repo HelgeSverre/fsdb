@@ -4711,6 +4711,38 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE negation_values" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private tableStatisticsCache =
+        let rows =
+            "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
+        let firstReadRows =
+            "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='first_read_stats_probe'"
+
+        { Name = "table-statistics-cache"
+          Setup =
+            [| "CREATE TABLE table_stats_probe(id INT PRIMARY KEY)"
+               "CREATE TABLE first_read_stats_probe(id INT PRIMARY KEY)" |]
+          Steps =
+            [| Contract.execute "first-read-insert" "INSERT INTO first_read_stats_probe VALUES(1),(2)"
+               Contract.query "first-read-after-insert" firstReadRows
+               Contract.execute "second-insert" "INSERT INTO first_read_stats_probe VALUES(3)"
+               Contract.query "first-read-cache-retained" firstReadRows
+               Contract.execute "analyze-empty" "ANALYZE TABLE table_stats_probe"
+               Contract.query "empty-estimate" rows
+               Contract.execute "insert-three" "INSERT INTO table_stats_probe VALUES(1),(2),(3)"
+               Contract.query "cached-after-insert" rows
+               Contract.execute "direct-statistics" "SET SESSION information_schema_stats_expiry=0"
+               Contract.query "live-after-insert" rows
+               Contract.execute "cached-statistics" "SET SESSION information_schema_stats_expiry=86400"
+               Contract.query "cached-again" rows
+               Contract.execute "analyze-three" "ANALYZE TABLE table_stats_probe"
+               Contract.query "refreshed-estimate" rows
+               Contract.execute "delete-one" "DELETE FROM table_stats_probe WHERE id=3"
+               Contract.query "cached-after-delete" rows
+               Contract.execute "direct-again" "SET SESSION information_schema_stats_expiry=0"
+               Contract.query "live-after-delete" rows |]
+          Cleanup = [| "DROP TABLE table_stats_probe"; "DROP TABLE first_read_stats_probe" |]
+          Coverage = [| "statement:analyze-table", [| "text-differential" |] |] }
+
     let private preparedSchemaChanges =
         { Name = "prepared-schema-type-refresh"
           Setup = [| "CREATE TABLE schema_source(id INT)"; "INSERT INTO schema_source VALUES(1)"; "CREATE TABLE schema_other(id INT)" |]
@@ -9015,7 +9047,8 @@ module ContractCatalog =
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let all =
-        [| missingTableDiagnostics
+        [| tableStatisticsCache
+           missingTableDiagnostics
            regexpPosixClasses
            mixedTypeJoinIn
            yearColumnValues

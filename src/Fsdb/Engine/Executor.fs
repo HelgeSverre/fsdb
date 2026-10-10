@@ -678,6 +678,20 @@ let internal withTriggerSessionExecutor executor body =
 
 let private currentVariableContext () = variableContext.Value
 
+let private informationSchemaStatisticsExpiry () =
+    currentVariableContext ()
+    |> Option.bind (fun variables ->
+        match variables.ReadSystemVariable "SESSION" "information_schema_stats_expiry" with
+        | Ok(Some value) ->
+            match Value.toText value with
+            | Some text ->
+                match System.Int64.TryParse text with
+                | true, seconds -> Some seconds
+                | _ -> None
+            | None -> None
+        | _ -> None)
+    |> Option.defaultValue 86400L
+
 let internal currentUserVariables () =
     currentVariableContext () |> Option.map _.UserVariables
 
@@ -7112,13 +7126,16 @@ and private resolveTableRef
     elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
         let tableName = tableRef.Table.ToUpperInvariant()
 
+        if tableName = "TABLES" && not planningProbe.Value then
+            Storage.ensureTableStatistics store (informationSchemaStatisticsExpiry ())
+
         if
             informationSchemaRequiresProcess tableName
             && not (InformationSchema.canViewProcessMetadata ())
         then
             Error(Err(1227, "Access denied; you need (at least one of) the PROCESS privilege(s) for this operation"))
         else
-            match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
+            match InformationSchema.scanWithStatisticsExpiry (informationSchemaStatisticsExpiry ()) store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
             | Some(columns, rows) -> Ok(columns, if planningProbe.Value then [] else rows)
             | None -> Error(storageErr (NoSuchTable(tableDb, tableRef.Table)))
     elif
@@ -7889,6 +7906,9 @@ and private tryInformationSchemaNarrow
     elif informationSchemaRequiresProcess tableRef.Table && not (InformationSchema.canViewProcessMetadata ()) then
         None
     else
+        if tableRef.Table.Equals("TABLES", System.StringComparison.OrdinalIgnoreCase) && not planningProbe.Value then
+            Storage.ensureTableStatistics store (informationSchemaStatisticsExpiry ())
+
         match
             literalPointLookupEqualities registry tableRef where
             |> List.choose (function
@@ -7943,7 +7963,7 @@ and private tryInformationSchemaNarrow
                             tableName
                             (Some(describeStoredViewColumns store registry))
                     )
-                | _ -> InformationSchema.scan catalog tableRef.Table (Some(describeStoredViewColumns store registry))
+                | _ -> InformationSchema.scanWithStatisticsExpiry (informationSchemaStatisticsExpiry ()) catalog tableRef.Table (Some(describeStoredViewColumns store registry))
 
             scan
             |> Option.map (fun (cols, rows) ->

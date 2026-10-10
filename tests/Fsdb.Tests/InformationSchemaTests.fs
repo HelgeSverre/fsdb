@@ -552,12 +552,10 @@ let tests =
                   Expect.equal (get "Auto_increment") None "no AUTO_INCREMENT column, no next value"
               | other -> failtestf "expected one status row, got %A" other
 
-          testCase "SHOW TABLE STATUS Rows/Data_length track the live table through DELETE and ADD COLUMN"
+          testCase "SHOW TABLE STATUS keeps cached Rows while Data_length tracks live payload"
           <| fun _ ->
-              // Deliberate divergence from InnoDB: fsdb reports live values
-              // where MySQL keeps stale page-count estimates until ANALYZE
-              // (real 8.4.11 still shows Rows=3 right after DELETE FROM, and
-              // an unchanged Data_length after ADD COLUMN).
+              // Rows now follows MySQL's stale metadata cache; Data_length
+              // remains fsdb's live payload size rather than an InnoDB page estimate.
               let store = setup ()
               run store "CREATE TABLE ts (id INT)" |> ignore
               run store "INSERT INTO ts VALUES (1), (2), (3)" |> ignore
@@ -580,8 +578,13 @@ let tests =
 
               run store "DELETE FROM ts" |> ignore
               let emptied = status ()
-              Expect.equal (emptied "Rows") (Some "0") "live zero immediately after DELETE, no stale estimate"
+              Expect.equal (emptied "Rows") (Some "3") "cached row estimate survives DELETE"
               Expect.equal (emptied "Avg_row_length") (Some "0") "no division-by-zero"
+              let liveSession, _ = Fsdb.QueryHandler.handle session "SET SESSION information_schema_stats_expiry=0"
+              match Fsdb.QueryHandler.handle liveSession "SHOW TABLE STATUS LIKE 'ts'" |> snd with
+              | ResultSet(cols, [ row ]) ->
+                  Expect.equal (List.item (List.findIndex ((=) "Rows") cols) row) (Some "0") "zero expiry bypasses the cache"
+              | other -> failtestf "expected one live status row, got %A" other
 
           testCase "SHOW TABLE STATUS Data_length stays 0 when ADD COLUMN hits an empty table"
           <| fun _ ->

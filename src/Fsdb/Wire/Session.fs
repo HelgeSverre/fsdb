@@ -88,6 +88,7 @@ let defaultVariables: Map<string, string option> =
           "max_sp_recursion_depth", "0"
           "max_execution_time", "0"
           "div_precision_increment", "4"
+          "information_schema_stats_expiry", "86400"
           "max_heap_table_size", "16777216"
           "tmp_table_size", "16777216"
           "performance_schema", "0"

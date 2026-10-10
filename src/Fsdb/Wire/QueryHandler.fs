@@ -359,6 +359,7 @@ let private numericSystemVariables =
           "ft_query_expansion_limit"
           "group_concat_max_len"
           "interactive_timeout"
+          "information_schema_stats_expiry"
           "innodb_buffer_pool_size"
           "innodb_ft_enable_stopword"
           "innodb_ft_max_token_size"
@@ -1066,7 +1067,10 @@ let private handleShowTableStatus (session: Session) (sql: string) : QueryResult
     let m = showTableStatusRe.Match sql
     let dbName = if m.Groups.[2].Success then stripIdentifierQuotes m.Groups.[2].Value else session.Database |> Option.defaultValue defaultDatabase
 
-    InformationSchema.showTableStatus (Session.currentStore session).Catalog dbName (likeSuffix sql)
+    let expiry = sessionValue session "information_schema_stats_expiry" |> Option.bind tryInt64 |> Option.defaultValue 86400L
+    let store = Session.currentStore session
+    Storage.ensureTableStatistics store expiry
+    InformationSchema.showTableStatusWithStatisticsExpiry expiry store.Catalog dbName (likeSuffix sql)
     |> Result.map (fun (columns, rows) -> columns, visibleTableRows session dbName rows)
     |> showResult
 
@@ -1098,6 +1102,7 @@ let private boundedIntegerVariables =
         [ "max_sp_recursion_depth", 255UL
           "max_error_count", 65535UL
           "div_precision_increment", 30UL
+          "information_schema_stats_expiry", 31536000UL
           "max_execution_time", UInt64.MaxValue ]
 
 let private typedSetVariables =
@@ -4636,6 +4641,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                     let qualified = dbName + "." + tableName
 
                     match Storage.scan store dbName tableName with
+                    | Ok _ when operation = "analyze" ->
+                        match Storage.analyzeTable store dbName tableName with
+                        | Ok() -> [ maintenanceRow qualified operation "status" "OK" ]
+                        | Error _ -> [ maintenanceRow qualified operation "Error" (sprintf "Table '%s.%s' couldn't be analyzed" dbName tableName) ]
                     | Ok _ when operation = "optimize" ->
                         [ maintenanceRow qualified operation "note" "Table does not support optimize, doing recreate + analyze instead"
                           maintenanceRow qualified operation "status" "OK" ]
