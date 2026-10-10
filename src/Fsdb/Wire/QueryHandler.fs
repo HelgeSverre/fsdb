@@ -849,7 +849,12 @@ let private registryFor (session: Session) : Functions.Registry =
             registry)
 
 let internal viewColumnsForSession (session: Session) database table =
-    Executor.viewColumns (Session.currentStore session) (registryFor session) database table
+    let store = Session.currentStore session
+    match Executor.viewColumns store (registryFor session) database table with
+    | Some columns -> Some(Ok columns)
+    | None when Executor.viewExists store database table ->
+        Some(Error(Executor.invalidViewError database table))
+    | None -> None
 
 let private storedFunctionEntries store =
     match Storage.scanList store "mysql" "functions" with

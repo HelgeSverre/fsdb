@@ -2147,13 +2147,12 @@ let private handleConnection
                                     | Result.Ok storedTable -> Ok(storedTable.Columns, storedTable.Indexes)
                                     | Result.Error error ->
                                         match QueryHandler.viewColumnsForSession session dbName table with
-                                        | Some viewColumns -> Ok(viewColumns, [])
-                                        | None -> Error error
+                                        | Some(Ok viewColumns) -> Ok(viewColumns, [])
+                                        | Some(Error error) -> Error error
+                                        | None -> Error(Storage.toMySqlError error)
 
                                 match columns with
-                                | Result.Error e ->
-                                    let code, message = Storage.toMySqlError e
-
+                                | Result.Error(code, message) ->
                                     do!
                                         writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities code message }
                                         |> Async.Ignore

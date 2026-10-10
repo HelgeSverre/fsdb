@@ -979,6 +979,9 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) =
     else
         tryStoredViewDefinition store dbName viewName
 
+let internal invalidViewError schema name =
+    1356, sprintf "View '%s.%s' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them" schema name
+
 /// A stored view binds its dependencies to the permanent catalog. Session
 /// temporary tables may shadow those names for direct queries, but cannot
 /// change the objects a definer view reads.
@@ -7296,7 +7299,7 @@ and private resolveTableRef
                             resolveRelationBody viewStore viewRegistry view.Schema view.Columns body None)
                         |> Result.mapError (function
                             | Err(1054, _) | Err(1146, _) | Err(1305, _) | Err(1356, _) ->
-                                Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them" view.Schema view.Name)
+                                Err(invalidViewError view.Schema view.Name)
                             | result -> result)
 
                     let resolved =
@@ -20103,6 +20106,9 @@ let runTopLevelUnion
 /// Describes a stored view without reading rows or invoking extension functions.
 let viewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
     describeStoredViewColumns store registry schema name
+
+let internal viewExists (store: Store) (schema: string) (name: string) =
+    tryStoredView store schema name |> Option.isSome
 
 /// Describes the result columns a statement fixes at prepare time without
 /// reading rows or invoking extension functions.

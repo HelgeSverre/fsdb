@@ -12,3 +12,10 @@ snapshot, returning 1146 for the view. It now uses the existing session-aware
 view column descriptor when no physical table exists, then applies the same
 wildcard and wire metadata path as a table. A raw-wire regression covers the
 view alias, schema/table names, and EOF termination.
+
+After dropping the table beneath a still-defined view, MySQL returned error
+1356 with the view's qualified name and the standard invalid-view message.
+Fsdb previously returned 1146 because the column descriptor could no longer
+resolve the source table. The wire handler now distinguishes an invalid stored
+view from an absent relation and returns 1356; a focused raw-wire regression
+asserts the code and message.

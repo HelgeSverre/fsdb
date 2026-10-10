@@ -3333,6 +3333,41 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "COM_FIELD_LIST reports an invalid view"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let admin = Fsdb.Session.create 99 store
+                  let admin, _ = Fsdb.QueryHandler.handle admin "CREATE TABLE invalid_view_source (id INT)"
+                  let admin, _ = Fsdb.QueryHandler.handle admin "CREATE VIEW invalid_view_wire AS SELECT id FROM invalid_view_source"
+                  let _, _ = Fsdb.QueryHandler.handle admin "DROP TABLE invalid_view_source"
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+
+                  let initDb = Array.append [| 0x02uy |] (Text.Encoding.UTF8.GetBytes "fsdb")
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = initDb } |> Async.Ignore
+                  let! selected = readPacketAsync stream
+                  Expect.equal selected.Value.Payload.[0] 0uy "database selection succeeds"
+
+                  let fieldList =
+                      Array.concat
+                          [ [| 0x04uy |]
+                            Text.Encoding.UTF8.GetBytes "invalid_view_wire"
+                            [| 0uy |]
+                            Text.Encoding.UTF8.GetBytes "%" ]
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = fieldList } |> Async.Ignore
+                  let! response = readPacketAsync stream
+                  Expect.equal response.Value.Payload.[0] 0xffuy "invalid view returns an error"
+                  Expect.equal (Reader(response.Value.Payload.[1..]).ReadInt16LE()) 1356 "invalid view uses MySQL error 1356"
+                  let message = Text.Encoding.UTF8.GetString(response.Value.Payload.[9..])
+                  Expect.equal
+                      message
+                      "View 'fsdb.invalid_view_wire' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them"
+                      "invalid view error names the view"
+              }
+              |> Async.RunSynchronously
+
           TestSupport.processGlobalCase "SHOW STATUS counts prepared-protocol commands"
           <| fun _ ->
               async {
