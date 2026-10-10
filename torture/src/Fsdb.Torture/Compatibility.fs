@@ -9378,6 +9378,22 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS join_labels"; "DROP TABLE IF EXISTS join_names" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private uniqueStepNames (case: ContractCase) =
+        let occurrences = Dictionary<string, int>(StringComparer.Ordinal)
+        let steps =
+            case.Steps
+            |> Array.map (fun step ->
+                let occurrence =
+                    match occurrences.TryGetValue step.Name with
+                    | true, count -> count + 1
+                    | _ -> 1
+
+                occurrences.[step.Name] <- occurrence
+                if occurrence = 1 then step
+                else { step with Name = sprintf "%s [%d]" step.Name occurrence })
+
+        { case with Steps = steps }
+
     let all =
         [| roundedFunctionalIndexes
            integralDoubleIndexProbes
@@ -9503,6 +9519,7 @@ module ContractCatalog =
            concurrentSessions
            contendedSchedule
            contendedDeleteAndInsert |]
+        |> Array.map uniqueStepNames
 
     let coverage = all |> Array.collect _.Coverage
 

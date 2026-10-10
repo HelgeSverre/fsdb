@@ -2398,16 +2398,21 @@ let tests =
               use scheduler = Fsdb.EventScheduler.acquire recovered Fsdb.Functions.empty
               let timer = System.Diagnostics.Stopwatch.StartNew()
 
-              while timer.Elapsed < TimeSpan.FromSeconds 4.0 && TestSupport.Sql.rows recovered "SELECT value FROM recovered_event_log" = [] do
+              let eventRows () = TestSupport.Sql.rows recovered "SELECT value FROM recovered_event_log"
+              let eventStatus () =
+                  TestSupport.Sql.rows recovered "SELECT status,last_executed IS NOT NULL FROM mysql.events WHERE event_name='recovered_event'"
+
+              while timer.Elapsed < TimeSpan.FromSeconds 4.0
+                    && (eventRows () <> [ [ Some "1" ] ] || eventStatus () <> [ [ Some "DISABLED"; Some "1" ] ]) do
                   System.Threading.Thread.Sleep 25
 
               Expect.equal
-                  (TestSupport.Sql.rows recovered "SELECT value FROM recovered_event_log")
+                  (eventRows ())
                   [ [ Some "1" ] ]
                   "recovered event body"
 
               Expect.equal
-                  (TestSupport.Sql.rows recovered "SELECT status,last_executed IS NOT NULL FROM mysql.events WHERE event_name='recovered_event'")
+                  (eventStatus ())
                   [ [ Some "DISABLED"; Some "1" ] ]
                   "recovered event completion"
 

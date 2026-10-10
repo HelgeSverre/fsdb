@@ -710,11 +710,13 @@ let tests =
                     let cases = ContractCatalog.all
                     Expect.equal (cases |> Array.distinctBy _.Name |> Array.length) cases.Length "case names"
 
-                    for case in cases do
-                        Expect.equal
-                            (case.Steps |> Array.distinctBy _.Name |> Array.length)
-                            case.Steps.Length
-                            (case.Name + " step names")
+                    let repeatedSteps =
+                        [| for case in cases do
+                               for name, steps in case.Steps |> Array.groupBy _.Name do
+                                   if steps.Length > 1 then
+                                       yield sprintf "%s/%s (%d)" case.Name name steps.Length |]
+
+                    Expect.equal repeatedSteps [||] "step names are unique within each case"
 
                 testCase "every asynchronous operation is reaped once"
                 <| fun _ ->
