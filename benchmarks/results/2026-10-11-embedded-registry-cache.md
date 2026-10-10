@@ -31,6 +31,8 @@ At `7c5f1e95`, avoiding redundant `AsyncLocal` writes in nested execution
 scopes brought prepared typed lookup allocation to roughly 123 KB/op in the
 same validator (from roughly 132 KB/op above). Separate runs varied between
 about 65 and 72 µs/op, so this follow-up supports an allocation reduction,
-not a latency claim. The pre-change CPU trace still points to scope setup and
-immutable-map work as the next places to inspect; a fresh profile is needed
-before another optimization.
+not a latency claim. A follow-up sampled trace at `ff7d95fa` spent most of its
+samples inside framework monitor and GC paths, including `Lazy` evaluation and
+result-metadata registration. That trace does not isolate one reliable fsdb
+hotspot, so it is not a basis for another local optimization. A longer,
+allocation-focused profile or a narrower stage benchmark is needed.
