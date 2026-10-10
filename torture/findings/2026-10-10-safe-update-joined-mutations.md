@@ -68,3 +68,10 @@ links between joined sources. The expanded pinned contract passed all 518
 safe-update steps at
 `torture/artifacts/runs/20261010T092632539-47054/contracts`; the full run
 still differed only on the nine documented identifier-case steps.
+MySQL also accepts a source-local lookup filter supplied only by `ON`, even
+through a three-table indexed chain. When the same statement has a `WHERE`
+filter only on the target, it returns 1175 in the audited fixture. Fsdb now
+checks `ON` filters when `WHERE` is absent and keeps the existing `WHERE`
+filter rule otherwise. The pinned contract passed all 578 safe-update steps
+at `torture/artifacts/runs/20261010T093429487-49404/contracts`; the complete
+run still retained only the nine identifier-case-policy differences.

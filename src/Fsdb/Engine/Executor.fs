@@ -24703,7 +24703,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             || hasIndexedInequality table tableRef right left
         | _ -> tryPhysicalCandidatesInTable store registry table tableRef (Some predicate) |> Option.isSome
 
-    let hasKeyedJoinFilter (targetRef: TableRef) (joins: Join list) (predicate: Expr) =
+    let hasKeyedJoinFilter (targetRef: TableRef) (joins: Join list) (predicate: Expr option) =
         let joinedRefs =
             joins
             |> List.choose (fun join ->
@@ -24726,7 +24726,11 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                 |> List.map (fst >> tableQualifier >> _.ToLowerInvariant())
                 |> List.distinct
                 |> List.length = sources.Length
-            let whereConditions = conjuncts predicate
+            let whereConditions = predicate |> Option.map conjuncts |> Option.defaultValue []
+            let filterConditions =
+                match predicate with
+                | Some _ -> whereConditions
+                | None -> joins |> List.collect (fun join -> conjuncts join.On)
 
             let edges =
                 joins
@@ -24768,8 +24772,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
 
                 joinedTable.RowsArray.Count <= targetTable.RowsArray.Count
                 && reachesTarget [] joinedQualifier
-                && (predicate
-                    |> conjuncts
+                && (filterConditions
                     |> List.exists (fun condition ->
                         let condition = qualifyBareLookup condition
                         canPushIntoSource joinedQualifier condition
@@ -24818,7 +24821,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             | None ->
                 match whereExpr with
                 | Some predicate when tables |> List.exists (fun (table, tableRef) -> usesKey table tableRef predicate) -> Ok()
-                | Some predicate when singleTarget && hasKeyedJoinFilter targetRef joins predicate -> Ok()
+                | _ when singleTarget && hasKeyedJoinFilter targetRef joins whereExpr -> Ok()
                 | _ when tables.IsEmpty -> Ok()
                 | _ -> Error unsafeError
 
