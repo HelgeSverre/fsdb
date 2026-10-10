@@ -11662,7 +11662,12 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let rec isSafe = function
         | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
         | Neg expression -> isSafe expression
-        | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafe left && isSafe right
+        | BinOp((Add | Sub | SignedSub | Mul | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
+            isSafe left && isSafe right
+        | Case(subject, branches, otherwise) ->
+            Option.forall isSafe subject
+            && (branches |> List.forall (fun (condition, result) -> isSafe condition && isSafe result))
+            && Option.forall isSafe otherwise
         | Expression.CollationOverride(expression, _) -> isSafe expression
         | FuncCall(name, arguments)
             when ((FunctionalIndex.tryBuiltin name |> Option.isSome)

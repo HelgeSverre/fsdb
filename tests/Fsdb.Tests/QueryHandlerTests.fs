@@ -2120,6 +2120,14 @@ let tests =
               Expect.equal result (ResultSet([ "id" ], [])) "missing bound"
               Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292 ] "missing bound warning"
 
+              let session, result = handle session "SELECT id FROM bound_warnings WHERE id=CASE WHEN 1 THEN ABS('2x') ELSE 3 END"
+              Expect.equal result (ResultSet([ "id" ], [ [ Some "2" ] ])) "matching CASE bound"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292; 1292 ] "matching CASE warnings"
+
+              let session, result = handle session "SELECT id FROM bound_warnings WHERE id=CASE WHEN 1 THEN ABS('9x') ELSE 3 END"
+              Expect.equal result (ResultSet([ "id" ], [])) "missing CASE bound"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292 ] "missing CASE warning"
+
           testCase "floating integer probes preserve out-of-range and rounded neighbors"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

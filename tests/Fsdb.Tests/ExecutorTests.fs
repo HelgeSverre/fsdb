@@ -1346,7 +1346,10 @@ let tests =
                           "NULLIF(2, 3)"
                           "GREATEST(1, 2)"
                           "LEAST(2, 3)"
-                          "-IF(1, -2, 3)" ] do
+                          "-IF(1, -2, 3)"
+                          "CASE WHEN 1=1 THEN 2 ELSE 3 END"
+                          "CASE 2 WHEN 2 THEN 2 ELSE 3 END"
+                          "CASE WHEN NULL THEN 3 ELSE 2 END" ] do
                         match runDefault store (sprintf "EXPLAIN SELECT v FROM users WHERE id = %s" bound) with
                         | ResultSet(_, [ [ _; _; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
                             ()
