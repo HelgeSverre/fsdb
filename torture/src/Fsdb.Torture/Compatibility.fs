@@ -5059,7 +5059,19 @@ module ContractCatalog =
                Contract.query "scan-zero-divisor" "SELECT id FROM numeric_bounds_scanned WHERE id=MOD(5,0)"
                Contract.query "scan-zero-divisor-warnings" "SHOW WARNINGS"
                Contract.query "project-zero-divisor" "SELECT MOD(5,0) FROM numeric_bounds_scanned"
-               Contract.query "project-zero-divisor-warnings" "SHOW WARNINGS" |]
+               Contract.query "project-zero-divisor-warnings" "SHOW WARNINGS"
+               Contract.query "branch-false-and" "SELECT id FROM numeric_bounds WHERE 0 AND id=MOD(5,0)"
+               Contract.query "branch-false-and-warnings" "SHOW WARNINGS"
+               Contract.query "branch-missed-key" "SELECT id FROM numeric_bounds WHERE id=0 AND id=MOD(5,0)"
+               Contract.query "branch-missed-key-warnings" "SHOW WARNINGS"
+               Contract.query "branch-hit-or" "SELECT id FROM numeric_bounds WHERE id=1 OR id=MOD(5,0)"
+               Contract.query "branch-hit-or-warnings" "SHOW WARNINGS"
+               Contract.query "branch-false-right" "SELECT id FROM numeric_bounds WHERE id=MOD(5,0) AND 0"
+               Contract.query "branch-false-right-warnings" "SHOW WARNINGS"
+               Contract.query "branch-false-or" "SELECT id FROM numeric_bounds WHERE 0 OR id=MOD(5,0)"
+               Contract.query "branch-false-or-warnings" "SHOW WARNINGS"
+               Contract.query "scan-branch-hit-or" "SELECT id FROM numeric_bounds_scanned WHERE id=1 OR id=MOD(5,0)"
+               Contract.query "scan-branch-hit-or-warnings" "SHOW WARNINGS" |]
           Cleanup = [| "DROP TABLE numeric_bounds_empty"; "DROP TABLE numeric_bounds_scanned"; "DROP TABLE numeric_bounds" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 

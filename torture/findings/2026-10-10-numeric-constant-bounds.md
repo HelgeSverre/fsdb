@@ -17,7 +17,7 @@ The native and Expecto probes also cover an exact `BIGINT` decimal bound above
 the double-precision integer limit (`9007199254740993.0`).
 
 The expanded `numeric-constant-index-bounds` contract in run
-`20261010T115652161-64008` matched MySQL 8.4.11 on all 21 steps.
+`20261010T121553333-67146` matched MySQL 8.4.11 on all 33 steps.
 The complete run retained the same nine documented identifier-case
 differences elsewhere.
 
@@ -32,7 +32,11 @@ division bound once when a B-tree lookup is available; the prepared comparison
 evaluates it once more, including for an empty indexed table. The audited
 unindexed table evaluates the predicate only once.
 
-Boolean branches around warning-producing bounds remain a separate gap:
-MySQL skips an unreachable `0 AND id=MOD(5,0)` branch, and its warning count
-for reachable `AND` and `OR` branches also depends on access planning. Fsdb's
-current planner can evaluate those branches before short-circuiting.
+The audited Boolean branches now also match. A diagnostic-free literal `0`
+in `AND` or `1` in `OR` eliminates the audited column-versus-closed-division
+comparison without evaluating its bound. A missed indexed key before `AND`
+retains one planner warning; an indexed `OR` lookup retains two, while its
+scan counterpart emits one. Closed warning-producing operands before the
+decisive literal still run:
+`'x' AND 0` emits its conversion warning. Deeper conditional and mixed
+expression shapes remain outside this audit.

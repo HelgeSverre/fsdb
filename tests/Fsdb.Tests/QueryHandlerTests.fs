@@ -128,6 +128,44 @@ let tests =
                   "projections evaluate per row"
               warnings 3 "projections retain per-row diagnostics"
 
+              for predicate, expectedRows, expectedWarnings in
+                  [ "0 AND id=MOD(5,0)", [], 0
+                    "id=0 AND id=MOD(5,0)", [], 1
+                    "id=1 OR id=MOD(5,0)", [ [ Some "1" ] ], 2
+                    "id=MOD(5,0) AND 0", [], 0
+                    "0 OR id=MOD(5,0)", [], 2
+                    "1 OR id=MOD(5,0)", [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ], 0
+                    "id=MOD(5,0) OR 1", [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ], 0
+                    "1/0 AND 0", [], 1
+                    "0 AND 1/0", [], 0 ] do
+                  Expect.equal
+                      (run (sprintf "SELECT id FROM warning_indexed WHERE %s" predicate))
+                      (ResultSet([ "id" ], expectedRows))
+                      predicate
+                  warnings expectedWarnings (sprintf "indexed branch %s" predicate)
+
+              for predicate, expectedRows, expectedWarnings in
+                  [ "0 AND id=MOD(5,0)", [], 0
+                    "id=1 OR id=MOD(5,0)", [ [ Some "1" ] ], 1
+                    "1 OR id=MOD(5,0)", [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ], 0 ] do
+                  Expect.equal
+                      (run (sprintf "SELECT id FROM warning_scanned WHERE %s" predicate))
+                      (ResultSet([ "id" ], expectedRows))
+                      predicate
+                  warnings expectedWarnings (sprintf "scan branch %s" predicate)
+
+              match run "SELECT id FROM warning_indexed WHERE missing_column AND 0" with
+              | Err(1054, _) -> ()
+              | result -> failtestf "an eliminated branch still validates column names: %A" result
+
+              match run "SELECT id FROM warning_indexed WHERE missing_column OR 1" with
+              | Err(1054, _) -> ()
+              | result -> failtestf "an eliminated OR branch still validates column names: %A" result
+
+              match run "SELECT id FROM warning_indexed WHERE no_such_function(id) AND 0" with
+              | Err(1046, _) -> ()
+              | result -> failtestf "an eliminated branch still validates function names: %A" result
+
           testCase "unqualified missing functions require a selected database"
           <| fun _ ->
               let run = queryFixture []

@@ -3769,6 +3769,44 @@ let private disjuncts (expr: Expr) : Expr list =
 
 let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
 
+let private diagnosticFreeLiteralTruth = function
+    | LiteralValue(VInt value) -> Some(value <> 0L)
+    | LiteralValue(VUInt value) -> Some(value <> 0UL)
+    | LiteralValue VNull -> Some false
+    | _ -> None
+
+let rec private containsDivision expression =
+    match expression with
+    | BinOp((Div | IntDiv), _, _) -> true
+    | FuncCall(name, _) when equalsIgnoreCase name "MOD" -> true
+    | _ -> Expression.children expression |> List.exists containsDivision
+
+let private isElidableDivisionComparison isKnownColumn isClosed = function
+    | BinOp(Eq, left, right) ->
+        (isKnownColumn left && containsDivision right && isClosed right)
+        || (isKnownColumn right && containsDivision left && isClosed left)
+    | _ -> false
+
+let private hasDecisiveLiteralBranch split decisive canSkipComparedDivision whereExpr =
+    // MySQL still reports warnings from closed operands before the decisive literal.
+    let canSkipBefore = function
+        | expression when diagnosticFreeLiteralTruth expression |> Option.isSome -> true
+        | expression -> canSkipComparedDivision expression
+
+    let rec find = function
+        | [] -> false
+        | expression :: _ when diagnosticFreeLiteralTruth expression = Some decisive -> true
+        | expression :: rest when canSkipBefore expression -> find rest
+        | _ -> false
+
+    whereExpr |> Option.map split |> Option.defaultValue [] |> find
+
+let private hasFalseLiteralConjunct canSkipComparedDivision whereExpr =
+    hasDecisiveLiteralBranch conjuncts false canSkipComparedDivision whereExpr
+
+let private hasTrueLiteralDisjunct canSkipComparedDivision whereExpr =
+    hasDecisiveLiteralBranch disjuncts true canSkipComparedDivision whereExpr
+
 let private combineConjuncts =
     function
     | [] -> None
@@ -8521,13 +8559,12 @@ and private prepareWhereMatches
     let context = { ctxFor [||] with Clause = WhereClause }
     let evaluate expression row = evalExpr { ctxFor row with Clause = WhereClause } expression
 
-    let rec containsDivision expression =
-        match expression with
-        | BinOp((Div | IntDiv), _, _) -> true
-        | FuncCall(name, _) when equalsIgnoreCase name "MOD" -> true
-        | _ -> Expression.children expression |> List.exists containsDivision
+    let canSkipComparedDivision =
+        isElidableDivisionComparison
+            (tryDirectColumnForExpr context >> Option.isSome)
+            (isLiteralConstantExpression context.Registry)
 
-    let directComparison op columnExpression constantExpression columnOnLeft =
+    let directComparison eager op columnExpression constantExpression columnOnLeft =
         match tryDirectColumnForExpr context columnExpression with
         | Some(index, column)
             when (match constantExpression with
@@ -8535,10 +8572,11 @@ and private prepareWhereMatches
                   | expression ->
                       containsDivision expression
                       && isLiteralConstantExpression context.Registry expression) ->
-            // A closed predicate operand has one evaluation per scan, including an empty scan.
-            let boundResult = evalExpr context constantExpression
+            // A top-level bound evaluates even for an empty scan; a Boolean branch waits until reached.
+            let boundResult = lazy (evalExpr context constantExpression)
+            if eager then ignore boundResult.Value
             Some(fun (row: Value[]) ->
-                match boundResult with
+                match boundResult.Value with
                 | Error error -> Error error
                 | Ok bound ->
                     let stored = row.[index]
@@ -8549,29 +8587,31 @@ and private prepareWhereMatches
                         comparisonResultWithNulls context constantExpression None bound columnExpression (Some column) op stored)
         | _ -> None
 
-    let rec prepare expression =
+    let rec prepare eager expression =
         match expression with
         | BinOp(And, left, right) ->
-            let evaluateLeft = prepare left
-            let evaluateRight = prepare right
+            let evaluateLeft = prepare false left
+            let evaluateRight = prepare false right
             fun row -> evalLogicalAnd (evaluateLeft row) (fun () -> evaluateRight row)
         | BinOp(Or, left, right) ->
-            let evaluateLeft = prepare left
-            let evaluateRight = prepare right
+            let evaluateLeft = prepare eager left
+            let evaluateRight = prepare eager right
             fun row -> evalLogicalOr (evaluateLeft row) (fun () -> evaluateRight row)
         | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), left, right) ->
-            directComparison op left right true
-            |> Option.orElseWith (fun () -> directComparison op right left false)
+            directComparison eager op left right true
+            |> Option.orElseWith (fun () -> directComparison eager op right left false)
             |> Option.defaultWith (fun () -> evaluate expression)
         | _ -> evaluate expression
 
     match where with
     | None -> fun _ -> Ok true
+    | Some _ when hasFalseLiteralConjunct canSkipComparedDivision where -> fun _ -> Ok false
+    | Some _ when hasTrueLiteralDisjunct canSkipComparedDivision where -> fun _ -> Ok true
     | Some expression when isLiteralConstantExpression context.Registry expression ->
         let result = evaluate expression [||] |> Result.map (truthy >> (=) (Some true))
         fun _ -> result
     | Some expression when storedRowsMatchReadRows context.Store (context.ColumnsByPosition |> Seq.choose id) ->
-        let prepared = prepare expression
+        let prepared = prepare true expression
         fun row -> prepared row |> Result.map (truthy >> (=) (Some true))
     | Some expression ->
         fun row -> evaluate expression row |> Result.map (truthy >> (=) (Some true))
@@ -13300,12 +13340,28 @@ and private directPhysicalAccessCandidatesInTableWith
     |> List.choose id
 
 and private physicalAccessCandidatesInTableWith policy store registry table tref whereExpr =
-    directPhysicalAccessCandidatesInTableWith policy store registry table tref whereExpr
-    @ ([ tryIndexUnionAccessInTableWith policy store registry table tref whereExpr
-         |> Option.map IndexMergeAccess
-         tryIndexIntersectionAccessInTableWith policy store registry table tref whereExpr
-         |> Option.map IndexMergeAccess ]
-       |> List.choose id)
+    let isKnownColumn expression =
+        storedIndexedColumnFor registry tref expression
+        |> Option.exists (fun (name, transform) ->
+            transform.IsNone
+            && (table.Columns |> List.exists (fun column -> equalsIgnoreCase column.Name name)))
+    let canSkipComparedDivision =
+        isElidableDivisionComparison isKnownColumn (isLiteralConstantExpression registry)
+
+    if hasFalseLiteralConjunct canSkipComparedDivision whereExpr
+       || hasTrueLiteralDisjunct canSkipComparedDivision whereExpr then
+        []
+    else
+        let direct = directPhysicalAccessCandidatesInTableWith policy store registry table tref whereExpr
+        if direct |> List.exists (physicalAccessCandidateCount >> (=) 0) then
+            direct
+        else
+            direct
+            @ ([ tryIndexUnionAccessInTableWith policy store registry table tref whereExpr
+                 |> Option.map IndexMergeAccess
+                 tryIndexIntersectionAccessInTableWith policy store registry table tref whereExpr
+                 |> Option.map IndexMergeAccess ]
+               |> List.choose id)
 
 and private choosePhysicalAccess candidates =
     match candidates with
