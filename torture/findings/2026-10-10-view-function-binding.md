@@ -12,10 +12,16 @@ evaluating its query or changing ordinary prepared-statement binding. The
 shared resolver accepts builtins, aggregate functions, extensions, and stored
 functions. A view created in another schema still resolves an unqualified
 function against the selected session schema, matching the MySQL oracle.
+At read time, MySQL resolves the stored view against its target schema. If
+both schemas define a same-named function, the target function runs; if only
+the selected creation schema does, reading the view returns 1356 (`HY000`).
+Fsdb now maps that missing target function to the view diagnostic, independent
+of the reader's selected database.
 Focused Expecto cases cover missing calls, valid builtin and stored calls,
 derived sources, and cross-schema lookup. The `missing-function-view-definitions`
 contract in run `20261010T130756272-76037` matched MySQL on all eight steps.
 The complete run retained only the nine known identifier-case differences.
 
-This audit covers these text-protocol DDL forms. Other expression-bearing DDL
-and stored-program definition contexts remain outside it.
+This audit covers these text-protocol DDL forms and the cross-schema view read.
+Other expression-bearing DDL and stored-program definition contexts remain
+outside it.

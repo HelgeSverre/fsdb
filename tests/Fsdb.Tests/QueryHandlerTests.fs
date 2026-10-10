@@ -342,6 +342,47 @@ let tests =
                   (ResultSet([ "v" ], [ [ Some "7" ] ]))
                   "the qualified view uses its definition's function schema"
 
+          testCase "cross-schema views validate in the caller schema and execute in the target schema"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in [ "CREATE DATABASE view_source"; "CREATE DATABASE view_target" ] do
+                  Expect.equal (run sql) (Affected 1UL) sql
+              for sql in
+                  [ "CREATE FUNCTION view_source.marker() RETURNS INT DETERMINISTIC RETURN 7"
+                    "CREATE FUNCTION view_target.marker() RETURNS INT DETERMINISTIC RETURN 9" ] do
+                  Expect.equal (run sql) (Affected 0UL) sql
+              Expect.equal (run "USE view_source") (Affected 0UL) "select definition schema"
+              Expect.equal
+                  (run "CREATE VIEW view_target.v AS SELECT marker() AS n")
+                  (Affected 0UL)
+                  "creation validates against the selected schema"
+              Expect.equal (run "USE view_target") (Affected 0UL) "switch to target schema"
+              Expect.equal
+                  (run "SELECT n FROM v")
+                  (ResultSet([ "n" ], [ [ Some "9" ] ]))
+                  "reading the view uses the target schema's function"
+              Expect.equal (run "CREATE DATABASE view_empty") (Affected 1UL) "create empty target schema"
+              Expect.equal (run "USE view_source") (Affected 0UL) "select source schema again"
+              Expect.equal
+                  (run "CREATE VIEW view_empty.v AS SELECT marker() AS n")
+                  (Affected 0UL)
+                  "source function permits creation without a target function"
+              let invalidView =
+                  Err(1356, "View 'view_empty.v' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them")
+              Expect.equal
+                  (run "SELECT n FROM view_empty.v")
+                  invalidView
+                  "reading the view fails when the target function is absent"
+              let reader = create 2 session.Store
+              Expect.equal
+                  (handle reader "SELECT n FROM view_empty.v" |> snd)
+                  invalidView
+                  "the view error does not depend on the reader's selected database"
+
           testCase "qualified routines use their definition schema without a selected database"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

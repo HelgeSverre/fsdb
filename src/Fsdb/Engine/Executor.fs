@@ -7244,6 +7244,10 @@ and private resolveTableRef
                     let resolve viewRegistry body =
                         withFunctionDatabase (Some view.Schema) (fun () ->
                             resolveRelationBody viewStore viewRegistry view.Schema view.Columns body None)
+                        |> Result.mapError (function
+                            | Err(1305, _) ->
+                                Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them" view.Schema view.Name)
+                            | result -> result)
 
                     let resolved =
                         match parseStoredViewStatement view with

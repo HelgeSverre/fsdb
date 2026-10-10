@@ -672,7 +672,9 @@ expression-bearing reads, mutations, `DO`, and `SET`; absent database context
 returns 1046 even for qualified-table mutations.
 [View-definition and CTAS function binding](torture/findings/2026-10-10-view-function-binding.md)
 now rejects missing functions before publication while preserving valid builtin
-and stored-function calls.
+and stored-function calls. Cross-schema views validate an unqualified function
+against the selected creation schema, then resolve it in the target schema at
+read time; a missing target function produces MySQL's view error 1356.
 [Existing stored functions without a selected database](torture/findings/2026-10-10-existing-function-no-database.md)
 also follow MySQL's 1046 rule in the audited expression statements, while
 qualified calls and qualified view reads remain valid.
