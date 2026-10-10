@@ -1790,7 +1790,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   let session, result = executePrepared session prepared [ VString "abc" ]
@@ -1850,7 +1850,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   let session, result = executePrepared session prepared [ VDecimal 67.891M ]

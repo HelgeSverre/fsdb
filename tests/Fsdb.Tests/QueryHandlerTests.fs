@@ -4784,7 +4784,7 @@ let tests =
                     LastParamTypes = None
                     ParameterTypes = None
                     SchemaDependencies = Map.empty
-                    FunctionDatabase = None
+                    PreparationDatabase = None
                     DivisionPrecisionIncrement = 4 }
 
               let literalSession, result = executePrepared literalSession textStatement [ VString "O'Brien\\" ]
@@ -5283,7 +5283,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = session.Database
+                        PreparationDatabase = session.Database
                         DivisionPrecisionIncrement = 4 }
 
                   let session, result =
@@ -7442,7 +7442,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = session.Database
+                        PreparationDatabase = session.Database
                         DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VInt 7L ] with
@@ -9371,7 +9371,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
                   | other -> failtestf "expected prepared query, got %A" other
 

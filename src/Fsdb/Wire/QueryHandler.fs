@@ -5457,8 +5457,17 @@ let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
       LastParamTypes = None
       ParameterTypes = types
       SchemaDependencies = ast |> Option.map (preparedDependencies session) |> Option.defaultValue Map.empty
-      FunctionDatabase = session.Database
+      PreparationDatabase = session.Database
       DivisionPrecisionIncrement = sessionDivisionPrecision session }
+
+let private withPreparedDatabase
+    (session: Session)
+    (statement: PreparedStmt)
+    (execute: Session -> Session * QueryResult)
+    : Session * QueryResult =
+    let preparedSession = { session with Database = statement.PreparationDatabase }
+    let executed, result = execute preparedSession
+    { executed with Database = session.Database }, result
 
 let private preparedMetadataCore
     (session: Session)
@@ -7091,19 +7100,21 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 | Some ast ->
                     withPreparedStatementHints session parserOptions statement.Sql (fun () ->
                         withStoredFunctionRegistry dispatch session (fun current ->
-                            match bindPreparedPlaceholders PreparedMetadata.UserVariables current statement ast values with
-                            | Ok(updated, bound) ->
-                                let current = { current with TextStatements = Map.add name updated current.TextStatements }
-                                Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
-                                    executeParsedWithFunctionDatabase updated.FunctionDatabase current bound)
-                            | Error(code, message) -> current, Err(code, message)))
+                            withPreparedDatabase current statement (fun current ->
+                                match bindPreparedPlaceholders PreparedMetadata.UserVariables current statement ast values with
+                                | Ok(updated, bound) ->
+                                    let current = { current with TextStatements = Map.add name updated current.TextStatements }
+                                    Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
+                                        executeParsedWithFunctionDatabase updated.PreparationDatabase current bound)
+                                | Error(code, message) -> current, Err(code, message))))
                 | None ->
-                    dispatch
-                        session
-                        (substitutePlaceholdersWithOptions
-                            parserOptions
-                            statement.Sql
-                            (values |> List.map (valueToSqlLiteralWithOptions parserOptions)))
+                    withPreparedDatabase session statement (fun scoped ->
+                        dispatch
+                            scoped
+                            (substitutePlaceholdersWithOptions
+                                parserOptions
+                                statement.Sql
+                                (values |> List.map (valueToSqlLiteralWithOptions parserOptions))))
         | DeallocateText name ->
             if Map.containsKey name session.TextStatements then
                 { session with TextStatements = Map.remove name session.TextStatements }, Affected 0UL
@@ -8247,14 +8258,15 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
     match stmt.Ast with
     | None ->
         let options = parserOptionsForSession session
-        handle
-            session
-            (substitutePlaceholdersWithOptions
-                options
-                stmt.Sql
-                (values |> List.map (valueToSqlLiteralWithOptions options)))
+        withPreparedDatabase session stmt (fun session ->
+            handle
+                session
+                (substitutePlaceholdersWithOptions
+                    options
+                    stmt.Sql
+                    (values |> List.map (valueToSqlLiteralWithOptions options))))
     | Some ast ->
-        let executed, result =
+        let execute session =
             recordDiagnostics session false (fun () ->
                 try
                     withPreparedStatementHints session (parserOptionsForSession session) stmt.Sql (fun () ->
@@ -8287,7 +8299,7 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                                         Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
                                             withTriggerSessionExecution session (fun () ->
                                                 withStoredFunctionRegistry dispatch session (fun current ->
-                                                    executeParsedWithFunctionDatabase updated.FunctionDatabase current statement)))
+                                                    executeParsedWithFunctionDatabase updated.PreparationDatabase current statement)))
 
                                     (if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                          { executed with PasswordExpired = false }
@@ -8300,6 +8312,7 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                 | :? OperationCanceledException -> reraise ()
                 | ex -> recoverExecutionError session "prepared statement" ex)
 
+        let executed, result = withPreparedDatabase session stmt execute
         recordSlowQueryIfNeeded session startedAt |> ignore
         syncTransactionView executed, result
 

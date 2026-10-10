@@ -664,6 +664,11 @@ whole statement, while compatible executions retain their numeric and temporal
 families. NULL projections retain declared metadata; a reprepare restores a
 NULL marker's original expression context.
 
+[Prepared statement database context](torture/findings/2026-10-10-prepared-database-context.md)
+now retains the selected database at preparation for unqualified table names,
+mutations, metadata binding, and `DATABASE()` during both text and binary
+execution, while preserving the caller's database afterward.
+
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |

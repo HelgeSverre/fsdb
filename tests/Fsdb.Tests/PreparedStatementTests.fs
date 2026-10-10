@@ -33,7 +33,67 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "preparing an unqualified stored function requires a selected database"
+        [ testCase "prepared statements retain their preparation database after USE"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE DATABASE prep_a"
+                    "CREATE DATABASE prep_b"
+                    "CREATE TABLE prep_a.t(v INT)"
+                    "CREATE TABLE prep_b.t(v INT)"
+                    "INSERT INTO prep_a.t VALUES(7)"
+                    "INSERT INTO prep_b.t VALUES(9)"
+                    "USE prep_a" ] do
+                  match run sql with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+              let sql = "SELECT v,DATABASE() FROM t"
+              let ast, count =
+                  prepareStatementForSession session sql
+                  |> Result.defaultWith (fun error -> failtestf "binary prepare failed: %A" error)
+              let binary = createPreparedStatement session sql ast count
+              Expect.equal (run "PREPARE p FROM 'SELECT v,DATABASE() FROM t'") (Affected 0UL) "text prepare"
+              let updateSql = "UPDATE t SET v=v+1"
+              let updateAst, updateCount =
+                  prepareStatementForSession session updateSql
+                  |> Result.defaultWith (fun error -> failtestf "binary update prepare failed: %A" error)
+              let binaryUpdate = createPreparedStatement session updateSql updateAst updateCount
+              Expect.equal (run "PREPARE u FROM 'UPDATE t SET v=v+1'") (Affected 0UL) "text update prepare"
+              Expect.equal (run "USE prep_b") (Affected 0UL) "change session database"
+              let expected = ResultSet([ "v"; "DATABASE()" ], [ [ Some "7"; Some "prep_a" ] ])
+              Expect.equal (executePrepared session binary [] |> snd) expected "binary read uses preparation database"
+              Expect.equal (run "EXECUTE p") expected "text read uses preparation database"
+              Expect.equal (executePrepared session binaryUpdate [] |> snd) (Affected 1UL) "binary update uses preparation database"
+              Expect.equal (run "EXECUTE u") (Affected 1UL) "text update uses preparation database"
+              Expect.equal (run "SELECT DATABASE()")
+                  (ResultSet([ "DATABASE()" ], [ [ Some "prep_b" ] ]))
+                  "execution restores the session's selected database"
+              Expect.equal (run "SELECT v FROM prep_a.t") (ResultSet([ "v" ], [ [ Some "9" ] ])) "preparation table changed"
+              Expect.equal (run "SELECT v FROM prep_b.t") (ResultSet([ "v" ], [ [ Some "9" ] ])) "caller table unchanged"
+              let withoutDatabase = create 2 session.Store
+              let ast, count =
+                  prepareStatementForSession withoutDatabase "SELECT DATABASE()"
+                  |> Result.defaultWith (fun error -> failtestf "no-database prepare failed: %A" error)
+              let noDatabaseStatement = createPreparedStatement withoutDatabase "SELECT DATABASE()" ast count
+              let withoutDatabase, prepared = handle withoutDatabase "PREPARE q FROM 'SELECT DATABASE()'"
+              Expect.equal prepared (Affected 0UL) "text prepare without a selected database"
+              let selected, used = handle withoutDatabase "USE prep_b"
+              Expect.equal used (Affected 0UL) "select database after preparation"
+              let noDatabaseResult = ResultSet([ "DATABASE()" ], [ [ None ] ])
+              Expect.equal
+                  (executePrepared selected noDatabaseStatement [] |> snd)
+                  noDatabaseResult
+                  "binary execution retains the absence of a preparation database"
+              Expect.equal
+                  (handle selected "EXECUTE q" |> snd)
+                  noDatabaseResult
+                  "text execution retains the absence of a preparation database"
+
+          testCase "preparing an unqualified stored function requires a selected database"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, created =
@@ -1735,7 +1795,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VString "name" ] |> snd with
@@ -1758,7 +1818,7 @@ let tests =
                       match prepareStatement sql with
                       | Ok prepared -> prepared
                       | Error error -> failtestf "prepare failed: %A" error
-                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None; SchemaDependencies = Map.empty; FunctionDatabase = None; DivisionPrecisionIncrement = 4 }
+                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None; SchemaDependencies = Map.empty; PreparationDatabase = None; DivisionPrecisionIncrement = 4 }
                   for value in [ VInt -2L; VInt 7L; VNull ] do
                       match executePrepared session statement (List.replicate count value) |> snd with
                       | ResultSet(columns, _) -> Expect.equal columns names sql
@@ -3204,7 +3264,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   // The name carries a quote and a backslash — bound as a
@@ -3238,7 +3298,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   let parameters =
@@ -3284,7 +3344,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VString "1.5" ] |> snd with
@@ -3319,7 +3379,7 @@ let tests =
                             LastParamTypes = None
                             ParameterTypes = None
                             SchemaDependencies = Map.empty
-                            FunctionDatabase = None
+                            PreparationDatabase = None
                             DivisionPrecisionIncrement = 4 }
                           [ value ]
                       |> snd
@@ -3394,7 +3454,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   let session, result = executePrepared session statement [ VInt 2L; VInt 99L ]
@@ -3420,7 +3480,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VInt 3L; VInt 4L ] |> snd with
@@ -3460,7 +3520,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
-                        FunctionDatabase = None
+                        PreparationDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   let session, result = executePrepared session statement [ VInt 0L ]

@@ -362,7 +362,7 @@ let tests =
                             LastParamTypes = None
                             ParameterTypes = None
                             SchemaDependencies = Map.empty
-                            FunctionDatabase = None
+                            PreparationDatabase = None
                             DivisionPrecisionIncrement = 4 }
 
                       let prepared, result = executePrepared executed statement [ VInt 2L; VInt 11L ]
