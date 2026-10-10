@@ -31,3 +31,9 @@ failed upload itself increments the counter. Fsdb now records failed local
 uploads, including transport and decoding errors, from the timer started
 before the request packet. MySQL's wider engine and latency status families
 remain outside fsdb's registry.
+
+On the pinned MySQL 8.4.11 server, a raw `COM_STATISTICS` response included
+the global `Slow queries` count. Setting the session threshold to zero and
+running `SELECT 1` increased that field by two (the setting statement and the
+SELECT); a subsequent `SHOW GLOBAL STATUS` read reported one more after
+counting itself. Fsdb now reads the same global counter for its wire response.

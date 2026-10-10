@@ -2057,8 +2057,12 @@ let private handleConnection
                                 let statistics =
                                     String.Format(
                                         Globalization.CultureInfo.InvariantCulture,
-                                        "Uptime: {0}  Threads: {1}  Questions: {2}  Slow queries: 0  Opens: 0  Flush tables: 0  Open tables: 0  Queries per second avg: {3:F3}",
-                                        [| box uptime; box (InformationSchema.connectedThreads ()); box questions; box rate |]
+                                        "Uptime: {0}  Threads: {1}  Questions: {2}  Slow queries: {3}  Opens: 0  Flush tables: 0  Open tables: 0  Queries per second avg: {4:F3}",
+                                        [| box uptime
+                                           box (InformationSchema.connectedThreads ())
+                                           box questions
+                                           box (InformationSchema.slowQueries ())
+                                           box rate |]
                                     )
 
                                 do!

@@ -4568,7 +4568,7 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          testCase "COM_STATISTICS reports live server counters"
+          TestSupport.processGlobalCase "COM_STATISTICS reports live server counters"
           <| fun _ ->
               async {
                   use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
@@ -4584,6 +4584,21 @@ let tests =
                   Expect.stringContains status "  Threads: " "thread count"
                   Expect.stringContains status "  Questions: " "question count"
                   Expect.stringContains status "  Queries per second avg: " "query rate"
+
+                  let slowQueries (text: string) =
+                      text.Split("Slow queries: ").[1].Split(' ').[0] |> int64
+
+                  let initialSlow = slowQueries status
+                  for sql in [ "SET SESSION long_query_time=0"; "DO 1" ] do
+                      let command = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                      do! writePacketAsync stream { SeqId = 0uy; Payload = command } |> Async.Ignore
+                      let! executed = readPacketAsync stream
+                      Expect.equal executed.Value.Payload.[0] 0uy "slow statement completes"
+
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = [| 0x09uy |] } |> Async.Ignore
+                  let! updated = readPacketAsync stream
+                  let updatedStatus = Text.Encoding.UTF8.GetString updated.Value.Payload
+                  Expect.equal (slowQueries updatedStatus) (initialSlow + 2L) "statistics reflects completed slow statements"
               }
               |> Async.RunSynchronously
 

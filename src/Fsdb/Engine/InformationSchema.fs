@@ -1288,6 +1288,7 @@ let recordSlowQuery (sessionCounters: StatusCounters) =
     sessionCounters.RecordSlowQuery()
 
 let questions () = processStatusCounters.Questions
+let slowQueries () = processStatusCounters.SlowQueries
 
 let recordCommand (sessionCounters: StatusCounters) (StatusCommand name) =
     processStatusCounters.RecordCommand name
