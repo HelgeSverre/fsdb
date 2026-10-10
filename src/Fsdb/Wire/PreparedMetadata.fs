@@ -276,6 +276,9 @@ let private inferParameters
 
             let fallback =
                 match operator, expected with
+                // A comparison produces a boolean, but that type says nothing
+                // about an otherwise untyped operand on either side.
+                | (Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _ -> None
                 | (Add | Sub | SignedSub | Mul | Div | IntDiv), None when leftMetadata.IsNone && rightMetadata.IsNone ->
                     Some(ColumnWire.parameterMetadataOfType (TDouble false))
                 | _ -> expected

@@ -826,9 +826,18 @@ The [prepared-statement control](benchmarks/results/2026-10-10-prepared-function
 reuses prepared commands for the same single-row primary-key and composed-key
 lookups. MySQL returns the functional row in about 42 microseconds, while fsdb
 takes about 49 milliseconds. A [repeat run](benchmarks/results/2026-10-10-prepared-functional-index-repeat.md)
-with a setup assertion that the prepared query returns the expected row still
-takes about 45 milliseconds on fsdb. This is a distinct parameterized functional
-lookup gap, consistent with a scan; the exact plan and cause remain to be traced.
+with a first-row setup assertion still takes about 45 milliseconds on fsdb;
+that assertion did not catch the incorrect extra rows. The cause was
+prepared-parameter type inference: a boolean condition's integer result type
+propagated into the equality's string parameter, converting `USER_250` to
+integer zero.
+The [fixed run](benchmarks/results/2026-10-10-prepared-functional-index-fixed.md)
+reduces fsdb's prepared composed-key lookup to
+about 278 microseconds, versus about 242 microseconds for its prepared
+primary-key control; MySQL takes about 41 and 32 microseconds respectively.
+A [targeted repeat](benchmarks/results/2026-10-10-prepared-functional-index-strict-row-check.md)
+requires exactly one returned row and measures about 251 microseconds on fsdb.
+The residual difference is part of the broader lookup overhead above.
 
 The constant-expression lookup pair records the
 [scan baseline](benchmarks/results/baa1b51-quick.md) and the

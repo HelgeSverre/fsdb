@@ -33,7 +33,48 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "ORDER BY subqueries resolve outer projection aliases in scope"
+        [ testCase "prepared functional equality narrows candidates before residual evaluation"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let rows =
+                  [ for id in 1 .. 300 -> $"({id}, ' user_{id} ')" ]
+                  |> String.concat ","
+
+              for sql in
+                  [ "CREATE TABLE indexed_names (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, INDEX ix_normalized ((UPPER(TRIM(name)))))"
+                    "INSERT INTO indexed_names VALUES " + rows ] do
+                  let next, result = handle session sql
+                  session <- next
+                  match result with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+
+              let mutable calls = 0
+              let functions =
+                  session.CustomFunctions
+                  |> Fsdb.Functions.registerScalar "TOUCH" (fun values ->
+                      calls <- calls + 1
+                      List.head values)
+              session <- { session with CustomFunctions = functions }
+
+              let expected = ResultSet([ "id" ], [ [ Some "250" ] ])
+              Expect.equal
+                  (handle session "SELECT id FROM indexed_names WHERE TOUCH(id) = id AND UPPER(TRIM(name)) = 'USER_250'" |> snd)
+                  expected
+                  "text lookup returns one row"
+              calls <- 0
+
+              let sql =
+                  "SELECT id FROM indexed_names WHERE TOUCH(id) = id AND UPPER(TRIM(name)) = ?"
+              let ast, count =
+                  prepareStatementForSession session sql
+                  |> Result.defaultWith (fun error -> failtestf "prepare failed: %A" error)
+              let prepared = createPreparedStatement session sql ast count
+              let _, result = executePrepared session prepared [ VString "USER_250" ]
+              Expect.equal result expected "prepared lookup returns the matching row"
+              Expect.isLessThan calls 10 "the prepared functional equality should use its expression index"
+
+          testCase "ORDER BY subqueries resolve outer projection aliases in scope"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               for sql in [ "CREATE TABLE ordering_scope(v INT,w INT)"; "INSERT INTO ordering_scope VALUES(2,10),(1,20)" ] do

@@ -69,8 +69,10 @@ type ServerBenchmarks() =
         preparedFunctional <-
             preparePointLookup "SELECT id FROM functional_users WHERE UPPER(TRIM(name)) = @key" (box "USER_0")
 
-        if Convert.ToInt32(preparedFunctional.ExecuteScalar()) <> 1 then
-            failwith "The prepared functional-index control must return user 1"
+        do
+            use expectedRow = preparedFunctional.ExecuteReader()
+            if not (expectedRow.Read()) || expectedRow.GetInt32(0) <> 1 || expectedRow.Read() then
+                failwith "The prepared functional-index control must return only user 1"
 
         let compressedConnection = MySqlConnectionStringBuilder(Schema.connectionString this.Target)
         compressedConnection.UseCompression <- true
