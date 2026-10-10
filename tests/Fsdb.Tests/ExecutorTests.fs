@@ -8594,6 +8594,43 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an ABS override reports a scan"
                     Expect.equal overriddenPlan.Key None "an ABS override does not claim the functional index"
 
+                testCase "SIGN functional keys serve equality, range, and maintained writes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE signed_keys(id INT PRIMARY KEY, score INT, KEY ix_sign ((SIGN(score))))" |> ignore
+                    runDefault store "CREATE TABLE scanned_signs(id INT PRIMARY KEY, score INT)" |> ignore
+
+                    for table in [ "signed_keys"; "scanned_signs" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES(1,-5),(2,-2),(3,0),(4,3),(5,9)" table) |> ignore
+
+                    let indexed sql = runDefault store (sql "signed_keys")
+                    let scanned sql = runDefault store (sql "scanned_signs")
+                    let equality table = sprintf "SELECT id FROM %s WHERE SIGN(score)=-1 ORDER BY id" table
+                    let bounded table = sprintf "SELECT id FROM %s WHERE SIGN(score) BETWEEN 0 AND 1 ORDER BY id" table
+
+                    Expect.equal (indexed equality) (scanned equality) "SIGN equality matches the scan"
+                    Expect.equal (indexed bounded) (scanned bounded) "SIGN range matches the scan"
+
+                    let plan = runDefault store "EXPLAIN SELECT id FROM signed_keys WHERE SIGN(score)=-1" |> explainRow
+                    Expect.equal plan.Key (Some "ix_sign") "SIGN equality uses its maintained key"
+
+                    runDefault store "UPDATE signed_keys SET score=7 WHERE id=2" |> ignore
+                    runDefault store "UPDATE scanned_signs SET score=7 WHERE id=2" |> ignore
+                    Expect.equal (indexed equality) (scanned equality) "updates refresh SIGN buckets"
+                    Expect.equal (indexed bounded) (scanned bounded) "updates refresh SIGN ranges"
+
+                    let overridden = builtins |> registerScalar "SIGN" (fun _ -> VInt 99L)
+                    let overridePlan = run store overridden "EXPLAIN SELECT id FROM signed_keys WHERE SIGN(score)=99" |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden SIGN cannot claim its stored key"
+
+                    runDefault store "CREATE TABLE unique_signs(id INT PRIMARY KEY, score INT, UNIQUE KEY uq_sign ((SIGN(score))))"
+                    |> ignore
+                    runDefault store "INSERT INTO unique_signs VALUES(1,-5),(2,0),(3,9)" |> ignore
+
+                    match runDefault store "INSERT INTO unique_signs VALUES(4,-2)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected SIGN uniqueness to reject a second negative value, got %A" other
+
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->
                     let store = newStore ()

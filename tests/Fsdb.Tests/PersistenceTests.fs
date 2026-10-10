@@ -3800,6 +3800,8 @@ let tests =
                     "INSERT INTO lookup_bits VALUES (1, 'é'), (2, 'Other')"
                     "CREATE TABLE lookup_abs (id INT PRIMARY KEY, value BIGINT, UNIQUE INDEX ix_abs_value ((ABS(value))))"
                     "INSERT INTO lookup_abs VALUES (1, -5), (2, 9)"
+                    "CREATE TABLE lookup_sign (id INT PRIMARY KEY, value INT, INDEX ix_sign_value ((SIGN(value))))"
+                    "INSERT INTO lookup_sign VALUES (1, -5), (2, 0), (3, 9)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
                     "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
                     "INSERT INTO lookup_abs_text VALUES (1, '12x'), (2, 'Other')"
@@ -3881,6 +3883,17 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered absolute-value bucket returns its row"
               | other -> failtestf "expected recovered absolute-value lookup rows, got %A" other
 
+              match handle (Fsdb.Session.create 20 reloaded) "SELECT id FROM lookup_sign WHERE SIGN(value) = -1" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered sign bucket returns its row"
+              | other -> failtestf "expected recovered sign lookup rows, got %A" other
+
+              let signPlan =
+                  handle (Fsdb.Session.create 21 reloaded) "EXPLAIN SELECT id FROM lookup_sign WHERE SIGN(value) = -1"
+                  |> snd
+                  |> TestSupport.Sql.explainRow
+
+              Expect.equal signPlan.Key (Some "ix_sign_value") "WAL recovery rebuilds the sign index"
+
               match handle (Fsdb.Session.create 14 reloaded) "INSERT INTO lookup_abs VALUES (3, 5)" |> snd with
               | Err(1062, _) -> ()
               | other -> failtestf "expected the recovered absolute-value unique key to reject a duplicate, got %A" other
@@ -3920,6 +3933,13 @@ let tests =
               match handle (Fsdb.Session.create 19 reloaded) "INSERT INTO lookup_composed VALUES (3, 'REFERENCE')" |> snd with
               | Err(1062, _) -> ()
               | other -> failtestf "expected recovered composed uniqueness to reject a duplicate, got %A" other
+
+              snapshotNow dir reloaded
+              let fromSnapshot = load dir
+
+              match handle (Fsdb.Session.create 22 fromSnapshot) "SELECT id FROM lookup_sign WHERE SIGN(value) = 1" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "the snapshot restores the sign index"
+              | other -> failtestf "expected snapshot sign lookup rows, got %A" other
 
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->

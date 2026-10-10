@@ -4985,11 +4985,6 @@ let private piFn: Scalar =
     | [] -> VDouble Math.PI
     | _ -> VNull
 
-let private signFn: Scalar =
-    function
-    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (sign (toDouble v)))
-    | _ -> VNull
-
 let private truncateDoubleAt number digits =
     let factor = Math.Pow(10.0, float (abs digits))
     if digits >= 0 then
@@ -6722,7 +6717,7 @@ let private registerNumericBuiltins registry =
     |> registerScalar
         "RADIANS"
         (exactArity "RADIANS" 1 (unaryMath "radians" (fun value -> value * Math.PI / 180.0)))
-    |> registerScalar "SIGN" (exactArity "SIGN" 1 signFn)
+    |> registerFunctionalScalar Signum
     |> registerScalar "TRUNCATE" (exactArity "TRUNCATE" 2 truncateFn)
     |> registerScalar "RAND" (arityRange "RAND" 0 1 randFn)
     |> registerScalarResult "GREATEST" (CombineArguments everyArgument) (minimumArity "GREATEST" 1 greatestFn)

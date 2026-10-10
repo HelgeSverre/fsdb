@@ -4726,6 +4726,24 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE constant_null_fallback" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private signFunctionalIndex =
+        { Name = "sign-functional-index"
+          Setup =
+            [| "CREATE TABLE sign_probe(id INT PRIMARY KEY,score INT,KEY ix_sign ((SIGN(score))))"
+               "INSERT INTO sign_probe VALUES(1,-5),(2,-2),(3,0),(4,3),(5,9)" |]
+          Steps =
+            [| Contract.query "negative" "SELECT id FROM sign_probe WHERE SIGN(score)=-1 ORDER BY id"
+               Contract.query "nonnegative-range"
+                   "SELECT id FROM sign_probe WHERE SIGN(score) BETWEEN 0 AND 1 ORDER BY id"
+               Contract.query "ordered" "SELECT id,SIGN(score) FROM sign_probe ORDER BY SIGN(score),id LIMIT 3"
+               Contract.execute "update" "UPDATE sign_probe SET score=7 WHERE id=2"
+               Contract.query "negative-after-update"
+                   "SELECT id FROM sign_probe WHERE SIGN(score)=-1 ORDER BY id"
+               Contract.query "positive-after-update"
+                   "SELECT id FROM sign_probe WHERE SIGN(score)=1 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE sign_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private tableStatisticsCache =
         let rows =
             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
@@ -9069,7 +9087,8 @@ module ContractCatalog =
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let all =
-        [| constantNullFallbackIndexes
+        [| signFunctionalIndex
+           constantNullFallbackIndexes
            tableStatisticsCache
            missingTableDiagnostics
            regexpPosixClasses

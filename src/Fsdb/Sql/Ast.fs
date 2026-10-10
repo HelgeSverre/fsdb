@@ -407,6 +407,7 @@ and IndexTransform =
     | BitLength
     | AbsoluteValue
     | Expression of Expr
+    | Signum
 
 and IndexColumn =
     { Name: string

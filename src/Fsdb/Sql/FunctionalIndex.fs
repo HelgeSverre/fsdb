@@ -37,7 +37,10 @@ let private definitions =
         Transform = BitLength }
       { CanonicalName = "ABS"
         Aliases = []
-        Transform = AbsoluteValue } ]
+        Transform = AbsoluteValue }
+      { CanonicalName = "SIGN"
+        Aliases = []
+        Transform = Signum } ]
 
 let private namesOf definition =
     definition.CanonicalName :: definition.Aliases
@@ -122,7 +125,8 @@ let rec hasTextResult = function
     | CharacterLength
     | ByteLength
     | BitLength
-    | AbsoluteValue -> false
+    | AbsoluteValue
+    | Signum -> false
 
 let tryRebaseColumn column = function
     | Expression expression ->
@@ -180,7 +184,8 @@ let private supportsSingleTransform transform columnType =
         | TGeometry _
         | TVector _ -> false
         | _ -> true
-    | AbsoluteValue ->
+    | AbsoluteValue
+    | Signum ->
         isNumeric columnType || isTextOrBinary columnType
     | Expression _ -> false
 
@@ -211,14 +216,16 @@ let supportsColumnType transform columnType =
                 else
                     supportsSingleTransform first columnType
             | first :: _, _ when List.forall isTextTransform transforms -> supportsSingleTransform first columnType
-            | _ :: _, _ when List.forall ((=) AbsoluteValue) transforms -> supportsSingleTransform AbsoluteValue columnType
+            | _ :: _, _ when List.forall (fun transform -> transform = AbsoluteValue || transform = Signum) transforms ->
+                supportsSingleTransform AbsoluteValue columnType
             | _ -> false)
     | transform -> supportsSingleTransform transform columnType
 
 let rec fixedKeyLength = function
     | CharacterLength
     | ByteLength
-    | BitLength -> Some 8
+    | BitLength
+    | Signum -> Some 8
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> fixedKeyLength))
@@ -326,7 +333,8 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
         | _ -> normalizeStored value
     | Some CharacterLength, _
     | Some ByteLength, _
-    | Some BitLength, _ -> tryExactInt64 value |> Option.map VInt
+    | Some BitLength, _
+    | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
     | Some(Expression expression), _ ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical ->
@@ -334,6 +342,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
 
             match List.tryLast transforms with
             | Some transform when isLengthTransform transform -> tryExactInt64 value |> Option.map VInt
+            | Some _ when List.contains Signum transforms -> tryExactInt64 value |> Option.map VInt
             | Some AbsoluteValue when List.forall ((=) AbsoluteValue) transforms ->
                 tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
             | Some _ -> normalizeStored value
@@ -357,6 +366,11 @@ let rec projectValueWithStatus encodeText transform value =
     | Some CharacterLength, value -> VInt(characterLength value), None
     | Some ByteLength, value -> VInt(byteLengthWith encodeText value), None
     | Some BitLength, value -> VInt(byteLengthWith encodeText value * 8L), None
+    | Some Signum, ((VString _ | VBytes _) as value) ->
+        let text = value |> toText |> Option.defaultValue ""
+        let number, truncated = coerceLeadingDouble text
+        VInt(int64 (sign number)), (if truncated then Some text else None)
+    | Some Signum, value -> VInt(int64 (sign (toDouble value))), None
     | Some AbsoluteValue, VInt Int64.MinValue -> raise SignedOutOfRange
     | Some AbsoluteValue, VInt value -> VInt(abs value), None
     | Some AbsoluteValue, VUInt value -> VUInt value, None
