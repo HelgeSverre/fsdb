@@ -418,6 +418,7 @@ and IndexTransform =
     | Floored
     | Ceiled
     | Rounded
+    | SquareRooted
 
 and IndexColumn =
     { Name: string

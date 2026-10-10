@@ -9021,6 +9021,78 @@ let tests =
                         |> explainRow
                     Expect.equal overridePlan.Key None "an overridden FLOOR cannot claim its stored key"
 
+                testCase "SQRT functional keys index nonnegative numeric and text values"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE sqrt_keys(id INT PRIMARY KEY, exact_value DECIMAL(8,2), approximate DOUBLE, text_value VARCHAR(20), KEY ix_sqrt_exact ((SQRT(exact_value))), KEY ix_sqrt_approx ((SQRT(approximate))), KEY ix_sqrt_text ((SQRT(text_value))))"
+                    |> ignore
+                    runDefault store "INSERT INTO sqrt_keys VALUES(1,0,0,'0'),(2,4,4,'4'),(3,9,9,'9'),(4,-1,-1,'-1'),(5,NULL,NULL,NULL)"
+                    |> ignore
+
+                    Expect.equal
+                        (runDefault store "SELECT id,SQRT(exact_value),SQRT(approximate),SQRT(text_value) FROM sqrt_keys ORDER BY id")
+                        (ResultSet(
+                            [ "id"; "SQRT(exact_value)"; "SQRT(approximate)"; "SQRT(text_value)" ],
+                            [ [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                              [ Some "2"; Some "2"; Some "2"; Some "2" ]
+                              [ Some "3"; Some "3"; Some "3"; Some "3" ]
+                              [ Some "4"; None; None; None ]
+                              [ Some "5"; None; None; None ] ]))
+                        "negative and NULL inputs produce NULL"
+
+                    for column, key in
+                        [ "exact_value", "ix_sqrt_exact"; "approximate", "ix_sqrt_approx"; "text_value", "ix_sqrt_text" ] do
+                        let sql = sprintf "SELECT id FROM sqrt_keys WHERE SQRT(%s)=2e0" column
+                        Expect.equal (runDefault store sql) (ResultSet([ "id" ], [ [ Some "2" ] ])) sql
+                        let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
+                        Expect.equal plan.Key (Some key) (sprintf "SQRT uses its functional key: %A" plan)
+
+                    let exactProbePlan = runDefault store "EXPLAIN SELECT id FROM sqrt_keys WHERE SQRT(exact_value)=2" |> explainRow
+                    Expect.equal exactProbePlan.Key None "an exact numeric probe does not claim the double key"
+
+                    let overridden = builtins |> registerScalar "SQRT" (fun _ -> VDouble 99.0)
+                    let overridePlan = run store overridden "EXPLAIN SELECT id FROM sqrt_keys WHERE SQRT(exact_value)=99e0" |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden SQRT cannot claim its stored key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM sqrt_keys WHERE SQRT(exact_value)>2e0 ORDER BY SQRT(exact_value)")
+                        (ResultSet([ "id" ], [ [ Some "3" ] ]))
+                        "the square-root key supports ranges"
+                    let rangePlan = runDefault store "EXPLAIN SELECT id FROM sqrt_keys WHERE SQRT(exact_value)>2e0" |> explainRow
+                    Expect.equal rangePlan.AccessType (Some "range") "SQRT probes its ordered range"
+                    Expect.equal rangePlan.Key (Some "ix_sqrt_exact") "SQRT reports its range key"
+
+                    Expect.equal
+                        (runDefault store "SELECT SQRT(exact_value),COUNT(*) FROM sqrt_keys GROUP BY SQRT(exact_value) ORDER BY SQRT(exact_value)")
+                        (ResultSet(
+                            [ "SQRT(exact_value)"; "COUNT(*)" ],
+                            [ [ None; Some "2" ]
+                              [ Some "0"; Some "1" ]
+                              [ Some "2"; Some "1" ]
+                              [ Some "3"; Some "1" ] ]))
+                        "negative and absent inputs group under NULL"
+                    let groupedPlan =
+                        runDefault store "EXPLAIN SELECT SQRT(exact_value),COUNT(*) FROM sqrt_keys GROUP BY SQRT(exact_value) ORDER BY SQRT(exact_value)"
+                        |> explainRow
+                    Expect.equal groupedPlan.Key (Some "ix_sqrt_exact") "SQRT groups through its stored order"
+
+                    runDefault store "CREATE TABLE unique_sqrt(id INT PRIMARY KEY, value DECIMAL(8,2), UNIQUE KEY ux_sqrt ((SQRT(value))))" |> ignore
+                    runDefault store "INSERT INTO unique_sqrt VALUES(1,4.00)" |> ignore
+                    match runDefault store "INSERT INTO unique_sqrt VALUES(2,4.00)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected square-root-key uniqueness to reject a duplicate, got %A" other
+                    runDefault store "INSERT INTO unique_sqrt VALUES(3,-1),(4,-2)" |> ignore
+
+                    runDefault store "UPDATE sqrt_keys SET exact_value=16 WHERE id=2" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM sqrt_keys WHERE SQRT(exact_value)=2e0")
+                        (ResultSet([ "id" ], []))
+                        "updates remove the old square-root key"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM sqrt_keys WHERE SQRT(exact_value)=4e0")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "updates insert the new square-root key"
+
                 testCase "ROUND functional keys retain exact and approximate halves"
                 <| fun _ ->
                     let store = newStore ()

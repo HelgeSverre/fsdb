@@ -70,7 +70,10 @@ let private definitions =
         Transform = Ceiled }
       { CanonicalName = "ROUND"
         Aliases = []
-        Transform = Rounded } ]
+        Transform = Rounded }
+      { CanonicalName = "SQRT"
+        Aliases = []
+        Transform = SquareRooted } ]
 
 let private namesOf definition =
     definition.CanonicalName :: definition.Aliases
@@ -166,7 +169,8 @@ let rec hasTextResult = function
     | Signum
     | Floored
     | Ceiled
-    | Rounded -> false
+    | Rounded
+    | SquareRooted -> false
 
 let tryRebaseColumn column = function
     | Expression expression ->
@@ -234,7 +238,8 @@ let private supportsSingleTransform transform columnType =
     | Signum
     | Floored
     | Ceiled
-    | Rounded ->
+    | Rounded
+    | SquareRooted ->
         isNumeric columnType || isTextOrBinary columnType
     | IsNullResult -> true
     | Expression _ -> false
@@ -427,6 +432,8 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
         value |> toDouble |> VDouble |> Some
     | (Some Floored | Some Ceiled | Some Rounded), _ ->
         tryRoundedProbe columnType value |> Option.orElseWith (fun () -> normalizeStored value)
+    | Some SquareRooted, VDouble number when Double.IsFinite number -> Some(VDouble number)
+    | Some SquareRooted, _ -> None
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _
@@ -568,6 +575,16 @@ let rec projectValueWithStatus encodeText transform value =
             (fun number -> Math.Round(number, MidpointRounding.AwayFromZero))
             (fun number -> Math.Round(number, MidpointRounding.ToEven))
             value
+    | Some SquareRooted, value ->
+        let number, truncated =
+            match value with
+            | (VString _ | VBytes _) as textValue ->
+                let text = textValue |> toText |> Option.defaultValue ""
+                let number, truncated = coerceLeadingDouble text
+                number, (if truncated then Some text else None)
+            | value -> toDouble value, None
+
+        (if number < 0.0 then VNull else VDouble(Math.Sqrt number)), truncated
     | Some Signum, ((VString _ | VBytes _) as value) ->
         let text = value |> toText |> Option.defaultValue ""
         let number, truncated = coerceLeadingDouble text

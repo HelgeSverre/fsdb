@@ -4969,7 +4969,9 @@ module ContractCatalog =
             [| "CREATE TABLE rounded_probe(id INT PRIMARY KEY,exact_value DECIMAL(8,2),text_value VARCHAR(20),KEY ix_floor ((FLOOR(exact_value))),KEY ix_ceil ((CEILING(exact_value))),KEY ix_floor_text ((FLOOR(text_value))))"
                "INSERT INTO rounded_probe VALUES(1,-2.50,'-2.5'),(2,0.01,'0.01'),(3,2.99,'2.99')"
                "CREATE TABLE round_probe(id INT PRIMARY KEY,exact_value DECIMAL(8,2),approximate DOUBLE,text_value VARCHAR(20),UNIQUE KEY ux_round_exact ((ROUND(exact_value))),KEY ix_round_approx ((ROUND(approximate))),KEY ix_round_text ((ROUND(text_value))))"
-               "INSERT INTO round_probe VALUES(1,1.50,1.5,'1.5'),(2,2.50,2.5,'2.5'),(3,-1.50,-1.5,'-1.5'),(4,-2.50,-2.5,'-2.5')" |]
+               "INSERT INTO round_probe VALUES(1,1.50,1.5,'1.5'),(2,2.50,2.5,'2.5'),(3,-1.50,-1.5,'-1.5'),(4,-2.50,-2.5,'-2.5')"
+               "CREATE TABLE sqrt_probe(id INT PRIMARY KEY,exact_value DECIMAL(8,2),approximate DOUBLE,text_value VARCHAR(20),UNIQUE KEY ux_sqrt_exact ((SQRT(exact_value))),KEY ix_sqrt_approx ((SQRT(approximate))),KEY ix_sqrt_text ((SQRT(text_value))))"
+               "INSERT INTO sqrt_probe VALUES(1,0,0,'0'),(2,4,4,'4'),(3,9,9,'9'),(4,-1,-1,'-1'),(5,NULL,NULL,NULL)" |]
           Steps =
             [| Contract.query "floor-decimal" "SELECT id FROM rounded_probe WHERE FLOOR(exact_value)=2"
                Contract.query "ceil-alias" "SELECT id FROM rounded_probe WHERE CEIL(exact_value)=1"
@@ -4995,8 +4997,18 @@ module ContractCatalog =
                Contract.execute "round-unique-duplicate" "INSERT INTO round_probe VALUES(5,1.51,5.0,'5.0')" |> Contract.fails 1062 "23000"
                Contract.execute "round-update" "UPDATE round_probe SET exact_value=4.50 WHERE id=2"
                Contract.query "round-old-key" "SELECT id FROM round_probe WHERE ROUND(exact_value)=3"
-               Contract.query "round-new-key" "SELECT id FROM round_probe WHERE ROUND(exact_value)=5" |]
-          Cleanup = [| "DROP TABLE round_probe"; "DROP TABLE rounded_probe" |]
+               Contract.query "round-new-key" "SELECT id FROM round_probe WHERE ROUND(exact_value)=5"
+               Contract.query "sqrt-values" "SELECT id,SQRT(exact_value),SQRT(approximate),SQRT(text_value) FROM sqrt_probe ORDER BY id"
+               Contract.query "sqrt-exact" "SELECT id FROM sqrt_probe WHERE SQRT(exact_value)=2e0"
+               Contract.query "sqrt-approximate" "SELECT id FROM sqrt_probe WHERE SQRT(approximate)=2e0"
+               Contract.query "sqrt-text" "SELECT id FROM sqrt_probe WHERE SQRT(text_value)=2e0"
+               Contract.query "sqrt-range" "SELECT id FROM sqrt_probe WHERE SQRT(exact_value)>2e0 ORDER BY SQRT(exact_value)"
+               Contract.query "sqrt-groups" "SELECT SQRT(exact_value),COUNT(*) FROM sqrt_probe GROUP BY SQRT(exact_value) ORDER BY SQRT(exact_value)"
+               Contract.execute "sqrt-unique-duplicate" "INSERT INTO sqrt_probe VALUES(6,4,16,'16')" |> Contract.fails 1062 "23000"
+               Contract.execute "sqrt-update" "UPDATE sqrt_probe SET exact_value=16 WHERE id=2"
+               Contract.query "sqrt-old-key" "SELECT id FROM sqrt_probe WHERE SQRT(exact_value)=2e0"
+               Contract.query "sqrt-new-key" "SELECT id FROM sqrt_probe WHERE SQRT(exact_value)=4e0" |]
+          Cleanup = [| "DROP TABLE sqrt_probe"; "DROP TABLE round_probe"; "DROP TABLE rounded_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private tableStatisticsCache =
