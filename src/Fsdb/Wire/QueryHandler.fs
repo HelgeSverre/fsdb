@@ -772,6 +772,35 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
     |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
 
+let private storedFunctionEntries store =
+    match Storage.scanList store "mysql" "functions" with
+    | Ok(_, rows) -> rows |> List.choose SystemCatalog.StoredFunction.tryRead
+    | Error _ -> []
+
+let private registerStoredFunctions registry functions invoke =
+    let register registry (routine: SystemCatalog.StoredFunction.Entry) =
+        let name = routine.Schema + "." + routine.Name
+        let call arguments = invoke routine arguments
+        match Parser.parseColumnTypeWithOptions (SqlMode.parserOptionsFor routine.SqlMode) routine.ReturnType with
+        | Error _ -> Functions.registerScalar name call registry
+        | Ok columnType ->
+            let metadata = ColumnWire.metadataOfType columnType
+            let metadata =
+                match columnType with
+                | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _ ->
+                    let collationId =
+                        Collation.idAndSortlen
+                        |> Map.tryFind routine.CollationConnection
+                        |> Option.map (fst >> uint16)
+                    { metadata with CollationId = collationId }
+                | _ -> metadata
+            Functions.registerScalarWithMetadata name metadata call registry
+
+    functions |> List.fold register registry
+
+let private preparedRegistryFor session =
+    registerStoredFunctions (registryFor session) (storedFunctionEntries session.Store) (fun _ _ -> VNull)
+
 let private evaluateSessionExpression
     (session: Session)
     (variables: Executor.VariableContext)
@@ -3839,18 +3868,24 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
 
     TableHandler.invalidate session stmt executed result, result
 
-let private executeParsedWithTemporaryAction action session stmt =
-    Executor.withFunctionDatabase session.Database (fun () ->
+let private executeParsedWithTemporaryActionInFunctionDatabase database action session stmt =
+    Executor.withFunctionDatabase database (fun () ->
         executeParsedWithTemporaryActionCore action session stmt)
 
-let private executeParsed session stmt =
+let private executeParsedWithFunctionDatabase database session stmt =
     match stmt with
     | SetVariables assignments ->
-        Executor.withFunctionDatabase session.Database (fun () ->
+        Executor.withFunctionDatabase database (fun () ->
             InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.setOption
             let session, result = executeVariableSet session assignments
             { session with LastResultColumnMetadata = [] }, result)
-    | _ -> executeParsedWithTemporaryAction None session stmt
+    | _ -> executeParsedWithTemporaryActionInFunctionDatabase database None session stmt
+
+let private executeParsedWithTemporaryAction action session stmt =
+    executeParsedWithTemporaryActionInFunctionDatabase session.Database action session stmt
+
+let private executeParsed session stmt =
+    executeParsedWithFunctionDatabase session.Database session stmt
 
 let private parsedStatementCapacity = 16384
 let private parsedStatementCandidateCapacity = parsedStatementCapacity * 2
@@ -3889,6 +3924,35 @@ let private parseStatement (options: Parser.ParserOptions) (sql: string) =
 
             parsed
         | Result.Error _ as error -> error
+
+let private resolveMissingFunctionDatabase selectedDatabase parserOptions sql result =
+    let prefix, suffix = "FUNCTION ", " does not exist"
+    let resolvesFunctionNames = function
+        | Select _ | Union _ | CreateTableAs _ | CreateView _
+        | Insert _ | InsertSelect _
+        | Replace _ | ReplaceSelect _ | ReplaceSet _
+        | Update _ | Delete _ | Do _ | SetVariables _ -> true
+        | _ -> false
+    match result with
+    | Err(1305, message) when
+        message.StartsWith(prefix, StringComparison.Ordinal)
+        && message.EndsWith(suffix, StringComparison.Ordinal) ->
+        let name = message.Substring(prefix.Length, message.Length - prefix.Length - suffix.Length)
+        let resolvesUnqualifiedFunction =
+            if name.Contains('.') then false
+            else
+                match parseStatement parserOptions sql with
+                | Ok statement -> resolvesFunctionNames statement
+                | Error _ -> sql.TrimStart().StartsWith("SET ", StringComparison.OrdinalIgnoreCase)
+        match selectedDatabase with
+        | Some database when resolvesUnqualifiedFunction ->
+            Err(1305, sprintf "FUNCTION %s.%s does not exist" database name)
+        | None when resolvesUnqualifiedFunction ->
+            // MySQL records one condition during resolution and one terminal error.
+            Diagnostics.error 1046 "No database selected"
+            Err(1046, "No database selected")
+        | _ -> result
+    | _ -> result
 
 let private executeStatement (session: Session) (normalizedSql: string) (parserSql: string) : Session * QueryResult =
     let parserOptions = parserOptionsForSession session
@@ -5247,7 +5311,7 @@ let private bindPreparedPlaceholders source (session: Session) (prepared: Prepar
         Error(1210, "Incorrect arguments to EXECUTE")
     else
         let store = preparedStore session
-        let registry = registryFor session
+        let registry = preparedRegistryFor session
         let schema = session.Database |> Option.defaultValue defaultDatabase
 
         let dependencies = preparedDependencies session statement
@@ -5352,7 +5416,13 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
             let store = preparedStore session
             let schema = session.Database |> Option.defaultValue defaultDatabase
             checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema ast)
-            |> Result.bind (fun () -> Executor.validatePreparedBindings store (registryFor session) schema ast)
+            |> Result.bind (fun () ->
+                Executor.withFunctionDatabase session.Database (fun () ->
+                    Executor.validatePreparedBindings store (preparedRegistryFor session) schema ast))
+            |> Result.mapError (fun (code, message) ->
+                match resolveMissingFunctionDatabase session.Database options sql (Err(code, message)) with
+                | Err(normalizedCode, normalizedMessage) -> normalizedCode, normalizedMessage
+                | _ -> code, message)
             |> Result.map (fun () -> statement, count))
 
 /// Binary preparation starts a new diagnostics area, just as COM_QUERY does.
@@ -5376,7 +5446,7 @@ let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
         ast |> Option.map (fun statement ->
             PreparedMetadata.initialTypes
                 (preparedStore session)
-                (registryFor session)
+                (preparedRegistryFor session)
                 (session.Database |> Option.defaultValue defaultDatabase)
                 statement
                 count)
@@ -5387,6 +5457,7 @@ let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
       LastParamTypes = None
       ParameterTypes = types
       SchemaDependencies = ast |> Option.map (preparedDependencies session) |> Option.defaultValue Map.empty
+      FunctionDatabase = session.Database
       DivisionPrecisionIncrement = sessionDivisionPrecision session }
 
 let private preparedMetadataCore
@@ -5401,7 +5472,7 @@ let private preparedMetadataCore
     | Some statement ->
         let store = preparedStore session
         let schema = session.Database |> Option.defaultValue defaultDatabase
-        let registry = registryFor session
+        let registry = preparedRegistryFor session
 
         match checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema statement) with
         | Error _ -> List.replicate parameterCount generic, []
@@ -6884,48 +6955,10 @@ let rec private invokeStoredFunction
         )
 
 and private withStoredFunctions executeText current =
-    let functions =
-        match Storage.scanList current.Store "mysql" "functions" with
-        | Ok(_, rows) -> rows |> List.choose SystemCatalog.StoredFunction.tryRead
-        | Error _ -> []
-
-    let register name routine registry =
-        let invoke arguments =
-            if Executor.isMetadataProbe () then
-                VNull
-            else
-                invokeStoredFunction executeText current routine arguments
-
-        match Parser.parseColumnTypeWithOptions (SqlMode.parserOptionsFor routine.SqlMode) routine.ReturnType with
-        | Error _ -> Functions.registerScalar name invoke registry
-        | Ok columnType ->
-            let metadata =
-                let metadata = ColumnWire.metadataOfType columnType
-
-                match columnType with
-                | TChar _
-                | TVarchar _
-                | TTinyText
-                | TText
-                | TMediumText
-                | TLongText
-                | TEnum _
-                | TSet _ ->
-                    let collationId =
-                        Collation.idAndSortlen
-                        |> Map.tryFind routine.CollationConnection
-                        |> Option.map (fst >> uint16)
-
-                    { metadata with CollationId = collationId }
-                | _ -> metadata
-
-            Functions.registerScalarWithMetadata name metadata invoke registry
-
     let registry =
-        functions
-        |> List.fold
-            (fun registry routine -> register (routine.Schema + "." + routine.Name) routine registry)
-            current.CustomFunctions
+        registerStoredFunctions current.CustomFunctions (storedFunctionEntries current.Store) (fun routine arguments ->
+            if Executor.isMetadataProbe () then VNull
+            else invokeStoredFunction executeText current routine arguments)
 
     { current with CustomFunctions = registry }
 
@@ -7061,7 +7094,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             | Ok(updated, bound) ->
                                 let current = { current with TextStatements = Map.add name updated current.TextStatements }
                                 Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
-                                    executeParsed current bound)
+                                    executeParsedWithFunctionDatabase updated.FunctionDatabase current bound)
                             | Error(code, message) -> current, Err(code, message)))
                 | None ->
                     dispatch
@@ -7981,35 +8014,6 @@ let private accountUpdateIsAuthorized session = function
     | ProbedAccountStatement _ -> false
     | UnknownAccountStatement -> false
 
-let private resolveMissingFunctionDatabase selectedDatabase parserOptions sql result =
-    let prefix, suffix = "FUNCTION ", " does not exist"
-    let resolvesFunctionNames = function
-        | Select _ | Union _ | CreateTableAs _ | CreateView _
-        | Insert _ | InsertSelect _
-        | Replace _ | ReplaceSelect _ | ReplaceSet _
-        | Update _ | Delete _ | Do _ | SetVariables _ -> true
-        | _ -> false
-    match result with
-    | Err(1305, message) when
-        message.StartsWith(prefix, StringComparison.Ordinal)
-        && message.EndsWith(suffix, StringComparison.Ordinal) ->
-        let name = message.Substring(prefix.Length, message.Length - prefix.Length - suffix.Length)
-        let resolvesUnqualifiedFunction =
-            if name.Contains('.') then false
-            else
-                match parseStatement parserOptions sql with
-                | Ok statement -> resolvesFunctionNames statement
-                | Error _ -> sql.TrimStart().StartsWith("SET ", StringComparison.OrdinalIgnoreCase)
-        match selectedDatabase with
-        | Some database when resolvesUnqualifiedFunction ->
-            Err(1305, sprintf "FUNCTION %s.%s does not exist" database name)
-        | None when resolvesUnqualifiedFunction ->
-            // MySQL records one condition during resolution and one terminal error.
-            Diagnostics.error 1046 "No database selected"
-            Err(1046, "No database selected")
-        | _ -> result
-    | _ -> result
-
 let private recordSlowQueryIfNeeded (session: Session) startedAt =
     let threshold =
         sessionValue session "long_query_time"
@@ -8281,7 +8285,8 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                                     let executed, result =
                                         Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
                                             withTriggerSessionExecution session (fun () ->
-                                                withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement)))
+                                                withStoredFunctionRegistry dispatch session (fun current ->
+                                                    executeParsedWithFunctionDatabase updated.FunctionDatabase current statement)))
 
                                     (if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                          { executed with PasswordExpired = false }

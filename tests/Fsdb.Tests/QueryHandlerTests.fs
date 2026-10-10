@@ -3100,8 +3100,13 @@ let tests =
 
           testCase "prepared metadata normalizes a long function name once"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
               let functionName = String.replicate 10_000 "f"
+              let session = create 1 (Fsdb.Storage.create ())
+              let session =
+                  { session with
+                      CustomFunctions =
+                          session.CustomFunctions
+                          |> Fsdb.Functions.registerScalar functionName (fun _ -> VInt 1L) }
               let arguments = List.replicate 128 "?" |> String.concat ","
               let sql = sprintf "SELECT %s(%s)" functionName arguments
 
@@ -4672,6 +4677,7 @@ let tests =
                     LastParamTypes = None
                     ParameterTypes = None
                     SchemaDependencies = Map.empty
+                    FunctionDatabase = None
                     DivisionPrecisionIncrement = 4 }
 
               let literalSession, result = executePrepared literalSession textStatement [ VString "O'Brien\\" ]
@@ -5170,6 +5176,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = session.Database
                         DivisionPrecisionIncrement = 4 }
 
                   let session, result =
@@ -7328,6 +7335,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = session.Database
                         DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VInt 7L ] with
@@ -9256,6 +9264,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = None
                         DivisionPrecisionIncrement = 4 }
                   | other -> failtestf "expected prepared query, got %A" other
 

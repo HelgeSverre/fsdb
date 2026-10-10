@@ -19892,7 +19892,7 @@ let statementColumns (store: Store) (registry: Registry) (schema: string) (state
     | _ -> None
 
 /// Binds references and literal diagnostics without evaluating prepared statements.
-let private validateBindingsWith describeColumns store registry schema statement =
+let private validateBindingsWith describeColumns validateFunction store registry schema statement =
     let validateBody body =
         match describeColumns store registry schema (QueryBody body) with
         | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
@@ -19901,7 +19901,7 @@ let private validateBindingsWith describeColumns store registry schema statement
     let validateExpressions expressions =
         expressions
         |> traverse (validateExpressionBindings (fun _ -> Ok()) (PlainSelect >> validateBody)
-                         Expression.tryLiteralNodeDiagnostic id (fun _ -> Ok()))
+                         Expression.tryLiteralNodeDiagnostic id validateFunction)
         |> Result.map ignore
 
     let rec validate = function
@@ -19930,10 +19930,12 @@ let private validateBindingsWith describeColumns store registry schema statement
     validate statement
 
 let validatePreparedBindings store registry schema statement =
-    validateBindingsWith describeQueryColumnsChecked store registry schema statement
+    let validateFunction = validateFunctionName registry schema
+    validateBindingsWith (describeQueryColumnsCheckingFunctions schema) validateFunction store registry schema statement
 
 let private validateViewBindings store registry schema functionDatabase statement =
-    validateBindingsWith (describeQueryColumnsCheckingFunctions functionDatabase) store registry schema statement
+    let validateFunction = validateFunctionName registry functionDatabase
+    validateBindingsWith (describeQueryColumnsCheckingFunctions functionDatabase) validateFunction store registry schema statement
 
 let private statementSources store schema (select: SelectStmt) =
     (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)

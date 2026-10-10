@@ -226,6 +226,8 @@ type PreparedStmt =
       LastParamTypes: (byte * bool) list option
       ParameterTypes: Fsdb.PreparedMetadata.ParameterTypes option
       SchemaDependencies: Map<string * string, PreparedDependency option>
+      /// The selected schema at PREPARE time binds unqualified stored-function names.
+      FunctionDatabase: string option
       DivisionPrecisionIncrement: int }
 
 /// A materialized read-only result retained between COM_STMT_FETCH calls.

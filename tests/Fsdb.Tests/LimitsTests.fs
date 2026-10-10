@@ -936,6 +936,7 @@ let tests =
                             LastParamTypes = None
                             ParameterTypes = None
                             SchemaDependencies = Map.empty
+                            FunctionDatabase = None
                             DivisionPrecisionIncrement = 4 }
 
                       match executePrepared session prepared [] |> snd with

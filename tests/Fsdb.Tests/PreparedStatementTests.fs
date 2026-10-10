@@ -33,7 +33,74 @@ let private relationNameSession () =
 let tests =
     testList
         "PreparedStatements"
-        [ testCase "prepared functional equality narrows candidates before residual evaluation"
+        [ testCase "preparing an unqualified stored function requires a selected database"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created =
+                  handle session "CREATE FUNCTION fsdb.prepared_fn() RETURNS INT DETERMINISTIC RETURN 7"
+              Expect.equal created (Affected 0UL) "create qualified function"
+              let sql = "SELECT prepared_fn()"
+              Expect.equal
+                  (prepareStatementForSession session sql)
+                  (Error(1046, "No database selected"))
+                  "binary prepare checks the selected database"
+              Expect.equal
+                  (handle session "PREPARE p FROM 'SELECT prepared_fn()'" |> snd)
+                  (Err(1046, "No database selected"))
+                  "text prepare checks the selected database"
+              let qualified = "SELECT fsdb.prepared_fn()"
+              let ast, count =
+                  prepareStatementForSession session qualified
+                  |> Result.defaultWith (fun error -> failtestf "qualified prepare failed: %A" error)
+              let prepared = createPreparedStatement session qualified ast count
+              Expect.equal
+                  (executePrepared session prepared [] |> snd)
+                  (ResultSet([ "fsdb.prepared_fn()" ], [ [ Some "7" ] ]))
+                  "qualified function remains callable"
+              let session, created = handle session "CREATE DATABASE prepared_other"
+              Expect.equal created (Affected 1UL) "create second schema"
+              let session, created =
+                  handle session "CREATE FUNCTION prepared_other.prepared_fn() RETURNS INT DETERMINISTIC RETURN 9"
+              Expect.equal created (Affected 0UL) "create same-named function in second schema"
+              let session, created =
+                  handle session "CREATE FUNCTION fsdb.prepared_arg(value INT) RETURNS INT DETERMINISTIC RETURN value+7"
+              Expect.equal created (Affected 0UL) "create parameterized function"
+              let session, created =
+                  handle session "CREATE FUNCTION prepared_other.prepared_arg(value INT) RETURNS INT DETERMINISTIC RETURN value+9"
+              Expect.equal created (Affected 0UL) "create second parameterized function"
+              let session, selected = handle session "USE fsdb"
+              Expect.equal selected (Affected 0UL) "select preparation schema"
+              let ast, count =
+                  prepareStatementForSession session sql
+                  |> Result.defaultWith (fun error -> failtestf "prepare failed: %A" error)
+              let bound = createPreparedStatement session sql ast count
+              let session, prepared = handle session "PREPARE p FROM 'SELECT prepared_fn()'"
+              Expect.equal prepared (Affected 0UL) "text prepare"
+              let parameterSql = "SELECT prepared_arg(?)"
+              let ast, count =
+                  prepareStatementForSession session parameterSql
+                  |> Result.defaultWith (fun error -> failtestf "parameterized prepare failed: %A" error)
+              let boundParameter = createPreparedStatement session parameterSql ast count
+              let session, prepared = handle session "PREPARE q FROM 'SELECT prepared_arg(?)'"
+              Expect.equal prepared (Affected 0UL) "parameterized text prepare"
+              let session, selected = handle session "USE prepared_other"
+              Expect.equal selected (Affected 0UL) "switch schema after preparation"
+              let expected = ResultSet([ "prepared_fn()" ], [ [ Some "7" ] ])
+              Expect.equal (executePrepared session bound [] |> snd) expected "binary execution keeps preparation schema"
+              Expect.equal (handle session "EXECUTE p" |> snd) expected "text execution keeps preparation schema"
+              let expectedParameter = ResultSet([ "prepared_arg(?)" ], [ [ Some "10" ] ])
+              Expect.equal
+                  (executePrepared session boundParameter [ VInt 3L ] |> snd)
+                  expectedParameter
+                  "parameterized binary execution keeps preparation schema"
+              let session, assigned = handle session "SET @input=3"
+              Expect.equal assigned (Affected 0UL) "set text prepared argument"
+              Expect.equal
+                  (handle session "EXECUTE q USING @input" |> snd)
+                  expectedParameter
+                  "parameterized text execution keeps preparation schema"
+
+          testCase "prepared functional equality narrows candidates before residual evaluation"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               let rows =
@@ -1668,6 +1735,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VString "name" ] |> snd with
@@ -1690,7 +1758,7 @@ let tests =
                       match prepareStatement sql with
                       | Ok prepared -> prepared
                       | Error error -> failtestf "prepare failed: %A" error
-                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None; SchemaDependencies = Map.empty; DivisionPrecisionIncrement = 4 }
+                  let statement = { Ast = ast; Sql = sql; ParamCount = count; LastParamTypes = None; ParameterTypes = None; SchemaDependencies = Map.empty; FunctionDatabase = None; DivisionPrecisionIncrement = 4 }
                   for value in [ VInt -2L; VInt 7L; VNull ] do
                       match executePrepared session statement (List.replicate count value) |> snd with
                       | ResultSet(columns, _) -> Expect.equal columns names sql
@@ -3136,6 +3204,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   // The name carries a quote and a backslash — bound as a
@@ -3169,6 +3238,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   let parameters =
@@ -3214,6 +3284,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VString "1.5" ] |> snd with
@@ -3248,6 +3319,7 @@ let tests =
                             LastParamTypes = None
                             ParameterTypes = None
                             SchemaDependencies = Map.empty
+                            FunctionDatabase = None
                             DivisionPrecisionIncrement = 4 }
                           [ value ]
                       |> snd
@@ -3322,6 +3394,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   let session, result = executePrepared session statement [ VInt 2L; VInt 99L ]
@@ -3347,6 +3420,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   match executePrepared session statement [ VInt 3L; VInt 4L ] |> snd with
@@ -3386,6 +3460,7 @@ let tests =
                         LastParamTypes = None
                         ParameterTypes = None
                         SchemaDependencies = Map.empty
+                        FunctionDatabase = None
                         DivisionPrecisionIncrement = 4 }
 
                   let session, result = executePrepared session statement [ VInt 0L ]

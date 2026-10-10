@@ -16,5 +16,5 @@ errors, qualified calls, a qualified view read, and unchanged table rows after
 rejected mutations.
 
 The MySQL evidence was taken from the digest-pinned 8.4.11 image in
-`torture/compose.yaml`. The audited statements cover text protocol; broader
-prepared and stored-program contexts remain to be compared.
+`torture/compose.yaml`. The audited statements cover text protocol;
+stored-program contexts remain to be compared.
