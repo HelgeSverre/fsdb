@@ -5154,7 +5154,7 @@ module ContractCatalog =
         { Name = "numeric-constant-index-bounds"
           Setup =
             [| "CREATE TABLE numeric_bounds(id INT PRIMARY KEY,label VARCHAR(20))"
-               "INSERT INTO numeric_bounds VALUES(-2,'minus two'),(1,'one'),(2,'two'),(3,'three'),(4,'four'),(20,'twenty')"
+               "INSERT INTO numeric_bounds VALUES(-2,'minus two'),(1,'one'),(2,'two'),(3,'three'),(4,'four'),(20,'twenty'),(891568578,'crc')"
                "CREATE TABLE numeric_bounds_scanned(id INT)"
                "INSERT INTO numeric_bounds_scanned VALUES(1),(2),(3)"
                "CREATE TABLE numeric_bounds_empty(id INT PRIMARY KEY)" |]
@@ -5165,6 +5165,10 @@ module ContractCatalog =
                Contract.query "truncate-negative-precision" "SELECT label FROM numeric_bounds WHERE id=TRUNCATE(29,-1)"
                Contract.query "pow" "SELECT label FROM numeric_bounds WHERE id=POW(2,2)"
                Contract.query "power" "SELECT label FROM numeric_bounds WHERE id=POWER(2,2)"
+               Contract.query "bit-count" "SELECT label FROM numeric_bounds WHERE id=BIT_COUNT(7)"
+               Contract.query "crc32" "SELECT label FROM numeric_bounds WHERE id=CRC32('abc')"
+               Contract.query "bit-count-text" "SELECT label FROM numeric_bounds WHERE id=BIT_COUNT('12x')"
+               Contract.query "crc32-utf8" "SELECT CRC32('é')"
                Contract.query "integral-decimal" "SELECT label FROM numeric_bounds WHERE id=2.0"
                Contract.query "fractional-decimal" "SELECT label FROM numeric_bounds WHERE id=2.5"
                Contract.query "range" "SELECT id FROM numeric_bounds WHERE id>=TRUNCATE(29,-1) ORDER BY id"
@@ -5191,7 +5195,10 @@ module ContractCatalog =
                Contract.query "branch-false-or" "SELECT id FROM numeric_bounds WHERE 0 OR id=MOD(5,0)"
                Contract.query "branch-false-or-warnings" "SHOW WARNINGS"
                Contract.query "scan-branch-hit-or" "SELECT id FROM numeric_bounds_scanned WHERE id=1 OR id=MOD(5,0)"
-               Contract.query "scan-branch-hit-or-warnings" "SHOW WARNINGS" |]
+               Contract.query "scan-branch-hit-or-warnings" "SHOW WARNINGS"
+               Contract.execute "bit-count-update" "UPDATE numeric_bounds SET label='counted' WHERE id=BIT_COUNT(7)"
+               Contract.execute "crc32-delete" "DELETE FROM numeric_bounds WHERE id=CRC32('abc')"
+               Contract.query "mutated-rows" "SELECT id,label FROM numeric_bounds WHERE id IN (3,891568578) ORDER BY id" |]
           Cleanup = [| "DROP TABLE numeric_bounds_empty"; "DROP TABLE numeric_bounds_scanned"; "DROP TABLE numeric_bounds" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 

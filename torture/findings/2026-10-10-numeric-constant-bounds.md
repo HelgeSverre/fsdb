@@ -16,8 +16,15 @@ fractional decimals, and an ordered range bound.
 The native and Expecto probes also cover an exact `BIGINT` decimal bound above
 the double-precision integer limit (`9007199254740993.0`).
 
+MySQL 8.4.11 also chooses `PRIMARY`/`const` for `id=BIT_COUNT(7)` and
+`id=CRC32('abc')`. Fsdb now folds these unmodified deterministic builtins into
+numeric index bounds. Focused tests cover matching rows, plan keys, and
+UPDATE/DELETE effects; the differential contract checks the same final data.
+The text-coercion result for `BIT_COUNT('12x')` also matches, but fsdb emits no
+conversion warnings where MySQL emits two. That diagnostic gap remains open.
+
 The expanded `numeric-constant-index-bounds` contract in run
-`20261010T121553333-67146` matched MySQL 8.4.11 on all 33 steps.
+`20261010T153911116-3559` matched MySQL 8.4.11 on all 40 steps.
 The complete run retained the same nine documented identifier-case
 differences elsewhere.
 

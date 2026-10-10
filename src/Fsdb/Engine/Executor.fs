@@ -11770,7 +11770,7 @@ and private isNumericIndexValue = function
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let foldableBuiltins =
         set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST"
-              "MOD"; "TRUNCATE"; "POW"; "POWER" ]
+              "MOD"; "TRUNCATE"; "POW"; "POWER"; "BIT_COUNT"; "CRC32" ]
 
     let rec isSafe expression =
         let safeChildren () = Expression.children expression |> List.forall isSafe

@@ -6384,7 +6384,7 @@ let tests =
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE numeric_bounds(id INT PRIMARY KEY, label VARCHAR(20))" |> ignore
-                    runDefault store "INSERT INTO numeric_bounds VALUES(-2,'minus two'),(1,'one'),(2,'two'),(3,'three'),(4,'four'),(20,'twenty')" |> ignore
+                    runDefault store "INSERT INTO numeric_bounds VALUES(-2,'minus two'),(1,'one'),(2,'two'),(3,'three'),(4,'four'),(20,'twenty'),(891568578,'crc')" |> ignore
 
                     for expression, expected in
                         [ "MOD(5,3)", "two"
@@ -6393,6 +6393,8 @@ let tests =
                           "TRUNCATE(29,-1)", "twenty"
                           "POW(2,2)", "four"
                           "POWER(2,2)", "four"
+                          "BIT_COUNT(7)", "three"
+                          "CRC32('abc')", "crc"
                           "2.0", "two" ] do
                         let sql = sprintf "SELECT label FROM numeric_bounds WHERE id=%s" expression
                         Expect.equal (runDefault store sql) (ResultSet([ "label" ], [ [ Some expected ] ])) sql
@@ -6433,6 +6435,14 @@ let tests =
                         run store overridden "EXPLAIN SELECT label FROM numeric_bounds WHERE id=MOD(5,3)"
                         |> explainRow
                     Expect.equal overridePlan.Key None "an overridden MOD cannot be folded into an index bound"
+                    Expect.equal
+                        (runDefault store "UPDATE numeric_bounds SET label='counted' WHERE id=BIT_COUNT(7)")
+                        (Affected 1UL)
+                        "BIT_COUNT bounds update one key"
+                    Expect.equal
+                        (runDefault store "DELETE FROM numeric_bounds WHERE id=CRC32('abc')")
+                        (Affected 1UL)
+                        "CRC32 bounds delete one key"
 
                 testCase "a one-column B-tree range matches a scan twin and retains residual predicates"
                 <| fun _ ->
