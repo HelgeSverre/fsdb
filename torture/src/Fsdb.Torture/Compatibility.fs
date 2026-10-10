@@ -5078,18 +5078,22 @@ module ContractCatalog =
         { Name = "inverse-trigonometric-functional-indexes"
           Setup =
             [| "CREATE TABLE inverse_trig_probe(id INT PRIMARY KEY,n DOUBLE,UNIQUE KEY ux_asin ((ASIN(n))),KEY ix_acos ((ACOS(n))),KEY ix_atan ((ATAN(n))))"
-               "INSERT INTO inverse_trig_probe VALUES(1,0),(2,1),(3,-1),(4,2),(5,NULL)" |]
+               "INSERT INTO inverse_trig_probe VALUES(1,0),(2,1),(3,-1),(4,2),(5,NULL)"
+               "CREATE TABLE atan_alias_probe(id INT PRIMARY KEY,n DOUBLE,KEY ix_atan2 ((ATAN2(n))))"
+               "INSERT INTO atan_alias_probe VALUES(1,0),(2,1),(3,-1),(4,NULL)" |]
           Steps =
             [| Contract.query "asin" "SELECT id FROM inverse_trig_probe WHERE ASIN(n)=0e0"
                Contract.query "acos" "SELECT id FROM inverse_trig_probe WHERE ACOS(n)=0e0"
                Contract.query "atan" "SELECT id FROM inverse_trig_probe WHERE ATAN(n)=0e0"
+               Contract.query "atan2-alias" "SELECT id FROM atan_alias_probe WHERE ATAN2(n)=0e0"
+               Contract.query "atan-alias" "SELECT id FROM atan_alias_probe WHERE ATAN(n)=0e0"
                Contract.query "domain-null" "SELECT id FROM inverse_trig_probe WHERE ASIN(n) IS NULL ORDER BY id"
                Contract.query "range" "SELECT id FROM inverse_trig_probe WHERE ATAN(n)>1e0"
                Contract.query "grouping" "SELECT COUNT(*) FROM inverse_trig_probe GROUP BY ATAN(n) ORDER BY ATAN(n)"
                Contract.execute "duplicate" "INSERT INTO inverse_trig_probe VALUES(6,0)" |> Contract.fails 1062 "23000"
                Contract.execute "update" "UPDATE inverse_trig_probe SET n=2 WHERE id=1"
                Contract.query "old-key" "SELECT id FROM inverse_trig_probe WHERE ASIN(n)=0e0" |]
-          Cleanup = [| "DROP TABLE inverse_trig_probe" |]
+          Cleanup = [| "DROP TABLE atan_alias_probe"; "DROP TABLE inverse_trig_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private projectedNullnessUniqueKey =

@@ -9297,6 +9297,20 @@ let tests =
                         (ResultSet([ "id" ], []))
                         "updates remove the old inverse-trig key"
 
+                    runDefault store "CREATE TABLE atan_alias(id INT PRIMARY KEY,n DOUBLE,KEY ix_atan2 ((ATAN2(n))))"
+                    |> ignore
+                    Expect.equal
+                        (runDefault store "INSERT INTO atan_alias VALUES(1,0),(2,1),(3,NULL)")
+                        (Affected 3UL)
+                        "unary ATAN2 key rows"
+                    let aliasQuery = "SELECT id FROM atan_alias WHERE ATAN(n)=0e0"
+                    Expect.equal (runDefault store aliasQuery) (ResultSet([ "id" ], [ [ Some "1" ] ])) aliasQuery
+                    Expect.equal ((runDefault store ("EXPLAIN " + aliasQuery) |> explainRow).Key) (Some "ix_atan2") aliasQuery
+                    match Fsdb.InformationSchema.showCreateTable store.Catalog defaultDatabase "atan_alias" with
+                    | Ok(_, [ [ _; Some ddl ] ]) ->
+                        Expect.stringContains ddl "KEY `ix_atan2` ((atan(`n`)))" "unary ATAN2 renders as ATAN"
+                    | other -> failtestf "expected SHOW CREATE TABLE for unary ATAN2, got %A" other
+
                 testCase "unique functional keys use projected nullness"
                 <| fun _ ->
                     let store = newStore ()

@@ -96,7 +96,7 @@ let private definitions =
         Aliases = []
         Transform = ArcCosine }
       { CanonicalName = "ATAN"
-        Aliases = []
+        Aliases = [ "ATAN2" ]
         Transform = ArcTangent }
       { CanonicalName = "COT"
         Aliases = []
@@ -192,30 +192,35 @@ let isBuiltin = function
     | Expression expression -> tryPhysicalExpression expression |> Option.isSome
     | transform -> tryBuiltinName transform |> Option.isSome
 
-let rec hasTextResult = function
+type private TransformFamily =
+    | TextOperation
+    | IntegerFromText
+    | EncodedTextResult
+    | DecodedBinaryResult
+    | NumericGeneral
+    | NumericDoubleResult
+    | NullIndicator
+    | ComposedExpression
+
+let private transformFamily = function
     | Lowercase
     | Uppercase
     | Trimmed
-    | Reversed
-    | EncodedHex
-    | Md5Digest
-    | Sha1Digest -> true
-    | Expression expression ->
-        tryPhysicalExpression expression
-        |> Option.bind (_.Calls >> List.tryLast)
-        |> Option.exists (snd >> hasTextResult)
+    | Reversed -> TextOperation
     | CharacterLength
     | ByteLength
     | BitLength
     | FirstByte
-    | FirstCharacterCode
-    | DecodedHex
+    | FirstCharacterCode -> IntegerFromText
+    | EncodedHex
+    | Md5Digest
+    | Sha1Digest -> EncodedTextResult
+    | DecodedHex -> DecodedBinaryResult
     | AbsoluteValue
-    | IsNullResult
     | Signum
     | Floored
     | Ceiled
-    | Rounded
+    | Rounded -> NumericGeneral
     | SquareRooted
     | Exponentiated
     | Sine
@@ -230,7 +235,19 @@ let rec hasTextResult = function
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
-    | DecimalLogarithm -> false
+    | DecimalLogarithm -> NumericDoubleResult
+    | IsNullResult -> NullIndicator
+    | Expression _ -> ComposedExpression
+
+let rec hasTextResult = function
+    | Expression expression ->
+        tryPhysicalExpression expression
+        |> Option.bind (_.Calls >> List.tryLast)
+        |> Option.exists (snd >> hasTextResult)
+    | transform ->
+        match transformFamily transform with
+        | TextOperation | EncodedTextResult -> true
+        | _ -> false
 
 let tryRebaseColumn column = function
     | Expression expression ->
@@ -270,115 +287,39 @@ let private isNumeric =
     | _ -> false
 
 let private supportsSingleTransform transform columnType =
-    match transform with
-    | Lowercase
-    | Uppercase
-    | Trimmed
-    | Reversed ->
+    match transformFamily transform with
+    | TextOperation ->
         match columnType with
         | TChar _
         | TVarchar _
         | TBinary _
         | TVarBinary _ -> true
         | _ -> false
-    | CharacterLength
-    | ByteLength
-    | BitLength
-    | FirstByte
-    | FirstCharacterCode
-    | DecodedHex
-    | EncodedHex
-    | Md5Digest
-    | Sha1Digest ->
+    | IntegerFromText
+    | DecodedBinaryResult
+    | EncodedTextResult ->
         match columnType with
         | TGeometry _
         | TVector _ -> false
         | _ -> true
-    | AbsoluteValue
-    | Signum
-    | Floored
-    | Ceiled
-    | Rounded
-    | SquareRooted
-    | Exponentiated
-    | Sine
-    | Cosine
-    | Tangent
-    | ArcSine
-    | ArcCosine
-    | ArcTangent
-    | Cotangent
-    | Degrees
-    | Radians
-    | Logarithm
-    | NaturalLogarithm
-    | BinaryLogarithm
-    | DecimalLogarithm ->
+    | NumericGeneral
+    | NumericDoubleResult ->
         isNumeric columnType || isTextOrBinary columnType
-    | IsNullResult -> true
-    | Expression _ -> false
+    | NullIndicator -> true
+    | ComposedExpression -> false
 
-let private isTextTransform = function
-    | Lowercase
-    | Uppercase
-    | Trimmed
-    | Reversed -> true
+let private isTextTransform transform = transformFamily transform = TextOperation
+
+let private isTextToIntegerTransform transform = transformFamily transform = IntegerFromText
+
+let private isEncodedTextTransform transform = transformFamily transform = EncodedTextResult
+
+let private isNumericTransform transform =
+    match transformFamily transform with
+    | NumericGeneral | NumericDoubleResult -> true
     | _ -> false
 
-let private isTextToIntegerTransform = function
-    | CharacterLength
-    | ByteLength
-    | BitLength
-    | FirstByte
-    | FirstCharacterCode -> true
-    | _ -> false
-
-let private isEncodedTextTransform = function
-    | EncodedHex
-    | Md5Digest
-    | Sha1Digest -> true
-    | _ -> false
-
-let private isNumericTransform = function
-    | AbsoluteValue
-    | Signum
-    | Floored
-    | Ceiled
-    | Rounded
-    | SquareRooted
-    | Exponentiated
-    | Sine
-    | Cosine
-    | Tangent
-    | ArcSine
-    | ArcCosine
-    | ArcTangent
-    | Cotangent
-    | Degrees
-    | Radians
-    | Logarithm
-    | NaturalLogarithm
-    | BinaryLogarithm
-    | DecimalLogarithm -> true
-    | _ -> false
-
-let private producesDoubleResult = function
-    | SquareRooted
-    | Exponentiated
-    | Sine
-    | Cosine
-    | Tangent
-    | ArcSine
-    | ArcCosine
-    | ArcTangent
-    | Cotangent
-    | Degrees
-    | Radians
-    | Logarithm
-    | NaturalLogarithm
-    | BinaryLogarithm
-    | DecimalLogarithm -> true
-    | _ -> false
+let private producesDoubleResult transform = transformFamily transform = NumericDoubleResult
 
 type private NumericKeyResult =
     | ExactSource

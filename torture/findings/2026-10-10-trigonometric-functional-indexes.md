@@ -1,57 +1,37 @@
 # Trigonometric functional keys
 
-Native MySQL 8.4.11 accepts separate `SIN(n)`, `COS(n)`, and `TAN(n)` functional
-indexes on a `DOUBLE` column. Over `0`, `1`, `-1`, and `NULL`, equality on
-`SIN(n)=0e0` and `TAN(n)=0e0` selects their respective keys with `ref` access;
-`COS(n)>0e0` selects its key with `range` access. The non-null results are
-double values, while all three functions return `NULL` for a null input.
+Pinned MySQL 8.4.11 accepts separate `SIN(n)`, `COS(n)`, and `TAN(n)` functional
+indexes on `DOUBLE` columns. Equality uses the matching key with `ref` access,
+and selective ranges use `range` access. These functions return double values
+for finite inputs and `NULL` for source `NULL`.
 
-The focused Expecto regression checks equality, a selective range, grouping,
-uniqueness, update maintenance, and key choice. The persistence regression
-checks lookup behavior after WAL replay and snapshot recovery. These keys use
-the existing physical expression path, so further trigonometric functions and
-general expressions remain outside this coverage.
+`ASIN(n)`, `ACOS(n)`, and unary `ATAN(n)` have the same physical access paths.
+`ASIN` and `ACOS` return `NULL` for out-of-domain inputs such as `2`; a unique
+functional key allows multiple such rows and source `NULL`s. Unary `ATAN2(n)`
+is an alias of `ATAN(n)` in MySQL's stored expression: an index declared as
+`ATAN2(n)` serves an `ATAN(n)` predicate, and `SHOW CREATE TABLE` renders it
+as `atan(n)`. Two-argument `ATAN` and `ATAN2` remain outside the unary-key
+grammar. MySQL's grouped `ATAN(2)` projection differs from its ordinary scalar
+display in the final decimal digit. The differential contract compares group
+counts, while the focused test verifies key selection.
 
-MySQL also accepts separate `ASIN(n)`, `ACOS(n)`, and unary `ATAN(n)` keys.
-`ASIN` and `ACOS` yield `NULL` for out-of-domain values such as `2`, which
-coexists with a source `NULL` in an indexed key. The `0` and `1` equality
-probes select the corresponding keys with `ref` access. fsdb's focused tests
-cover these values, selective range and grouping plans, uniqueness, updates,
-and WAL/snapshot recovery. Two-argument `ATAN` remains outside the unary-key
-grammar.
+MySQL also accepts `COT`, `DEGREES`, and `RADIANS` functional keys. A `COT`
+unique key allows multiple source `NULL`s, rejects a duplicate finite value,
+and reports 1690/22003 when zero would produce an infinite key. MySQL returns
+a finite `RADIANS(1e308)` value; fsdb now divides by 180 before multiplying by
+π in both scalar and indexed execution. Focused tests cover equality, range,
+grouping, uniqueness, updates, and WAL/snapshot recovery across these keys.
 
-The differential run also exposed a general unique-key bug: source `NULL`
-values were ignored even when an expression such as `ISNULL(n)` produced a
-non-null key, while out-of-domain `ASIN(n)` results were compared as raw source
-values. Unique-key checks now use the projected result's nullness. MySQL 8.4.11
-rejects a second `ISNULL(NULL)` key with error 1062; the focused regression and
-`functional-unique-projected-nullness` contract cover that rule.
-Duplicate-key diagnostics also render the projected key value (`1` for
-`ISNULL(NULL)`) rather than the source `NULL`.
+The inverse-trigonometric differential run also exposed a general unique-key
+bug: fsdb used source nullness rather than projected-key nullness. MySQL rejects
+a second `ISNULL(NULL)` key with 1062 and displays the projected value `1` in
+the duplicate message. fsdb now uses the projected values for both checks and
+diagnostics.
 
-MySQL's grouped `ATAN(2)` projection differs from its ordinary scalar display
-in the final decimal digit. The differential contract compares grouping counts
-and the focused plan check verifies key selection; exact grouped floating
-display remains outside this change.
-
-The `trigonometric-functional-indexes` differential contract passed all nine
-steps in pinned MySQL 8.4.11 run `20261010T145406462-91681`. The full run
-retained nine identifier-case differences outside this contract.
-The `inverse-trigonometric-functional-indexes` contract passed all nine steps
-in pinned MySQL 8.4.11 run `20261010T150348157-93348`, with the same nine
-unrelated identifier-case differences in the full run.
-The follow-up `20261010T150621125-93504` run passed that contract and all
-three `functional-unique-projected-nullness` steps, again retaining only the
-nine existing identifier-case differences.
-
-Native MySQL 8.4.11 also accepts `COT`, `DEGREES`, and `RADIANS` functional
-keys. In the audited rows, equality on zero uses the angle-conversion keys,
-`RADIANS(n)>1e0` uses a range, and a `COT` unique key accepts multiple source
-`NULL`s but rejects a duplicate finite result. Inserting zero into indexed
-`COT(n)` fails with 1690/22003. MySQL computes `RADIANS(1e308)` as a finite
-value; dividing by 180 before multiplying by π now preserves that result in
-both fsdb's scalar and indexed paths. The focused regression and WAL/snapshot
-recovery checks cover these keys.
-The `angle-functional-indexes` differential contract passed all nine steps
-in pinned MySQL 8.4.11 run `20261010T151654993-95961`. The full run retained
-the same nine identifier-case differences outside this contract.
+The `trigonometric-functional-indexes` contract passed all nine steps in run
+`20261010T145406462-91681`; `inverse-trigonometric-functional-indexes` passed
+all 11 steps in `20261010T152623452-98304`;
+`functional-unique-projected-nullness` passed all three steps in
+`20261010T150621125-93504`; and `angle-functional-indexes` passed all nine
+steps in `20261010T151654993-95961`. Each full run retained the same nine
+identifier-case differences outside these contracts.

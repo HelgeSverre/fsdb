@@ -3799,6 +3799,10 @@ let tests =
                           (handle (Fsdb.Session.create 62 recovered) sql |> snd)
                           (ResultSet([ "id" ], [ [ Some id ] ]))
                           (sprintf "%s restores %s" source functionName)
+                  Expect.equal
+                      (handle (Fsdb.Session.create 64 recovered) "SELECT id FROM lookup_atan_alias WHERE ATAN(value)=0e0" |> snd)
+                      (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                      (sprintf "%s restores unary ATAN2 as ATAN" source)
               let verifyAngleLookups source recovered =
                   for functionName in [ "COT"; "DEGREES"; "RADIANS" ] do
                       let sql = sprintf "SELECT id FROM lookup_angle WHERE %s(value)>0e0" functionName
@@ -3857,6 +3861,8 @@ let tests =
                     "INSERT INTO lookup_log VALUES (1, 1), (2, 2), (3, 10), (4, NULL)"
                     "CREATE TABLE lookup_trig (id INT PRIMARY KEY, value DOUBLE, INDEX ix_sin ((SIN(value))), INDEX ix_cos ((COS(value))), INDEX ix_tan ((TAN(value))), INDEX ix_asin ((ASIN(value))), INDEX ix_acos ((ACOS(value))), INDEX ix_atan ((ATAN(value))))"
                     "INSERT INTO lookup_trig VALUES (1, 0), (2, 1), (3, -1), (4, NULL), (5, 2)"
+                    "CREATE TABLE lookup_atan_alias (id INT PRIMARY KEY, value DOUBLE, INDEX ix_atan2 ((ATAN2(value))))"
+                    "INSERT INTO lookup_atan_alias VALUES (1, 0), (2, 1), (3, NULL)"
                     "CREATE TABLE lookup_angle (id INT PRIMARY KEY, value DOUBLE, INDEX ix_cot ((COT(value))), INDEX ix_degrees ((DEGREES(value))), INDEX ix_radians ((RADIANS(value))))"
                     "INSERT INTO lookup_angle VALUES (1, 1), (2, -1), (3, NULL)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
