@@ -25,6 +25,11 @@ An `INSERT … SELECT` that read three source rows and inserted two reported
 `rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives
 the same result in a regression.
 
+A prepared `SELECT ? AS fsdb_slow_prepared_probe` executed with 43 produced a
+slow-log row for `SELECT 43 AS fsdb_slow_prepared_probe` with one row sent and
+one examined. The fsdb regression also covers its binary prepared execution
+path.
+
 All rows had an empty `db`, zero `last_insert_id`/`insert_id`, and server ID
 1 for this connection. `query_time` and `lock_time` have microsecond `TIME`
 values.

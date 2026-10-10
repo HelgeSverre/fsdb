@@ -9490,6 +9490,13 @@ let tests =
               let session, _ = handle session "SET SESSION long_query_time=0"
               let session, selected = handle session "SELECT 42 AS fsdb_slow_log_probe"
               Expect.equal selected (ResultSet([ "fsdb_slow_log_probe" ], [ [ Some "42" ] ])) "SELECT completes"
+              let session, prepared = prepareStatementWithDiagnostics session "SELECT ? AS fsdb_slow_prepared_probe"
+              let statement =
+                  match prepared with
+                  | Ok(Some ast, count) -> createPreparedStatement session "SELECT ? AS fsdb_slow_prepared_probe" (Some ast) count
+                  | other -> failtestf "expected binary preparation, got %A" other
+              let session, preparedResult = executePrepared session statement [ VInt 43L ]
+              Expect.equal preparedResult (ResultSet([ "fsdb_slow_prepared_probe" ], [ [ Some "43" ] ])) "prepared SELECT completes"
               let session, evaluated = handle session "DO 1"
               Expect.equal evaluated (Affected 0UL) "DO completes"
               let session, _ = handle session "CREATE TABLE slow_scan_probe (id INT)"
@@ -9506,7 +9513,7 @@ let tests =
 
               let _, logged =
                   handle session
-                      "SELECT sql_text,rows_sent,rows_examined FROM mysql.slow_log WHERE sql_text IN ('SELECT 42 AS fsdb_slow_log_probe','DO 1','SELECT id FROM slow_scan_probe WHERE id > 1','INSERT INTO slow_insert_probe SELECT id FROM slow_scan_probe WHERE id > 1','UPDATE slow_scan_probe SET id=id+10 WHERE id=2','DELETE FROM slow_scan_probe WHERE id > 10','SELECT * FROM fsdb_missing_slow_probe') ORDER BY sql_text"
+                      "SELECT sql_text,rows_sent,rows_examined FROM mysql.slow_log WHERE sql_text IN ('SELECT 42 AS fsdb_slow_log_probe','SELECT 43 AS fsdb_slow_prepared_probe','DO 1','SELECT id FROM slow_scan_probe WHERE id > 1','INSERT INTO slow_insert_probe SELECT id FROM slow_scan_probe WHERE id > 1','UPDATE slow_scan_probe SET id=id+10 WHERE id=2','DELETE FROM slow_scan_probe WHERE id > 10','SELECT * FROM fsdb_missing_slow_probe') ORDER BY sql_text"
 
               Expect.equal
                   logged
@@ -9517,6 +9524,7 @@ let tests =
                         [ Some "INSERT INTO slow_insert_probe SELECT id FROM slow_scan_probe WHERE id > 1"; Some "0"; Some "3" ]
                         [ Some "SELECT * FROM fsdb_missing_slow_probe"; Some "0"; Some "0" ]
                         [ Some "SELECT 42 AS fsdb_slow_log_probe"; Some "1"; Some "1" ]
+                        [ Some "SELECT 43 AS fsdb_slow_prepared_probe"; Some "1"; Some "1" ]
                         [ Some "SELECT id FROM slow_scan_probe WHERE id > 1"; Some "2"; Some "3" ]
                         [ Some "UPDATE slow_scan_probe SET id=id+10 WHERE id=2"; Some "0"; Some "3" ] ]
                   ))

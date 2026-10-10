@@ -8173,6 +8173,18 @@ let rec private rowsSent = function
     | MultipleResults results -> results |> List.sumBy (fst >> rowsSent)
     | _ -> 0L
 
+let private executeWithSlowLog startedAt (session: Session) sql execute =
+    let (executed, result), examinedRows =
+        if Session.slowLogTableEnabled session.Store then
+            Executor.withExaminedRows execute
+        else
+            execute (), 0L
+
+    let isSlow, elapsed = recordSlowQueryIfNeeded executed startedAt
+    if isSlow && Session.slowLogTableEnabled executed.Store then
+        Session.recordSlowCommand executed (sql ()) elapsed (rowsSent result) examinedRows
+    executed, result, isSlow
+
 let internal recordFailedLoadStartedAt startedAt session =
     recordSlowQueryIfNeeded session startedAt |> ignore
 
@@ -8242,15 +8254,8 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                         reraise ()
                     | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
 
-    let (executed, result), examinedRows =
-        if Session.slowLogTableEnabled session.Store then
-            Executor.withExaminedRows executeStatement
-        else
-            executeStatement (), 0L
-
-    let isSlow, elapsed = recordSlowQueryIfNeeded executed startedAt
-    if isSlow && Session.slowLogTableEnabled executed.Store then
-        Session.recordSlowCommand executed rawSql elapsed (rowsSent result) examinedRows
+    let executed, result, isSlow =
+        executeWithSlowLog startedAt session (fun () -> rawSql) executeStatement
     let result = if isSlow && showStatusRe.IsMatch sql then includeCurrentSlowStatus result else result
     syncTransactionView executed, result
 
@@ -8459,14 +8464,8 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                 | :? OperationCanceledException -> reraise ()
                 | ex -> recoverExecutionError session "prepared statement" ex)
 
-        let (executed, result), examinedRows =
-            if Session.slowLogTableEnabled session.Store then
-                Executor.withExaminedRows (fun () -> withPreparedDatabase session stmt execute)
-            else
-                withPreparedDatabase session stmt execute, 0L
-        let isSlow, elapsed = recordSlowQueryIfNeeded executed startedAt
-        if isSlow && Session.slowLogTableEnabled executed.Store then
-            Session.recordSlowCommand executed (expandedSql ()) elapsed (rowsSent result) examinedRows
+        let executed, result, _ =
+            executeWithSlowLog startedAt session expandedSql (fun () -> withPreparedDatabase session stmt execute)
         syncTransactionView executed, result
 
 /// Executes an unregistered prepared statement once.
