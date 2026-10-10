@@ -9409,6 +9409,51 @@ let tests =
                       "SELECT COUNT(*) FROM mysql.general_log WHERE argument='[REDACTED CREDENTIAL STATEMENT]'"
               Expect.equal redacted (ResultSet([ "COUNT(*)" ], [ [ Some "1" ] ])) "credential text is not persisted verbatim"
 
+              let client, textPrepared =
+                  handle client "PREPARE general_log_stmt FROM 'SELECT ? AS fsdb_general_log_text_prepared'"
+              Expect.equal textPrepared (Affected 0UL) "SQL statement is prepared"
+              let client, _ = handle client "SET @general_log_value=42"
+              let client, textExecuted = handle client "EXECUTE general_log_stmt USING @general_log_value"
+              Expect.equal
+                  textExecuted
+                  (ResultSet([ "fsdb_general_log_text_prepared" ], [ [ Some "42" ] ]))
+                  "SQL prepared statement executes"
+
+              let _, textEvents =
+                  handle admin
+                      "SELECT command_type, argument FROM mysql.general_log WHERE argument LIKE '%fsdb_general_log_text_prepared%' AND command_type IN ('Prepare','Execute') ORDER BY event_time"
+              Expect.equal
+                  textEvents
+                  (ResultSet(
+                      [ "command_type"; "argument" ],
+                      [ [ Some "Prepare"; Some "SELECT ? AS fsdb_general_log_text_prepared" ]
+                        [ Some "Execute"; Some "SELECT 42 AS fsdb_general_log_text_prepared" ] ]
+                  ))
+                  "SQL preparation and execution have distinct log entries"
+
+              let client, binaryPrepared = prepareStatementWithDiagnostics client "SELECT ? AS fsdb_general_log_binary_prepared"
+              let binaryStatement =
+                  match binaryPrepared with
+                  | Ok(Some ast, count) -> createPreparedStatement client "SELECT ? AS fsdb_general_log_binary_prepared" (Some ast) count
+                  | other -> failtestf "expected binary preparation, got %A" other
+              let _, binaryExecuted = executePrepared client binaryStatement [ VInt 43L ]
+              Expect.equal
+                  binaryExecuted
+                  (ResultSet([ "fsdb_general_log_binary_prepared" ], [ [ Some "43" ] ]))
+                  "binary prepared statement executes"
+
+              let _, binaryEvents =
+                  handle admin
+                      "SELECT command_type, argument FROM mysql.general_log WHERE argument LIKE '%fsdb_general_log_binary_prepared%' AND command_type IN ('Prepare','Execute') ORDER BY event_time"
+              Expect.equal
+                  binaryEvents
+                  (ResultSet(
+                      [ "command_type"; "argument" ],
+                      [ [ Some "Prepare"; Some "SELECT ? AS fsdb_general_log_binary_prepared" ]
+                        [ Some "Execute"; Some "SELECT 43 AS fsdb_general_log_binary_prepared" ] ]
+                  ))
+                  "binary preparation and execution have distinct log entries"
+
               let _, disabledOutput = handle admin "SET GLOBAL log_output='NONE,TABLE'"
               Expect.equal disabledOutput (Affected 0UL) "NONE can be combined with TABLE"
               let _, _ = handle client "SELECT 161803 AS fsdb_general_log_none_probe"

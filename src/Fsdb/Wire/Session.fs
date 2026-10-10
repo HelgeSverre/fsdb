@@ -716,3 +716,34 @@ let finalizeTransactionTracking (previous: Session) (session: Session) =
 /// Resolves statement storage to the active transaction snapshot when present.
 let currentStore (session: Session) : Store =
     session.Tx |> Option.map (fun tx -> tx.Snapshot) |> Option.defaultValue session.Store
+
+/// General-log entries publish outside the issuing transaction, like MySQL's
+/// non-transactional log table. The destination setting is shared by sessions.
+let generalLogTableEnabled store =
+    match globalVariablesByStore.TryGetValue store.Lock with
+    | false, _ -> false
+    | true, variables ->
+        match variables.TryGetValue "general_log", variables.TryGetValue "log_output" with
+        | (true, Some "1"), (true, Some output) ->
+            let outputs = output.Split(',') |> Set.ofArray
+            outputs.Contains "TABLE" && not (outputs.Contains "NONE")
+        | _ -> false
+
+let recordGeneralCommand (session: Session) commandType (sql: string) =
+    if generalLogTableEnabled session.Store then
+        let userHost = sprintf "%s[%s] @  [%s]" session.User session.LoginUser session.ClientHost
+
+        match
+            Storage.insertRows
+                session.Store
+                "mysql"
+                "general_log"
+                (Some [ "user_host"; "thread_id"; "server_id"; "command_type"; "argument" ])
+                [ [ VString userHost
+                    VInt(int64 session.ConnectionId)
+                    VInt 1L
+                    VString commandType
+                    VBytes(System.Text.Encoding.UTF8.GetBytes(Log.generalLogSql sql)) ] ]
+        with
+        | Result.Ok _ -> ()
+        | Result.Error error -> Log.diagnostic "fsdb: general log write failed: %A" error

@@ -24,6 +24,7 @@ type QueryResult = Fsdb.Executor.QueryResult
 open Fsdb.Executor
 
 let private binaryResultProtocol = System.Threading.AsyncLocal<bool>()
+let private suppressGeneralQueryLog = System.Threading.AsyncLocal<bool>()
 
 let private storedProgramProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
 let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
@@ -5542,6 +5543,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
 
 /// Binary preparation starts a new diagnostics area, just as COM_QUERY does.
 let prepareStatementWithDiagnostics (session: Session) sql =
+    Session.recordGeneralCommand session "Prepare" sql
     let limit =
         sessionValue session "max_error_count"
         |> Option.bind (fun value -> match Int32.TryParse value with true, number -> Some number | _ -> None)
@@ -7183,6 +7185,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
             match sql with
             | None -> session, syntaxError "PREPARE source"
             | Some sql ->
+                Session.recordGeneralCommand session "Prepare" sql
                 match prepareStatementForSession session sql with
                 | Error(code, message) -> session, Err(code, message)
                 | Ok(ast, count) when session.TextStatements.Count + session.Statements.Count < Limits.maxPreparedStmtCount ->
@@ -7211,6 +7214,15 @@ and private dispatchNormalized session rawSql parserOptions sql =
                     variables
                     |> List.map (fun variable -> session.UserVariables |> Map.tryFind variable.Name |> Option.defaultValue VNull)
 
+                let expandedSql () =
+                    substitutePlaceholdersWithOptions
+                        parserOptions
+                        statement.Sql
+                        (values |> List.map (valueToSqlLiteralWithOptions parserOptions))
+
+                if Session.generalLogTableEnabled session.Store then
+                    Session.recordGeneralCommand session "Execute" (expandedSql ())
+
                 match statement.Ast with
                 | Some ast ->
                     withPreparedStatementHints session parserOptions statement.Sql (fun () ->
@@ -7224,12 +7236,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                                 | Error(code, message) -> current, Err(code, message))))
                 | None ->
                     withPreparedDatabase session statement (fun scoped ->
-                        dispatch
-                            scoped
-                            (substitutePlaceholdersWithOptions
-                                parserOptions
-                                statement.Sql
-                                (values |> List.map (valueToSqlLiteralWithOptions parserOptions))))
+                        dispatch scoped (expandedSql ()))
         | DeallocateText name ->
             if Map.containsKey name session.TextStatements then
                 { session with TextStatements = Map.remove name session.TextStatements }, Affected 0UL
@@ -8156,37 +8163,6 @@ let private recordSlowQueryIfNeeded (session: Session) startedAt =
 let internal recordFailedLoadStartedAt startedAt session =
     recordSlowQueryIfNeeded session startedAt |> ignore
 
-let private recordGeneralQuery (session: Session) (sql: string) =
-    let enabled =
-        Session.tryGlobalVariable session.Store "general_log"
-        |> Option.flatten
-        |> Option.exists (fun value -> value = "1")
-
-    let tableOutput =
-        Session.tryGlobalVariable session.Store "log_output"
-        |> Option.flatten
-        |> Option.exists (fun value ->
-            let outputs = value.Split(',') |> Set.ofArray
-            outputs.Contains "TABLE" && not (outputs.Contains "NONE"))
-
-    if enabled && tableOutput then
-        let userHost = sprintf "%s[%s] @  [%s]" session.User session.LoginUser session.ClientHost
-
-        match
-            Storage.insertRows
-                session.Store
-                "mysql"
-                "general_log"
-                (Some [ "user_host"; "thread_id"; "server_id"; "command_type"; "argument" ])
-                [ [ VString userHost
-                    VInt(int64 session.ConnectionId)
-                    VInt 1L
-                    VString "Query"
-                    VBytes(System.Text.Encoding.UTF8.GetBytes(Log.generalLogSql sql)) ] ]
-        with
-        | Ok _ -> ()
-        | Error error -> Log.diagnostic "fsdb: general log write failed: %A" error
-
 let private includeCurrentSlowStatus = function
     | ResultSet(columns, rows) ->
         ResultSet(
@@ -8200,7 +8176,7 @@ let private includeCurrentSlowStatus = function
 
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
-    recordGeneralQuery session rawSql
+    if not suppressGeneralQueryLog.Value then Session.recordGeneralCommand session "Query" rawSql
     let session = Session.clearSessionStateChanges session
     let parserOptions = parserOptionsForSession session
     let sql = normalizeDispatchedSql parserOptions rawSql
@@ -8396,6 +8372,15 @@ let executeServerLoad session load =
 let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (values: Value list) : Session * QueryResult =
     let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
     let session = Session.clearSessionStateChanges session
+    let options = parserOptionsForSession session
+    let expandedSql () =
+        substitutePlaceholdersWithOptions
+            options
+            stmt.Sql
+            (values |> List.map (valueToSqlLiteralWithOptions options))
+
+    if Session.generalLogTableEnabled session.Store then
+        Session.recordGeneralCommand session "Execute" (expandedSql ())
 
     // The AST path calls `executeParsed` directly, which — unlike `handle` —
     // doesn't convert a stray .NET exception into an `Err`, so a bound value
@@ -8404,14 +8389,8 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
     // `handle` gives the text path.
     match stmt.Ast with
     | None ->
-        let options = parserOptionsForSession session
         withPreparedDatabase session stmt (fun session ->
-            handle
-                session
-                (substitutePlaceholdersWithOptions
-                    options
-                    stmt.Sql
-                    (values |> List.map (valueToSqlLiteralWithOptions options))))
+            DynamicScope.withValue suppressGeneralQueryLog true (fun () -> handle session (expandedSql ())))
     | Some ast ->
         let execute session =
             recordDiagnostics session false (fun () ->

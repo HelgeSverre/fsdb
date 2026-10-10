@@ -20,15 +20,23 @@ ORDER BY event_time DESC LIMIT 1;
 The probe returned `Query` and the exact SQL text. The server's original
 global settings were restored after the probe.
 
+For `PREPARE p FROM 'SELECT ? AS fsdb_log_prepared_probe'` followed by
+`EXECUTE p USING @v` with `@v=42`, MySQL records a `Prepare` entry with
+`SELECT ? AS fsdb_log_prepared_probe` and an `Execute` entry with
+`SELECT 42 AS fsdb_log_prepared_probe`. It also records the outer SQL
+`EXECUTE p USING @v` as a `Query` entry.
+
 A separate `CREATE USER ... IDENTIFIED BY 'fixture_secret_314159'` probe
 produced a log argument with `IDENTIFIED BY <secret>` rather than the cleartext
 password. fsdb conservatively replaces the whole credential statement with
 `[REDACTED CREDENTIAL STATEMENT]`; this preserves the secrecy property but
 does not match MySQL's retained statement shape.
 
-fsdb now records text queries to the table destination from its shared store,
-so a rollback does not remove the log entry. The `NONE` destination suppresses
-it as in MySQL. With the default `FILE` destination, enabling general logging
-is refused explicitly because there is no compatible file sink yet. Prepared
-executions and non-query wire commands are also outside this first path.
-These boundaries remain open in `GAPS.md`.
+fsdb now records text queries and SQL/binary prepared `Prepare` and `Execute`
+events to the table destination from its shared store, so a rollback does not
+remove the log entry. Bound values are rendered in `Execute` arguments while
+credential statements remain redacted. The `NONE` destination suppresses
+output as in MySQL. With the default `FILE` destination, enabling general
+logging is refused explicitly because there is no compatible file sink yet.
+Non-query wire commands remain outside this path. These boundaries remain
+open in `GAPS.md`.
