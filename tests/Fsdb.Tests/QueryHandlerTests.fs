@@ -182,9 +182,10 @@ let tests =
                       | result -> failtestf "%s on %s should report 1054: %A" predicate table result
 
                   for predicate in [ "0 AND no_such_function(id)"; "1 OR no_such_function(id)" ] do
-                      match run (sprintf "SELECT id FROM %s WHERE %s" table predicate) with
-                      | Err(1305, _) -> ()
-                      | result -> failtestf "%s on %s should report 1305: %A" predicate table result
+                      Expect.equal
+                          (run (sprintf "SELECT id FROM %s WHERE %s" table predicate))
+                          (Err(1305, "FUNCTION fsdb.no_such_function does not exist"))
+                          (sprintf "%s on %s binds the selected database" predicate table)
 
                   match run (sprintf "SELECT id FROM %s WHERE 0 AND COUNT(id)" table) with
                   | Err(1111, _) -> ()
@@ -210,8 +211,13 @@ let tests =
                       [ Some "1287"; Some "1046"; Some "1046" ] "deprecation warning precedes both errors"
               | other -> failtestf "expected diagnostics, got %A" other
               Expect.equal (run "USE fsdb") (Affected 0UL) "select database"
-              Expect.equal (run "SELECT no_such_function()")
-                  (Err(1305, "FUNCTION no_such_function does not exist")) "selected database keeps 1305"
+              let selectedDatabaseError = run "SELECT no_such_function()"
+              Expect.equal selectedDatabaseError
+                  (Err(1305, "FUNCTION fsdb.no_such_function does not exist")) "selected database qualifies 1305"
+              Expect.equal
+                  (Fsdb.Executor.errorInfo selectedDatabaseError |> Option.map (fun error -> error.State))
+                  (Some "42000")
+                  "missing function uses the MySQL SQLSTATE"
 
           testCase "maximum execution time retains unsigned settings and scope defaults"
           <| fun _ ->

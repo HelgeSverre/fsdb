@@ -5087,7 +5087,9 @@ module ContractCatalog =
                Contract.query "false-and-empty" "SELECT id FROM binding_empty WHERE 0 AND missing_column" |> Contract.fails 1054 "42S22"
                Contract.query "true-or-empty" "SELECT id FROM binding_empty WHERE 1 OR missing_column" |> Contract.fails 1054 "42S22"
                Contract.query "aggregate-rows" "SELECT id FROM binding_rows WHERE 0 AND COUNT(id)" |> Contract.fails 1111 "HY000"
-               Contract.query "aggregate-empty" "SELECT id FROM binding_empty WHERE 0 AND COUNT(id)" |> Contract.fails 1111 "HY000" |]
+               Contract.query "aggregate-empty" "SELECT id FROM binding_empty WHERE 0 AND COUNT(id)" |> Contract.fails 1111 "HY000"
+               Contract.query "function-rows" "SELECT id FROM binding_rows WHERE 0 AND no_such_function(id)" |> Contract.fails 1305 "42000"
+               Contract.query "function-empty" "SELECT id FROM binding_empty WHERE 1 OR no_such_function(id)" |> Contract.fails 1305 "42000" |]
           Cleanup = [| "DROP TABLE binding_empty"; "DROP TABLE binding_rows" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 

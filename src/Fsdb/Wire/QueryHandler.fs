@@ -7975,7 +7975,7 @@ let private accountUpdateIsAuthorized session = function
     | ProbedAccountStatement _ -> false
     | UnknownAccountStatement -> false
 
-let private resolveMissingFunctionWithoutDatabase parserOptions sql result =
+let private resolveMissingFunctionDatabase selectedDatabase parserOptions sql result =
     let prefix, suffix = "FUNCTION ", " does not exist"
     match result with
     | Err(1305, message) when
@@ -7984,10 +7984,12 @@ let private resolveMissingFunctionWithoutDatabase parserOptions sql result =
         let name = message.Substring(prefix.Length, message.Length - prefix.Length - suffix.Length)
         match parseStatement parserOptions sql with
         | Ok(Select _ | Union _) when not (name.Contains('.')) ->
-            // MySQL resolves an unqualified routine against the current database.
-            // It records one condition during resolution and one terminal error.
-            Diagnostics.error 1046 "No database selected"
-            Err(1046, "No database selected")
+            match selectedDatabase with
+            | Some database -> Err(1305, sprintf "FUNCTION %s.%s does not exist" database name)
+            | None ->
+                // MySQL records one condition during resolution and one terminal error.
+                Diagnostics.error 1046 "No database selected"
+                Err(1046, "No database selected")
         | _ -> result
     | _ -> result
 
@@ -8053,9 +8055,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                             withSessionStatementHints session parserOptions rawSql sql (fun () ->
                                 withTriggerSessionExecution session (fun () ->
                                     dispatchNormalized session rawSql parserOptions sql))
-                        let result =
-                            if session.Database.IsNone then resolveMissingFunctionWithoutDatabase parserOptions sql result
-                            else result
+                        let result = resolveMissingFunctionDatabase session.Database parserOptions sql result
                         let executed =
                             if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                 { executed with PasswordExpired = false }
