@@ -33,6 +33,10 @@ request did not create an `Init DB` row. Closing the TCP socket without
 `COM_QUIT` also did not create a `Quit` row in the observed session. The
 client's `COM_PING` did not create a general-log row.
 
+`log_output='NONE,FILE'` is accepted while `general_log=ON`; the `NONE`
+destination suppresses output despite the `FILE` member. fsdb permits this
+combination without requiring a file sink.
+
 A separate `CREATE USER ... IDENTIFIED BY 'fixture_secret_314159'` probe
 produced a log argument with `IDENTIFIED BY <secret>` rather than the cleartext
 password. fsdb conservatively replaces the whole credential statement with

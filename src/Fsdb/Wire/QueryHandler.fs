@@ -1992,7 +1992,9 @@ let private validateSetActions session actions =
         let enabled = globalValue "general_log" = Some "1"
         let fileOutput =
             globalValue "log_output"
-            |> Option.exists (fun value -> value.Split(',') |> Array.contains "FILE")
+            |> Option.exists (fun value ->
+                let outputs = value.Split(',') |> Set.ofArray
+                outputs.Contains "FILE" && not (outputs.Contains "NONE"))
 
         if enabled && fileOutput then
             Error(Err(1231, "FILE general logging is unsupported; set log_output to TABLE or NONE"))

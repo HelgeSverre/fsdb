@@ -9462,6 +9462,14 @@ let tests =
                       "SELECT COUNT(*) FROM mysql.general_log WHERE argument='SELECT 161803 AS fsdb_general_log_none_probe'"
               Expect.equal absent (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) "NONE suppresses table logging"
 
+              let _, disabledFile = handle admin "SET GLOBAL log_output='NONE,FILE'"
+              Expect.equal disabledFile (Affected 0UL) "NONE also suppresses the unsupported file destination"
+              let _, _ = handle client "SELECT 141421 AS fsdb_general_log_none_file_probe"
+              let _, absentFile =
+                  handle admin
+                      "SELECT COUNT(*) FROM mysql.general_log WHERE argument='SELECT 141421 AS fsdb_general_log_none_file_probe'"
+              Expect.equal absentFile (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) "NONE suppresses all destinations"
+
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
