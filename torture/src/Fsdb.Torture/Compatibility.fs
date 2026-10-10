@@ -5034,7 +5034,10 @@ module ContractCatalog =
         { Name = "exp-functional-indexes"
           Setup =
             [| "CREATE TABLE exp_probe(id INT PRIMARY KEY,n DECIMAL(8,2),d DOUBLE,s VARCHAR(20),UNIQUE KEY ux_exp_n ((EXP(n))),KEY ix_exp_d ((EXP(d))),KEY ix_exp_s ((EXP(s))))"
-               "INSERT INTO exp_probe VALUES(1,0,0,'0'),(2,1,1,'1'),(3,-1,-1,'-1'),(4,NULL,NULL,NULL)" |]
+               "INSERT INTO exp_probe VALUES(1,0,0,'0'),(2,1,1,'1'),(3,-1,-1,'-1'),(4,NULL,NULL,NULL)"
+               "CREATE TABLE exp_composed_probe(id INT PRIMARY KEY,n DECIMAL(8,2),KEY ix_exp_abs ((EXP(ABS(n)))))"
+               "INSERT INTO exp_composed_probe VALUES(1,-1),(2,1),(3,0)"
+               "CREATE TABLE exp_nested_probe(id INT PRIMARY KEY,n DECIMAL(8,2),KEY ix_round_exp ((ROUND(EXP(n)))))" |]
           Steps =
             [| Contract.query "values" "SELECT id,EXP(n),EXP(d),EXP(s) FROM exp_probe ORDER BY id"
                Contract.query "decimal-lookup" "SELECT id FROM exp_probe WHERE EXP(n)=1e0"
@@ -5044,10 +5047,13 @@ module ContractCatalog =
                Contract.query "grouping" "SELECT EXP(n),COUNT(*) FROM exp_probe GROUP BY EXP(n) ORDER BY EXP(n)"
                Contract.execute "duplicate" "INSERT INTO exp_probe VALUES(5,0,2,'2')" |> Contract.fails 1062 "23000"
                Contract.execute "overflow" "INSERT INTO exp_probe VALUES(6,1000,1000,'1000')" |> Contract.fails 1690 "22003"
+               Contract.query "composed" "SELECT id FROM exp_composed_probe WHERE EXP(ABS(n))=2.718281828459045e0 ORDER BY id"
+               Contract.execute "composed-overflow" "INSERT INTO exp_composed_probe VALUES(4,1000)" |> Contract.fails 1690 "22003"
+               Contract.execute "nested-overflow" "INSERT INTO exp_nested_probe VALUES(1,1000)" |> Contract.fails 1690 "22003"
                Contract.execute "update" "UPDATE exp_probe SET n=2 WHERE id=1"
                Contract.query "old-key" "SELECT id FROM exp_probe WHERE EXP(n)=1e0"
                Contract.query "new-key" "SELECT id FROM exp_probe WHERE EXP(n)>7e0" |]
-          Cleanup = [| "DROP TABLE exp_probe" |]
+          Cleanup = [| "DROP TABLE exp_nested_probe"; "DROP TABLE exp_composed_probe"; "DROP TABLE exp_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private numericConstantIndexBounds =

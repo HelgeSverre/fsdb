@@ -2952,7 +2952,19 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
             FunctionalIndex.projectValueWithStatus encodeText transform value
         with
         | FunctionalIndex.ExponentialOutOfRange ->
-            raise (IndexExpressionError(1690, sprintf "DOUBLE value is out of range in 'exp(%s)'" (SqlText.quoteIdentifier column.Name)))
+            let rec failingExp = function
+                | FuncCall(name, [ argument ]) as expression ->
+                    match failingExp argument with
+                    | Some inner -> Some inner
+                    | None when name.Equals("EXP", StringComparison.OrdinalIgnoreCase) -> Some expression
+                    | None -> None
+                | _ -> None
+            let expression =
+                match transform with
+                | Some(Expression expression) ->
+                    expression |> failingExp |> Option.defaultValue expression |> SqlText.expression
+                | _ -> sprintf "exp(%s)" (SqlText.quoteIdentifier column.Name)
+            raise (IndexExpressionError(1690, sprintf "DOUBLE value is out of range in '%s'" expression))
         | SignedOutOfRange ->
             let expression =
                 transform

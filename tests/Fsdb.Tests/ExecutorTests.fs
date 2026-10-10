@@ -9180,6 +9180,26 @@ let tests =
                     | Err(1690, _) -> ()
                     | other -> failtestf "expected EXP overflow to reject the row, got %A" other
 
+                    runDefault store "CREATE TABLE composed_exp(id INT PRIMARY KEY,n DECIMAL(8,2),KEY ix_exp_abs ((EXP(ABS(n)))))"
+                    |> ignore
+                    runDefault store "INSERT INTO composed_exp VALUES(1,-1),(2,1),(3,0)" |> ignore
+                    let composed = "SELECT id FROM composed_exp WHERE EXP(ABS(n))=2.718281828459045e0 ORDER BY id"
+                    Expect.equal (runDefault store composed) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) "composed EXP values"
+                    let composedPlan =
+                        runDefault store "EXPLAIN SELECT id FROM composed_exp WHERE EXP(ABS(n))=2.718281828459045e0"
+                        |> explainRow
+                    Expect.equal composedPlan.Key (Some "ix_exp_abs") "composed EXP uses its key"
+                    Expect.equal
+                        (runDefault store "INSERT INTO composed_exp VALUES(4,1000)")
+                        (Err(1690, "DOUBLE value is out of range in 'exp(abs(`n`))'"))
+                        "overflow identifies the composed expression"
+                    runDefault store "CREATE TABLE nested_exp(id INT PRIMARY KEY,n DECIMAL(8,2),KEY ix_round_exp ((ROUND(EXP(n)))))"
+                    |> ignore
+                    Expect.equal
+                        (runDefault store "INSERT INTO nested_exp VALUES(1,1000)")
+                        (Err(1690, "DOUBLE value is out of range in 'exp(`n`)'"))
+                        "overflow identifies the failing inner function"
+
                     runDefault store "UPDATE exp_keys SET n=2 WHERE id=1" |> ignore
                     Expect.equal
                         (runDefault store "SELECT id FROM exp_keys WHERE EXP(n)=1e0")
