@@ -8609,6 +8609,63 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an ABS override reports a scan"
                     Expect.equal overriddenPlan.Key None "an ABS override does not claim the functional index"
 
+                testCase "ORD functional keys retain character bytes and source charset"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE ordinal_keys(id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1, KEY ix_ord ((ORD(value))))" |> ignore
+                    runDefault store "INSERT INTO ordinal_keys VALUES(1,'é'),(2,''),(3,NULL),(4,'A')" |> ignore
+
+                    Expect.equal
+                        (runDefault store "SELECT id,ORD(value) FROM ordinal_keys ORDER BY id")
+                        (ResultSet([ "id"; "ORD(value)" ], [ [ Some "1"; Some "233" ]; [ Some "2"; Some "0" ]; [ Some "3"; None ]; [ Some "4"; Some "65" ] ]))
+                        "latin1 uses one source byte for the first character"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM ordinal_keys WHERE ORD(value)=233")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the ordinal key finds the latin1 row"
+
+                    let plan = runDefault store "EXPLAIN SELECT id FROM ordinal_keys WHERE ORD(value)=233" |> explainRow
+                    Expect.equal plan.Key (Some "ix_ord") "the ordinal equality uses its key"
+
+                    runDefault store "UPDATE ordinal_keys SET value='B' WHERE id=1" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM ordinal_keys WHERE ORD(value)=233")
+                        (ResultSet([ "id" ], []))
+                        "updates remove the old ordinal key"
+
+                    runDefault store "CREATE TABLE utf8_ordinals(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_ord ((ORD(value))))" |> ignore
+                    runDefault store "INSERT INTO utf8_ordinals VALUES(1,'é'),(2,'😀')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id,ORD(value) FROM utf8_ordinals ORDER BY id")
+                        (ResultSet([ "id"; "ORD(value)" ], [ [ Some "1"; Some "50089" ]; [ Some "2"; Some "4036991104" ] ]))
+                        "multibyte UTF-8 characters use all bytes of the first scalar"
+
+                    runDefault store "CREATE TABLE binary_ordinals(id INT PRIMARY KEY, value VARBINARY(20), KEY ix_ord ((ORD(value))))" |> ignore
+                    runDefault store "INSERT INTO binary_ordinals VALUES(1,X'C3A9'),(2,X'')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id,ORD(value) FROM binary_ordinals ORDER BY id")
+                        (ResultSet([ "id"; "ORD(value)" ], [ [ Some "1"; Some "195" ]; [ Some "2"; Some "0" ] ]))
+                        "binary inputs use only their first byte"
+
+                    runDefault store "CREATE TABLE padded_ordinals(id INT PRIMARY KEY, value INT(4) ZEROFILL, KEY ix_ord ((ORD(value))))" |> ignore
+                    runDefault store "INSERT INTO padded_ordinals VALUES(1,1),(2,12)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM padded_ordinals WHERE ORD(value)=48 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "numeric display padding supplies the first character"
+
+                    runDefault store "CREATE TABLE trimmed_ordinals(id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1, KEY ix_ord ((ORD(TRIM(value)))))" |> ignore
+                    runDefault store "INSERT INTO trimmed_ordinals VALUES(1,' é '),(2,'A')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM trimmed_ordinals WHERE ORD(TRIM(value))=233")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "composed transforms keep the source charset"
+
+                    let overridden = builtins |> registerScalar "ORD" (fun _ -> VInt 99L)
+                    let overridePlan = run store overridden "EXPLAIN SELECT id FROM ordinal_keys WHERE ORD(value)=99" |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden ORD cannot claim its stored key"
+
                 testCase "ASCII functional keys follow source bytes and writes"
                 <| fun _ ->
                     let store = newStore ()

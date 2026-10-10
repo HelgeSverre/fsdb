@@ -6890,6 +6890,9 @@ and private prepareScalarArguments ctx name expressions values =
         | VEncodedString(_, bytes) when Functions.isByteArgument name index ctx.Registry -> VBytes bytes
         | VString text when Functions.isByteArgument name index ctx.Registry ->
             VBytes(Charset.encode (sourceCharset ctx expression) text)
+        | VString text when Functions.isEncodedArgument name index ctx.Registry ->
+            let charset = sourceCharset ctx expression
+            VEncodedString(charset, Charset.encode charset text)
         | _ -> value)
 
 and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, EvalError> =

@@ -117,6 +117,7 @@ type Registry =
       ScalarParameters: Map<string, ColumnMetadata list>
       TextArguments: Map<string, int -> bool>
       ByteArguments: Map<string, int -> bool>
+      EncodedArguments: Map<string, int -> bool>
       ResultCollations: Map<string, ResultCollation>
       Aggregates: Map<string, Aggregate>
       /// Context-aware registrations are bound once per statement;
@@ -129,6 +130,7 @@ let empty: Registry =
       ScalarParameters = Map.empty
       TextArguments = Map.empty
       ByteArguments = Map.empty
+      EncodedArguments = Map.empty
       ResultCollations = Map.empty
       Aggregates = Map.empty
       Extensions = Map.empty }
@@ -146,6 +148,7 @@ let private replaceScalar (name: string) metadata (fn: Scalar) (registry: Regist
         ScalarParameters = Map.remove name registry.ScalarParameters
         TextArguments = Map.remove name registry.TextArguments
         ByteArguments = Map.remove name registry.ByteArguments
+        EncodedArguments = Map.remove name registry.EncodedArguments
         ResultCollations = Map.remove name registry.ResultCollations }
 
 let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
@@ -173,6 +176,9 @@ let internal registerTextScalar (name: string) (textArgument: int -> bool) (fn: 
 let private registerByteArguments (name: string) (byteArgument: int -> bool) (registry: Registry) =
     { registry with ByteArguments = Map.add (name.ToUpperInvariant()) byteArgument registry.ByteArguments }
 
+let private registerEncodedArguments (name: string) (encodedArgument: int -> bool) (registry: Registry) =
+    { registry with EncodedArguments = Map.add (name.ToUpperInvariant()) encodedArgument registry.EncodedArguments }
+
 let private registerByteScalar name byteArgument fn registry =
     registry
     |> registerScalar name fn
@@ -182,6 +188,11 @@ let private registerByteTextScalar name byteArgument fn registry =
     registry
     |> registerTextScalar name byteArgument fn
     |> registerByteArguments name byteArgument
+
+let private registerEncodedTextScalar name encodedArgument fn registry =
+    registry
+    |> registerTextScalar name encodedArgument fn
+    |> registerEncodedArguments name encodedArgument
 
 let private registerResultCollation (name: string) (policy: ResultCollation) (registry: Registry) =
     { registry with
@@ -231,6 +242,11 @@ let internal isTextArgument (name: string) index (registry: Registry) =
 
 let internal isByteArgument (name: string) index (registry: Registry) =
     registry.ByteArguments
+    |> Map.tryFind (name.ToUpperInvariant())
+    |> Option.exists (fun predicate -> predicate index)
+
+let internal isEncodedArgument (name: string) index (registry: Registry) =
+    registry.EncodedArguments
     |> Map.tryFind (name.ToUpperInvariant())
     |> Option.exists (fun predicate -> predicate index)
 
@@ -3630,22 +3646,6 @@ let private spaceFn: Scalar =
         if k > Limits.maxAllowedPacket then VNull else VString(String(' ', k))
     | _ -> VNull
 
-let private ordFn: Scalar =
-    function
-    | [ value ] when not (anyNull [ value ]) ->
-        match tryRawBytes value with
-        | Some bytes -> FunctionalIndex.firstByteValue bytes
-        | None ->
-            let text = req value
-
-            if text.Length = 0 then
-                VInt 0L
-            else
-                let scalarLength = if Char.IsSurrogatePair(text, 0) then 2 else 1
-                let bytes = Text.Encoding.UTF8.GetBytes(text.Substring(0, scalarLength))
-                VInt(bytes |> Array.fold (fun result part -> result * 256L + int64 part) 0L)
-    | _ -> VNull
-
 /// Minimal `CHAR(n1, n2, ...)`: builds a string from Unicode code points
 /// rather than MySQL's charset-aware byte assembly. Per MySQL, NULL
 /// arguments are skipped rather than nulling the whole result.
@@ -6514,6 +6514,12 @@ let private registerFunctionalByteText transform registry =
         (fun registry name -> registerByteTextScalar name firstArgument (exactArity name 1 (functionalIndexScalar transform)) registry)
         registry
 
+let private registerFunctionalEncodedText transform registry =
+    FunctionalIndex.names transform
+    |> List.fold
+        (fun registry name -> registerEncodedTextScalar name firstArgument (exactArity name 1 (functionalIndexScalar transform)) registry)
+        registry
+
 let private registerFunctionalScalar transform registry =
     FunctionalIndex.names transform
     |> List.fold (fun registry name -> registerScalar name (exactArity name 1 (functionalIndexScalar transform)) registry) registry
@@ -6614,7 +6620,7 @@ let private registerStringBuiltins registry =
     |> registerStringScalar "REPEAT" firstArgument (InheritArgument 0) repeatFn
     |> registerScalar "SPACE" (exactArity "SPACE" 1 spaceFn)
     |> registerFunctionalByteText FirstByte
-    |> registerTextScalar "ORD" firstArgument (exactArity "ORD" 1 ordFn)
+    |> registerFunctionalEncodedText FirstCharacterCode
     |> registerScalarResult "CHAR" binaryResult charFn
     |> registerByteScalar "HEX" firstArgument (exactArity "HEX" 1 hexFn)
     |> registerStringScalar "UNHEX" firstArgument binaryResult (exactArity "UNHEX" 1 unhexFn)

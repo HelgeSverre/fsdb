@@ -496,6 +496,15 @@ let private firstInvalidByte length characterWidth =
         | None -> invalid <- Some offset
     invalid
 
+let private characterByteWidth charset (bytes: byte[]) offset =
+    if charset = "ucs2" then min 2 (bytes.Length - offset)
+    elif hasLegacyByteRules charset then
+        legacyCharacterWidth charset bytes offset |> Option.defaultValue 1
+    else unicodeScalarWidth charset bytes offset |> Option.defaultValue 1
+
+let firstCharacterByteWidth name (bytes: byte[]) =
+    if bytes.Length = 0 then 0 else characterByteWidth (canonicalName name) bytes 0
+
 /// Invalid encoded bytes occupy individual characters; UCS2 uses code units.
 let characterByteOffsets name (bytes: byte[]) =
     let charset = canonicalName name
@@ -503,11 +512,7 @@ let characterByteOffsets name (bytes: byte[]) =
     let mutable offset = 0
     while offset < bytes.Length do
         offsets.Add offset
-        let width =
-            if charset = "ucs2" then min 2 (bytes.Length - offset)
-            elif hasLegacyByteRules charset then
-                legacyCharacterWidth charset bytes offset |> Option.defaultValue 1
-            else unicodeScalarWidth charset bytes offset |> Option.defaultValue 1
+        let width = characterByteWidth charset bytes offset
         offset <- offset + width
     offsets.Add bytes.Length
     offsets.ToArray()

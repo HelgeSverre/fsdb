@@ -2900,7 +2900,7 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
 let private projectIndexValue indexName row (column: ColumnDef) prefixLength transform value =
     let value =
         match transform, column.NumericDisplay with
-        | Some FirstByte, Some _ ->
+        | (Some FirstByte | Some FirstCharacterCode), Some _ ->
             ColumnDisplay.renderStoredColumnValue column value
             |> Option.map VString
             |> Option.defaultValue VNull

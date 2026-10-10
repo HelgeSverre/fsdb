@@ -38,6 +38,9 @@ let private definitions =
       { CanonicalName = "ASCII"
         Aliases = []
         Transform = FirstByte }
+      { CanonicalName = "ORD"
+        Aliases = []
+        Transform = FirstCharacterCode }
       { CanonicalName = "ABS"
         Aliases = []
         Transform = AbsoluteValue }
@@ -138,6 +141,7 @@ let rec hasTextResult = function
     | ByteLength
     | BitLength
     | FirstByte
+    | FirstCharacterCode
     | AbsoluteValue
     | IsNullResult
     | Signum
@@ -196,7 +200,8 @@ let private supportsSingleTransform transform columnType =
     | CharacterLength
     | ByteLength
     | BitLength
-    | FirstByte ->
+    | FirstByte
+    | FirstCharacterCode ->
         match columnType with
         | TGeometry _
         | TVector _ -> false
@@ -220,7 +225,8 @@ let private isTextToIntegerTransform = function
     | CharacterLength
     | ByteLength
     | BitLength
-    | FirstByte -> true
+    | FirstByte
+    | FirstCharacterCode -> true
     | _ -> false
 
 let supportsColumnType transform columnType =
@@ -246,6 +252,7 @@ let rec fixedKeyLength = function
     | CharacterLength
     | ByteLength
     | BitLength
+    | FirstCharacterCode
     | Signum -> Some 8
     | FirstByte
     | IsNullResult -> Some 4
@@ -377,6 +384,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some ByteLength, _
     | Some BitLength, _
     | Some FirstByte, _
+    | Some FirstCharacterCode, _
     | Some IsNullResult, _
     | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
     | Some(Expression expression), _ ->
@@ -400,6 +408,21 @@ let private mapTextOrBytes mapText mapBytes value =
 
 let firstByteValue bytes =
     bytes |> Array.tryHead |> Option.defaultValue 0uy |> int64 |> VInt
+
+let private firstCharacterBytes encodeText = function
+    | VEncodedString(charset, bytes) ->
+        bytes |> Array.truncate (Fsdb.Charset.firstCharacterByteWidth charset bytes)
+    | value ->
+        match tryRawBytes value with
+        | Some bytes -> bytes |> Array.truncate 1
+        | None ->
+            let text = value |> toText |> Option.defaultValue ""
+            text.EnumerateRunes() |> Seq.tryHead |> Option.map (fun rune -> encodeText (rune.ToString())) |> Option.defaultValue [||]
+
+let firstCharacterCode encodeText value =
+    firstCharacterBytes encodeText value
+    |> Array.fold (fun code part -> code * 256L + int64 part) 0L
+    |> VInt
 
 let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble: float -> float) value =
     match value with
@@ -432,6 +455,7 @@ let rec projectValueWithStatus encodeText transform value =
             | None -> value |> toText |> Option.defaultValue "" |> encodeText
 
         firstByteValue bytes, None
+    | Some FirstCharacterCode, value -> firstCharacterCode encodeText value, None
     | Some Floored, value -> roundFunctionalValue Math.Floor Math.Floor value
     | Some Ceiled, value -> roundFunctionalValue Math.Ceiling Math.Ceiling value
     | Some Signum, ((VString _ | VBytes _) as value) ->

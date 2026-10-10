@@ -4813,6 +4813,34 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE ascii_probe"; "DROP TABLE ascii_numeric_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private ordFunctionalIndex =
+        { Name = "ord-functional-index"
+          Setup =
+            [| "CREATE TABLE ord_latin1_probe(id INT PRIMARY KEY,v VARCHAR(20) CHARACTER SET latin1,KEY ix_ord ((ORD(v))))"
+               "INSERT INTO ord_latin1_probe VALUES(1,'é'),(2,''),(3,NULL),(4,'A')"
+               "CREATE TABLE ord_utf8_probe(id INT PRIMARY KEY,v VARCHAR(20),KEY ix_ord ((ORD(v))))"
+               "INSERT INTO ord_utf8_probe VALUES(1,'é'),(2,'😀')"
+               "CREATE TABLE ord_binary_probe(id INT PRIMARY KEY,v VARBINARY(20),KEY ix_ord ((ORD(v))))"
+               "INSERT INTO ord_binary_probe VALUES(1,X'C3A9'),(2,X'')"
+               "CREATE TABLE ord_numeric_probe(id INT PRIMARY KEY,v INT(4) ZEROFILL,KEY ix_ord ((ORD(v))))"
+               "INSERT INTO ord_numeric_probe VALUES(1,1),(2,12)" |]
+          Steps =
+            [| Contract.query "latin1-source" "SELECT id,ORD(v) FROM ord_latin1_probe ORDER BY id"
+               Contract.query "latin1-key" "SELECT id FROM ord_latin1_probe WHERE ORD(v)=233 ORDER BY id"
+               Contract.query "utf8-source" "SELECT id,ORD(v) FROM ord_utf8_probe ORDER BY id"
+               Contract.query "utf8-key" "SELECT id FROM ord_utf8_probe WHERE ORD(v)=50089 ORDER BY id"
+               Contract.query "binary-source" "SELECT id,ORD(v) FROM ord_binary_probe ORDER BY id"
+               Contract.query "numeric-key" "SELECT id,ORD(v) FROM ord_numeric_probe WHERE ORD(v)=48 ORDER BY id"
+               Contract.execute "update" "UPDATE ord_latin1_probe SET v='B' WHERE id=1"
+               Contract.query "old-key-removed" "SELECT id FROM ord_latin1_probe WHERE ORD(v)=233 ORDER BY id"
+               Contract.query "new-key-added" "SELECT id FROM ord_latin1_probe WHERE ORD(v)=66 ORDER BY id" |]
+          Cleanup =
+            [| "DROP TABLE ord_latin1_probe"
+               "DROP TABLE ord_utf8_probe"
+               "DROP TABLE ord_binary_probe"
+               "DROP TABLE ord_numeric_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private signFunctionalIndex =
         { Name = "sign-functional-index"
           Setup =
@@ -9203,6 +9231,7 @@ module ContractCatalog =
            signFunctionalIndex
            isNullFunctionalIndex
            asciiFunctionalIndex
+           ordFunctionalIndex
            constantNullFallbackIndexes
            tableStatisticsCache
            missingTableDiagnostics
