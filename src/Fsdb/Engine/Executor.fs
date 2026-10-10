@@ -7126,7 +7126,7 @@ and private resolveTableRef
     elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
         let tableName = tableRef.Table.ToUpperInvariant()
 
-        if tableName = "TABLES" && not planningProbe.Value then
+        if (tableName = "TABLES" || tableName = "STATISTICS") && not planningProbe.Value then
             Storage.ensureTableStatistics store (informationSchemaStatisticsExpiry ())
 
         if
@@ -7906,7 +7906,9 @@ and private tryInformationSchemaNarrow
     elif informationSchemaRequiresProcess tableRef.Table && not (InformationSchema.canViewProcessMetadata ()) then
         None
     else
-        if tableRef.Table.Equals("TABLES", System.StringComparison.OrdinalIgnoreCase) && not planningProbe.Value then
+        if (tableRef.Table.Equals("TABLES", System.StringComparison.OrdinalIgnoreCase)
+            || tableRef.Table.Equals("STATISTICS", System.StringComparison.OrdinalIgnoreCase))
+           && not planningProbe.Value then
             Storage.ensureTableStatistics store (informationSchemaStatisticsExpiry ())
 
         match

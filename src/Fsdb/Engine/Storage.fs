@@ -243,7 +243,8 @@ let private tryIndexTraversal requested stored =
 /// the cache is first populated, expires, or `ANALYZE TABLE` runs.
 type TableStatistics =
     { RowEstimate: int
-      RefreshedAt: DateTime }
+      RefreshedAt: DateTime
+      IndexCardinality: Map<string, int list> }
 
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
@@ -2951,6 +2952,35 @@ let private encodeIndexKey (columns: ColumnDef list) (group: IndexKeyGroup) (row
     row
     |> indexValues columns group
     |> encodeEqualityValues columns group.Indices
+
+let private captureTableStatistics (now: DateTime) (table: Table) : TableStatistics =
+    let cardinality (group: IndexKeyGroup) =
+        let indices = List.toArray group.Indices
+        let distinct = Array.init indices.Length (fun _ -> HashSet<string>(StringComparer.Ordinal))
+
+        for row in table.RowsArray do
+            let values = indexValues table.Columns group row |> List.toArray
+
+            for prefix in 1 .. indices.Length do
+                let key =
+                    encodeEqualityValues
+                        table.Columns
+                        (indices.[.. prefix - 1] |> Array.toList)
+                        (values.[.. prefix - 1] |> Array.toList)
+                distinct.[prefix - 1].Add key |> ignore
+
+        distinct |> Array.map _.Count |> Array.toList
+
+    let btree = indexKeyGroups table |> List.map (fun group -> group.Name, cardinality group) |> Map.ofList
+    let cardinalities =
+        table.Indexes
+        |> List.fold (fun known index ->
+            if Map.containsKey index.Name known then known
+            else Map.add index.Name (List.replicate index.KeyColumns.Length table.RowsArray.Count) known) btree
+
+    { RowEstimate = table.RowsArray.Count
+      RefreshedAt = now
+      IndexCardinality = cardinalities }
 
 let private encodeUniqueKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string option =
     if group.Indices |> List.exists (fun index -> row.[index] = VNull) then
@@ -6110,7 +6140,7 @@ let analyzeTable (store: Store) (dbName: string) (tableName: string) : Result<un
         (fun database ->
             tryGetTable dbName database tableName
             |> Result.map (fun table ->
-                let statistics = { RowEstimate = table.RowsArray.Count; RefreshedAt = DateTime.UtcNow }
+                let statistics = captureTableStatistics DateTime.UtcNow table
                 let key = normalizeTableName tableName
                 Map.add key { table with Statistics = Some statistics } database, statistics))
     |> Result.map ignore
@@ -6123,7 +6153,10 @@ let ensureTableStatistics (store: Store) (expirySeconds: int64) : unit =
         let expired (now: DateTime) (table: Table) : bool =
             match table.Statistics with
             | None -> true
-            | Some statistics -> (now - statistics.RefreshedAt).TotalSeconds >= float expirySeconds
+            | Some statistics ->
+                (now - statistics.RefreshedAt).TotalSeconds >= float expirySeconds
+                || (statistics.IndexCardinality.IsEmpty
+                    && (not table.Indexes.IsEmpty || not (primaryKeyColumns table).IsEmpty))
 
         let now = DateTime.UtcNow
 
@@ -6136,7 +6169,7 @@ let ensureTableStatistics (store: Store) (expirySeconds: int64) : unit =
 
                     for KeyValue(tableName, table) in current do
                         if expired now table then
-                            let statistics = { RowEstimate = table.RowsArray.Count; RefreshedAt = now }
+                            let statistics = captureTableStatistics now table
                             updated <- Map.add tableName { table with Statistics = Some statistics } updated
                             events.Add(TableStatisticsRefreshed(dbName, table.OriginalName, statistics))
 

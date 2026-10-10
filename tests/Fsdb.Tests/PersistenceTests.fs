@@ -303,10 +303,10 @@ let tests =
                           TestSupport.Sql.expectOk result sql
                           result
                       for sql in
-                          [ "CREATE TABLE statistics_recovery(id INT PRIMARY KEY)"
+                          [ "CREATE TABLE statistics_recovery(id INT PRIMARY KEY,category INT,KEY k_category(category))"
                             "CREATE TABLE first_read_recovery(id INT PRIMARY KEY)"
                             "INSERT INTO first_read_recovery VALUES(1),(2)"
-                            "INSERT INTO statistics_recovery VALUES(1),(2),(3)"
+                            "INSERT INTO statistics_recovery VALUES(1,1),(2,1),(3,2)"
                             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='first_read_recovery'"
                             "INSERT INTO first_read_recovery VALUES(3)"
                             "ANALYZE TABLE statistics_recovery"
@@ -316,6 +316,7 @@ let tests =
                       let recovered = load directory
                       let table = recovered.Catalog.[defaultDatabase].["statistics_recovery"]
                       Expect.equal (table.Statistics |> Option.map _.RowEstimate) (Some 3) "analyzed estimate survives recovery"
+                      Expect.equal (table.Statistics |> Option.bind (fun statistics -> Map.tryFind "k_category" statistics.IndexCardinality)) (Some [ 2 ]) "index cardinality survives recovery"
                       Expect.equal table.RowsArray.Count 2 "live rows survive recovery"
                       let firstRead = recovered.Catalog.[defaultDatabase].["first_read_recovery"]
                       Expect.equal (firstRead.Statistics |> Option.map _.RowEstimate) (Some 2) "first-read estimate survives recovery"

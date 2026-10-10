@@ -29,7 +29,17 @@ positive expiry values refresh an expired estimate. The estimate survives WAL
 and snapshot recovery. A native differential contract covers first-read
 timing, stale counts after writes, ANALYZE refresh, and the zero-expiry path.
 
+The same snapshot now stores index cardinality. In a native MySQL 8.4.11
+probe, a three-row table with `(category,id)` values `(1,1)`, `(1,2)`,
+`(2,3)` reported 2 distinct first-key values and 3 distinct two-key values
+after `ANALYZE TABLE`; deleting the third row left those estimates unchanged.
+FULLTEXT and SPATIAL indexes reported the three-row count in a separate
+duplicate-value probe. fsdb computes exact B-tree prefix counts with the same
+key projection used by its maintained indexes, and uses the row count for
+FULLTEXT/SPATIAL entries. The snapshot survives WAL and snapshot recovery;
+the native contract checks `INFORMATION_SCHEMA.STATISTICS` and `SHOW INDEX`.
+
 The remaining divergence is InnoDB's approximate row sampling, page-derived
-`DATA_LENGTH`/`INDEX_LENGTH` and `AVG_ROW_LENGTH`, and per-index cardinality
-estimates. fsdb's row estimate is an exact snapshot of its live row count at
-refresh time; it does not imitate InnoDB's sampling error or physical pages.
+`DATA_LENGTH`/`INDEX_LENGTH` and `AVG_ROW_LENGTH`, and its sampled
+cardinalities on larger indexes. fsdb's estimates are exact snapshots at
+refresh time; they do not imitate InnoDB's sampling error or physical pages.

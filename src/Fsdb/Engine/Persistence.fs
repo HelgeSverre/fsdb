@@ -41,7 +41,8 @@ let private partitionTablespaceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Duy
 
 let private generatedForeignKeySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Euy |] // "FSNN" (format 23)
 let private previousSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Fuy |] // "FSNO" (format 24)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x50uy |] // "FSNP" (format 25)
+let private tableStatisticsSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x50uy |] // "FSNP" (format 25)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x51uy |] // "FSNQ" (format 26)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -65,7 +66,8 @@ type private SnapshotFormat =
       FullTextStopwords: bool
       FullTextDocumentRules: bool
       FullTextStopwordSources: bool
-      TableStatistics: bool }
+      TableStatistics: bool
+      IndexCardinality: bool }
 
 let private legacySnapshotFormat =
     { GeneratedForeignKeyIndexes = false
@@ -89,7 +91,8 @@ let private legacySnapshotFormat =
       FullTextStopwords = false
       FullTextDocumentRules = false
       FullTextStopwordSources = false
-      TableStatistics = false }
+      TableStatistics = false
+      IndexCardinality = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -152,7 +155,7 @@ let private generatedForeignKeySnapshotFormat =
     { partitionTablespaceSnapshotFormat with GeneratedForeignKeyIndexes = true }
 
 let private currentSnapshotFormat =
-    { generatedForeignKeySnapshotFormat with PreparedXaCatalogRefs = true; TableStatistics = true }
+    { generatedForeignKeySnapshotFormat with PreparedXaCatalogRefs = true; TableStatistics = true; IndexCardinality = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -161,8 +164,10 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = tableStatisticsSnapshotMagic then
+        Some { currentSnapshotFormat with IndexCardinality = false }
     elif header = previousSnapshotMagic then
-        Some { currentSnapshotFormat with TableStatistics = false }
+        Some { currentSnapshotFormat with TableStatistics = false; IndexCardinality = false }
     elif header = generatedForeignKeySnapshotMagic then
         Some generatedForeignKeySnapshotFormat
     elif header = partitionTablespaceSnapshotMagic then
@@ -285,6 +290,19 @@ let private readBool (r: #IReader) : bool = r.ReadByte() = 1uy
 let private writeStr (w: Writer) (s: string) = w.WriteLenEncString s
 
 let private readStr (r: #IReader) : string = r.ReadLenEncString() |> Option.defaultValue ""
+
+let private encodeIndexCardinality (w: Writer) (cardinality: Map<string, int list>) =
+    w.WriteInt32LE cardinality.Count
+    for KeyValue(name, prefixes) in cardinality do
+        writeStr w name
+        w.WriteInt32LE prefixes.Length
+        for count in prefixes do w.WriteInt32LE count
+
+let private decodeIndexCardinality (r: #IReader) : Map<string, int list> =
+    List.init (r.ReadInt32LE()) (fun _ ->
+        let name = readStr r
+        name, List.init (r.ReadInt32LE()) (fun _ -> r.ReadInt32LE()))
+    |> Map.ofList
 
 let private writeOptStr (w: Writer) (s: string option) =
     match s with
@@ -1196,6 +1214,7 @@ let private KindSchemaChangedV13 = 0x29uy
 let private KindSchemaChangedAtV13 = 0x2Auy
 let private KindWithDdlAllowInvalidDates = 0x2Buy
 let private KindTableStatisticsRefreshed = 0x2Cuy
+let private KindTableStatisticsRefreshedWithCardinality = 0x2Duy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1375,11 +1394,12 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteLenEncString table
         w.WriteInt64LE nextId
     | TableStatisticsRefreshed(db, table, statistics) ->
-        w.WriteByte KindTableStatisticsRefreshed
+        w.WriteByte KindTableStatisticsRefreshedWithCardinality
         writeStr w db
         writeStr w table
         w.WriteInt32LE statistics.RowEstimate
         w.WriteInt64LE statistics.RefreshedAt.Ticks
+        encodeIndexCardinality w statistics.IndexCardinality
     | SchemaChanged(db, stmt) ->
         w.WriteByte KindSchemaChangedV13
         w.WriteLenEncString db
@@ -1495,7 +1515,17 @@ let rec private decodeEventAt
         TableStatisticsRefreshed(
             str (),
             str (),
-            { RowEstimate = r.ReadInt32LE(); RefreshedAt = DateTime(r.ReadInt64LE(), DateTimeKind.Utc) }
+            { RowEstimate = r.ReadInt32LE()
+              RefreshedAt = DateTime(r.ReadInt64LE(), DateTimeKind.Utc)
+              IndexCardinality = Map.empty }
+        )
+    | k when k = KindTableStatisticsRefreshedWithCardinality ->
+        TableStatisticsRefreshed(
+            str (),
+            str (),
+            { RowEstimate = r.ReadInt32LE()
+              RefreshedAt = DateTime(r.ReadInt64LE(), DateTimeKind.Utc)
+              IndexCardinality = decodeIndexCardinality r }
         )
     | k when k = KindSchemaChanged ->
         let db = str ()
@@ -1856,7 +1886,8 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
         writeBool w t.Statistics.IsSome
         t.Statistics |> Option.iter (fun statistics ->
             w.WriteInt32LE statistics.RowEstimate
-            w.WriteInt64LE statistics.RefreshedAt.Ticks)
+            w.WriteInt64LE statistics.RefreshedAt.Ticks
+            if format.IndexCardinality then encodeIndexCardinality w statistics.IndexCardinality)
     if format.FullTextStopwords then
         for index in t.Indexes |> List.filter (fun index -> index.Kind.IsFullText) do
             encodeStopwordPolicy w (FullText.storedRules t.FullTextIndexes.[index.Name]).Stopwords
@@ -1980,7 +2011,10 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let statistics =
         if format.TableStatistics then
             if readBool r then
-                Some { RowEstimate = r.ReadInt32LE(); RefreshedAt = DateTime(r.ReadInt64LE(), DateTimeKind.Utc) }
+                let rowEstimate = r.ReadInt32LE()
+                let refreshedAt = DateTime(r.ReadInt64LE(), DateTimeKind.Utc)
+                let cardinality = if format.IndexCardinality then decodeIndexCardinality r else Map.empty
+                Some { RowEstimate = rowEstimate; RefreshedAt = refreshedAt; IndexCardinality = cardinality }
             else
                 None
         else

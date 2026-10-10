@@ -4878,6 +4878,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripIdentifierQuotes |> Option.defaultValue dbName
+        let expiry = sessionValue session "information_schema_stats_expiry" |> Option.bind tryInt64 |> Option.defaultValue 86400L
+        Storage.ensureTableStatistics (Session.currentStore session) expiry
         session,
         InformationSchema.showIndex (catalogWithOverlay session dbName table) dbName table
         |> Result.map (fun (columns, rows) ->

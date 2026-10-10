@@ -577,6 +577,12 @@ let private indexColumnNullability (table: Table) (keyColumn: IndexColumn) =
     |> Option.map (fun column -> if column.PrimaryKey || not column.Nullable then "" else "YES")
     |> Option.defaultValue ""
 
+let private indexCardinality (table: Table) (index: IndexDef) position =
+    table.Statistics
+    |> Option.bind (fun statistics -> Map.tryFind index.Name statistics.IndexCardinality)
+    |> Option.bind (List.tryItem position)
+    |> Option.defaultValue 0
+
 /// One row per `(index, column)` pair.
 let private statisticsRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -600,7 +606,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vi (i + 1)
                    colName
                    (if ix.Kind.IsFullText then VNull else vs (indexDirectionText keyColumn))
-                   vi 0
+                   vi (indexCardinality t ix i)
                    (effectivePrefixLength t keyColumn |> Option.map vi |> Option.defaultValue VNull)
                    VNull
                    vs nullable
@@ -4040,7 +4046,7 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       Some(string (i + 1))
                       (if expression.IsSome then None else Some keyColumn.Name)
                       (if ix.Kind.IsFullText then None else Some(indexDirectionText keyColumn))
-                      Some "0"
+                      Some(string (indexCardinality t ix i))
                       (effectivePrefixLength t keyColumn |> Option.map string)
                       None
                       Some(if expression.IsSome then "YES" else indexColumnNullability t keyColumn)
