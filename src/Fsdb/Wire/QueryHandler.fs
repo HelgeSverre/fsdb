@@ -8003,6 +8003,9 @@ let private recordSlowQueryIfNeeded (session: Session) startedAt =
         InformationSchema.recordSlowQuery session.StatusCounters
     isSlow
 
+let internal recordFailedLoadStartedAt startedAt session =
+    recordSlowQueryIfNeeded session startedAt |> ignore
+
 let private includeCurrentSlowStatus = function
     | ResultSet(columns, rows) ->
         ResultSet(
@@ -8199,7 +8202,7 @@ let internal executeServerLoadStartedAt startedAt (session: Session) (load: Pars
     | Ok rows -> executeLoadedDataStartedAt startedAt session load rows
     | Error(code, message) ->
         let outcome = recordDiagnostics session false (fun () -> session, Err(code, message))
-        recordSlowQueryIfNeeded session startedAt |> ignore
+        recordFailedLoadStartedAt startedAt session
         outcome
 
 let executeServerLoad session load =

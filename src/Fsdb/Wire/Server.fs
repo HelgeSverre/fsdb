@@ -1978,12 +1978,17 @@ let private handleConnection
 
                                                                 match! receiveLocalData client stream readProgress (sessionNetReadTimeout session) uploadSeqId with
                                                                 | Result.Error((code, _), _) when code = 2013 ->
+                                                                    QueryHandler.recordFailedLoadStartedAt startedAt session
                                                                     client.Close()
                                                                     return None
-                                                                | Result.Error((code, message), responseSeqId) -> return Some(session, Err(code, message), responseSeqId)
+                                                                | Result.Error((code, message), responseSeqId) ->
+                                                                    QueryHandler.recordFailedLoadStartedAt startedAt session
+                                                                    return Some(session, Err(code, message), responseSeqId)
                                                                 | Result.Ok(bytes, responseSeqId) ->
                                                                     match LoadData.decode load bytes with
-                                                                    | Result.Error(code, message) -> return Some(session, Err(code, message), responseSeqId)
+                                                                    | Result.Error(code, message) ->
+                                                                        QueryHandler.recordFailedLoadStartedAt startedAt session
+                                                                        return Some(session, Err(code, message), responseSeqId)
                                                                     | Result.Ok rows ->
                                                                         return
                                                                             runCancellable statement (fun () ->

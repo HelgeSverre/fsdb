@@ -24,5 +24,10 @@ opened it. The subsequent session status reported `Slow_queries=1`; the
 table contained the row. This confirms that the local upload interval belongs
 to the statement's slow-query time.
 
-Uploads rejected before row decoding do not yet update the counter. MySQL's
-wider engine and latency status families remain outside fsdb's registry.
+A native MySQL 8.4.11 session with `long_query_time=0` reported
+`Slow_queries=1` after its first status read, then `Slow_queries=3` after a
+missing-file `LOAD DATA LOCAL INFILE` error and another status read. Thus the
+failed upload itself increments the counter. Fsdb now records failed local
+uploads, including transport and decoding errors, from the timer started
+before the request packet. MySQL's wider engine and latency status families
+remain outside fsdb's registry.

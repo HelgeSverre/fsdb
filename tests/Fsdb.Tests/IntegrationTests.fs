@@ -1448,8 +1448,17 @@ let tests =
                       let query (sql: string) =
                           writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
 
+                      let globalSlowQueries () =
+                          let observer = Fsdb.Session.create 999 store
+                          match Fsdb.QueryHandler.handle observer "SHOW GLOBAL STATUS LIKE 'Slow_queries'" |> snd with
+                          | ResultSet(_, [ [ Some "Slow_queries"; Some count ] ]) -> int64 count
+                          | other -> failtestf "expected Slow_queries status, got %A" other
+
                       do! query "CREATE TABLE limited_load (value TEXT)" |> Async.Ignore
                       let! _ = readPacketAsync stream
+                      do! query "SET SESSION long_query_time=0" |> Async.Ignore
+                      let! _ = readPacketAsync stream
+                      let before = globalSlowQueries ()
                       do! query "LOAD DATA LOCAL INFILE 'large.tsv' INTO TABLE limited_load" |> Async.Ignore
                       let! _ = readPacketAsync stream
                       do! writePacketAsync stream { SeqId = 2uy; Payload = Array.create 1025 120uy } |> Async.Ignore
@@ -1458,6 +1467,7 @@ let tests =
                       Expect.equal rejected.Value.SeqId 4uy "overflow result sequence"
                       Expect.equal rejected.Value.Payload.[0] 0xffuy "overflow returns ERR"
                       Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 1153 "overflow error code"
+                      Expect.equal (globalSlowQueries ()) (before + 1L) "failed upload counts as a slow query"
                       match Fsdb.Storage.scanList store "fsdb" "limited_load" with
                       | Ok(_, rows) -> Expect.isEmpty rows "no rows are published"
                       | Error error -> failtestf "table scan failed: %A" error
