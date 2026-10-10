@@ -230,13 +230,14 @@ or locking retain the general SELECT pipeline.
   hashing, and UUIDs;
 - IPv4 and IPv6 conversion and predicates;
 - NULL-selection, comparison, and session identity functions;
-- OGC geometry construction, serialization, inspection, coordinate swapping, and member access,
+- OGC geometry construction, serialization, inspection, coordinate swapping,
+  line interpolation, and member access,
   including typed text/binary constructors, line endpoints and indexing,
   polygon rings, multi-geometry members, and closure checks.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | geographic non-point distance and topology beyond line length; `ST_LineInterpolatePoint`, `ST_LineInterpolatePoints`, and `ST_PointAtDistance`; transformations and reference systems beyond EPSG 4326/3857/3395 | low |
+| Remaining spatial behavior | geographic non-point distance and topology beyond line length, plus transformations and reference systems beyond EPSG 4326/3857/3395 | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
@@ -326,7 +327,7 @@ BIGINT values. Runtime precision keeps its declared metadata boundary
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes and geographic SRS rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays, geometry property/member accessors, and independently configurable square/circle point, flat/round end, and miter/round join buffer strategies work; EPSG 4326 constructors and text/binary serializers honor MySQL axis options and coordinate domains, point distance and line length use MySQL's Andoyer strategy and linear-unit registry, and `ST_DISTANCE_SPHERE` supports point and multipoint inputs with MySQL's default, SRS-derived, or explicit radius; [EPSG 3857 projected constructors, metadata, planar distance/length, envelope, and spherical-distance refusal](torture/findings/2026-10-10-epsg-3857.md) are covered, as are [EPSG 3395 projected metadata, planar operations, and transforms among 4326/3857/3395](torture/findings/2026-10-10-world-mercator.md); broader non-point geographic distance/topology and other SRS definitions remain absent, and the internal augmented interval tree is not an R-tree | low | subset |
+| Spatial indexes and operations | R-tree indexes and geographic SRS rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays, geometry property/member accessors, and independently configurable square/circle point, flat/round end, and miter/round join buffer strategies work; EPSG 4326 constructors and text/binary serializers honor MySQL axis options and coordinate domains, point distance and line length use MySQL's Andoyer strategy and linear-unit registry, and `ST_DISTANCE_SPHERE` supports point and multipoint inputs with MySQL's default, SRS-derived, or explicit radius; [line interpolation](torture/findings/2026-10-10-line-interpolation.md) works across supported SRSs; [EPSG 3857 projected constructors, metadata, planar distance/length, envelope, and spherical-distance refusal](torture/findings/2026-10-10-epsg-3857.md) are covered, as are [EPSG 3395 projected metadata, planar operations, and transforms among 4326/3857/3395](torture/findings/2026-10-10-world-mercator.md); broader non-point geographic distance/topology and other SRS definitions remain absent, and the internal augmented interval tree is not an R-tree | low | subset |
 | Constant unary negation inference | constant integer expressions can promote to DECIMAL; runtime BIGINT operands retain overflow checks | casts, arithmetic, CASE, and audited original builtin constants support promotion through the shared evaluator; unaudited constant functions remain incomplete. Mixed signed/unsigned BIGINT conditional results use DECIMAL throughout arithmetic; column and parameter expressions whose result remains BIGINT retain runtime overflow checks ([oracle](torture/findings/2026-10-06-prepared-parameter-repreparation.md#constant-negation-and-mixed-integer-results)) | low | divergence/refusal |
 | Binary-literal expression boundaries | context-dependent numeric interpretation and expression descriptors | bare bit/hex literals retain numeric origin through arithmetic, casts, aggregates, IF/CASE, and source-free scalar subqueries with absent or supported constant-true conditions; variables, derived columns, and non-reduced scalar subqueries erase it. Conditional reduction shares execution semantics for literal operators and audited original builtins, and preserves runtime variable/parameter boundaries. NOT and IF condition simplification follow MySQL’s three-valued logic boundaries; ordinary comparisons, casts, and COALESCE retain runtime operands. Broader constant-function reduction remains incomplete ([oracle](torture/findings/2026-10-06-prepared-parameter-repreparation.md#binary-literal-context-boundaries)) | low | divergence |
 | Numeric expression descriptors | widths and scales depend on expression family and literal spelling | common exact and approximate arithmetic, conditionals, numeric rounding, casts, and aggregates retain operand-derived descriptors; scientific literal spelling survives projections, views, and CTAS. Broader scalar/function descriptors remain incomplete ([oracle](torture/findings/2026-10-06-prepared-parameter-repreparation.md#rounding-precision-and-exact-values)) | low | divergence |
@@ -905,9 +906,10 @@ implementation effort:
    point/multipoint distance, and linear units are covered alongside planar
    spatial indexes and operations; EPSG 3857 and 3395 projected geometry use planar
    metric operations, with `ST_Transform` among EPSG 4326, 3857, and 3395.
-   `ST_SwapXY` covers all supported geometry shapes. Line interpolation,
-   broader non-point geographic distance and topology, and other reference
-   systems remain absent.
+   `ST_SwapXY` covers all supported geometry shapes. Line interpolation and
+   point-at-distance use planar segment lengths or MySQL's Andoyer/Thomas
+   geographic strategy; broader non-point geographic distance and topology,
+   and other reference systems remain absent.
 
 5. Extensible authentication providers. The built-in caching-SHA2, SHA-256,
    and native password exchanges are covered; external identity providers and

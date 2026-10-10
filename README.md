@@ -521,7 +521,8 @@ current boundaries live in [GAPS.md](GAPS.md).
   predicates, overlays, independently configurable buffer strategies, and
   EPSG 4326 point distance and line length with axis-order and linear-unit
   handling, EPSG 3857/3395 projected planar distance and length,
-  `ST_Transform` among 4326/3857/3395, plus spherical
+  `ST_Transform` among 4326/3857/3395, line interpolation across supported
+  SRSs, plus spherical
   point and multipoint distance.
 - Writes and schema: `INSERT`, `INSERT ... SELECT`, `REPLACE`, multi-table
   `UPDATE`/`DELETE`, generated columns, foreign keys, HASH partition metadata,

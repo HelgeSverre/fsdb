@@ -75,7 +75,7 @@ let private geometryFunctions =
           "ST_ASBINARY"; "ST_ASTEXT"; "ST_ASWKB"; "ST_ASWKT"; "ST_BUFFER"; "ST_CONTAINS"; "ST_CONVEXHULL"; "ST_DIMENSION"
           "ST_DIFFERENCE"; "ST_DISJOINT"; "ST_DISTANCE"; "ST_DISTANCE_SPHERE"; "ST_ENVELOPE"; "ST_EQUALS"; "ST_GEOMETRYTYPE"; "ST_INTERSECTION"; "ST_INTERSECTS"
           "ST_ISEMPTY"; "ST_ISVALID"; "ST_ISCLOSED"; "ST_SYMDIFFERENCE"; "ST_UNION"
-          "ST_LENGTH"; "ST_SRID"; "ST_TRANSFORM"; "ST_SWAPXY"; "ST_TOUCHES"; "ST_WITHIN"; "ST_X"; "ST_Y"; "X"; "Y"
+          "ST_LENGTH"; "ST_SRID"; "ST_TRANSFORM"; "ST_SWAPXY"; "ST_LINEINTERPOLATEPOINT"; "ST_LINEINTERPOLATEPOINTS"; "ST_POINTATDISTANCE"; "ST_TOUCHES"; "ST_WITHIN"; "ST_X"; "ST_Y"; "X"; "Y"
           "ST_NUMPOINTS"; "ST_STARTPOINT"; "ST_ENDPOINT"; "ST_POINTN"
           "ST_NUMINTERIORRING"; "ST_NUMINTERIORRINGS"; "ST_EXTERIORRING"; "ST_INTERIORRINGN"
           "ST_NUMGEOMETRIES"; "ST_GEOMETRYN" ]
@@ -145,6 +145,8 @@ let private functionParameterMetadata (registry: Registry) (name: string) index 
         Some floatingPoint
     | None when name = "ST_BUFFER" && index > 1 ->
         Some binary
+    | None when (name = "ST_LINEINTERPOLATEPOINT" || name = "ST_LINEINTERPOLATEPOINTS" || name = "ST_POINTATDISTANCE") && index = 1 ->
+        Some floatingPoint
     | None when name = "ST_DISTANCE_SPHERE" && index = 2 ->
         Some floatingPoint
     | None when (name = "ST_SRID" || name = "ST_TRANSFORM") && index = 1 ->

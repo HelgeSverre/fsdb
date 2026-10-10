@@ -6175,21 +6175,16 @@ let private geometryLengthFn: Scalar =
         let functionName = "ST_LENGTH"
         let geometry = geometryArgument functionName value
 
-        let euclidean (firstX, firstY) (secondX, secondY) =
-            let deltaX = secondX - firstX
-            let deltaY = secondY - firstY
-            sqrt (deltaX * deltaX + deltaY * deltaY)
-
         let measured =
             if geometry.Srid = 0 then
-                lineworkLength euclidean geometry.Shape
+                lineworkLength planarPointDistance geometry.Shape
             else
                 let referenceSystem = spatialReferenceSystem functionName geometry.Srid
                 match referenceSystem.SemiMajorAxis with
                 | Some _ -> lineworkLength (geographicPointDistance referenceSystem) geometry.Shape
                 | None ->
                     let coordinateUnit = referenceSystem.LinearUnitInMetres |> Option.defaultValue 1.0
-                    lineworkLength euclidean geometry.Shape |> Option.map (fun length -> length * coordinateUnit)
+                    lineworkLength planarPointDistance geometry.Shape |> Option.map (fun length -> length * coordinateUnit)
 
         match measured, geometry.Srid, unit with
         | None, _, _ -> VNull
@@ -6212,6 +6207,68 @@ let private geometryLengthFn: Scalar =
     | [ value ] -> length value None
     | [ value; unit ] -> length value (Some unit)
     | _ -> nativeParameterCountError "st_length"
+
+type private LineInterpolationMode =
+    | FractionPoint
+    | FractionPoints
+    | AbsolutePoint
+
+let private geometryLineInterpolateFn functionName mode: Scalar =
+    let evaluate geometryValue distanceValue =
+        let geometry = geometryArgument functionName geometryValue
+        let points =
+            match geometry.Shape with
+            | GLineString points -> points
+            | shape ->
+                raise (
+                    SqlError(
+                        3516,
+                        sprintf
+                            "LINESTRING value is a geometry of unexpected type %s in %s."
+                            (geometryTypeName (geometryKind shape))
+                            (functionName.ToLowerInvariant())
+                    )
+                )
+
+        let referenceSystem = spatialReferenceSystem functionName geometry.Srid
+        let segmentDistance, pointAlong =
+            if referenceSystem.SemiMajorAxis.IsSome then
+                geographicPointDistance referenceSystem,
+                (fun start endpoint fraction length ->
+                    geographicPointAlong referenceSystem start endpoint (fraction * length))
+            else
+                planarPointDistance,
+                (fun (firstX, firstY) (secondX, secondY) fraction _ ->
+                    firstX + (secondX - firstX) * fraction,
+                    firstY + (secondY - firstY) * fraction)
+
+        let totalLength =
+            points
+            |> List.pairwise
+            |> List.sumBy (fun (first, second) -> segmentDistance first second)
+
+        let requested = toDouble distanceValue
+        let outOfRange =
+            not (Double.IsFinite requested)
+            || requested < 0.0
+            || (match mode with
+                | AbsolutePoint -> requested > totalLength
+                | FractionPoint
+                | FractionPoints -> requested > 1.0)
+
+        if outOfRange then
+            raise (SqlError(1690, sprintf "Distance value is out of range in '%s'" (functionName.ToLowerInvariant())))
+
+        let spacing = if mode = AbsolutePoint then requested else requested * totalLength
+        let result = interpolateLinePoints segmentDistance pointAlong spacing (mode = FractionPoints) points
+        let shape = if mode = FractionPoints then GMultiPoint result else GPoint(List.head result)
+        VGeometry { Srid = geometry.Srid; Shape = shape }
+
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ geometry; distance ] -> evaluate geometry distance
+    | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
 
 let private geometryEnvelopeFn: Scalar =
     function
@@ -6444,6 +6501,9 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_DISTANCE" geometryDistanceFn
     |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
     |> registerScalar "ST_LENGTH" geometryLengthFn
+    |> registerScalar "ST_LINEINTERPOLATEPOINT" (geometryLineInterpolateFn "ST_LineInterpolatePoint" FractionPoint)
+    |> registerScalar "ST_LINEINTERPOLATEPOINTS" (geometryLineInterpolateFn "ST_LineInterpolatePoints" FractionPoints)
+    |> registerScalar "ST_POINTATDISTANCE" (geometryLineInterpolateFn "ST_PointAtDistance" AbsolutePoint)
     |> registerScalar "ST_EQUALS" (geometryPredicateFn "ST_EQUALS" geometryEqualsPlanar)
     |> registerScalar "ST_CONTAINS" (geometryPredicateFn "ST_CONTAINS" geometryContainsPlanar)
     |> registerScalar "ST_WITHIN" (geometryPredicateFn "ST_WITHIN" (fun first second -> geometryContainsPlanar second first))

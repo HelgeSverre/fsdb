@@ -36,6 +36,10 @@ let private encodedStrategyLength = strategyCodeLength + sizeof<double>
 
 let private radians degrees = degrees * Math.PI / 180.0
 
+let internal planarPointDistance (firstX: float, firstY: float) (secondX: float, secondY: float) =
+    let deltaX, deltaY = secondX - firstX, secondY - firstY
+    sqrt (deltaX * deltaX + deltaY * deltaY)
+
 let private sphericalPointDistance radius (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
     let latitudeDelta = radians (secondLatitude - firstLatitude)
     let longitudeDelta = radians (secondLongitude - firstLongitude)
@@ -105,6 +109,100 @@ let internal geographicPointDistance referenceSystem first second =
         semiMajorAxis * (angularDistance + flatteningCorrection)
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
 
+/// Boost's default geographic line interpolation uses Andoyer for the initial
+/// azimuth and first-order Thomas for the direct point. Keep this paired with
+/// geographicPointDistance, which supplies the distance along each segment.
+let private geographicSegmentAzimuth flattening (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
+    let latitude1, latitude2 = radians firstLatitude, radians secondLatitude
+    let longitudeDelta = radians (secondLongitude - firstLongitude)
+    let sin1, cos1 = sin latitude1, cos latitude1
+    let sin2, cos2 = sin latitude2, cos latitude2
+    let sinLongitude, cosLongitude = sin longitudeDelta, cos longitudeDelta
+    let cosineDistance = max -1.0 (min 1.0 (sin1 * sin2 + cos1 * cos2 * cosLongitude))
+    let angularDistance = acos cosineDistance
+    let sineDistance = sin angularDistance
+
+    if abs sineDistance < 1e-15 then
+        if cosineDistance >= 0.0 || abs (sin1 - 1.0) > 1e-15 then 0.0 else Math.PI
+    else
+        let firstAngle, firstCorrection =
+            if abs cos2 < 1e-15 then
+                (if sin2 < 0.0 then Math.PI else 0.0), 0.0
+            else
+                let angle = atan2 sinLongitude (cos1 * sin2 / cos2 - sin1 * cosLongitude)
+                angle, flattening / 2.0 * cos1 * cos1 * sin (2.0 * angle)
+
+        let secondCorrection =
+            if abs cos1 < 1e-15 then 0.0
+            else
+                let angle = atan2 sinLongitude (cos2 * sin1 / cos1 - sin2 * cosLongitude)
+                flattening / 2.0 * cos2 * cos2 * sin (2.0 * angle)
+
+        let correction = secondCorrection * angularDistance / sineDistance - firstCorrection
+        let azimuth = firstAngle - correction
+        if firstAngle >= 0.0 then
+            if correction >= 0.0 then max 0.0 azimuth else min Math.PI azimuth
+        elif correction <= 0.0 then min 0.0 azimuth
+        else max -Math.PI azimuth
+
+let internal geographicPointAlong referenceSystem first second distance =
+    match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
+    | Some semiMajorAxis, Some inverseFlattening ->
+        let flattening = 1.0 / inverseFlattening
+        let firstLatitude, firstLongitude = first
+        let azimuth = geographicSegmentAzimuth flattening first second
+        let latitude1, azimuth12, flipped =
+            let latitude = radians firstLatitude
+            if azimuth > Math.PI / 2.0 then -latitude, Math.PI - azimuth, true
+            elif azimuth < -Math.PI / 2.0 then -latitude, -Math.PI - azimuth, true
+            else latitude, azimuth, false
+
+        let reducedLatitude = atan ((1.0 - flattening) * tan latitude1)
+        let sinReduced, cosReduced = sin reducedLatitude, cos reducedLatitude
+        let sinAzimuth, cosAzimuth = sin azimuth12, cos azimuth12
+        let m = cosReduced * sinAzimuth
+        let n = cosReduced * cosAzimuth
+        let c1 = flattening * m
+        let c2 = flattening * (1.0 - m * m) / 4.0
+        let divisor = 1.0 - 2.0 * c2 - c1 * m
+        let p = c2 / divisor
+        let sinTheta0 = sin (acos m)
+        let cosSigma1 = if abs sinTheta0 < 1e-15 then 1.0 else max -1.0 (min 1.0 (sinReduced / sinTheta0))
+        let sigma1 = acos cosSigma1
+        let d = distance / (semiMajorAxis * divisor)
+        let u = 2.0 * (sigma1 - d)
+        let cosineD, sineD = cos d, sin d
+        let cosineU, sineU = cos u, sin u
+        let v = cosineU * cosineD - sineU * sineD
+        let deltaSigma = d - 2.0 * p * v * (1.0 - 2.0 * p * cosineU) * sineD
+        let sinDelta, cosDelta = sin deltaSigma, cos deltaSigma
+        let reverseAzimuth = atan2 m (n * cosDelta - sinReduced * sinDelta)
+        let reverseAzimuth =
+            if not flipped then reverseAzimuth
+            elif abs reverseAzimuth < 1e-15 then if azimuth >= 0.0 then Math.PI else -Math.PI
+            elif reverseAzimuth > 0.0 then Math.PI - reverseAzimuth
+            else -Math.PI - reverseAzimuth
+
+        let longitudeDelta =
+            atan2 (sinDelta * sinAzimuth) (cosReduced * cosDelta - sinReduced * sinDelta * cosAzimuth)
+            - c1 * deltaSigma
+        let longitude = radians firstLongitude + longitudeDelta
+        let longitude =
+            if longitude > Math.PI then longitude - 2.0 * Math.PI
+            elif longitude <= -Math.PI then longitude + 2.0 * Math.PI
+            else longitude
+
+        let tangentReducedLatitude =
+            if abs m >= 1e-15 then
+                (sinReduced * cosDelta + n * sinDelta) * sin reverseAzimuth / m
+            else
+                let sigma2 = (2.0 * sigma1 - deltaSigma) - sigma1
+                cos sigma2 / abs (sin sigma2)
+        let latitude = atan (tangentReducedLatitude / (1.0 - flattening))
+        let latitude = if flipped then -latitude else latitude
+        latitude * 180.0 / Math.PI, longitude * 180.0 / Math.PI
+    | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
+
 let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
     let length (points: (float * float) list) =
         points
@@ -115,6 +213,40 @@ let internal lineworkLength (segmentDistance: float * float -> float * float -> 
     | GLineString points -> Some(length points)
     | GMultiLineString lines -> Some(lines |> List.sumBy length)
     | _ -> None
+
+let internal interpolateLinePoints
+    (segmentDistance: float * float -> float * float -> float)
+    (pointAlong: float * float -> float * float -> float -> float -> float * float)
+    spacing
+    multiple
+    (points: (float * float) list)
+    =
+    match points with
+    | [] -> []
+    | first :: rest when spacing <= 0.0 -> [ first ]
+    | first :: rest ->
+        let result = ResizeArray<float * float>()
+        let mutable previous = first
+        let mutable start = first
+        let mutable previousDistance = 0.0
+        let mutable nextDistance = spacing
+
+        for endpoint in rest do
+            let currentDistance = previousDistance + segmentDistance previous endpoint
+            while currentDistance >= nextDistance && (multiple || result.Count = 0) do
+                let remainingDistance = currentDistance - previousDistance
+                let fraction = (nextDistance - previousDistance) / remainingDistance
+                let point = pointAlong start endpoint fraction remainingDistance
+                result.Add point
+                start <- point
+                previousDistance <- nextDistance
+                nextDistance <- nextDistance + spacing
+            previousDistance <- currentDistance
+            previous <- endpoint
+            start <- endpoint
+
+        if result.Count = 0 then result.Add previous
+        List.ofSeq result
 
 let private strategyCodeAndPoints = function
     | BufferStrategy.EndRound points -> 1, points

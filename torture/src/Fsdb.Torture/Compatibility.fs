@@ -3119,6 +3119,71 @@ module ContractCatalog =
                    "geographic-linestring-length"
                    "SELECT ROUND(ST_Length(ST_GeomFromText('LINESTRING(59.9139 10.7522,51.5074 -0.1278)', 4326)), 3)"
                |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-planar-point"
+                   "SELECT ST_AsText(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(0 0,0 5,5 5)'),0.5)),ST_AsText(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(0 0,0 5,5 5)'),0.75))"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-planar-points"
+                   "SELECT ST_AsText(ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,0 5,5 5)'),0.25)),ST_AsText(ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,0 5,5 5)'),0.3))"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-points-beyond-geometry-setting"
+                   "SELECT ST_NumGeometries(ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,1 1)'),0.00001))"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-planar-distance"
+                   "SELECT ST_AsText(ST_PointAtDistance(ST_GeomFromText('LINESTRING(0 0,0 5,5 5)'),7.5)),ST_AsText(ST_PointAtDistance(ST_GeomFromText('LINESTRING(0 0,0 5,5 5)'),10))"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-boundaries"
+                   "SELECT ST_AsText(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(0 0,1 1)'),0)),ST_AsText(ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,1 1)'),0)),ST_AsText(ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,1 1)'),1)),ST_AsText(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(0 0,0 0)'),0.5))"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-geographic-point"
+                   "SELECT ROUND(ST_X(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),0.5)),8),ROUND(ST_Y(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),0.5)),8)"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-geographic-northwest"
+                   "SELECT ROUND(ST_X(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(59.9139 10.7522,51.5074 -0.1278)',4326),0.5)),7),ROUND(ST_Y(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(59.9139 10.7522,51.5074 -0.1278)',4326),0.5)),7)"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-geographic-antimeridian"
+                   "SELECT ROUND(ST_X(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(10 179,10 -179)',4326),0.5)),6),ROUND(ST_Y(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(10 179,10 -179)',4326),0.5)),6)"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-geographic-points"
+                   "SELECT ST_NumGeometries(ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),0.25)),ROUND(ST_X(ST_GeometryN(ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),0.25),2)),8),ROUND(ST_Y(ST_GeometryN(ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),0.25),2)),8)"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-geographic-distance"
+                   "SELECT ROUND(ST_X(ST_PointAtDistance(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),100000)),8),ROUND(ST_Y(ST_PointAtDistance(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),100000)),8)"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-projected"
+                   "SELECT ST_AsText(ST_LineInterpolatePoint(ST_GeomFromText('LINESTRING(0 0,0 5,5 5)',3395),0.75)),ST_SRID(ST_PointAtDistance(ST_GeomFromText('LINESTRING(0 0,0 5,5 5)',3857),7.5))"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "line-interpolate-prepared"
+                   "SELECT ST_AsText(ST_LineInterpolatePoint(ST_GeomFromText(?),?))"
+                   [| box "LINESTRING(0 0,0 5,5 5)"; box 0.75 |]
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-null"
+                   "SELECT ST_LineInterpolatePoint(NULL,0.5),ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,1 1)'),NULL),ST_PointAtDistance(NULL,1)"
+               |> Contract.comparingValues
+               Contract.query
+                   "line-interpolate-type-error"
+                   "SELECT ST_LineInterpolatePoint(ST_GeomFromText('POINT(0 0)'),0.5)"
+               |> Contract.fails 3516 "22S01"
+               Contract.query
+                   "line-interpolate-range-error"
+                   "SELECT ST_LineInterpolatePoints(ST_GeomFromText('LINESTRING(0 0,1 1)'),1.1)"
+               |> Contract.fails 1690 "22003"
+               Contract.query
+                   "point-at-distance-range-error"
+                   "SELECT ST_PointAtDistance(ST_GeomFromText('LINESTRING(0 0,1 1)'),-1)"
+               |> Contract.fails 1690 "22003"
                Contract.preparedQuery
                    "geographic-multilinestring-length-unit-prepared"
                    "SELECT ROUND(ST_Length(ST_GeomFromText(?, 4326), ?), 6)"
