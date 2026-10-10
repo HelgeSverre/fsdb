@@ -732,6 +732,13 @@ routines, events, and administrative probes.
 
 ## 15. Differential-testing and performance tails
 
+The [safe-update join snapshot](benchmarks/results/224915e6-safe-update-joins.md)
+checks the recent joined UPDATE work on native same-host servers. Rejected
+joined updates reached about 0.20 ms on fsdb and 0.05 ms on MySQL in the
+last measured block; the control and mutation workloads drifted across
+blocks, so the snapshot is a profiling baseline rather than a regression
+claim.
+
 The [line-interpolation wire snapshot](benchmarks/results/2026-10-10-line-interpolation.md)
 compares the recent spatial functions with a simple-query control on native
 fsdb and MySQL 8.4.11. Fixed overhead dominates the short cases, but the
