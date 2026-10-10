@@ -271,6 +271,10 @@ runs:
 These reports explain a measured revision pair. They do not replace the live
 compatibility and performance boundaries in [GAPS.md](../GAPS.md).
 
+The [integral DOUBLE constant-bound profile](results/177f6306-constant-bound-profile.md)
+compares indexed conditional lookup with an equivalent forced scan on the
+current implementation, including raw timing and allocation samples.
+
 The [numeric-expression snapshot](results/c29d188d-numeric.md) covers literal
 arithmetic, scalar subqueries, text-to-number aggregates, and prepared numeric
 queries on native fsdb and MySQL 8.4.11. Small expression queries take roughly
