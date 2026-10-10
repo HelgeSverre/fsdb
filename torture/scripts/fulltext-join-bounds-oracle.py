@@ -141,6 +141,17 @@ def verify(client, _):
         print(label + ":\n" + plan, flush=True)
         native["expect"](label + " filter owner", f"({filter_owner}.k in (1,NULL))" in plan, True)
 
+    native["expect"]("direct names IN", client.query(
+        "SELECT id,k IN (1,NULL) FROM names ORDER BY id"), "1\tNULL\n2\t1\n3\tNULL")
+    native["expect"]("direct labels IN", client.query(
+        "SELECT k,k IN (1,NULL) FROM labels ORDER BY k"), "1\t1\nother\tNULL")
+    for predicate in ("d.k IN (1,NULL)", "o.k IN (1,NULL)"):
+        query = ("SELECT d.id FROM names d STRAIGHT_JOIN labels o ON o.k=d.k WHERE "
+                 + predicate + " ORDER BY d.id")
+        native["expect"]("expanded straight " + predicate, client.query(query), "2")
+        plan = client.query("EXPLAIN FORMAT=TREE " + query)
+        native["expect"]("expanded straight " + predicate + " filter owner", "(d.k in (1,NULL))" in plan, True)
+
     client.query("INSERT INTO names VALUES(4,'missing','needle')")
     native["expect"]("outer join retains unmatched rows", client.query(
         "SELECT d.id FROM names d LEFT JOIN labels o ON o.k=d.k AND o.k='1' "

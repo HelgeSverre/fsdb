@@ -146,6 +146,15 @@ oracle script now asserts both plan placement and result rows, and compares
 full-text scores with a same-instance baseline because rounded relevance can
 vary between fresh servers.
 
+The indexed-table probe also evaluates the keys directly: `names.k IN
+(1,NULL)` is NULL for `①` and true for `1`. Yet after the second label row is
+added, an ordinary costed join with a written `d.k IN (1,NULL)` returns both
+IDs, while `names d STRAIGHT_JOIN labels o` with the same written predicate
+returns only ID 2. Both TREE plans show a hash join with a filter on `d.k`.
+The visible plan shape therefore cannot stand in for the optimizer's internal
+predicate conversion. The oracle pins the direct expression, the two result
+sets, and the displayed filter placement separately.
+
 A second MySQL 8.4.11 probe isolates why this cannot be decided from the
 written predicate alone. With `names` containing `(1,'①'), (2,'1'),
 (3,'other')` and `labels` initially containing just `'1'`, the ordinary
