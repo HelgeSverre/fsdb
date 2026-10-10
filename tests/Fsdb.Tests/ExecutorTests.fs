@@ -13562,6 +13562,40 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected CTE hint to remain accepted, got %A" other
 
+                testCase "table index hints control index ordering"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE hinted_order(id INT PRIMARY KEY,v INT,KEY ix_v(v))" |> ignore
+                    runDefault store "INSERT INTO hinted_order VALUES(1,4),(2,9),(3,16)" |> ignore
+                    let explain hint =
+                        runDefault store (sprintf "EXPLAIN SELECT v FROM hinted_order %s ORDER BY v" hint)
+                        |> explainRow
+                    Expect.isFalse ((explain "").Extra |> Option.exists (_.Contains("filesort"))) "index order avoids a sort"
+                    for hint in [ "IGNORE INDEX FOR ORDER BY(ix_v)"; "USE INDEX FOR ORDER BY()" ] do
+                        let plan = explain hint
+                        Expect.isTrue (plan.Extra |> Option.exists (_.Contains("filesort"))) (sprintf "%s requires a sort" hint)
+                    let explainGroup hint =
+                        runDefault store (sprintf "EXPLAIN SELECT v,COUNT(*) FROM hinted_order %s GROUP BY v" hint)
+                        |> explainRow
+                    Expect.isFalse ((explainGroup "").Extra |> Option.exists (_.Contains("temporary"))) "index grouping avoids a temporary table"
+                    for hint in [ "IGNORE INDEX FOR GROUP BY(ix_v)"; "USE INDEX FOR GROUP BY()" ] do
+                        let plan = explainGroup hint
+                        Expect.isTrue (plan.Extra |> Option.exists (_.Contains("temporary"))) (sprintf "%s requires temporary grouping" hint)
+                    let joinOnlyGroup = explainGroup "IGNORE INDEX FOR JOIN(ix_v)"
+                    Expect.isFalse (joinOnlyGroup.Extra |> Option.exists (_.Contains("temporary"))) "JOIN-only hint leaves grouping key available"
+                    let joinOnlyOrder = explain "IGNORE INDEX FOR JOIN(ix_v)"
+                    Expect.isTrue (joinOnlyOrder.Extra |> Option.exists (_.Contains("filesort"))) "JOIN-only hint blocks the ordering scan"
+                    runDefault store "CREATE TABLE hinted_order_choice(id INT PRIMARY KEY,v INT,KEY ix_first(v),KEY ix_second(v))" |> ignore
+                    runDefault store "INSERT INTO hinted_order_choice VALUES(1,4),(2,9),(3,16)" |> ignore
+                    let alternateOrder =
+                        runDefault store "EXPLAIN SELECT v FROM hinted_order_choice IGNORE INDEX FOR ORDER BY(ix_first) ORDER BY v"
+                        |> explainRow
+                    Expect.equal alternateOrder.Key (Some "ix_second") "ORDER BY selects another permitted key"
+                    let alternateGroup =
+                        runDefault store "EXPLAIN SELECT v,COUNT(*) FROM hinted_order_choice IGNORE INDEX FOR GROUP BY(ix_first) GROUP BY v"
+                        |> explainRow
+                    Expect.equal alternateGroup.Key (Some "ix_second") "GROUP BY selects another permitted key"
+
                 testCase "integer writes reject overflow in strict mode and clamp it otherwise"
                 <| fun _ ->
                     let store = newStore ()

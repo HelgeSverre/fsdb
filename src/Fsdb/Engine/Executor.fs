@@ -245,7 +245,8 @@ type private IndexedGroupProjection =
     | GroupConstant of Value
 
 type private OrderedIndexCandidate =
-    { Terms: IndexOrderTerm list }
+    { Name: string
+      Terms: IndexOrderTerm list }
 
 type private IndexPrefixMatch =
     { Terms: IndexOrderTerm list
@@ -13503,6 +13504,13 @@ and private indexAllowedBy (hints: TableIndexHint list) name =
     (included.IsEmpty || included |> List.exists named)
     && not (hints |> List.exists (fun hint -> hint.Kind = IgnoreIndex && named hint))
 
+and private indexAllowedForOrderedAccess scope (tref: TableRef) name =
+    let allowedForPurpose = indexAllowedBy (indexHintsFor scope tref) name
+    match scope with
+    | IndexGroupBy -> allowedForPurpose
+    | IndexOrderBy | IndexJoin ->
+        allowedForPurpose && indexAllowedBy (indexHintsFor IndexJoin tref) name
+
 and private physicalAccessCandidatesInTableWith policy store registry table tref whereExpr =
     let joinHints = indexHintsFor IndexJoin tref
     let policy =
@@ -13702,6 +13710,7 @@ and private tryIndexOrder
     (select: SelectStmt)
     : IndexOrderPlan option =
     let tableDb = tref.Database |> Option.defaultValue dbName
+    let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
 
     let canUseIndexOrder =
         (not select.OrderBy.IsEmpty || select.Limit.IsSome)
@@ -13757,7 +13766,7 @@ and private tryIndexOrder
             let completeIndexOrder () =
                 orderedColumns
                 |> storageOrderTerms
-                |> Storage.tryOrderedIndexLookup store tableDb tref.Table
+                |> Storage.tryOrderedIndexLookupWith allowed store tableDb tref.Table
                 |> Option.bind planLookup
 
             let direct =
@@ -13772,7 +13781,7 @@ and private tryIndexOrder
                         |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
                         |> Option.defaultValue (None, None)
 
-                    Storage.trySecondaryOrderedLookup store tableDb tref.Table term.Column lower upper term.Direction
+                    Storage.trySecondaryOrderedLookupWith allowed store tableDb tref.Table term.Column lower upper term.Direction
                     |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
                     |> Option.orElseWith completeIndexOrder
                 | _ -> completeIndexOrder ()
@@ -14921,7 +14930,7 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
             index.KeyColumns
             |> List.map tryTerm
             |> tryAllSome
-            |> Option.map (fun terms -> { Terms = terms })
+            |> Option.map (fun terms -> { Name = index.Name; Terms = terms })
         else
             None
 
@@ -14936,7 +14945,8 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
                 None
             else
                 Some
-                    { Terms =
+                    { Name = "PRIMARY"
+                      Terms =
                         columns
                         |> List.map (fun column ->
                             { Column = column
@@ -15036,6 +15046,7 @@ and private trySuffixRangeCoverageCount
             if lowerCount <= 1 && upperCount <= 1 then Some predicateGroups.Length else None
 
 and private orderedIndexPrefixMatches
+    (hintScope: TableIndexHintScope)
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -15057,6 +15068,7 @@ and private orderedIndexPrefixMatches
                 if equalsIgnoreCase equality.Column term.Column then Some equality.Value else None)
 
         orderedIndexCandidates table
+        |> List.filter (fun candidate -> indexAllowedForOrderedAccess hintScope tref candidate.Name)
         |> List.choose (fun candidate ->
             tryIndexPrefix pinnedColumns requestedTerms candidate.Terms
             |> Option.bind (fun matched ->
@@ -15087,8 +15099,9 @@ and private tryFixedPrefixIndexOrder
     : Storage.OrderedLookup option =
     let invert = function Asc -> Desc | Desc -> Asc
     let requestedDirections = orderedTerms |> List.map _.Direction
+    let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
 
-    orderedIndexPrefixMatches store registry dbName tref whereExpr orderedTerms
+    orderedIndexPrefixMatches IndexOrderBy store registry dbName tref whereExpr orderedTerms
     |> List.tryPick (fun resolved ->
         let matched = resolved.Match
 
@@ -15111,7 +15124,8 @@ and private tryFixedPrefixIndexOrder
 
                 let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr matched
 
-                Storage.tryOrderedIndexPrefixRangeLookup
+                Storage.tryOrderedIndexPrefixRangeLookupWith
+                    allowed
                     store
                     resolved.Database
                     tref.Table
@@ -15120,7 +15134,7 @@ and private tryFixedPrefixIndexOrder
                     lower
                     upper
                 |> Option.orElseWith (fun () ->
-                    Storage.tryOrderedIndexPrefixLookup store resolved.Database tref.Table terms resolved.PinnedValues)))
+                    Storage.tryOrderedIndexPrefixLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues)))
 
 and private tryGroupingIndexOrder
     (store: Store)
@@ -15130,7 +15144,8 @@ and private tryGroupingIndexOrder
     (whereExpr: Expr option)
     (groupTerms: IndexOrderTerm list)
     : GroupingIndexLookup option =
-    orderedIndexPrefixMatches store registry dbName tref whereExpr groupTerms
+    let allowed = indexAllowedForOrderedAccess IndexGroupBy tref
+    orderedIndexPrefixMatches IndexGroupBy store registry dbName tref whereExpr groupTerms
     |> List.tryPick (fun resolved ->
         let terms = resolved.Match.Terms |> storageOrderTerms
         let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr resolved.Match
@@ -15139,7 +15154,8 @@ and private tryGroupingIndexOrder
             match resolved.PinnedValues with
             | [] -> None
             | pinnedValues ->
-                Storage.tryOrderedIndexPrefixRangeLookup
+                Storage.tryOrderedIndexPrefixRangeLookupWith
+                    allowed
                     store
                     resolved.Database
                     tref.Table
@@ -15150,11 +15166,11 @@ and private tryGroupingIndexOrder
 
         let lookup =
             match resolved.PinnedValues with
-            | [] -> Storage.tryOrderedIndexLookup store resolved.Database tref.Table terms
+            | [] -> Storage.tryOrderedIndexLookupWith allowed store resolved.Database tref.Table terms
             | pinnedValues ->
                 rangeLookup
                 |> Option.orElseWith (fun () ->
-                    Storage.tryOrderedIndexPrefixLookup store resolved.Database tref.Table terms pinnedValues)
+                    Storage.tryOrderedIndexPrefixLookupWith allowed store resolved.Database tref.Table terms pinnedValues)
 
         lookup
         |> Option.map (fun lookup ->
