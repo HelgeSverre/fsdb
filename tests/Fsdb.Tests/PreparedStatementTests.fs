@@ -74,6 +74,20 @@ let tests =
               Expect.equal result expected "prepared lookup returns the matching row"
               Expect.isLessThan calls 10 "the prepared functional equality should use its expression index"
 
+              for predicate, expectedIds in
+                  [ "UPPER(TRIM(name)) = ?", [ "250" ]
+                    "id > 0 AND UPPER(TRIM(name)) = ?", [ "250" ]
+                    "UPPER(TRIM(name)) = ? OR id = 300", [ "250"; "300" ]
+                    "? = UPPER(TRIM(name))", [ "250" ] ] do
+                  let query = $"SELECT id FROM indexed_names WHERE {predicate} ORDER BY id"
+                  let ast, count =
+                      prepareStatementForSession session query
+                      |> Result.defaultWith (fun error -> failtestf "prepare failed: %A" error)
+                  let prepared = createPreparedStatement session query ast count
+                  let actual = executePrepared session prepared [ VString "USER_250" ] |> snd
+                  let expectedRows = ResultSet([ "id" ], expectedIds |> List.map (fun id -> [ Some id ]))
+                  Expect.equal actual expectedRows predicate
+
           testCase "ORDER BY subqueries resolve outer projection aliases in scope"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

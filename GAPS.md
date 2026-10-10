@@ -837,6 +837,11 @@ about 278 microseconds, versus about 242 microseconds for its prepared
 primary-key control; MySQL takes about 41 and 32 microseconds respectively.
 A [targeted repeat](benchmarks/results/2026-10-10-prepared-functional-index-strict-row-check.md)
 requires exactly one returned row and measures about 251 microseconds on fsdb.
+The [MySQL 8.4.11 oracle probes](torture/findings/2026-10-10-prepared-comparison-inference.md)
+with `lower_case_table_names=2` also return the same
+single-row result for direct, conjunctive, and reversed prepared equalities,
+and the expected two rows for a disjunction with a second ID; focused fsdb
+regressions cover those four shapes.
 The residual difference is part of the broader lookup overhead above.
 
 The constant-expression lookup pair records the
