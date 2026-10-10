@@ -79,7 +79,16 @@ For an `ON`-filtered lookup, MySQL treats an audited constant-true `WHERE`
 like no `WHERE`; constant false or NULL produces a safe no-op. A plain
 constant-true `WHERE` without a key still returns 1175, and adding a
 target-only condition to the true constant does not make the joined write
-safe. Fsdb now uses its safe planner constant evaluator for these conditions.
+safe. Fsdb uses its three-valued condition analysis for these conditions.
 The pinned contract passed all 644 safe-update steps at
 `torture/artifacts/runs/20261010T094036048-50439/contracts`; the complete run
 again retained only the nine identifier-case-policy differences.
+Native MySQL 8.4.11 also accepts an unindexed predicate conjoined with a
+constant false or NULL because the condition cannot select a row; it rejects
+the corresponding false-OR and true-AND unindexed predicates. A true
+disjunct makes an `ON`-filtered keyed join behave like an absent `WHERE`.
+Fsdb's existing three-valued condition analysis now recognizes these
+boundaries without evaluating row-dependent expressions. The pinned contract
+passed all 722 safe-update steps at
+`torture/artifacts/runs/20261010T094631593-50877/contracts`; the complete run
+retained only the nine documented identifier-case-policy differences.

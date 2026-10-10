@@ -24819,16 +24819,17 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             match whereExpr |> Option.bind columnBindingError with
             | Some error -> Error error
             | None ->
-                let constantTruth =
+                let possibleTruths =
                     whereExpr
-                    |> Option.bind (fun predicate ->
-                        Diagnostics.suppress (fun () -> plannerConstantEvaluator store registry predicate))
-                    |> Option.map truthy
+                    |> Option.map (fun predicate ->
+                        let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+                        possibleConditionTruths context predicate)
 
-                match constantTruth with
-                | Some(Some false) | Some None -> Ok()
+                match possibleTruths with
+                | Some truths when not (Set.contains (Some true) truths) -> Ok()
                 | _ ->
-                    let effectiveWhere = if constantTruth = Some(Some true) then None else whereExpr
+                    let effectiveWhere =
+                        if possibleTruths = Some(Set.singleton (Some true)) then None else whereExpr
                     match whereExpr with
                     | Some predicate when tables |> List.exists (fun (table, tableRef) -> usesKey table tableRef predicate) -> Ok()
                     | _ when singleTarget && hasKeyedJoinFilter targetRef joins effectiveWhere -> Ok()

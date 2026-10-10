@@ -3672,7 +3672,12 @@ let tests =
                     "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE 1=0", Affected 0UL
                     "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE NULL", Affected 0UL
                     "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE 1=1 AND t.v=0", unsafeError
+                    "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE 1=1 OR t.v=0", Affected 2UL
+                    "UPDATE t JOIN l ON l.id=t.id AND l.v=0 SET t.v=1 WHERE 1=0 AND t.v=0", Affected 0UL
                     "UPDATE t SET v=1 WHERE 1=0", Affected 0UL
+                    "UPDATE t SET v=1 WHERE v=0 AND 1=0", Affected 0UL
+                    "UPDATE t SET v=1 WHERE NULL AND v=0", Affected 0UL
+                    "UPDATE t SET v=1 WHERE 1=0 OR v=0", unsafeError
                     "UPDATE t SET v=1 WHERE 1=1", unsafeError ] do
                   let session = create 1 (Fsdb.Storage.create ())
                   let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
