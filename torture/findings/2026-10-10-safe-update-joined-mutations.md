@@ -33,8 +33,12 @@ return MySQL's 1054 (`42S22`) before safe-update error 1175, including when
 the target is empty. The validator shares this small binding check with its
 ambiguity handling.
 
-Multi-target writes, broader filter shapes, and other optimizer-dependent
-source choices are still outside this rule. The
+Native MySQL 8.4.11 also accepts two-target UPDATE and DELETE with either
+table's indexed `id=1` filter, and rejects an unindexed lookup-side filter
+or an unfiltered two-target UPDATE with 1175. The existing fsdb validator
+matches all seven audited multi-target cases; the differential contract and
+focused regression now protect them. Other multi-target access paths,
+broader filter shapes, and optimizer-dependent source choices remain open. The
 `sql_safe_updates` Expecto regression and `safe-update-mode` differential
 contract cover the accepted and rejected forms, error code, and unchanged
 target rows after rejection.
@@ -43,3 +47,6 @@ The expanded `safe-update-mode` contract passed every step against the pinned
 MySQL 8.4.11 image. The complete contract run reported nine differences,
 all in the previously documented identifier-case-policy cases on Linux mode
 0; none belonged to safe-update mode.
+The expanded contract passed all 386 safe-update steps at
+`torture/artifacts/runs/20261010T091140255-45246/contracts`; the complete run
+again differed only in the nine identifier-case-policy steps.

@@ -3537,10 +3537,16 @@ let tests =
                     "UPDATE t STRAIGHT_JOIN l ON l.id=t.id SET t.v=1 WHERE l.v=0", true
                     "UPDATE t JOIN l ON l.id=t.id SET l.v=1 WHERE l.v=0", true
                     "UPDATE t JOIN l ON l.id=t.id SET t.v=1,l.v=1 WHERE l.v=0", true
+                    "UPDATE t JOIN l ON l.id=t.id SET t.v=1,l.v=1 WHERE t.id=1", false
+                    "UPDATE t JOIN l ON l.id=t.id SET t.v=1,l.v=1 WHERE l.id=1", false
+                    "UPDATE t JOIN l ON l.id=t.id SET t.v=1,l.v=1", true
                     "DELETE t FROM t JOIN l ON l.id=t.id WHERE l.v=0", false
                     "DELETE t FROM t JOIN l ON l.id=t.id WHERE l.v BETWEEN 0 AND 0", false
                     "DELETE t FROM t STRAIGHT_JOIN l ON l.id=t.id WHERE l.v=0", true
-                    "DELETE l FROM t JOIN l ON l.id=t.id WHERE l.v=0", true ] do
+                    "DELETE l FROM t JOIN l ON l.id=t.id WHERE l.v=0", true
+                    "DELETE t,l FROM t JOIN l ON l.id=t.id WHERE l.v=0", true
+                    "DELETE t,l FROM t JOIN l ON l.id=t.id WHERE t.id=1", false
+                    "DELETE t,l FROM t JOIN l ON l.id=t.id WHERE l.id=1", false ] do
                   let session = create 1 (Fsdb.Storage.create ())
                   let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
                   let session, _ = handle session "CREATE TABLE l(id INT PRIMARY KEY,v INT)"

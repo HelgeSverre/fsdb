@@ -8353,6 +8353,13 @@ module ContractCatalog =
                                 "SELECT id,value FROM safe_update_probe ORDER BY id" ]
               mutationCase "straight-join-target-delete" true "DELETE p FROM safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               mutationCase "joined-lookup-delete" true "DELETE l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
+              mutationCase "multi-target-lookup-filter" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1,l.value=1 WHERE l.value=0"
+              mutationCase "multi-target-target-key" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1,l.value=1 WHERE p.id=1"
+              mutationCase "multi-target-lookup-key" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1,l.value=1 WHERE l.id=1"
+              mutationCase "multi-target-no-filter" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1,l.value=1"
+              mutationCase "multi-delete-lookup-filter" true "DELETE p,l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
+              mutationCase "multi-delete-target-key" false "DELETE p,l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE p.id=1"
+              mutationCase "multi-delete-lookup-key" false "DELETE p,l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.id=1"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
