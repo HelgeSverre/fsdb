@@ -54,10 +54,19 @@ UPDATE, DELETE, and three-table chain, while rejecting target-only,
 unfiltered, and target-first writes. Fsdb treats a `USING` column as an
 indexed link when it exists on both sources and leads an index on the
 earlier source.
+
 MySQL also accepts `NATURAL JOIN` when its shared columns include an indexed
 link to the earlier source. The audited filtered UPDATE, DELETE, and
 three-table chain succeed; target-only and unfiltered updates return 1175.
 Fsdb follows the implicit shared-column link for these inner joins.
+
+The audited LEFT and RIGHT joins, including NATURAL outer joins, accept a
+lookup-filtered single-target UPDATE or DELETE through an indexed join key.
+Target-only and unfiltered updates return 1175. An outer join's source-local
+`ON` filter alone does not make an UPDATE safe, even with `WHERE 1=1`; fsdb
+rejects these forms. A native probe also showed that a RIGHT JOIN DELETE can
+be accepted without a WHERE filter. Fsdb still refuses that broader
+optimizer-dependent case.
 
 An `ON`-filtered lookup treats a constant-true `WHERE` like no `WHERE`.
 False or NULL conditions, including a false or NULL conjunct with an
@@ -68,8 +77,8 @@ row-dependent expressions.
 
 The `sql_safe_updates` Expecto regression and the pinned MySQL 8.4.11
 `safe-update-mode` contract cover the accepted and rejected forms, error
-codes, and unchanged rows after rejection. All 854 safe-update steps passed
-in run `20261010T100612516-53553`; the complete contract run had only the
+codes, and unchanged rows after rejection. All 1082 safe-update steps passed
+in run `20261010T102710810-57839`; the complete contract run had only the
 nine documented identifier-case-policy differences on Linux mode 0. Other
 multi-target access paths, filter shapes, and optimizer-dependent source
 choices remain open.

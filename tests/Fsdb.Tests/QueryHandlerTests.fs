@@ -3699,6 +3699,37 @@ let tests =
                             "SET sql_safe_updates=ON" ]
                   Expect.equal (run sql) expected sql
 
+          testCase "sql_safe_updates follows an outer join key"
+          <| fun _ ->
+              for sql, expected in
+                  [ "UPDATE t LEFT JOIN l ON t.id=l.id SET t.payload=1 WHERE l.flag=0", Affected 2UL
+                    "UPDATE t LEFT JOIN l ON t.id=l.id SET t.payload=1 WHERE t.payload=0", safeUpdateRejection
+                    "DELETE t FROM t LEFT JOIN l ON t.id=l.id WHERE l.flag=0", Affected 2UL
+                    "UPDATE t NATURAL LEFT JOIN l SET t.payload=1 WHERE l.flag=0", Affected 2UL
+                    "DELETE t FROM t NATURAL LEFT JOIN l WHERE l.flag=0", Affected 2UL
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id SET t.payload=1 WHERE l.flag=0", Affected 2UL
+                    "DELETE t FROM t RIGHT JOIN l ON t.id=l.id WHERE l.flag=0", Affected 2UL
+                    "UPDATE t NATURAL RIGHT JOIN l SET t.payload=1 WHERE l.flag=0", Affected 2UL
+                    "DELETE t FROM t NATURAL RIGHT JOIN l WHERE l.flag=0", Affected 2UL
+                    "UPDATE t NATURAL LEFT JOIN l SET t.payload=1 WHERE t.payload=0", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id SET t.payload=1 WHERE t.payload=0", safeUpdateRejection
+                    "UPDATE t NATURAL RIGHT JOIN l SET t.payload=1 WHERE t.payload=0", safeUpdateRejection
+                    "UPDATE t LEFT JOIN l ON t.id=l.id SET t.payload=1", safeUpdateRejection
+                    "UPDATE t NATURAL LEFT JOIN l SET t.payload=1", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id SET t.payload=1", safeUpdateRejection
+                    "UPDATE t NATURAL RIGHT JOIN l SET t.payload=1", safeUpdateRejection
+                    "UPDATE t LEFT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1", safeUpdateRejection
+                    "UPDATE t LEFT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1 WHERE 1=1", safeUpdateRejection
+                    "UPDATE t RIGHT JOIN l ON t.id=l.id AND l.flag=0 SET t.payload=1", safeUpdateRejection ] do
+                  let run =
+                      queryFixture
+                          [ "CREATE TABLE t(id INT PRIMARY KEY,payload INT)"
+                            "CREATE TABLE l(id INT PRIMARY KEY,flag INT)"
+                            "INSERT INTO t VALUES(1,0),(2,0)"
+                            "INSERT INTO l VALUES(1,0),(2,0)"
+                            "SET sql_safe_updates=ON" ]
+                  Expect.equal (run sql) expected sql
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

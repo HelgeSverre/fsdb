@@ -24708,7 +24708,9 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             joins
             |> List.choose (fun join ->
                 match join.Kind, join.Table with
-                | (InnerJoin | CrossJoin | NaturalJoin), FromTable tableRef -> Some tableRef
+                | (InnerJoin | CrossJoin | NaturalJoin
+                   | LeftJoin | RightJoin | NaturalLeftJoin | NaturalRightJoin), FromTable tableRef ->
+                    Some tableRef
                 | _ -> None)
 
         let sources =
@@ -24727,10 +24729,16 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                 |> List.distinct
                 |> List.length = sources.Length
             let whereConditions = predicate |> Option.map conjuncts |> Option.defaultValue []
+            // An outer join's ON filter does not establish a safe target scan by itself.
             let filterConditions =
                 match predicate with
                 | Some _ -> whereConditions
-                | None -> joins |> List.collect (fun join -> conjuncts join.On)
+                | None when joins |> List.forall (fun join ->
+                    match join.Kind with
+                    | InnerJoin | CrossJoin | NaturalJoin -> true
+                    | _ -> false) ->
+                    joins |> List.collect (fun join -> conjuncts join.On)
+                | None -> []
 
             let probesIndexedKey earlierQualifier (earlierTable: Table) joinedQualifier = function
                 | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
@@ -24755,11 +24763,11 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                               tableHasColumn joinedTable column
                               && tableHasColumn earlierTable column
                               && hasLeadingIndexColumn earlierTable column
-                          let implicitKeyProbe =
-                              (if join.Kind = NaturalJoin then
-                                   earlierTable.Columns |> List.map _.Name
-                               else join.Using)
-                              |> List.exists sharedIndexedColumn
+                          let implicitColumns =
+                              match join.Kind with
+                              | NaturalJoin | NaturalLeftJoin | NaturalRightJoin -> earlierTable.Columns |> List.map _.Name
+                              | _ -> join.Using
+                          let implicitKeyProbe = implicitColumns |> List.exists sharedIndexedColumn
                           let equalityProbe =
                               joinConditions |> List.exists (probesIndexedKey earlierQualifier earlierTable joinedQualifier)
                           if implicitKeyProbe || equalityProbe then

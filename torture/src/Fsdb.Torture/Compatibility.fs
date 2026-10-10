@@ -8421,6 +8421,25 @@ module ContractCatalog =
               naturalCase "natural-no-filter" true "UPDATE safe_update_probe p NATURAL JOIN safe_update_lookup l SET p.value=1"
               naturalCase "natural-lookup-delete" false "DELETE p FROM safe_update_probe p NATURAL JOIN safe_update_lookup l WHERE l.flag=0"
               naturalCase "natural-chain" false "UPDATE safe_update_probe p NATURAL JOIN safe_update_lookup l NATURAL JOIN safe_update_middle m SET p.value=1 WHERE m.flag=0"
+              naturalCase "left-lookup-update" false "UPDATE safe_update_probe p LEFT JOIN safe_update_lookup l ON p.id=l.id SET p.value=1 WHERE l.flag=0"
+              naturalCase "left-target-update" true "UPDATE safe_update_probe p LEFT JOIN safe_update_lookup l ON p.id=l.id SET p.value=1 WHERE p.value=0"
+              naturalCase "left-no-filter" true "UPDATE safe_update_probe p LEFT JOIN safe_update_lookup l ON p.id=l.id SET p.value=1"
+              naturalCase "left-lookup-delete" false "DELETE p FROM safe_update_probe p LEFT JOIN safe_update_lookup l ON p.id=l.id WHERE l.flag=0"
+              naturalCase "left-on-only" true "UPDATE safe_update_probe p LEFT JOIN safe_update_lookup l ON p.id=l.id AND l.flag=0 SET p.value=1"
+              naturalCase "left-on-true-where" true "UPDATE safe_update_probe p LEFT JOIN safe_update_lookup l ON p.id=l.id AND l.flag=0 SET p.value=1 WHERE 1=1"
+              naturalCase "natural-left-lookup-update" false "UPDATE safe_update_probe p NATURAL LEFT JOIN safe_update_lookup l SET p.value=1 WHERE l.flag=0"
+              naturalCase "natural-left-target-update" true "UPDATE safe_update_probe p NATURAL LEFT JOIN safe_update_lookup l SET p.value=1 WHERE p.value=0"
+              naturalCase "natural-left-no-filter" true "UPDATE safe_update_probe p NATURAL LEFT JOIN safe_update_lookup l SET p.value=1"
+              naturalCase "natural-left-lookup-delete" false "DELETE p FROM safe_update_probe p NATURAL LEFT JOIN safe_update_lookup l WHERE l.flag=0"
+              naturalCase "right-lookup-update" false "UPDATE safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.id=l.id SET p.value=1 WHERE l.flag=0"
+              naturalCase "right-target-update" true "UPDATE safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.id=l.id SET p.value=1 WHERE p.value=0"
+              naturalCase "right-no-filter" true "UPDATE safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.id=l.id SET p.value=1"
+              naturalCase "right-lookup-delete" false "DELETE p FROM safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.id=l.id WHERE l.flag=0"
+              naturalCase "right-on-only-update" true "UPDATE safe_update_probe p RIGHT JOIN safe_update_lookup l ON p.id=l.id AND l.flag=0 SET p.value=1"
+              naturalCase "natural-right-lookup-update" false "UPDATE safe_update_probe p NATURAL RIGHT JOIN safe_update_lookup l SET p.value=1 WHERE l.flag=0"
+              naturalCase "natural-right-target-update" true "UPDATE safe_update_probe p NATURAL RIGHT JOIN safe_update_lookup l SET p.value=1 WHERE p.value=0"
+              naturalCase "natural-right-no-filter" true "UPDATE safe_update_probe p NATURAL RIGHT JOIN safe_update_lookup l SET p.value=1"
+              naturalCase "natural-right-lookup-delete" false "DELETE p FROM safe_update_probe p NATURAL RIGHT JOIN safe_update_lookup l WHERE l.flag=0"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
@@ -9800,6 +9819,7 @@ module CompatibilityRunner =
         task {
             let builder = MySqlConnectionStringBuilder(connectionString)
             builder.AllowUserVariables <- true
+            builder.Pooling <- false
             let connectionString = builder.ConnectionString
             let connections = Dictionary<string, MySqlConnection>(StringComparer.Ordinal)
             let pending = Dictionary<string, Task<ContractTargetOutcome>>(StringComparer.Ordinal)
