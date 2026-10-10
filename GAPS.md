@@ -757,6 +757,13 @@ text-to-number aggregate scan costs. Its repeatability check passes, but
 between-run variation and the absence of a pre-change baseline limit it to
 profiling guidance rather than a regression claim.
 
+A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
+on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes
+or one, versus 6.56 ms for the scan-shaped expression; MySQL takes about
+0.15–0.16 ms on the indexed forms and 1.57 ms on the scan. Three measured
+iterations and a broad confidence interval make this a profile target, not
+evidence that index intersection itself improves this workload.
+
 The [numeric aggregate decomposition](benchmarks/results/2026-10-10-numeric-aggregate-components-baseline.md)
 isolates most of the 10,000-row gap to text casts feeding SUM/AVG rather than
 the integer SUM or COUNT control. In an [A/B baseline](benchmarks/results/2026-10-10-numeric-cast-ab-baseline.md)
