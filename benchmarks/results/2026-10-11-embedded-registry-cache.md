@@ -25,5 +25,12 @@ time-zone changes passed after the change.
 
 These are directional same-process API measurements. They exclude connection
 creation and preparation, and they do not measure server throughput or compare
-with MySQL. The remaining roughly 132 KB per prepared lookup warrants another
-profile before further optimization.
+with MySQL.
+
+At `7c5f1e95`, avoiding redundant `AsyncLocal` writes in nested execution
+scopes brought prepared typed lookup allocation to roughly 123 KB/op in the
+same validator (from roughly 132 KB/op above). Separate runs varied between
+about 65 and 72 µs/op, so this follow-up supports an allocation reduction,
+not a latency claim. The pre-change CPU trace still points to scope setup and
+immutable-map work as the next places to inspect; a fresh profile is needed
+before another optimization.
