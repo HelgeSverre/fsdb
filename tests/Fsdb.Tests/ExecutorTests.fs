@@ -11604,6 +11604,25 @@ let tests =
                         Expect.equal (runDefault store "DELETE FROM temporal_parent") (Affected 1UL) $"{kind} delete cascades"
                         Expect.equal (runDefault store "SELECT COUNT(*) FROM temporal_child") (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) $"{kind} child follows the parent"
 
+                testCase "temporal foreign-key cascades from narrower to wider precision"
+                <| fun _ ->
+                    for kind, baseValue in
+                        [ "TIME", "12:00:00"
+                          "DATETIME", "2024-01-02 12:00:00"
+                          "TIMESTAMP", "2024-01-02 12:00:00" ] do
+                        let store = newStore ()
+                        runDefault store $"CREATE TABLE temporal_parent(k {kind}(1) PRIMARY KEY)" |> ignore
+                        runDefault store $"CREATE TABLE temporal_child(id INT PRIMARY KEY,k {kind}(2),CONSTRAINT fk_temporal FOREIGN KEY(k) REFERENCES temporal_parent(k) ON UPDATE CASCADE ON DELETE CASCADE)" |> ignore
+                        runDefault store $"INSERT INTO temporal_parent VALUES('{baseValue}.1')" |> ignore
+                        runDefault store $"INSERT INTO temporal_child VALUES(1,'{baseValue}.10')" |> ignore
+                        Expect.equal (runDefault store $"UPDATE temporal_parent SET k='{baseValue}.2'") (Affected 1UL) $"{kind} parent update cascades"
+                        Expect.equal
+                            (runDefault store "SELECT k FROM temporal_child")
+                            (ResultSet([ "k" ], [ [ Some $"{baseValue}.20" ] ]))
+                            $"{kind} child retains its wider display precision"
+                        Expect.equal (runDefault store "DELETE FROM temporal_parent") (Affected 1UL) $"{kind} parent delete cascades"
+                        Expect.equal (runDefault store "SELECT COUNT(*) FROM temporal_child") (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) $"{kind} child follows the parent"
+
                 testCase "DECIMAL foreign keys compare packed storage bytes"
                 <| fun _ ->
                     for parentType, childType, parentValue, childValue, matches in

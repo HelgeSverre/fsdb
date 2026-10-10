@@ -7368,6 +7368,21 @@ module ContractCatalog =
                    [ "TIME", "12:00:00"
                      "DATETIME", "2024-01-02 12:00:00"
                      "TIMESTAMP", "2024-01-02 12:00:00" ] do
+                   let label = kind.ToLowerInvariant() + "-reverse-cascade"
+                   let parent = "reverse_parent_" + kind.ToLowerInvariant()
+                   let child = "reverse_child_" + kind.ToLowerInvariant()
+                   Contract.execute (label + "-create-parent") (sprintf "CREATE TABLE %s(k %s(1) PRIMARY KEY)" parent kind)
+                   Contract.execute (label + "-create-child") (sprintf "CREATE TABLE %s(id INT PRIMARY KEY,k %s(2),FOREIGN KEY(k) REFERENCES %s(k) ON UPDATE CASCADE ON DELETE CASCADE)" child kind parent)
+                   Contract.execute (label + "-insert-parent") (sprintf "INSERT INTO %s VALUES('%s.1')" parent baseValue)
+                   Contract.execute (label + "-insert-child") (sprintf "INSERT INTO %s VALUES(1,'%s.10')" child baseValue)
+                   Contract.execute (label + "-update-parent") (sprintf "UPDATE %s SET k='%s.2'" parent baseValue)
+                   Contract.query (label + "-child-after-update") (sprintf "SELECT k FROM %s" child)
+                   Contract.execute (label + "-delete-parent") (sprintf "DELETE FROM %s" parent)
+                   Contract.query (label + "-child-after-delete") (sprintf "SELECT COUNT(*) FROM %s" child)
+               for kind, baseValue in
+                   [ "TIME", "12:00:00"
+                     "DATETIME", "2024-01-02 12:00:00"
+                     "TIMESTAMP", "2024-01-02 12:00:00" ] do
                    let label = kind.ToLowerInvariant() + "-cascade"
                    let parent = "cascade_parent_" + kind.ToLowerInvariant()
                    let child = "cascade_child_" + kind.ToLowerInvariant()

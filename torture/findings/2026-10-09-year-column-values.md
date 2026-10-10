@@ -45,8 +45,12 @@ explicitly assigned values. The expanded `time-date-foreign-keys` contract
 and focused regression cover these same-family referential actions. A further
 MySQL 8.4.11 differential run also matched `ON UPDATE SET NULL` and
 `ON DELETE SET NULL` for the same mixed-precision pairs, including the
-retained nullable child rows. Other temporal physical-key combinations remain
-unverified.
+retained nullable child rows. A native MySQL 8.4.11 probe also confirmed the
+reverse `parent(1)` to `child(2)` cascade for all three temporal families:
+updating `.1` to `.2` leaves the wider child displaying `.20`, and deleting
+the parent removes that child. The differential contract and focused
+regression cover this direction. Other temporal physical-key combinations
+remain unverified.
 
 Within each of `TIME`, `DATETIME`, and `TIMESTAMP`, MySQL 8.4.11 accepts
 foreign keys with different fractional precisions but matches values by the
@@ -59,3 +63,8 @@ The expanded `time-date-foreign-keys` contract passed all 148 steps at
 `torture/artifacts/runs/20261009T233133629-60515/contracts`; `just check`
 passed all 3,250 tests. The full contract run retained only the nine
 identifier-case differences from the pinned server's case mode.
+After adding the reverse cascades, the same contract passed all 232 steps
+against pinned MySQL 8.4.11 at
+`torture/artifacts/runs/20261010T090731683-43946/contracts`; `just check`
+passed all 3,281 tests. The full run still had only those nine
+identifier-case differences.
