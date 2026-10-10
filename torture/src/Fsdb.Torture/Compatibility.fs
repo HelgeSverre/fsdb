@@ -8302,6 +8302,18 @@ module ContractCatalog =
             @ [ "CREATE TABLE safe_update_middle(id INT PRIMARY KEY, value INT)"
                 "INSERT INTO safe_update_middle VALUES(1,0),(2,0)" ]
 
+        let naturalReset =
+            [ "DROP TABLE IF EXISTS safe_update_middle"
+              "DROP TABLE IF EXISTS safe_update_lookup"
+              "DROP TABLE IF EXISTS safe_update_probe"
+              "CREATE TABLE safe_update_probe(id INT PRIMARY KEY, value INT)"
+              "CREATE TABLE safe_update_lookup(id INT PRIMARY KEY, flag INT)"
+              "CREATE TABLE safe_update_middle(id INT PRIMARY KEY, flag INT)"
+              "INSERT INTO safe_update_probe VALUES(1,0),(2,0)"
+              "INSERT INTO safe_update_lookup VALUES(1,0),(2,0)"
+              "INSERT INTO safe_update_middle VALUES(1,0),(2,0)"
+              "SET sql_safe_updates=ON" ]
+
         let cases =
             let mutationCaseWith (setup: string list) name rejected sql =
                 name,
@@ -8311,6 +8323,7 @@ module ContractCatalog =
             let mutationCase = mutationCaseWith reset
             let bareCase = mutationCaseWith bareReset
             let chainCase = mutationCaseWith chainReset
+            let naturalCase = mutationCaseWith naturalReset
 
             [ mutationCase "unrestricted-update" true "UPDATE safe_update_probe SET value=1"
               mutationCase "unindexed-update" true "UPDATE safe_update_probe SET value=1 WHERE value=0"
@@ -8403,6 +8416,11 @@ module ContractCatalog =
               chainCase "using-lookup-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l USING(id) WHERE l.value=0"
               chainCase "using-straight" true "UPDATE safe_update_probe p STRAIGHT_JOIN safe_update_lookup l USING(id) SET p.value=1 WHERE l.value=0"
               chainCase "using-chain" false "UPDATE safe_update_probe p JOIN safe_update_lookup l USING(id) JOIN safe_update_middle m USING(id) SET p.value=1 WHERE m.value=0"
+              naturalCase "natural-lookup-update" false "UPDATE safe_update_probe p NATURAL JOIN safe_update_lookup l SET p.value=1 WHERE l.flag=0"
+              naturalCase "natural-target-update" true "UPDATE safe_update_probe p NATURAL JOIN safe_update_lookup l SET p.value=1 WHERE p.value=0"
+              naturalCase "natural-no-filter" true "UPDATE safe_update_probe p NATURAL JOIN safe_update_lookup l SET p.value=1"
+              naturalCase "natural-lookup-delete" false "DELETE p FROM safe_update_probe p NATURAL JOIN safe_update_lookup l WHERE l.flag=0"
+              naturalCase "natural-chain" false "UPDATE safe_update_probe p NATURAL JOIN safe_update_lookup l NATURAL JOIN safe_update_middle m SET p.value=1 WHERE m.flag=0"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"

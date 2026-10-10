@@ -3680,6 +3680,25 @@ let tests =
                   let run = safeUpdateJoinFixture ()
                   Expect.equal (run sql) expected sql
 
+          testCase "sql_safe_updates follows a NATURAL JOIN key"
+          <| fun _ ->
+              for sql, expected in
+                  [ "UPDATE t NATURAL JOIN l SET t.payload=1 WHERE l.flag=0", Affected 2UL
+                    "UPDATE t NATURAL JOIN l SET t.payload=1 WHERE t.payload=0", safeUpdateRejection
+                    "UPDATE t NATURAL JOIN l SET t.payload=1", safeUpdateRejection
+                    "DELETE t FROM t NATURAL JOIN l WHERE l.flag=0", Affected 2UL
+                    "UPDATE t NATURAL JOIN l NATURAL JOIN m SET t.payload=1 WHERE m.flag=0", Affected 2UL ] do
+                  let run =
+                      queryFixture
+                          [ "CREATE TABLE t(id INT PRIMARY KEY,payload INT)"
+                            "CREATE TABLE l(id INT PRIMARY KEY,flag INT)"
+                            "CREATE TABLE m(id INT PRIMARY KEY,flag INT)"
+                            "INSERT INTO t VALUES(1,0),(2,0)"
+                            "INSERT INTO l VALUES(1,0),(2,0)"
+                            "INSERT INTO m VALUES(1,0),(2,0)"
+                            "SET sql_safe_updates=ON" ]
+                  Expect.equal (run sql) expected sql
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

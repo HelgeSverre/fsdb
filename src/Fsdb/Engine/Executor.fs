@@ -24708,7 +24708,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             joins
             |> List.choose (fun join ->
                 match join.Kind, join.Table with
-                | (InnerJoin | CrossJoin), FromTable tableRef -> Some tableRef
+                | (InnerJoin | CrossJoin | NaturalJoin), FromTable tableRef -> Some tableRef
                 | _ -> None)
 
         let sources =
@@ -24750,8 +24750,12 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                     let joinedQualifier = tableQualifier joinedRef
                     [ for earlierRef, earlierTable in sources |> List.take (index + 1) do
                           let earlierQualifier = tableQualifier earlierRef
-                          let usingProbe =
-                              join.Using
+                          let implicitKeyProbe =
+                              (if join.Kind = NaturalJoin then
+                                   joinedTable.Columns
+                                   |> List.map _.Name
+                                   |> List.filter (tableHasColumn earlierTable)
+                               else join.Using)
                               |> List.exists (fun column ->
                                   tableHasColumn joinedTable column
                                   && tableHasColumn earlierTable column
@@ -24759,7 +24763,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                           let equalityProbe =
                               (conjuncts join.On @ whereConditions)
                               |> List.exists (probesIndexedKey earlierQualifier earlierTable joinedQualifier)
-                          if usingProbe || equalityProbe then
+                          if implicitKeyProbe || equalityProbe then
                               yield joinedQualifier, earlierQualifier ])
                 |> List.concat
 
