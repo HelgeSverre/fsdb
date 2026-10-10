@@ -5723,7 +5723,8 @@ let private prepareSerializedGeometry (functionName: string) axisOrder (geometry
     | None -> geometry
 
 let private requirePlanar (functionName: string) (geometry: Geometry) =
-    if geometry.Srid <> 0 then
+    let referenceSystem = spatialReferenceSystem functionName geometry.Srid
+    if referenceSystem.SemiMajorAxis.IsSome then
         raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s with nonzero SRIDs'" functionName))
 
     geometry
@@ -5994,6 +5995,13 @@ let private geometryNFn =
         |> tryOneBasedItem index
         |> Option.map (geometryMember geometry))
 
+let private linearUnitMetres = function
+    | None -> 1.0
+    | Some value ->
+        SpatialReferenceSystems.tryLinearUnit (req value)
+        |> Option.defaultWith (fun () ->
+            raise (SqlError(3902, sprintf "There's no unit of measure named '%s'." (req value))))
+
 let private geometryDistanceFn: Scalar =
     let distance firstValue secondValue unit =
         let first = geometryArgument "ST_DISTANCE" firstValue
@@ -6015,19 +6023,19 @@ let private geometryDistanceFn: Scalar =
                         unitName
                 )
             )
-        | srid, GPoint(firstX, firstY), GPoint(secondX, secondY) ->
+        | srid, firstShape, secondShape ->
             let referenceSystem = spatialReferenceSystem "ST_DISTANCE" srid
+            let factor = linearUnitMetres unit
 
-            let factor =
-                unit
-                |> Option.map (fun value ->
-                    SpatialReferenceSystems.tryLinearUnit (req value)
-                    |> Option.defaultWith (fun () ->
-                        raise (SqlError(3902, sprintf "There's no unit of measure named '%s'." (req value)))))
-                |> Option.defaultValue 1.0
-
-            geographicPointDistance referenceSystem (firstX, firstY) (secondX, secondY) / factor |> VDouble
-        | _ -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_DISTANCE for non-point geographic geometries'"))
+            match referenceSystem.SemiMajorAxis, firstShape, secondShape with
+            | None, _, _ ->
+                let coordinateUnit = referenceSystem.LinearUnitInMetres |> Option.defaultValue 1.0
+                geometryDistancePlanar first second
+                |> Option.map (fun distance -> VDouble(distance * coordinateUnit / factor))
+                |> Option.defaultValue VNull
+            | Some _, GPoint(firstX, firstY), GPoint(secondX, secondY) ->
+                geographicPointDistance referenceSystem (firstX, firstY) (secondX, secondY) / factor |> VDouble
+            | _ -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_DISTANCE for non-point geographic geometries'"))
 
     function
     | [ VNull; _ ]
@@ -6085,10 +6093,25 @@ let private geometryDistanceSphereFn: Scalar =
         if first.Srid <> second.Srid then
             raise (SqlError(3033, sprintf "Binary geometry function st_distance_sphere given two geometries of different SRIDs: %d and %d, which should have been identical." first.Srid second.Srid))
 
-        let radius = radiusValue |> Option.map toDouble |> Option.defaultWith (fun () -> defaultRadius functionName first.Srid)
+        let suppliedRadius = radiusValue |> Option.map toDouble
 
-        if radius <= 0.0 then
+        if suppliedRadius |> Option.exists (fun radius -> radius <= 0.0) then
             raise (SqlError(3706, "Invalid radius provided to function st_distance_sphere: Radius must be greater than zero."))
+
+        if first.Srid <> 0 && (spatialReferenceSystem functionName first.Srid).SemiMajorAxis.IsNone then
+            let firstKind = first.Shape |> geometryKind |> geometryTypeName
+            let secondKind = second.Shape |> geometryKind |> geometryTypeName
+            raise (
+                SqlError(
+                    3705,
+                    sprintf
+                        "st_distance_sphere(%s, %s) has not been implemented for projected spatial reference systems."
+                        firstKind
+                        secondKind
+                )
+            )
+
+        let radius = suppliedRadius |> Option.defaultWith (fun () -> defaultRadius functionName first.Srid)
 
         sphericalPointSetDistance radius (coordinates functionName first) (coordinates functionName second)
         |> Option.map VDouble
@@ -6106,29 +6129,27 @@ let private geometryDistanceSphereFn: Scalar =
 
 let private geometryLengthFn: Scalar =
     let convertUnit unit distance =
-        unit
-        |> Option.map (fun value ->
-            SpatialReferenceSystems.tryLinearUnit (req value)
-            |> Option.map (fun factor -> distance / factor)
-            |> Option.defaultWith (fun () ->
-                raise (SqlError(3902, sprintf "There's no unit of measure named '%s'." (req value)))))
-        |> Option.defaultValue distance
+        distance / linearUnitMetres unit
 
     let length value unit =
         let functionName = "ST_LENGTH"
         let geometry = geometryArgument functionName value
 
+        let euclidean (firstX, firstY) (secondX, secondY) =
+            let deltaX = secondX - firstX
+            let deltaY = secondY - firstY
+            sqrt (deltaX * deltaX + deltaY * deltaY)
+
         let measured =
             if geometry.Srid = 0 then
-                let euclidean (firstX, firstY) (secondX, secondY) =
-                    let deltaX = secondX - firstX
-                    let deltaY = secondY - firstY
-                    sqrt (deltaX * deltaX + deltaY * deltaY)
-
                 lineworkLength euclidean geometry.Shape
             else
                 let referenceSystem = spatialReferenceSystem functionName geometry.Srid
-                lineworkLength (geographicPointDistance referenceSystem) geometry.Shape
+                match referenceSystem.SemiMajorAxis with
+                | Some _ -> lineworkLength (geographicPointDistance referenceSystem) geometry.Shape
+                | None ->
+                    let coordinateUnit = referenceSystem.LinearUnitInMetres |> Option.defaultValue 1.0
+                    lineworkLength euclidean geometry.Shape |> Option.map (fun length -> length * coordinateUnit)
 
         match measured, geometry.Srid, unit with
         | None, _, _ -> VNull

@@ -3143,7 +3143,51 @@ module ContractCatalog =
                Contract.query
                    "geographic-srs-catalog"
                    "SELECT SRS_NAME, SRS_ID, ORGANIZATION, ORGANIZATION_COORDSYS_ID, DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID = 4326"
-               |> Contract.comparingValues |]
+               |> Contract.comparingValues
+               Contract.query
+                   "projected-srs-catalog"
+                   "SELECT SRS_NAME,SRS_ID,ORGANIZATION,ORGANIZATION_COORDSYS_ID,DEFINITION,DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=3857"
+               |> Contract.comparingValues
+               Contract.query
+                   "projected-point-axis-order"
+                   "SELECT ST_AsText(ST_GeomFromText('POINT(1 2)',3857)),ST_AsText(ST_GeomFromText('POINT(1 2)',3857,'axis-order=lat-long'))"
+               |> Contract.comparingValues
+               Contract.query
+                   "projected-point-distance"
+                   "SELECT ST_Distance(ST_GeomFromText('POINT(1 2)',3857),ST_GeomFromText('POINT(4 6)',3857))"
+               |> Contract.comparingValues
+               Contract.query
+                   "projected-point-distance-in-feet"
+                   "SELECT ROUND(ST_Distance(ST_GeomFromText('POINT(1 2)',3857),ST_GeomFromText('POINT(4 6)',3857),'foot'),6)"
+               |> Contract.comparingValues
+               Contract.query
+                   "projected-nonpoint-distance"
+                   "SELECT ST_Distance(ST_GeomFromText('LINESTRING(0 0,4 0)',3857),ST_GeomFromText('POINT(2 3)',3857))"
+               |> Contract.comparingValues
+               Contract.query
+                   "projected-line-length-in-feet"
+                   "SELECT ROUND(ST_Length(ST_GeomFromText('LINESTRING(0 0,3 4)',3857),'foot'),6)"
+               |> Contract.comparingValues
+               Contract.query
+                   "projected-envelope"
+                   "SELECT ST_AsText(ST_Envelope(ST_GeomFromText('LINESTRING(1 2,4 6)',3857)))"
+               |> Contract.comparingValues
+               Contract.query
+                   "projected-spherical-distance-refusal"
+                   "SELECT ST_Distance_Sphere(ST_GeomFromText('POINT(1 2)',3857),ST_GeomFromText('POINT(4 6)',3857))"
+               |> Contract.fails 3705 "22S00"
+               Contract.query
+                   "projected-spherical-custom-radius-refusal"
+                   "SELECT ST_Distance_Sphere(ST_GeomFromText('POINT(1 2)',3857),ST_GeomFromText('POINT(4 6)',3857),1000)"
+               |> Contract.fails 3705 "22S00"
+               Contract.query
+                   "projected-spherical-multipoint-refusal"
+                   "SELECT ST_Distance_Sphere(ST_GeomFromText('MULTIPOINT((1 2),(4 6))',3857),ST_GeomFromText('POINT(4 6)',3857))"
+               |> Contract.fails 3705 "22S00"
+               Contract.query
+                   "projected-spherical-invalid-radius"
+                   "SELECT ST_Distance_Sphere(ST_GeomFromText('POINT(1 2)',3857),ST_GeomFromText('POINT(4 6)',3857),0)"
+               |> Contract.fails 3706 "22003" |]
           Cleanup = [||]
           Coverage =
             [| "function:st_distance",

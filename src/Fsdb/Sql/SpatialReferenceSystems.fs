@@ -22,10 +22,23 @@ type internal SpatialReferenceSystem =
       Description: string option
       AxisOrder: AxisOrder
       SemiMajorAxis: float option
-      InverseFlattening: float option }
+      InverseFlattening: float option
+      /// Projected coordinate-unit scale; absent for geographic and unitless SRID 0.
+      LinearUnitInMetres: float option }
 
 let private wgs84Definition =
     "GEOGCS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]"
+
+let private pseudoMercatorDefinition =
+    [ "PROJCS[\"WGS 84 / Pseudo-Mercator\","
+      wgs84Definition
+      ",PROJECTION[\"Popular Visualisation Pseudo Mercator\",AUTHORITY[\"EPSG\",\"1024\"]]"
+      ",PARAMETER[\"Latitude of natural origin\",0,AUTHORITY[\"EPSG\",\"8801\"]]"
+      ",PARAMETER[\"Longitude of natural origin\",0,AUTHORITY[\"EPSG\",\"8802\"]]"
+      ",PARAMETER[\"False easting\",0,AUTHORITY[\"EPSG\",\"8806\"]]"
+      ",PARAMETER[\"False northing\",0,AUTHORITY[\"EPSG\",\"8807\"]]"
+      ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"X\",EAST],AXIS[\"Y\",NORTH],AUTHORITY[\"EPSG\",\"3857\"]]" ]
+    |> String.concat ""
 
 let internal all =
     [ { Name = ""
@@ -36,7 +49,8 @@ let internal all =
         Description = None
         AxisOrder = LongitudeLatitude
         SemiMajorAxis = None
-        InverseFlattening = None }
+        InverseFlattening = None
+        LinearUnitInMetres = None }
       { Name = "WGS 84"
         Srid = 4326
         Organization = Some "EPSG"
@@ -45,7 +59,18 @@ let internal all =
         Description = None
         AxisOrder = LatitudeLongitude
         SemiMajorAxis = Some 6378137.0
-        InverseFlattening = Some 298.257223563 } ]
+        InverseFlattening = Some 298.257223563
+        LinearUnitInMetres = None }
+      { Name = "WGS 84 / Pseudo-Mercator"
+        Srid = 3857
+        Organization = Some "EPSG"
+        OrganizationCoordinateSystemId = Some 3857
+        Definition = pseudoMercatorDefinition
+        Description = None
+        AxisOrder = LongitudeLatitude
+        SemiMajorAxis = None
+        InverseFlattening = None
+        LinearUnitInMetres = Some 1.0 } ]
 
 let internal tryFind srid = all |> List.tryFind (fun referenceSystem -> referenceSystem.Srid = srid)
 

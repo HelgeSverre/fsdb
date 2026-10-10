@@ -13255,7 +13255,25 @@ let tests =
 
           testList
               "spatial values"
-              [ testCase "a POINT column preserves WKT, SRID, and accessors"
+              [ testCase "EPSG 3857 uses planar metric operations"
+                <| fun _ ->
+                    let store = newStore ()
+                    let sql =
+                        "SELECT ST_AsText(ST_GeomFromText('POINT(1 2)',3857)),"
+                        + "ST_Distance(ST_GeomFromText('LINESTRING(0 0,4 0)',3857),ST_GeomFromText('POINT(2 3)',3857)),"
+                        + "ST_Length(ST_GeomFromText('LINESTRING(0 0,3 4)',3857))"
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "POINT(1 2)"; Some "3"; Some "5" ] ]) -> ()
+                    | other -> failtestf "expected Cartesian projected geometry, got %A" other
+                    let _, refusal =
+                        Fsdb.QueryHandler.handle
+                            (Fsdb.Session.create 1 store)
+                            "SELECT ST_Distance_Sphere(ST_GeomFromText('POINT(1 2)',3857),ST_GeomFromText('POINT(4 6)',3857))"
+                    match refusal with
+                    | Err(3705, "st_distance_sphere(POINT, POINT) has not been implemented for projected spatial reference systems.") -> ()
+                    | other -> failtestf "expected projected-SRS spherical-distance refusal, got %A" other
+
+                testCase "a POINT column preserves WKT, SRID, and accessors"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE places (shape POINT)" |> ignore
