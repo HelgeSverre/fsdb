@@ -14,10 +14,23 @@ ordered MySQL-shaped condition, and retain the result rows. The wire result
 reports a numeric checksum column. The engine-specific non-QUICK checksum
 value remains an intentional documented difference.
 
-The focused `CHECKSUM TABLE reports each missing object` regression covers
-both modes, ordered 1146/1049 conditions, and preserved result rows. The
-`missing-table-diagnostics` differential contract also covers both modes and
-their `SHOW WARNINGS` results. Its four new steps passed against pinned MySQL
-8.4.11 at `torture/artifacts/runs/20261009T235520898-27509/contracts`;
-the full 112-case run retained the same nine unrelated identifier-case
-differences. `just check` passed all 3,252 tests with no build warnings.
+## Views and temporary tables
+
+The same MySQL 8.4.11 oracle returned a NULL checksum and Error 1347
+(`'probe.vv' is not BASE TABLE`) for a view in both ordinary and QUICK mode.
+It checks subsequent tables in the same list and records their conditions in
+order. A session temporary table is eligible: ordinary mode returns a
+checksum and QUICK mode returns NULL without a condition.
+
+fsdb's temporary-table overlay already resolved the latter correctly. Its
+view lookup used to report 1146 as though the view were missing. The checksum
+path now recognizes a saved view and reports 1347 while retaining its NULL
+result row.
+
+Focused regressions cover missing objects, views, and temporary tables. The
+`missing-table-diagnostics` wire contract covers both checksum modes,
+`SHOW WARNINGS`, a mixed view/missing-table list, and temporary QUICK results.
+All 11 checksum steps passed at
+`torture/artifacts/runs/20261010T000038959-31990/contracts`; the full run
+retained the same nine identifier-case differences. `just check` passed all
+3,253 tests with no build warnings.

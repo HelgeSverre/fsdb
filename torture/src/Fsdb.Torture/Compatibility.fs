@@ -6204,8 +6204,15 @@ module ContractCatalog =
                yield Contract.query "checksum-missing" "CHECKSUM TABLE absent, nowhere.absent EXTENDED" |> Contract.comparingValues
                yield Contract.query "checksum-missing-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "checksum-quick-missing" "CHECKSUM TABLE absent, nowhere.absent QUICK" |> Contract.comparingValues
-               yield Contract.query "checksum-quick-missing-warnings" "SHOW WARNINGS" |> Contract.comparingValues |]
-          Cleanup = [| "DROP VIEW IF EXISTS absent_view"; "DROP TABLE IF EXISTS copied" |]
+               yield Contract.query "checksum-quick-missing-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.execute "checksum-create-base" "CREATE TABLE checksum_base(id INT)"
+               yield Contract.execute "checksum-create-view" "CREATE VIEW checksum_view AS SELECT id FROM checksum_base"
+               yield Contract.query "checksum-view" "CHECKSUM TABLE checksum_view,absent QUICK" |> Contract.comparingValues
+               yield Contract.query "checksum-view-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.execute "checksum-create-temporary" "CREATE TEMPORARY TABLE checksum_temp(id INT)"
+               yield Contract.query "checksum-temporary-quick" "CHECKSUM TABLE checksum_temp QUICK" |> Contract.comparingValues
+               yield Contract.query "checksum-temporary-quick-warnings" "SHOW WARNINGS" |> Contract.comparingValues |]
+          Cleanup = [| "DROP VIEW IF EXISTS absent_view"; "DROP VIEW IF EXISTS checksum_view"; "DROP TABLE IF EXISTS copied,checksum_base" |]
           Coverage = [| "statement:select", [| "text-differential" |]; "statement:drop-table", [| "text-differential" |]; "statement:create-view", [| "text-differential" |] |] }
 
     let private isolatedScriptStepsWithErrors (cases: (string * (int * int * string) list * string list) list) =

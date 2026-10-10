@@ -19376,6 +19376,9 @@ let private checksumTables (store: Store) (dbName: string) (tables: string list)
         let label = database + "." + table
 
         match scan store database table with
+        | Error(NoSuchTable _) when tryStoredView store database table |> Option.isSome ->
+            Diagnostics.error 1347 (sprintf "'%s' is not BASE TABLE" label)
+            [ Some label; None ]
         | Error missing ->
             let code, message = Storage.toMySqlError missing
             Diagnostics.error code message

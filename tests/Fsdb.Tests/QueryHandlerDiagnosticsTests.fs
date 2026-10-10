@@ -40,14 +40,16 @@ let tests =
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE present (id INT)"
+              let session, _ = handle session "CREATE VIEW present_view AS SELECT id FROM present"
               for suffix in [ ""; " QUICK" ] do
-                  let session, result = handle session ("CHECKSUM TABLE absent, missing_db.other, present" + suffix)
+                  let session, result = handle session ("CHECKSUM TABLE absent, present_view, missing_db.other, present" + suffix)
                   let presentChecksum = if suffix = "" then Some "0" else None
                   Expect.equal
                       result
                       (ResultSet(
                           [ "Table"; "Checksum" ],
                           [ [ Some "fsdb.absent"; None ]
+                            [ Some "fsdb.present_view"; None ]
                             [ Some "missing_db.other"; None ]
                             [ Some "fsdb.present"; presentChecksum ] ]
                       ))
@@ -55,8 +57,20 @@ let tests =
                   Expect.equal
                       (conditionTriples session)
                       [ error 1146 "Table 'fsdb.absent' doesn't exist"
+                        error 1347 "'fsdb.present_view' is not BASE TABLE"
                         error 1049 "Unknown database 'missing_db'" ]
                       "missing objects emit ordered conditions in both modes"
+
+          testCase "CHECKSUM TABLE resolves session temporary tables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TEMPORARY TABLE scratch (id INT)"
+              let session, _ = handle session "INSERT INTO scratch VALUES (1)"
+              let session, result = handle session "CHECKSUM TABLE scratch"
+              match result with
+              | ResultSet([ "Table"; "Checksum" ], [ [ Some "fsdb.scratch"; Some _ ] ]) -> ()
+              | other -> failtestf "expected a temporary-table checksum, got %A" other
+              Expect.isEmpty (conditionTriples session) "temporary table exists"
 
           testCase "Foreign-key ALTER rejects missing drops and required column drops atomically"
           <| fun _ ->
