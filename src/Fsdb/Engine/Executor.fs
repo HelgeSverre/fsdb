@@ -24708,7 +24708,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             joins
             |> List.choose (fun join ->
                 match join.Kind, join.Table with
-                | InnerJoin, FromTable tableRef when join.Using.IsEmpty -> Some tableRef
+                | (InnerJoin | CrossJoin), FromTable tableRef when join.Using.IsEmpty -> Some tableRef
                 | _ -> None)
 
         let sources =
@@ -24726,6 +24726,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                 |> List.map (fst >> tableQualifier >> _.ToLowerInvariant())
                 |> List.distinct
                 |> List.length = sources.Length
+            let whereConditions = conjuncts predicate
 
             let edges =
                 joins
@@ -24733,8 +24734,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                     let joinedQualifier = sources.[index + 1] |> fst |> tableQualifier
                     [ for earlierRef, earlierTable in sources |> List.take (index + 1) do
                           let earlierQualifier = tableQualifier earlierRef
-                          if join.On
-                             |> conjuncts
+                          if (conjuncts join.On @ whereConditions)
                              |> List.exists (function
                                  | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
                                      when equalsIgnoreCase leftOwner earlierQualifier

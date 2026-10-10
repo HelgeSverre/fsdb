@@ -8372,6 +8372,12 @@ module ContractCatalog =
               chainCase "chain-target-filter" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id JOIN safe_update_middle m ON m.id=l.id SET p.value=1 WHERE p.value=0"
               chainCase "chain-forced-target-first" true "UPDATE safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id STRAIGHT_JOIN safe_update_middle m ON m.id=l.id SET p.value=1 WHERE m.value=0"
               chainCase "chain-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id JOIN safe_update_middle m ON m.id=l.id WHERE m.value=0"
+              chainCase "where-join-key" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON 1=1 SET p.value=1 WHERE l.id=p.id AND l.value=0"
+              chainCase "where-cross-key" false "UPDATE safe_update_probe p CROSS JOIN safe_update_lookup l SET p.value=1 WHERE l.id=p.id AND l.value=0"
+              chainCase "where-comma-key" false "UPDATE safe_update_probe p, safe_update_lookup l SET p.value=1 WHERE l.id=p.id AND l.value=0"
+              chainCase "where-or-key" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON 1=1 SET p.value=1 WHERE (l.id=p.id OR p.id=99) AND l.value=0"
+              chainCase "where-nonkey" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON 1=1 SET p.value=1 WHERE l.value=p.value AND l.value=0"
+              chainCase "where-key-chain" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON 1=1 JOIN safe_update_middle m ON 1=1 SET p.value=1 WHERE l.id=p.id AND m.id=l.id AND m.value=0"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"

@@ -3623,6 +3623,27 @@ let tests =
                   let _, result = handle session sql
                   Expect.equal result expected sql
 
+          testCase "sql_safe_updates follows a key equality in WHERE"
+          <| fun _ ->
+              let unsafeError = Err(1175, "You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column. ")
+              for sql, expected in
+                  [ "UPDATE t JOIN l ON 1=1 SET t.v=1 WHERE l.id=t.id AND l.v=0", Affected 2UL
+                    "UPDATE t CROSS JOIN l SET t.v=1 WHERE l.id=t.id AND l.v=0", Affected 2UL
+                    "UPDATE t, l SET t.v=1 WHERE l.id=t.id AND l.v=0", Affected 2UL
+                    "UPDATE t JOIN l ON 1=1 SET t.v=1 WHERE (l.id=t.id OR t.id=99) AND l.v=0", unsafeError
+                    "UPDATE t JOIN l ON 1=1 SET t.v=1 WHERE l.v=t.v AND l.v=0", unsafeError
+                    "UPDATE t JOIN l ON 1=1 JOIN m ON 1=1 SET t.v=1 WHERE l.id=t.id AND m.id=l.id AND m.v=0", Affected 2UL ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "CREATE TABLE l(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "CREATE TABLE m(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "INSERT INTO t VALUES(1,0),(2,0)"
+                  let session, _ = handle session "INSERT INTO l VALUES(1,0),(2,0)"
+                  let session, _ = handle session "INSERT INTO m VALUES(1,0),(2,0)"
+                  let session, _ = handle session "SET sql_safe_updates=ON"
+                  let _, result = handle session sql
+                  Expect.equal result expected sql
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -60,3 +60,11 @@ again differed only in the nine identifier-case-policy steps.
 The three-table extension passed all 446 safe-update steps at
 `torture/artifacts/runs/20261010T091904371-46091/contracts`; the full run
 again retained the same nine identifier-case-policy differences.
+MySQL also accepts an indexed equality placed in `WHERE` for ordinary JOIN,
+CROSS JOIN, comma join, and a three-table chain. It rejects the equality
+inside an `OR` and an equality on unindexed columns in the audited fixture.
+Fsdb now treats top-level conjunctive `WHERE` equalities as possible indexed
+links between joined sources. The expanded pinned contract passed all 518
+safe-update steps at
+`torture/artifacts/runs/20261010T092632539-47054/contracts`; the full run
+still differed only on the nine documented identifier-case steps.
