@@ -4874,6 +4874,45 @@ module ContractCatalog =
                "DROP TABLE unhex_unicode_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private hexFunctionalIndex =
+        { Name = "hex-functional-index"
+          Setup =
+            [| "CREATE TABLE hex_text_probe(id INT PRIMARY KEY,v VARCHAR(20),KEY ix_hex ((HEX(v))))"
+               "INSERT INTO hex_text_probe VALUES(1,'A'),(2,'B'),(3,NULL)"
+               "CREATE TABLE hex_latin1_probe(id INT PRIMARY KEY,v VARCHAR(20) CHARACTER SET latin1,KEY ix_hex ((HEX(v))))"
+               "INSERT INTO hex_latin1_probe VALUES(1,_latin1 X'E9'),(2,'A')"
+               "CREATE TABLE hex_binary_probe(id INT PRIMARY KEY,v VARBINARY(8),KEY ix_hex ((HEX(v))))"
+               "INSERT INTO hex_binary_probe VALUES(1,X'00FF'),(2,X'41')"
+               "CREATE TABLE hex_numeric_probe(id INT PRIMARY KEY,v INT(4) ZEROFILL,KEY ix_hex ((HEX(v))))"
+               "INSERT INTO hex_numeric_probe VALUES(1,12),(2,1)"
+               "CREATE TABLE hex_composed_probe(id INT PRIMARY KEY,v VARCHAR(20),KEY ix_hex ((HEX(TRIM(v)))))"
+               "INSERT INTO hex_composed_probe VALUES(1,' A '),(2,' B ')"
+               "CREATE TABLE hex_decimal_probe(v DECIMAL(20,0),KEY ix_hex ((HEX(v))))" |]
+          Steps =
+            [| Contract.query "text-key" "SELECT id FROM hex_text_probe WHERE HEX(v)='41' ORDER BY id"
+               Contract.query "latin1-key" "SELECT id,HEX(v) FROM hex_latin1_probe WHERE HEX(v)='E9' ORDER BY id"
+               Contract.query "null-result" "SELECT id FROM hex_text_probe WHERE HEX(v) IS NULL ORDER BY id"
+               Contract.query "binary-key" "SELECT id FROM hex_binary_probe WHERE HEX(v)='00FF' ORDER BY id"
+               Contract.query "binary-lowercase-probe" "SELECT id FROM hex_binary_probe WHERE HEX(v)='00ff' ORDER BY id"
+               Contract.query "numeric-key" "SELECT id,HEX(v) FROM hex_numeric_probe WHERE HEX(v)='C' ORDER BY id"
+               Contract.query "composed-key" "SELECT id FROM hex_composed_probe WHERE HEX(TRIM(v))='41' ORDER BY id"
+               Contract.query "numeric-rounding" "SELECT HEX(-1),HEX(2.5),HEX(CAST(2.5 AS DECIMAL(4,1)))"
+               Contract.execute "strict-decimal-overflow" "INSERT INTO hex_decimal_probe VALUES(99999999999999999999)" |> Contract.fails 3751 "01000"
+               Contract.query "strict-overflow-atomic" "SELECT COUNT(*) FROM hex_decimal_probe"
+               Contract.execute "non-strict-mode" "SET sql_mode='NO_ENGINE_SUBSTITUTION'"
+               Contract.execute "non-strict-decimal-overflow" "INSERT INTO hex_decimal_probe VALUES(99999999999999999999)"
+               Contract.query "non-strict-overflow-warning" "SHOW WARNINGS"
+               Contract.query "non-strict-clamped-result" "SELECT HEX(v) FROM hex_decimal_probe"
+               Contract.execute "restore-mode" "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" |]
+          Cleanup =
+            [| "DROP TABLE hex_text_probe"
+               "DROP TABLE hex_latin1_probe"
+               "DROP TABLE hex_binary_probe"
+               "DROP TABLE hex_numeric_probe"
+               "DROP TABLE hex_composed_probe"
+               "DROP TABLE hex_decimal_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private signFunctionalIndex =
         { Name = "sign-functional-index"
           Setup =
@@ -9266,6 +9305,7 @@ module ContractCatalog =
            asciiFunctionalIndex
            ordFunctionalIndex
            unhexFunctionalIndex
+           hexFunctionalIndex
            constantNullFallbackIndexes
            tableStatisticsCache
            missingTableDiagnostics

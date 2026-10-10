@@ -3661,22 +3661,10 @@ let private charFn: Scalar =
 
 let internal hexFn: Scalar =
     function
-    | [ value ] when not (anyNull [ value ]) ->
-        match value, tryRawBytes value with
-        | VBit(_, bits), _ -> VString(bits.ToString "X")
-        | _, Some bytes -> VString(bytes |> Array.map (fun byte -> byte.ToString "X2") |> String.concat "")
-        | _, None ->
-            match value with
-            | VInt value -> VString(value.ToString "X")
-            | VUInt value -> VString(value.ToString "X")
-            | VString value -> VString(Text.Encoding.UTF8.GetBytes value |> Array.map (fun byte -> byte.ToString "X2") |> String.concat "")
-            | VDecimal number ->
-                let rounded = Math.Round(number, MidpointRounding.AwayFromZero)
-                let bounded = max (decimal Int64.MinValue) (min (decimal Int64.MaxValue) rounded)
-                if bounded <> rounded then
-                    Diagnostics.numericConversion "DECIMAL" (req value)
-                VString((int64 bounded).ToString "X")
-            | _ -> VString((value |> roundNumeric |> integerArgument).ToString "X")
+    | [ value ] ->
+        let result, overflow = FunctionalIndex.hexValueWithStatus Text.Encoding.UTF8.GetBytes value
+        if overflow then Diagnostics.numericConversion "DECIMAL" (req value)
+        result
     | _ -> VNull
 
 type private AesCipherMode =

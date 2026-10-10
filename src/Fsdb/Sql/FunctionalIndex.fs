@@ -44,6 +44,9 @@ let private definitions =
       { CanonicalName = "UNHEX"
         Aliases = []
         Transform = DecodedHex }
+      { CanonicalName = "HEX"
+        Aliases = []
+        Transform = EncodedHex }
       { CanonicalName = "ABS"
         Aliases = []
         Transform = AbsoluteValue }
@@ -135,7 +138,8 @@ let rec hasTextResult = function
     | Lowercase
     | Uppercase
     | Trimmed
-    | Reversed -> true
+    | Reversed
+    | EncodedHex -> true
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.bind (_.Calls >> List.tryLast)
@@ -206,7 +210,8 @@ let private supportsSingleTransform transform columnType =
     | BitLength
     | FirstByte
     | FirstCharacterCode
-    | DecodedHex ->
+    | DecodedHex
+    | EncodedHex ->
         match columnType with
         | TGeometry _
         | TVector _ -> false
@@ -243,7 +248,7 @@ let supportsColumnType transform columnType =
 
             match transforms, List.rev transforms with
             | first :: _, textResult :: inner
-                when (isTextToIntegerTransform textResult || textResult = DecodedHex)
+                when (isTextToIntegerTransform textResult || textResult = DecodedHex || textResult = EncodedHex)
                      && List.forall isTextTransform inner ->
                 if inner.IsEmpty then
                     supportsSingleTransform textResult columnType
@@ -373,6 +378,10 @@ let private tryBinaryProbe = function
         Some(VBytes(Text.Encoding.ASCII.GetBytes text))
     | _ -> None
 
+let private tryHexProbe = function
+    | VString text -> Some(VString text)
+    | _ -> None
+
 let rec tryNormalizeProbe columnType transform normalizeStored value =
     match transform, value with
     | Some _, VNull -> Some VNull
@@ -403,6 +412,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some IsNullResult, _
     | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
     | Some DecodedHex, _ -> tryBinaryProbe value
+    | Some EncodedHex, _ -> tryHexProbe value
     | Some(Expression expression), _ ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical ->
@@ -411,6 +421,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             match List.tryLast transforms with
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
+            | Some EncodedHex -> tryHexProbe value
             | Some _ when List.contains Signum transforms -> tryExactInt64 value |> Option.map VInt
             | Some AbsoluteValue when List.forall ((=) AbsoluteValue) transforms ->
                 tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
@@ -451,6 +462,34 @@ let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble
         VDouble(roundDouble number), (if truncated then Some text else None)
     | value -> VDouble(roundDouble (toDouble value)), None
 
+let hexValueWithStatus encodeText value =
+    let encodedBytes (bytes: byte[]) = VString(Convert.ToHexString bytes), false
+
+    match value, tryRawBytes value with
+    | VNull, _ -> VNull, false
+    | VBit(_, bits), _ -> VString(bits.ToString "X"), false
+    | _, Some bytes -> encodedBytes bytes
+    | VString text, _ -> encodedBytes (encodeText text)
+    | VInt number, _ -> VString(number.ToString "X"), false
+    | VUInt number, _ -> VString(number.ToString "X"), false
+    | VDecimal number, _ ->
+        let rounded = Math.Round(number, MidpointRounding.AwayFromZero)
+        let bounded = max (decimal Int64.MinValue) (min (decimal Int64.MaxValue) rounded)
+        VString((int64 bounded).ToString "X"), bounded <> rounded
+    | value, _ ->
+        let number =
+            match value with
+            | VDouble number -> Math.Round(number, MidpointRounding.ToEven)
+            | _ -> toDouble value
+
+        let bounded =
+            if Double.IsNaN number then 0L
+            elif number >= float Int64.MaxValue then Int64.MaxValue
+            elif number <= float Int64.MinValue then Int64.MinValue
+            else int64 number
+
+        VString(bounded.ToString "X"), false
+
 let rec projectValueWithStatus encodeText transform value =
     match transform, value with
     | Some IsNullResult, VNull -> VInt 1L, None
@@ -483,6 +522,9 @@ let rec projectValueWithStatus encodeText transform value =
             [| for index in 0 .. 2 .. digits.Length - 1 -> Convert.ToByte(digits.Substring(index, 2), 16) |]
             |> VBytes,
             None
+    | Some EncodedHex, value ->
+        let encoded, overflow = hexValueWithStatus encodeText value
+        encoded, (if overflow then toText value else None)
     | Some Floored, value -> roundFunctionalValue Math.Floor Math.Floor value
     | Some Ceiled, value -> roundFunctionalValue Math.Ceiling Math.Ceiling value
     | Some Signum, ((VString _ | VBytes _) as value) ->

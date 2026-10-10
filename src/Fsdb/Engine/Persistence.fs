@@ -738,6 +738,7 @@ let private bitLengthIndexColumnPrefix = "\u0000B:"
 let private firstByteIndexColumnPrefix = "\u0000Q:"
 let private firstCharacterCodeIndexColumnPrefix = "\u0000K:"
 let private decodedHexIndexColumnPrefix = "\u0000X:"
+let private encodedHexIndexColumnPrefix = "\u0000Y:"
 let private absoluteValueIndexColumnPrefix = "\u0000A:"
 let private isNullResultIndexColumnPrefix = "\u0000J:"
 let private signumIndexColumnPrefix = "\u0000G:"
@@ -771,6 +772,7 @@ let private encodeIndexColumn (format: SnapshotFormat) column =
         | Some FirstByte, _ -> firstByteIndexColumnPrefix + column.Name
         | Some FirstCharacterCode, _ -> firstCharacterCodeIndexColumnPrefix + column.Name
         | Some DecodedHex, _ -> decodedHexIndexColumnPrefix + column.Name
+        | Some EncodedHex, _ -> encodedHexIndexColumnPrefix + column.Name
         | Some AbsoluteValue, _ -> absoluteValueIndexColumnPrefix + column.Name
         | Some IsNullResult, _ -> isNullResultIndexColumnPrefix + column.Name
         | Some Signum, _ -> signumIndexColumnPrefix + column.Name
@@ -817,6 +819,7 @@ let private decodeIndexColumn (format: SnapshotFormat) (columnNames: Set<string>
         | Prefixed firstByteIndexColumnPrefix name -> column direction name None (Some FirstByte)
         | Prefixed firstCharacterCodeIndexColumnPrefix name -> column direction name None (Some FirstCharacterCode)
         | Prefixed decodedHexIndexColumnPrefix name -> column direction name None (Some DecodedHex)
+        | Prefixed encodedHexIndexColumnPrefix name -> column direction name None (Some EncodedHex)
         | Prefixed absoluteValueIndexColumnPrefix name -> column direction name None (Some AbsoluteValue)
         | Prefixed isNullResultIndexColumnPrefix name -> column direction name None (Some IsNullResult)
         | Prefixed signumIndexColumnPrefix name -> column direction name None (Some Signum)

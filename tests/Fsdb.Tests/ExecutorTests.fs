@@ -8609,6 +8609,69 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an ABS override reports a scan"
                     Expect.equal overriddenPlan.Key None "an ABS override does not claim the functional index"
 
+                testCase "HEX functional keys index text, bytes, and numbers"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE encoded_keys(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_hex ((HEX(value))))" |> ignore
+                    runDefault store "INSERT INTO encoded_keys VALUES(1,'A'),(2,'B'),(3,NULL)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM encoded_keys WHERE HEX(value)='41'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "encoded text selects the matching row"
+
+                    let textPlan = runDefault store "EXPLAIN SELECT id FROM encoded_keys WHERE HEX(value)='41'" |> explainRow
+                    Expect.equal textPlan.Key (Some "ix_hex") "encoded text uses its key"
+
+                    runDefault store "CREATE TABLE encoded_latin1(id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1, KEY ix_hex ((HEX(value))))" |> ignore
+                    runDefault store "INSERT INTO encoded_latin1 VALUES(1,_latin1 X'E9'),(2,'A')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id,HEX(value) FROM encoded_latin1 WHERE HEX(value)='E9'")
+                        (ResultSet([ "id"; "HEX(value)" ], [ [ Some "1"; Some "E9" ] ]))
+                        "encoded text uses the source charset"
+
+                    runDefault store "CREATE TABLE encoded_binary(id INT PRIMARY KEY, value VARBINARY(8), KEY ix_hex ((HEX(value))))" |> ignore
+                    runDefault store "INSERT INTO encoded_binary VALUES(1,X'00FF'),(2,X'41')" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM encoded_binary WHERE HEX(value)='00FF'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "encoded binary bytes preserve leading zeroes"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM encoded_binary WHERE HEX(value)='00ff'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the textual HEX result compares without case"
+
+                    runDefault store "CREATE TABLE encoded_trimmed(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_hex ((HEX(TRIM(value)))))" |> ignore
+                    runDefault store "INSERT INTO encoded_trimmed VALUES(1,' A '),(2,' B ')" |> ignore
+                    let composedPlan = runDefault store "EXPLAIN SELECT id FROM encoded_trimmed WHERE HEX(TRIM(value))='41'" |> explainRow
+                    Expect.equal composedPlan.Key (Some "ix_hex") "composed HEX uses its key"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM encoded_trimmed WHERE HEX(TRIM(value))='41'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "composed HEX returns the matching row"
+
+                    runDefault store "CREATE TABLE encoded_numbers(id INT PRIMARY KEY, value INT(4) ZEROFILL, KEY ix_hex ((HEX(value))))" |> ignore
+                    runDefault store "INSERT INTO encoded_numbers VALUES(1,12),(2,1)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id,HEX(value) FROM encoded_numbers WHERE HEX(value)='C'")
+                        (ResultSet([ "id"; "HEX(value)" ], [ [ Some "1"; Some "C" ] ]))
+                        "numeric HEX uses the stored number rather than its display padding"
+
+                    let numericPlan = runDefault store "EXPLAIN SELECT id FROM encoded_numbers WHERE HEX(value)='C'" |> explainRow
+                    Expect.equal numericPlan.Key (Some "ix_hex") "numeric HEX uses its key"
+
+                    runDefault store "CREATE TABLE encoded_big_decimal(value DECIMAL(20,0), KEY ix_hex ((HEX(value))))" |> ignore
+                    match runDefault store "INSERT INTO encoded_big_decimal VALUES(99999999999999999999)" with
+                    | Err(3751, _) -> ()
+                    | other -> failtestf "expected strict indexed decimal HEX overflow to reject with 3751, got %A" other
+                    Expect.equal
+                        (runDefault store "SELECT COUNT(*) FROM encoded_big_decimal")
+                        (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ]))
+                        "failed functional key projection leaves no row"
+
+                    let overridden = builtins |> registerScalar "HEX" (fun _ -> VString "99")
+                    let overridePlan = run store overridden "EXPLAIN SELECT id FROM encoded_keys WHERE HEX(value)='99'" |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden encoder cannot claim its stored key"
+
                 testCase "UNHEX functional keys index bytes and validate writes"
                 <| fun _ ->
                     let store = newStore ()

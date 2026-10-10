@@ -3810,6 +3810,8 @@ let tests =
                     "INSERT INTO lookup_ord VALUES (1, 'é'), (2, 'A')"
                     "CREATE TABLE lookup_unhex (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_unhex_value ((UNHEX(value))))"
                     "INSERT INTO lookup_unhex VALUES (1, '41'), (2, '61')"
+                    "CREATE TABLE lookup_hex (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_hex_value ((HEX(value))))"
+                    "INSERT INTO lookup_hex VALUES (1, 'A'), (2, 'a')"
                     "CREATE TABLE lookup_round (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_floor_value ((FLOOR(value))), INDEX ix_ceil_value ((CEIL(value))))"
                     "INSERT INTO lookup_round VALUES (1, -2.50), (2, 0.01), (3, 2.99)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
@@ -3948,6 +3950,17 @@ let tests =
 
               Expect.equal unhexPlan.Key (Some "ix_unhex_value") "the recovered UNHEX lookup reports its key"
 
+              match handle (Fsdb.Session.create 38 reloaded) "SELECT id FROM lookup_hex WHERE HEX(value) = '41'" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "WAL recovery rebuilds the encoded-text index"
+              | other -> failtestf "expected recovered HEX lookup rows, got %A" other
+
+              let hexPlan =
+                  handle (Fsdb.Session.create 39 reloaded) "EXPLAIN SELECT id FROM lookup_hex WHERE HEX(value) = '41'"
+                  |> snd
+                  |> TestSupport.Sql.explainRow
+
+              Expect.equal hexPlan.Key (Some "ix_hex_value") "the recovered HEX lookup reports its key"
+
               match handle (Fsdb.Session.create 23 reloaded) "SELECT id FROM lookup_round WHERE FLOOR(value) = 2" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "WAL recovery rebuilds the floor index"
               | other -> failtestf "expected recovered floor lookup rows, got %A" other
@@ -4018,6 +4031,10 @@ let tests =
               match handle (Fsdb.Session.create 37 fromSnapshot) "SELECT id FROM lookup_unhex WHERE UNHEX(value) = X'61'" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ] ] "the snapshot restores the UNHEX index"
               | other -> failtestf "expected snapshot UNHEX lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 40 fromSnapshot) "SELECT id FROM lookup_hex WHERE HEX(value) = '61'" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ] ] "the snapshot restores the HEX index"
+              | other -> failtestf "expected snapshot HEX lookup rows, got %A" other
 
               match handle (Fsdb.Session.create 25 fromSnapshot) "SELECT id FROM lookup_round WHERE CEIL(value) = -2" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the snapshot restores the ceiling index"

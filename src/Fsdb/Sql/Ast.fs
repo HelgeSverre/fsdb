@@ -408,6 +408,7 @@ and IndexTransform =
     | FirstByte
     | FirstCharacterCode
     | DecodedHex
+    | EncodedHex
     | AbsoluteValue
     | IsNullResult
     | Expression of Expr
