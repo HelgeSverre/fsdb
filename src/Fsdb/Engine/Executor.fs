@@ -5554,26 +5554,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | TChar _ | TVarchar _ | TBinary _ | TVarBinary _ -> displayValueForText ctx e v
             | _ -> v)
         |> Result.bind (fun v ->
-            // Storage owns coercion rules. Calendar casts use strict validation
+            // Storage owns general coercion rules. Calendar casts use strict validation
             // to distinguish invalid input from an allowed zero-component date;
             // rejection becomes a warning and NULL rather than a statement error.
-            let castCol: ColumnDef =
-                { Name = "CAST"
-                  Type = ty
-                  NumericDisplay = None
-                  Nullable = true
-                  Default = None
-                  AutoIncrement = false
-                  PrimaryKey = false
-                  Unique = false
-                  Generated = None
-                  Comment = ""
-                  Collation = None
-                  Charset = None
-                  OnUpdateCurrentTimestamp = false
-                  ExpressionCollation = None
-                  Srid = None }
-
             let v =
                 match v, ty with
                 | VBinaryLiteral bytes, TBigInt false -> VInt(int64 (Value.binaryLiteralNumber bytes))
@@ -5587,9 +5570,28 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | _ -> v
 
             let coerce mode value =
+                let castCol: ColumnDef =
+                    { Name = "CAST"
+                      Type = ty
+                      NumericDisplay = None
+                      Nullable = true
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None
+                      Comment = ""
+                      Collation = None
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false
+                      ExpressionCollation = None
+                      Srid = None }
                 Diagnostics.suppress (fun () -> Storage.coerceValueWithMode mode castCol value)
-            match ty with
-            | TDate | TDateTime _ ->
+            match ty, v with
+            | TChar _, (VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
+                // A numeric CHAR cast needs no charset conversion or storage warnings.
+                Ok(VString(toText v |> Option.defaultValue ""))
+            | (TDate | TDateTime _), _ ->
                 let source =
                     match v with
                     | VInt 0L | VUInt 0UL | VDecimal 0M | VDouble 0.0 -> VString "0000-00-00"
@@ -5603,7 +5605,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | Error _ ->
                     Diagnostics.warning 1292 (sprintf "Incorrect datetime value: '%s'" (Value.toText v |> Option.defaultValue "NULL"))
                     Ok VNull
-            | _ ->
+            | _, _ ->
                 coerce
                     { Strict = false
                       NoZeroDate = true

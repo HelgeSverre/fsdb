@@ -5360,6 +5360,17 @@ let tests =
                         (runDefault store "SELECT SUM(CAST(p AS CHAR)) FROM t")
                         (ResultSet([ "SUM(CAST(p AS CHAR))" ], [ [ Some "7" ] ]))
                         "the plain integer text cast feeds numeric aggregation"
+                    let numericCasts =
+                        "SELECT CAST(-7 AS CHAR) AS signed_text,"
+                        + "CAST(CAST(18446744073709551615 AS UNSIGNED) AS CHAR) AS unsigned_text,"
+                        + "CAST(CAST(12.50 AS DECIMAL(5,2)) AS CHAR) AS decimal_text,"
+                        + "CAST(1.25E0 AS CHAR) AS double_text"
+                    Expect.equal
+                        (runDefault store numericCasts)
+                        (ResultSet(
+                            [ "signed_text"; "unsigned_text"; "decimal_text"; "double_text" ],
+                            [ [ Some "-7"; Some "18446744073709551615"; Some "12.50"; Some "1.25" ] ]))
+                        "numeric text casts preserve signed, unsigned, decimal, and approximate formatting"
 
                 testCase "REGEXP row patterns and match types remain independent"
                 <| fun _ ->

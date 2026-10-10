@@ -775,8 +775,18 @@ versus [whole-number fast-path](benchmarks/results/2026-10-10-numeric-parser-fas
 comparison did not isolate the regex as the dominant cost: the single-cast
 query measured about 31 milliseconds in both runs, while the combined query's
 small difference overlaps short-run variation. The fast path was discarded;
-further work should profile aggregate evaluation rather than assume parsing
-is the main remaining cost.
+the regex was not the main remaining cost.
+
+A server-side runtime sample instead exposed repeated storage coercion and
+diagnostic-scope setup for numeric `CAST(... AS CHAR)` values. Returning the
+same text directly for those values, while retaining storage coercion for
+other cast inputs, reduces the [10,000-row same-host comparison](benchmarks/results/2026-10-10-numeric-char-cast-fast.md)
+from roughly 31 to 13 milliseconds for the single cast aggregate and from
+roughly 108 to 55 milliseconds for the combined query. The plain integer SUM
+control remains near 4 milliseconds. MySQL remains around 1.1 and 2.3
+milliseconds respectively, so row preparation and aggregate evaluation still
+warrant profiling. The native MySQL 8.4.11 contract lane passed all 123 cases
+and 16,517 steps with zero differences after this change.
 
 The [window snapshot](benchmarks/results/01e61930-windows.md) identifies offset
 RANGE boundary lookup and stored-function window inputs as profiling candidates.
