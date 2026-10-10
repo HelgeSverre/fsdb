@@ -446,8 +446,8 @@ different access pattern:
   `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, `ASCII`, `ORD`, `HEX`, `UNHEX`,
   `MD5`, `SHA1`/`SHA`, `ISNULL`,
   or numeric/text/binary `ABS`, `SIGN`, `FLOOR`, `CEIL`/`CEILING`, `ROUND`, and `SQRT` parts.
-  Compatible unary parts can be composed, such as `UPPER(TRIM(name))` or
-  `BIT_LENGTH(REVERSE(name))`. These keys participate in equality,
+  Compatible unary parts can be composed, such as `UPPER(TRIM(name))`,
+  `BIT_LENGTH(REVERSE(name))`, or `SQRT(ABS(amount))`. These keys participate in equality,
   uniqueness, ordering, grouping, mutation, recovery, and correlated probes.
   Numeric-result keys serve direct and correlated comparison ranges and
   `BETWEEN`; text-result keys do the same when the comparison uses the key's

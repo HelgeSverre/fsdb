@@ -5011,6 +5011,25 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE sqrt_probe"; "DROP TABLE round_probe"; "DROP TABLE rounded_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private numericComposedFunctionalIndexes =
+        { Name = "numeric-composed-functional-indexes"
+          Setup =
+            [| "CREATE TABLE numeric_compositions(id INT PRIMARY KEY,n DECIMAL(8,2),s VARCHAR(20),KEY ix_sqrt_abs ((SQRT(ABS(n)))),KEY ix_round_sqrt ((ROUND(SQRT(n)))),KEY ix_abs_round ((ABS(ROUND(n)))),KEY ix_sqrt_abs_text ((SQRT(ABS(s)))))"
+               "INSERT INTO numeric_compositions VALUES(1,-4,'-4'),(2,4,'4'),(3,9,'9'),(4,-9,'-9'),(5,NULL,NULL)" |]
+          Steps =
+            [| Contract.query "values" "SELECT id,SQRT(ABS(n)),ROUND(SQRT(n)),ABS(ROUND(n)),SQRT(ABS(s)) FROM numeric_compositions ORDER BY id"
+               Contract.query "sqrt-abs" "SELECT id FROM numeric_compositions WHERE SQRT(ABS(n))=2e0 ORDER BY id"
+               Contract.query "round-sqrt" "SELECT id FROM numeric_compositions WHERE ROUND(SQRT(n))=2e0"
+               Contract.query "abs-round" "SELECT id FROM numeric_compositions WHERE ABS(ROUND(n))=4.0 ORDER BY id"
+               Contract.query "sqrt-abs-text" "SELECT id FROM numeric_compositions WHERE SQRT(ABS(s))=2e0 ORDER BY id"
+               Contract.query "range" "SELECT id FROM numeric_compositions WHERE SQRT(ABS(n))>2e0 ORDER BY id"
+               Contract.query "groups" "SELECT SQRT(ABS(n)),COUNT(*) FROM numeric_compositions GROUP BY SQRT(ABS(n)) ORDER BY SQRT(ABS(n))"
+               Contract.execute "update" "UPDATE numeric_compositions SET n=16 WHERE id=2"
+               Contract.query "old-key" "SELECT id FROM numeric_compositions WHERE SQRT(ABS(n))=2e0 ORDER BY id"
+               Contract.query "new-key" "SELECT id FROM numeric_compositions WHERE SQRT(ABS(n))=4e0 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE numeric_compositions" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private tableStatisticsCache =
         let rows =
             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
@@ -9649,6 +9668,7 @@ module ContractCatalog =
 
     let all =
         [| roundedFunctionalIndexes
+           numericComposedFunctionalIndexes
            integralDoubleIndexProbes
            signFunctionalIndex
            isNullFunctionalIndex

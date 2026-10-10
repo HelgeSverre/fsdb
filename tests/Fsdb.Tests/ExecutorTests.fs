@@ -9093,6 +9093,47 @@ let tests =
                         (ResultSet([ "id" ], [ [ Some "2" ] ]))
                         "updates insert the new square-root key"
 
+                testCase "numeric unary compositions keep their functional keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE numeric_compositions(id INT PRIMARY KEY, n DECIMAL(8,2), s VARCHAR(20), KEY ix_sqrt_abs ((SQRT(ABS(n)))), KEY ix_round_sqrt ((ROUND(SQRT(n)))), KEY ix_abs_round ((ABS(ROUND(n)))), KEY ix_sqrt_abs_text ((SQRT(ABS(s)))))"
+                    |> ignore
+                    runDefault store "INSERT INTO numeric_compositions VALUES(1,-4,'-4'),(2,4,'4'),(3,9,'9'),(4,-9,'-9'),(5,NULL,NULL)"
+                    |> ignore
+
+                    for predicate, expected, key in
+                        [ "SQRT(ABS(n))=2e0", [ [ Some "1" ]; [ Some "2" ] ], "ix_sqrt_abs"
+                          "ROUND(SQRT(n))=2e0", [ [ Some "2" ] ], "ix_round_sqrt"
+                          "ABS(ROUND(n))=4.0", [ [ Some "1" ]; [ Some "2" ] ], "ix_abs_round"
+                          "SQRT(ABS(s))=2e0", [ [ Some "1" ]; [ Some "2" ] ], "ix_sqrt_abs_text" ] do
+                        let sql = sprintf "SELECT id FROM numeric_compositions WHERE %s" predicate
+                        Expect.equal (runDefault store (sql + " ORDER BY id")) (ResultSet([ "id" ], expected)) sql
+                        let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
+                        Expect.equal plan.Key (Some key) (sprintf "numeric composition uses its key: %A" plan)
+
+                    runDefault store "CREATE TABLE unique_numeric_composition(id INT PRIMARY KEY, n DECIMAL(8,2), UNIQUE KEY ux_sqrt_abs ((SQRT(ABS(n)))))"
+                    |> ignore
+                    runDefault store "INSERT INTO unique_numeric_composition VALUES(1,-4)" |> ignore
+                    match runDefault store "INSERT INTO unique_numeric_composition VALUES(2,4)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected composed square-root uniqueness to reject a duplicate, got %A" other
+
+                    let rangePlan =
+                        runDefault store "EXPLAIN SELECT id FROM numeric_compositions WHERE SQRT(ABS(n))>2e0"
+                        |> explainRow
+                    Expect.equal rangePlan.AccessType (Some "range") "numeric composition supports range probes"
+                    Expect.equal rangePlan.Key (Some "ix_sqrt_abs") "numeric composition reports its range key"
+
+                    runDefault store "UPDATE numeric_compositions SET n=16 WHERE id=2" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM numeric_compositions WHERE SQRT(ABS(n))=2e0")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "updates remove the old composed key"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM numeric_compositions WHERE SQRT(ABS(n))=4e0")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "updates insert the new composed key"
+
                 testCase "ROUND functional keys retain exact and approximate halves"
                 <| fun _ ->
                     let store = newStore ()

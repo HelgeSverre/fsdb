@@ -265,6 +265,41 @@ let private isEncodedTextTransform = function
     | Sha1Digest -> true
     | _ -> false
 
+let private isNumericTransform = function
+    | AbsoluteValue
+    | Signum
+    | Floored
+    | Ceiled
+    | Rounded
+    | SquareRooted -> true
+    | _ -> false
+
+type private NumericKeyResult =
+    | ExactSource
+    | SignedInteger
+    | Approximate
+
+let private numericKeyResult columnType transforms =
+    let sourceResult =
+        match columnType, transforms with
+        | TBit _, AbsoluteValue :: _ -> ExactSource
+        | TBool, _
+        | TYear, _
+        | TBit _, _
+        | TFloat _, _
+        | TDouble _, _ -> Approximate
+        | _ when isTextOrBinary columnType -> Approximate
+        | _ -> ExactSource
+
+    transforms
+    |> List.fold
+        (fun result transform ->
+            match transform with
+            | Signum -> SignedInteger
+            | SquareRooted -> Approximate
+            | _ -> result)
+        sourceResult
+
 let supportsColumnType transform columnType =
     match transform with
     | Expression expression ->
@@ -283,8 +318,8 @@ let supportsColumnType transform columnType =
                 else
                     supportsSingleTransform first columnType
             | first :: _, _ when List.forall isTextTransform transforms -> supportsSingleTransform first columnType
-            | _ :: _, _ when List.forall (fun transform -> transform = AbsoluteValue || transform = Signum) transforms ->
-                supportsSingleTransform AbsoluteValue columnType
+            | first :: _, _ when List.forall isNumericTransform transforms ->
+                supportsSingleTransform first columnType
             | _ -> false)
     | transform -> supportsSingleTransform transform columnType
 
@@ -452,9 +487,12 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
             | Some transform when isEncodedTextTransform transform -> tryTextResultProbe value
-            | Some _ when List.contains Signum transforms -> tryExactInt64 value |> Option.map VInt
-            | Some AbsoluteValue when List.forall ((=) AbsoluteValue) transforms ->
-                tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
+            | Some _ when List.forall isNumericTransform transforms ->
+                match numericKeyResult columnType transforms, value with
+                | SignedInteger, _ -> tryExactInt64 value |> Option.map VInt
+                | Approximate, VDouble number when Double.IsFinite number -> Some(VDouble number)
+                | Approximate, _ -> None
+                | ExactSource, _ -> tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
             | Some _ -> normalizeStored value
             | None -> None)
     | _ -> normalizeStored value
