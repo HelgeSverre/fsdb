@@ -16,14 +16,17 @@ When `t` has two rows and `l` has one hundred, MySQL chooses the target scan
 and returns 1175 for the same ordinary inner join.
 
 Fsdb recognizes this two-table, inner-join form when the target's leading
-B-tree key is equated to a column of the other source and a qualified
-source-local filter applies to that source. Native MySQL 8.4.11 accepts lookup filters
+B-tree key is equated to a column of the other source and a source-local
+filter applies to that source. Native MySQL 8.4.11 accepts lookup filters
 using `BETWEEN`, literal `IN`, ranges, `IS NOT NULL`, a self-comparison,
 `NOT`, `<>`, or an OR whose branches both belong to the lookup source. It
 rejects a cross-source OR and an arithmetic `l.value+0=0` filter in the
 audited fixture. The fsdb rule follows that source-local boundary and still
 requires the lookup row count to be no larger than the target row count,
-matching the audited source choices.
+matching the audited source choices. Bare filter columns uniquely owned by
+the lookup table are resolved to that source; an ambiguous bare column still
+returns MySQL's 1052 (`23000`) before safe-update evaluation, even when the
+target has no rows.
 
 Multi-target writes, broader filter shapes, and other optimizer-dependent
 source choices are still outside this rule. The

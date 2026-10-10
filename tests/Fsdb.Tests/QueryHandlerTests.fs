@@ -3568,6 +3568,31 @@ let tests =
               let _, rows = handle session "SELECT id,v FROM t ORDER BY id"
               Expect.equal rows (ResultSet([ "id"; "v" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) "rejected join leaves target unchanged"
 
+          testCase "sql_safe_updates resolves unique bare lookup filters"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
+              let session, _ = handle session "CREATE TABLE l(id INT PRIMARY KEY,flag INT)"
+              let session, _ = handle session "INSERT INTO t VALUES(1,0),(2,0)"
+              let session, _ = handle session "INSERT INTO l VALUES(1,0),(2,0)"
+              let session, _ = handle session "SET sql_safe_updates=ON"
+
+              for predicate in [ "flag=0"; "flag BETWEEN 0 AND 0"; "flag IN (0,1)"; "flag IS NOT NULL"; "flag=0 OR flag=1" ] do
+                  let _, reset = handle session "UPDATE t SET v=0 WHERE id IN (1,2)"
+                  Expect.isNone (errorInfo reset) "the keyed reset is allowed"
+                  let _, result = handle session ("UPDATE t JOIN l ON l.id=t.id SET t.v=1 WHERE " + predicate)
+                  Expect.equal result (Affected 2UL) predicate
+
+              let session, _ = handle session "ALTER TABLE t ADD COLUMN flag INT DEFAULT 0"
+              match handle session "UPDATE t JOIN l ON l.id=t.id SET t.v=1 WHERE flag=0" |> snd with
+              | Err(1052, _) -> ()
+              | other -> failtestf "expected an ambiguous-column error, got %A" other
+
+              let session, _ = handle session "DELETE FROM t WHERE id IN (1,2)"
+              match handle session "UPDATE t JOIN l ON l.id=t.id SET t.v=1 WHERE flag=0" |> snd with
+              | Err(1052, _) -> ()
+              | other -> failtestf "expected ambiguity even with no target rows, got %A" other
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

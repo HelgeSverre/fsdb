@@ -8272,11 +8272,23 @@ module ContractCatalog =
               "INSERT INTO safe_update_lookup VALUES(1,0),(2,0)"
               "SET sql_safe_updates=ON" ]
 
+        let bareReset =
+            [ "DROP TABLE IF EXISTS safe_update_lookup"
+              "DROP TABLE IF EXISTS safe_update_probe"
+              "CREATE TABLE safe_update_probe(id INT PRIMARY KEY, value INT)"
+              "CREATE TABLE safe_update_lookup(id INT PRIMARY KEY, flag INT)"
+              "INSERT INTO safe_update_probe VALUES(1,0),(2,0)"
+              "INSERT INTO safe_update_lookup VALUES(1,0),(2,0)"
+              "SET sql_safe_updates=ON" ]
+
         let cases =
-            let mutationCase name rejected sql =
+            let mutationCaseWith setup name rejected sql =
                 name,
                 (if rejected then Some(7, 1175, "HY000") else None),
-                reset @ [ sql; "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+                setup @ [ sql; "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+
+            let mutationCase = mutationCaseWith reset
+            let bareCase = mutationCaseWith bareReset
 
             [ mutationCase "unrestricted-update" true "UPDATE safe_update_probe SET value=1"
               mutationCase "unindexed-update" true "UPDATE safe_update_probe SET value=1 WHERE value=0"
@@ -8297,6 +8309,20 @@ module ContractCatalog =
               mutationCase "joined-lookup-write" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET l.value=1 WHERE l.value=0"
               mutationCase "joined-target-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               mutationCase "joined-between-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value BETWEEN 0 AND 0"
+              bareCase "bare-lookup-equality" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE flag=0"
+              bareCase "bare-lookup-between" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE flag BETWEEN 0 AND 0"
+              bareCase "bare-lookup-in" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE flag IN (0,1)"
+              bareCase "bare-lookup-null-test" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE flag IS NOT NULL"
+              bareCase "bare-lookup-or" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE flag=0 OR flag=1"
+              "bare-ambiguous", Some(8, 1052, "23000"),
+                  bareReset @ [ "ALTER TABLE safe_update_probe ADD COLUMN flag INT DEFAULT 0"
+                                "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE flag=0"
+                                "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+              "bare-ambiguous-empty", Some(9, 1052, "23000"),
+                  bareReset @ [ "DELETE FROM safe_update_probe WHERE id IN (1,2)"
+                                "ALTER TABLE safe_update_probe ADD COLUMN flag INT DEFAULT 0"
+                                "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE flag=0"
+                                "SELECT id,value FROM safe_update_probe ORDER BY id" ]
               mutationCase "straight-join-target-delete" true "DELETE p FROM safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               mutationCase "joined-lookup-delete" true "DELETE l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
               "joined-large-lookup", Some(8, 1175, "HY000"),

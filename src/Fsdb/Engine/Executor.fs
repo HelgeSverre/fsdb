@@ -24672,6 +24672,9 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
 
     let tableQualifier (tableRef: TableRef) = tableRef.Alias |> Option.defaultValue tableRef.Table
 
+    let tableHasColumn (table: Table) name =
+        table.Columns |> List.exists (fun column -> equalsIgnoreCase column.Name name)
+
     let hasLeadingIndexColumn (table: Table) name =
         table.Indexes
         |> List.exists (fun index ->
@@ -24703,35 +24706,41 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
     let hasKeyedJoinFilter (targetRef: TableRef) (joins: Join list) (predicate: Expr) =
         match joins, physicalFastPathTable store dbName targetRef with
         | [ join ], Some targetTable when join.Kind = InnerJoin ->
-            let lookupCanDrive joinedRef =
-                physicalFastPathTable store dbName joinedRef
-                |> Option.exists (fun joinedTable -> joinedTable.RowsArray.Count <= targetTable.RowsArray.Count)
-
             match join.Table with
-            | FromTable joinedRef when lookupCanDrive joinedRef ->
+            | FromTable joinedRef ->
                 let joinedQualifier = tableQualifier joinedRef
-                let hasLookupFilter =
-                    predicate
-                    |> conjuncts
-                    |> List.exists (fun condition ->
-                        canPushIntoSource joinedQualifier condition
-                        && Expression.exists (function
-                            | QualifiedCol(owner, _) -> equalsIgnoreCase owner joinedQualifier
-                            | _ -> false) condition)
+                match physicalFastPathTable store dbName joinedRef with
+                | Some joinedTable when joinedTable.RowsArray.Count <= targetTable.RowsArray.Count ->
+                    let qualifyBareLookup =
+                        Expression.rewrite (function
+                            | Col name when tableHasColumn joinedTable name && not (tableHasColumn targetTable name) ->
+                                Some(QualifiedCol(joinedQualifier, name))
+                            | _ -> None)
 
-                hasLookupFilter
-                && (join.On
-                    |> conjuncts
-                    |> List.exists (function
-                        | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
-                            when equalsIgnoreCase leftOwner (tableQualifier targetRef)
-                                 && equalsIgnoreCase rightOwner joinedQualifier ->
-                            hasLeadingIndexColumn targetTable leftName
-                        | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
-                            when equalsIgnoreCase rightOwner (tableQualifier targetRef)
-                                 && equalsIgnoreCase leftOwner joinedQualifier ->
-                            hasLeadingIndexColumn targetTable rightName
-                        | _ -> false))
+                    let hasLookupFilter =
+                        predicate
+                        |> conjuncts
+                        |> List.exists (fun condition ->
+                            let condition = qualifyBareLookup condition
+                            canPushIntoSource joinedQualifier condition
+                            && Expression.exists (function
+                                | QualifiedCol(owner, _) -> equalsIgnoreCase owner joinedQualifier
+                                | _ -> false) condition)
+
+                    hasLookupFilter
+                    && (join.On
+                        |> conjuncts
+                        |> List.exists (function
+                            | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
+                                when equalsIgnoreCase leftOwner (tableQualifier targetRef)
+                                     && equalsIgnoreCase rightOwner joinedQualifier ->
+                                hasLeadingIndexColumn targetTable leftName
+                            | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
+                                when equalsIgnoreCase rightOwner (tableQualifier targetRef)
+                                     && equalsIgnoreCase leftOwner joinedQualifier ->
+                                hasLeadingIndexColumn targetTable rightName
+                            | _ -> false))
+                | _ -> false
             | _ -> false
         | _ -> false
 
@@ -24747,11 +24756,25 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                         |> Option.map (fun table -> table, tableRef)
                     | _ -> None)
 
-            match whereExpr with
-            | Some predicate when tables |> List.exists (fun (table, tableRef) -> usesKey table tableRef predicate) -> Ok()
-            | Some predicate when singleTarget && hasKeyedJoinFilter targetRef joins predicate -> Ok()
-            | _ when tables.IsEmpty -> Ok()
-            | _ -> Error unsafeError
+            let ambiguousBareColumn predicate =
+                match joins with
+                | [ join ] when join.Kind = InnerJoin && join.Using.IsEmpty ->
+                    Expression.collect (function
+                        | Col name ->
+                            let owners = tables |> List.filter (fun (table, _) -> tableHasColumn table name)
+                            if owners.Length > 1 then Some name else None
+                        | _ -> None) predicate
+                    |> List.tryHead
+                | _ -> None
+
+            match whereExpr |> Option.bind ambiguousBareColumn with
+            | Some name -> Error(1052, sprintf "Column '%s' in where clause is ambiguous" name)
+            | None ->
+                match whereExpr with
+                | Some predicate when tables |> List.exists (fun (table, tableRef) -> usesKey table tableRef predicate) -> Ok()
+                | Some predicate when singleTarget && hasKeyedJoinFilter targetRef joins predicate -> Ok()
+                | _ when tables.IsEmpty -> Ok()
+                | _ -> Error unsafeError
 
     match statement with
     | Update update ->
