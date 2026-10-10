@@ -3227,6 +3227,23 @@ let tests =
                   Expect.isTrue (fieldFlags &&& PartKeyFlag <> 0us) "COM_FIELD_LIST carries key-part membership"
                   let! _ = readPacketAsync stream // trailing EOF
 
+                  let! _ = query "ALTER TABLE t ADD note INT"
+                  let! _ = readPacketAsync stream
+                  let filteredFields =
+                      Array.concat
+                          [ [| 0x04uy |]
+                            Text.Encoding.UTF8.GetBytes "t"
+                            [| 0uy |]
+                            Text.Encoding.UTF8.GetBytes "NO%" ]
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = filteredFields } |> Async.Ignore
+                  let! filteredField = readPacketAsync stream
+                  let filtered = Reader(filteredField.Value.Payload)
+                  for _ in 1..4 do
+                      filtered.ReadLenEncString() |> ignore
+                  Expect.equal (filtered.ReadLenEncString()) (Some "note") "wildcard selects the matching column case-insensitively"
+                  let! filteredEnd = readPacketAsync stream
+                  Expect.equal filteredEnd.Value.Payload.[0] 0xfeuy "filtered field list contains no other columns"
+
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x04uy |] (Array.append (Text.Encoding.UTF8.GetBytes "ghost") [| 0uy |]) }
                   let! fieldListErr = readPacketAsync stream
                   Expect.equal fieldListErr.Value.Payload.[0] 0xffuy "missing table: ERR"

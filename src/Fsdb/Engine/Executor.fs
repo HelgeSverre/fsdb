@@ -2451,7 +2451,7 @@ let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 /// MySQL folds LIKE one character at a time: `ä` matches `a`, but `æ` does
 /// not expand to `ae`. The iterative matcher also keeps adversarial patterns
 /// off the call stack.
-let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: string) (pattern: string) : bool =
+let internal likeMatch (escape: char) (charEq: char -> char -> bool) (subject: string) (pattern: string) : bool =
     let slen, plen = subject.Length, pattern.Length
     let mutable si, pi = 0, 0
     let mutable star = -1

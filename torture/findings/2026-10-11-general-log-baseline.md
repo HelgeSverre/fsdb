@@ -36,6 +36,10 @@ client's `COM_PING` did not create a general-log row.
 A follow-up raw-protocol probe sent `COM_FIELD_LIST` with the `%` wildcard.
 MySQL recorded `Field List` with argument `user %` for an existing table and
 `fsdb_missing_field_list_probe %` for a missing table (which returned 1146).
+On a table with `id`, `name`, and `note`, an empty wildcard returned all three
+columns, `n%` and `N%` returned `name` and `note`, `no_e` returned only `note`,
+and an unmatched pattern returned an EOF without column definitions. Fsdb now
+applies its shared iterative SQL-LIKE matcher to these column names.
 `COM_RESET_CONNECTION` and `COM_SET_OPTION` produced no general-log entries
 in the same probe.
 Another raw-protocol probe recorded empty-argument `Statistics` and `Debug`

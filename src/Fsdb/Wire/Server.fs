@@ -2147,8 +2147,15 @@ let private handleConnection
 
                                     return! loop session
                                 | Result.Ok storedTable ->
+                                    let matchesColumn =
+                                        if wildcard = "" then fun (_: string) -> true
+                                        else
+                                            let equalsIgnoreCase left right = Char.ToUpperInvariant left = Char.ToUpperInvariant right
+                                            fun name -> likeMatch '\\' equalsIgnoreCase name wildcard
+
                                     let payloads =
                                         (storedTable.Columns
+                                         |> List.filter (fun column -> matchesColumn column.Name)
                                          |> List.map (fun column ->
                                              let metadata =
                                                  { ColumnWire.metadataOfTableColumn storedTable.Indexes column with

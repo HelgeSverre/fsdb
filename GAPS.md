@@ -630,6 +630,7 @@ quit, connection reset, and the complete prepared-statement lifecycle. Prepared
 statements support read-only cursors, type reuse, bounded long data, and text or
 binary rows with microsecond temporal precision. Packet framing handles values
 larger than one protocol packet.
+`COM_FIELD_LIST` filters column names by its case-insensitive SQL wildcard.
 
 Transport supports zlib, Zstandard, TLS 1.2 and 1.3, optional server and client
 CA certificates, secure-transport enforcement, and per-account SSL, X509,
