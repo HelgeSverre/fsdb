@@ -245,7 +245,8 @@ and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 HEX preserves audited decimal rounding and [expression-sensitive DOUBLE
 conversion](torture/findings/2026-10-09-hex-expression.md), including selected
 conditional branches and stored-column warnings. Broader integer-conversion
-contexts and materialized scalar-subquery shapes remain unaudited.
+contexts and scalar-subquery shapes beyond the audited grouped, UNION,
+derived, and filtered forms remain unaudited.
 `WEIGHT_STRING()` returns host-ICU sort-key bytes for textual collations, not
 MySQL's UCA weight-table bytes.
 SUM and AVG convert text before accumulation, including single-row windows;

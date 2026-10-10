@@ -937,6 +937,21 @@ let tests =
               Expect.equal (conditionTriples session)
                   [ warning 1292 "Truncated incorrect INTEGER value: '1e30'" ] "column warning"
 
+          testCase "HEX scalar subqueries retain DOUBLE conversion through materialization"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE hex_scalar_probe(id INT PRIMARY KEY,n DOUBLE)"
+              let session, _ = handle session "INSERT INTO hex_scalar_probe VALUES(1,1e20),(2,-1e20)"
+              for subquery, expected in
+                  [ "SELECT MAX(n) FROM hex_scalar_probe WHERE id=1", "7FFFFFFFFFFFFFFF"
+                    "SELECT n FROM hex_scalar_probe WHERE id=1 UNION SELECT n FROM hex_scalar_probe WHERE 0", "7FFFFFFFFFFFFFFF"
+                    "SELECT n FROM (SELECT n FROM hex_scalar_probe WHERE id=1) AS source", "7FFFFFFFFFFFFFFF"
+                    "SELECT n FROM hex_scalar_probe WHERE id=1 HAVING n>0", "7FFFFFFFFFFFFFFF"
+                    "SELECT n FROM hex_scalar_probe WHERE id=2 GROUP BY n", "8000000000000000" ] do
+                  let actualSession, result = handle session (sprintf "SELECT HEX((%s)) AS value" subquery)
+                  Expect.equal result (ResultSet([ "value" ], [ [ Some expected ] ])) subquery
+                  Expect.isEmpty actualSession.Diagnostics (subquery + " warnings")
+
           testCase "ALTER converts complete rows in final column order"
           <| fun _ ->
               for mode in [ ""; "STRICT_ALL_TABLES" ] do

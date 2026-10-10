@@ -5,15 +5,16 @@ deprecation warnings implemented.
 
 ## Native evidence
 
-The [native fixture](2026-10-09-hex-expression-native.json) records 51 scripts
-on disposable MySQL 8.4.11 with a 64 MiB buffer pool and redo capacity. Reproduce:
+The [native fixture](2026-10-09-hex-expression-native.json) records the original
+matrix and a materialized scalar-subquery follow-up. It runs on disposable
+MySQL 8.4.11 with a 64 MiB buffer pool and redo capacity. Reproduce:
 
 ```sh
 python3 torture/scripts/condition-oracle.py torture/findings/2026-10-09-hex-expression-native.json
 ```
 
-The [fsdb replay](2026-10-09-hex-expression-current.json) matches all 51 scripts
-exactly. The `hex-expression-conversion` wire contract covers these scripts,
+The [fsdb replay](2026-10-09-hex-expression-current.json) matches the original
+51 scripts exactly. The `hex-expression-conversion` wire contract covers those scripts,
 including user-variable assignment warnings and single evaluation of conditions.
 No mismatch is enrolled in the known-gap allowlist.
 
@@ -33,7 +34,9 @@ No mismatch is enrolled in the known-gap allowlist.
   IFNULL apply their own computed-result conversion. Unchosen branches do not
   execute, and side-effecting conditions execute once.
 - The audited plain scalar subqueries retain the projection's conversion
-  behavior, including selected IF and CASE branches.
+  behavior, including selected IF and CASE branches. Grouped, UNION,
+  derived, and filtered scalar subqueries also retain the stored DOUBLE
+  conversion for positive and negative overflow values without warnings.
 
 The executor shares IF/CASE branch selection between ordinary evaluation and
 HEX argument validation. Numeric HEX formatting remains in the existing scalar
@@ -41,8 +44,8 @@ function; byte/string preparation retains its existing charset handling.
 No second evaluation is used to reconstruct a selected branch.
 
 This matrix does not establish every integer-conversion context, mixed-result
-type, or materialized/filtered scalar-subquery shape. Those need further native
-probes before broader compatibility claims.
+type, or scalar-subquery shape. Those need further native probes before broader
+compatibility claims.
 
 ## Assignment warning coverage
 
@@ -57,5 +60,8 @@ preparation timing, warning order, and remaining unrelated diagnostics.
 - `just check`: 3,155 tests pass, no build warnings or errors.
 - Expanded expression replay: all 51 scripts match.
 - Full native wire suite: 93 contracts, 13,996 steps, zero differences.
+- Materialized scalar-subquery follow-up: the expanded native fixture passes
+  on MySQL 8.4.11, and `just check` passes 3,269 tests including its new
+  focused regression.
 
 Wire artifact: `torture/artifacts/runs/20261008T224244964-83002/contracts`.

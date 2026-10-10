@@ -656,6 +656,29 @@
       "stdout": "value\n7FFFFFFFFFFFFFFF\nLevel\tCode\tMessage\nWarning\t1287\tSetting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.\ncalls\n1\n",
       "stderr": "",
       "errors": []
+    },
+    {
+      "name": "materialized-scalar-subqueries",
+      "statements": [
+        "USE probe",
+        "DROP TABLE IF EXISTS hex_scalar_probe",
+        "CREATE TABLE hex_scalar_probe(id INT PRIMARY KEY,n DOUBLE)",
+        "INSERT INTO hex_scalar_probe VALUES(1,1e20),(2,-1e20)",
+        "SELECT HEX((SELECT MAX(n) FROM hex_scalar_probe WHERE id=1)) AS grouped",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_scalar_probe WHERE id=1 UNION SELECT n FROM hex_scalar_probe WHERE 0)) AS unioned",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM (SELECT n FROM hex_scalar_probe WHERE id=1) AS source)) AS derived",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_scalar_probe WHERE id=1 HAVING n>0)) AS filtered",
+        "SHOW WARNINGS",
+        "SELECT HEX((SELECT n FROM hex_scalar_probe WHERE id=2 GROUP BY n)) AS negative_grouped",
+        "SHOW WARNINGS",
+        "DROP TABLE hex_scalar_probe"
+      ],
+      "stdout": "grouped\n7FFFFFFFFFFFFFFF\nunioned\n7FFFFFFFFFFFFFFF\nderived\n7FFFFFFFFFFFFFFF\nfiltered\n7FFFFFFFFFFFFFFF\nnegative_grouped\n8000000000000000\n",
+      "stderr": "",
+      "errors": []
     }
   ]
 }
