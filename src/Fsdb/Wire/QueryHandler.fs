@@ -277,6 +277,8 @@ let private globalScopeOnlyVariables =
     Set.ofList
         [ "activate_all_roles_on_login"
           "connect_timeout"
+          "general_log"
+          "log_output"
           "ft_query_expansion_limit"
           "innodb_ft_server_stopword_table"
           "innodb_ft_max_token_size"
@@ -1658,6 +1660,8 @@ let private systemSetAction
         when usesDefault
              && (name = "activate_all_roles_on_login"
                  || name = "event_scheduler"
+                 || name = "general_log"
+                 || name = "log_output"
                  || name = "mandatory_roles"
                  || name = "protocol_compression_algorithms") ->
         Ok(SetVarAction(name, Session.defaultVariables.[name], isGlobal), sideEffects)
@@ -1682,9 +1686,23 @@ let private systemSetAction
     | Ok(value, sideEffects) when name = "sql_safe_updates" ->
         normalizeOnOff name value
         |> Result.map (fun value -> SetVarAction(name, Some(if value = "ON" then "1" else "0"), isGlobal), sideEffects)
-    | Ok(value, sideEffects) when name = "sql_log_bin" ->
+    | Ok(value, sideEffects) when name = "sql_log_bin" || name = "general_log" ->
         normalizeOnOff name value
         |> Result.map (fun value -> SetVarAction(name, Some(if value = "ON" then "1" else "0"), isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "log_output" ->
+        let parts =
+            toText value
+            |> Option.defaultValue ""
+            |> _.Split(',', StringSplitOptions.TrimEntries ||| StringSplitOptions.RemoveEmptyEntries)
+            |> Array.map _.ToUpperInvariant()
+            |> Set.ofArray
+
+        if parts.IsEmpty || not (Set.isSubset parts (set [ "FILE"; "TABLE"; "NONE" ])) then
+            let supplied = toText value |> Option.defaultValue "NULL"
+            Error(Err(1231, sprintf "Variable 'log_output' can't be set to the value of '%s'" supplied))
+        else
+            let canonical = [ "FILE"; "NONE"; "TABLE" ] |> List.filter parts.Contains |> String.concat ","
+            Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
     | Ok(_, sideEffects) when usesDefault && name = "sql_mode" ->
         let value =
             if isGlobal then
@@ -1957,6 +1975,29 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | _ -> Ok()
 
+let private validateSetActions session actions =
+    actions
+    |> traverse (validateSetAction session)
+    |> Result.bind (fun _ ->
+        let globalValue name =
+            actions
+            |> List.fold
+                (fun current action ->
+                    match action with
+                    | SetVarAction(candidate, value, true) when candidate = name -> value
+                    | _ -> current)
+                (Session.tryGlobalVariable session.Store name |> Option.flatten)
+
+        let enabled = globalValue "general_log" = Some "1"
+        let fileOutput =
+            globalValue "log_output"
+            |> Option.exists (fun value -> value.Split(',') |> Array.contains "FILE")
+
+        if enabled && fileOutput then
+            Error(Err(1231, "FILE general logging is unsupported; set log_output to TABLE or NONE"))
+        else
+            Ok())
+
 /// Publishes SET effects only after every assignment has been evaluated and validated.
 let private applySetActions (session: Session) parsed : Session * QueryResult =
     match parsed with
@@ -1971,7 +2012,7 @@ let private applySetActions (session: Session) parsed : Session * QueryResult =
         if userVariables.Count > maxUserVariables then
             session, Err(1105, "Too many user-defined variables")
         else
-            match actions |> traverse (validateSetAction session) with
+            match validateSetActions session actions with
             | Error result -> session, result
             | Ok _ ->
                 let updated = actions |> List.fold applySetAction session
@@ -8115,6 +8156,37 @@ let private recordSlowQueryIfNeeded (session: Session) startedAt =
 let internal recordFailedLoadStartedAt startedAt session =
     recordSlowQueryIfNeeded session startedAt |> ignore
 
+let private recordGeneralQuery (session: Session) (sql: string) =
+    let enabled =
+        Session.tryGlobalVariable session.Store "general_log"
+        |> Option.flatten
+        |> Option.exists (fun value -> value = "1")
+
+    let tableOutput =
+        Session.tryGlobalVariable session.Store "log_output"
+        |> Option.flatten
+        |> Option.exists (fun value ->
+            let outputs = value.Split(',') |> Set.ofArray
+            outputs.Contains "TABLE" && not (outputs.Contains "NONE"))
+
+    if enabled && tableOutput then
+        let userHost = sprintf "%s[%s] @  [%s]" session.User session.LoginUser session.ClientHost
+
+        match
+            Storage.insertRows
+                session.Store
+                "mysql"
+                "general_log"
+                (Some [ "user_host"; "thread_id"; "server_id"; "command_type"; "argument" ])
+                [ [ VString userHost
+                    VInt(int64 session.ConnectionId)
+                    VInt 1L
+                    VString "Query"
+                    VBytes(System.Text.Encoding.UTF8.GetBytes(Log.generalLogSql sql)) ] ]
+        with
+        | Ok _ -> ()
+        | Error error -> Log.diagnostic "fsdb: general log write failed: %A" error
+
 let private includeCurrentSlowStatus = function
     | ResultSet(columns, rows) ->
         ResultSet(
@@ -8128,6 +8200,7 @@ let private includeCurrentSlowStatus = function
 
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
+    recordGeneralQuery session rawSql
     let session = Session.clearSessionStateChanges session
     let parserOptions = parserOptionsForSession session
     let sql = normalizeDispatchedSql parserOptions rawSql

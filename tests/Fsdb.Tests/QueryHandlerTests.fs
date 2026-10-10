@@ -9339,6 +9339,84 @@ let tests =
                   | ResultSet(_, [ [ Some actual; Some value ] ]) when actual = name && int64 value > 0L -> ()
                   | other -> failtestf "expected a positive %s counter, got %A" name other
 
+          testCase "general log table records queries across sessions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let admin = create 1 store
+              let _, initiallyEmpty = handle admin "SELECT COUNT(*) FROM mysql.general_log"
+              Expect.equal initiallyEmpty (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) "logging starts disabled"
+              let _, unsupportedFile = handle admin "SET GLOBAL general_log=ON"
+              Expect.equal
+                  unsupportedFile
+                  (Err(1231, "FILE general logging is unsupported; set log_output to TABLE or NONE"))
+                  "enabling an unsupported file destination fails explicitly"
+              let _, output = handle admin "SET GLOBAL log_output='TABLE'"
+              Expect.equal output (Affected 0UL) "table output is enabled"
+              let _, enabled = handle admin "SET GLOBAL general_log=ON"
+              Expect.equal enabled (Affected 0UL) "general log is enabled"
+              let _, unsupportedSwitch = handle admin "SET GLOBAL log_output='FILE'"
+              Expect.equal
+                  unsupportedSwitch
+                  (Err(1231, "FILE general logging is unsupported; set log_output to TABLE or NONE"))
+                  "an enabled log cannot switch to an unsupported destination"
+
+              let _, sessionSetting = handle admin "SET SESSION general_log=ON"
+              Expect.equal
+                  sessionSetting
+                  (Err(1229, "Variable 'general_log' is a GLOBAL variable and should be set with SET GLOBAL"))
+                  "general logging is a global setting"
+
+              let client = create 2 store
+              let _, query = handle client "SELECT 314159 AS fsdb_general_log_probe"
+              Expect.equal query (ResultSet([ "fsdb_general_log_probe" ], [ [ Some "314159" ] ])) "query succeeds"
+
+              let _, logged =
+                  handle admin
+                      "SELECT command_type, argument FROM mysql.general_log WHERE argument='SELECT 314159 AS fsdb_general_log_probe'"
+
+              Expect.equal
+                  logged
+                  (ResultSet(
+                      [ "command_type"; "argument" ],
+                      [ [ Some "Query"; Some "SELECT 314159 AS fsdb_general_log_probe" ] ]
+                  ))
+                  "query text is visible from another session"
+
+              let client, started = handle client "START TRANSACTION"
+              Expect.equal started (Affected 0UL) "transaction starts"
+              let client, _ = handle client "SELECT 271828 AS fsdb_general_log_rollback_probe"
+              let _, rolledBack = handle client "ROLLBACK"
+              Expect.equal rolledBack (Affected 0UL) "transaction rolls back"
+              let _, retained =
+                  handle admin
+                      "SELECT COUNT(*) FROM mysql.general_log WHERE argument='SELECT 271828 AS fsdb_general_log_rollback_probe'"
+              Expect.equal retained (ResultSet([ "COUNT(*)" ], [ [ Some "1" ] ])) "logging survives statement rollback"
+
+              let client, created = handle client "CREATE TABLE general_log_tx (id INT PRIMARY KEY)"
+              Expect.equal created (Affected 0UL) "test table exists"
+              let client, started = handle client "START TRANSACTION"
+              Expect.equal started (Affected 0UL) "writing transaction starts"
+              let client, inserted = handle client "INSERT INTO general_log_tx VALUES (1)"
+              Expect.equal inserted (Affected 1UL) "transaction writes despite logging"
+              let client, committed = handle client "COMMIT"
+              Expect.equal committed (Affected 0UL) "logging does not conflict with commit"
+              let _, persisted = handle client "SELECT id FROM general_log_tx"
+              Expect.equal persisted (ResultSet([ "id" ], [ [ Some "1" ] ])) "committed row remains"
+
+              let _, _ = handle client "CREATE USER 'general_log_secret_probe'@'%' IDENTIFIED BY 'fixture_secret_314159'"
+              let _, redacted =
+                  handle admin
+                      "SELECT COUNT(*) FROM mysql.general_log WHERE argument='[REDACTED CREDENTIAL STATEMENT]'"
+              Expect.equal redacted (ResultSet([ "COUNT(*)" ], [ [ Some "1" ] ])) "credential text is not persisted verbatim"
+
+              let _, disabledOutput = handle admin "SET GLOBAL log_output='NONE,TABLE'"
+              Expect.equal disabledOutput (Affected 0UL) "NONE can be combined with TABLE"
+              let _, _ = handle client "SELECT 161803 AS fsdb_general_log_none_probe"
+              let _, absent =
+                  handle admin
+                      "SELECT COUNT(*) FROM mysql.general_log WHERE argument='SELECT 161803 AS fsdb_general_log_none_probe'"
+              Expect.equal absent (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])) "NONE suppresses table logging"
+
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -18,6 +18,24 @@ let diagnostic fmt = Printf.kprintf sink fmt
 
 let private maxSqlLogLength = 1024
 
+/// Credential assignments need stronger handling than literal substitution.
+let private isCredentialStatement (sql: string) =
+    let mutable start = 0
+
+    while start < sql.Length && System.Char.IsWhiteSpace sql.[start] do
+        start <- start + 1
+
+    sql.IndexOf("CREATE USER", start, System.StringComparison.OrdinalIgnoreCase) = start
+        || sql.IndexOf("ALTER USER", start, System.StringComparison.OrdinalIgnoreCase) = start
+        || sql.IndexOf("SET PASSWORD", start, System.StringComparison.OrdinalIgnoreCase) = start
+        || sql.IndexOf("IDENTIFIED BY", System.StringComparison.OrdinalIgnoreCase) >= 0
+        || sql.IndexOf("IDENTIFIED WITH", System.StringComparison.OrdinalIgnoreCase) >= 0
+
+/// The general query log retains SQL text but never persists credential
+/// statements verbatim. MySQL also replaces their secrets in this log.
+let generalLogSql (sql: string) =
+    if isCredentialStatement sql then "[REDACTED CREDENTIAL STATEMENT]" else sql
+
 /// Removes secrets before SQL text crosses an observability boundary — the
 /// diagnostic log and the PROCESSLIST `INFO` column. A statement that sets a
 /// credential collapses whole (the password is a bare token, not a quotable
@@ -25,19 +43,7 @@ let private maxSqlLogLength = 1024
 /// replaced by `?`. Quote-aware so a `#`/`--` or a keyword inside a literal
 /// isn't mistaken for structure.
 let redactSql (sql: string) : string =
-    let mutable start = 0
-
-    while start < sql.Length && System.Char.IsWhiteSpace sql.[start] do
-        start <- start + 1
-
-    let isCredential =
-        sql.IndexOf("CREATE USER", start, System.StringComparison.OrdinalIgnoreCase) = start
-        || sql.IndexOf("ALTER USER", start, System.StringComparison.OrdinalIgnoreCase) = start
-        || sql.IndexOf("SET PASSWORD", start, System.StringComparison.OrdinalIgnoreCase) = start
-        || sql.IndexOf("IDENTIFIED BY", System.StringComparison.OrdinalIgnoreCase) >= 0
-        || sql.IndexOf("IDENTIFIED WITH", System.StringComparison.OrdinalIgnoreCase) >= 0
-
-    if isCredential then
+    if isCredentialStatement sql then
         "[REDACTED CREDENTIAL STATEMENT]"
     else
         let sb = System.Text.StringBuilder(min sql.Length maxSqlLogLength)
