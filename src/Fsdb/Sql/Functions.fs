@@ -4899,23 +4899,6 @@ let private requiredRegexpFunction name =
 // Math/misc.
 // ---------------------------------------------------------------------------
 
-/// Exact rounding avoids losing DECIMAL digits through floating-point conversion.
-let private ceilFn: Scalar =
-    function
-    | [ VInt i ] -> VInt i
-    | [ VUInt u ] -> VUInt u
-    | [ VDecimal d ] -> VDecimal(Math.Ceiling d)
-    | [ v ] when not (anyNull [ v ]) -> VDouble(Math.Ceiling(toDouble v))
-    | _ -> VNull
-
-let private floorFn: Scalar =
-    function
-    | [ VInt i ] -> VInt i
-    | [ VUInt u ] -> VUInt u
-    | [ VDecimal d ] -> VDecimal(Math.Floor d)
-    | [ v ] when not (anyNull [ v ]) -> VDouble(Math.Floor(toDouble v))
-    | _ -> VNull
-
 let private powFn: Scalar =
     function
     | [ a; b ] when not (anyNull [ a; b ]) -> VDouble(Math.Pow(toDouble a, toDouble b))
@@ -6691,9 +6674,8 @@ let private registerStringBuiltins registry =
 
 let private registerNumericBuiltins registry =
     registry
-    |> registerScalar "CEIL" (exactArity "CEIL" 1 ceilFn)
-    |> registerScalar "CEILING" (exactArity "CEILING" 1 ceilFn)
-    |> registerScalar "FLOOR" (exactArity "FLOOR" 1 floorFn)
+    |> registerFunctionalScalar Ceiled
+    |> registerFunctionalScalar Floored
     |> registerScalar "POW" (exactArity "POW" 2 powFn)
     |> registerScalar "POWER" (exactArity "POWER" 2 powFn)
     |> registerScalar "SQRT" (exactArity "SQRT" 1 sqrtFn)

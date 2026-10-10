@@ -3802,6 +3802,8 @@ let tests =
                     "INSERT INTO lookup_abs VALUES (1, -5), (2, 9)"
                     "CREATE TABLE lookup_sign (id INT PRIMARY KEY, value INT, INDEX ix_sign_value ((SIGN(value))))"
                     "INSERT INTO lookup_sign VALUES (1, -5), (2, 0), (3, 9)"
+                    "CREATE TABLE lookup_round (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_floor_value ((FLOOR(value))), INDEX ix_ceil_value ((CEIL(value))))"
+                    "INSERT INTO lookup_round VALUES (1, -2.50), (2, 0.01), (3, 2.99)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
                     "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
                     "INSERT INTO lookup_abs_text VALUES (1, '12x'), (2, 'Other')"
@@ -3894,6 +3896,14 @@ let tests =
 
               Expect.equal signPlan.Key (Some "ix_sign_value") "WAL recovery rebuilds the sign index"
 
+              match handle (Fsdb.Session.create 23 reloaded) "SELECT id FROM lookup_round WHERE FLOOR(value) = 2" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "WAL recovery rebuilds the floor index"
+              | other -> failtestf "expected recovered floor lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 24 reloaded) "SELECT id FROM lookup_round WHERE CEILING(value) = 1" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ] ] "WAL recovery rebuilds the ceiling index"
+              | other -> failtestf "expected recovered ceiling lookup rows, got %A" other
+
               match handle (Fsdb.Session.create 14 reloaded) "INSERT INTO lookup_abs VALUES (3, 5)" |> snd with
               | Err(1062, _) -> ()
               | other -> failtestf "expected the recovered absolute-value unique key to reject a duplicate, got %A" other
@@ -3940,6 +3950,10 @@ let tests =
               match handle (Fsdb.Session.create 22 fromSnapshot) "SELECT id FROM lookup_sign WHERE SIGN(value) = 1" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "the snapshot restores the sign index"
               | other -> failtestf "expected snapshot sign lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 25 fromSnapshot) "SELECT id FROM lookup_round WHERE CEIL(value) = -2" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the snapshot restores the ceiling index"
+              | other -> failtestf "expected snapshot ceiling lookup rows, got %A" other
 
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->

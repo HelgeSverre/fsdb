@@ -8631,6 +8631,37 @@ let tests =
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected SIGN uniqueness to reject a second negative value, got %A" other
 
+                testCase "FLOOR and CEIL functional keys retain exact and text values"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE rounded_keys(id INT PRIMARY KEY, exact_value DECIMAL(8,2), text_value VARCHAR(20), KEY ix_floor ((FLOOR(exact_value))), KEY ix_ceil ((CEILING(exact_value))), KEY ix_floor_text ((FLOOR(text_value))))"
+                    |> ignore
+                    runDefault store "INSERT INTO rounded_keys VALUES(1,-2.50,'-2.5'),(2,0.01,'0.01'),(3,2.99,'2.99')"
+                    |> ignore
+
+                    for sql, expected, key in
+                        [ "SELECT id FROM rounded_keys WHERE FLOOR(exact_value)=2", "3", "ix_floor"
+                          "SELECT id FROM rounded_keys WHERE CEIL(exact_value)=1", "2", "ix_ceil"
+                          "SELECT id FROM rounded_keys WHERE FLOOR(text_value)=-3", "1", "ix_floor_text" ] do
+                        match runDefault store sql with
+                        | ResultSet([ "id" ], [ [ Some id ] ]) -> Expect.equal id expected sql
+                        | other -> failtestf "expected one rounded-key row for %s, got %A" sql other
+
+                        let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
+                        Expect.equal plan.Key (Some key) (sprintf "rounded equality uses its functional key: %A" plan)
+
+                    runDefault store "UPDATE rounded_keys SET exact_value=4.01 WHERE id=3" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM rounded_keys WHERE FLOOR(exact_value)=2")
+                        (ResultSet([ "id" ], []))
+                        "updates remove the old floor key"
+
+                    let overridden = builtins |> registerScalar "FLOOR" (fun _ -> VDecimal 99M)
+                    let overridePlan =
+                        run store overridden "EXPLAIN SELECT id FROM rounded_keys WHERE FLOOR(exact_value)=99"
+                        |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden FLOOR cannot claim its stored key"
+
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->
                     let store = newStore ()

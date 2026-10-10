@@ -40,7 +40,13 @@ let private definitions =
         Transform = AbsoluteValue }
       { CanonicalName = "SIGN"
         Aliases = []
-        Transform = Signum } ]
+        Transform = Signum }
+      { CanonicalName = "FLOOR"
+        Aliases = []
+        Transform = Floored }
+      { CanonicalName = "CEIL"
+        Aliases = [ "CEILING" ]
+        Transform = Ceiled } ]
 
 let private namesOf definition =
     definition.CanonicalName :: definition.Aliases
@@ -126,7 +132,9 @@ let rec hasTextResult = function
     | ByteLength
     | BitLength
     | AbsoluteValue
-    | Signum -> false
+    | Signum
+    | Floored
+    | Ceiled -> false
 
 let tryRebaseColumn column = function
     | Expression expression ->
@@ -185,7 +193,9 @@ let private supportsSingleTransform transform columnType =
         | TVector _ -> false
         | _ -> true
     | AbsoluteValue
-    | Signum ->
+    | Signum
+    | Floored
+    | Ceiled ->
         isNumeric columnType || isTextOrBinary columnType
     | Expression _ -> false
 
@@ -313,6 +323,21 @@ let private tryExactUInt64 =
     | VBytes bytes -> bytes |> Text.Encoding.Latin1.GetString |> ofText
     | _ -> None
 
+let private tryRoundedProbe columnType value =
+    let exactDoubleLimit = 1L <<< 53
+
+    match columnType, value with
+    | TDecimal _, VInt number -> Some(VDecimal(decimal number))
+    | TDecimal _, VUInt number -> Some(VDecimal(decimal number))
+    | TDecimal _, VDecimal number when Decimal.Truncate number = number -> Some(VDecimal number)
+    | (TFloat _ | TDouble _), VInt number when number >= -exactDoubleLimit && number <= exactDoubleLimit ->
+        Some(VDouble(float number))
+    | (TFloat _ | TDouble _), VUInt number when number <= uint64 exactDoubleLimit ->
+        Some(VDouble(float number))
+    | (TFloat _ | TDouble _), VDouble number when Double.IsFinite number && Math.Truncate number = number ->
+        Some(VDouble number)
+    | _ -> None
+
 let rec tryNormalizeProbe columnType transform normalizeStored value =
     match transform, value with
     | Some _, VNull -> Some VNull
@@ -331,6 +356,10 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             |> Option.filter (fun value -> value <= maximum)
             |> Option.map VUInt
         | _ -> normalizeStored value
+    | (Some Floored | Some Ceiled), _ when isTextOrBinary columnType || (match columnType with TBit _ -> true | _ -> false) ->
+        value |> toDouble |> VDouble |> Some
+    | (Some Floored | Some Ceiled), _ ->
+        tryRoundedProbe columnType value |> Option.orElseWith (fun () -> normalizeStored value)
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _
@@ -354,6 +383,16 @@ let private mapTextOrBytes mapText mapBytes value =
     | Some bytes -> VBytes(mapBytes bytes)
     | None -> value |> toText |> Option.defaultValue "" |> mapText |> VString
 
+let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble: float -> float) value =
+    match value with
+    | VInt _ | VUInt _ -> value, None
+    | VDecimal number -> VDecimal(roundDecimal number), None
+    | (VString _ | VBytes _) as textValue ->
+        let text = textValue |> toText |> Option.defaultValue ""
+        let number, truncated = coerceLeadingDouble text
+        VDouble(roundDouble number), (if truncated then Some text else None)
+    | value -> VDouble(roundDouble (toDouble value)), None
+
 let rec projectValueWithStatus encodeText transform value =
     match transform, value with
     | Some _, VNull -> VNull, None
@@ -366,6 +405,8 @@ let rec projectValueWithStatus encodeText transform value =
     | Some CharacterLength, value -> VInt(characterLength value), None
     | Some ByteLength, value -> VInt(byteLengthWith encodeText value), None
     | Some BitLength, value -> VInt(byteLengthWith encodeText value * 8L), None
+    | Some Floored, value -> roundFunctionalValue Math.Floor Math.Floor value
+    | Some Ceiled, value -> roundFunctionalValue Math.Ceiling Math.Ceiling value
     | Some Signum, ((VString _ | VBytes _) as value) ->
         let text = value |> toText |> Option.defaultValue ""
         let number, truncated = coerceLeadingDouble text

@@ -408,6 +408,8 @@ and IndexTransform =
     | AbsoluteValue
     | Expression of Expr
     | Signum
+    | Floored
+    | Ceiled
 
 and IndexColumn =
     { Name: string

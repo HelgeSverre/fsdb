@@ -2487,6 +2487,14 @@ let tests =
                     | CreateIndex("ix_sign", "t", [ { Name = "rating"; PrefixLength = None; Transform = Some Signum; Direction = Asc } ], false, BTree, true) -> ()
                     | other -> failtestf "expected a sign functional key part, got %A" other
 
+                    match parseOk "CREATE INDEX ix_floor ON t ((FLOOR(rating)))" with
+                    | CreateIndex("ix_floor", "t", [ { Name = "rating"; PrefixLength = None; Transform = Some Floored; Direction = Asc } ], false, BTree, true) -> ()
+                    | other -> failtestf "expected a floor functional key part, got %A" other
+
+                    match parseOk "CREATE INDEX ix_ceil ON t ((CEILING(rating)))" with
+                    | CreateIndex("ix_ceil", "t", [ { Name = "rating"; PrefixLength = None; Transform = Some Ceiled; Direction = Asc } ], false, BTree, true) -> ()
+                    | other -> failtestf "expected CEILING to normalize to the ceiling transform, got %A" other
+
                     match
                         parseOk
                             "CREATE TABLE companies (name VARCHAR(255), rating BIGINT, firm_name VARCHAR(255), firm_id BIGINT, client_of BIGINT, INDEX company_name_index USING btree (name), INDEX company_expression_index ((CASE WHEN rating > 0 THEN lower(name) END) DESC), INDEX full_name_index ((CONCAT_WS(firm_name, name, _utf8mb4' '))), INDEX company_disabled_index (firm_id, client_of) INVISIBLE)"

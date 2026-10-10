@@ -4744,6 +4744,22 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE sign_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private roundedFunctionalIndexes =
+        { Name = "rounded-functional-indexes"
+          Setup =
+            [| "CREATE TABLE rounded_probe(id INT PRIMARY KEY,exact_value DECIMAL(8,2),text_value VARCHAR(20),KEY ix_floor ((FLOOR(exact_value))),KEY ix_ceil ((CEILING(exact_value))),KEY ix_floor_text ((FLOOR(text_value))))"
+               "INSERT INTO rounded_probe VALUES(1,-2.50,'-2.5'),(2,0.01,'0.01'),(3,2.99,'2.99')" |]
+          Steps =
+            [| Contract.query "floor-decimal" "SELECT id FROM rounded_probe WHERE FLOOR(exact_value)=2"
+               Contract.query "ceil-alias" "SELECT id FROM rounded_probe WHERE CEIL(exact_value)=1"
+               Contract.query "floor-text" "SELECT id FROM rounded_probe WHERE FLOOR(text_value)=-3"
+               Contract.query "ordered" "SELECT id,FLOOR(exact_value),CEILING(exact_value) FROM rounded_probe ORDER BY id"
+               Contract.execute "update" "UPDATE rounded_probe SET exact_value=4.01 WHERE id=3"
+               Contract.query "floor-after-update" "SELECT id FROM rounded_probe WHERE FLOOR(exact_value)=2"
+               Contract.query "ceil-after-update" "SELECT id FROM rounded_probe WHERE CEILING(exact_value)=5" |]
+          Cleanup = [| "DROP TABLE rounded_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private tableStatisticsCache =
         let rows =
             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
@@ -9087,7 +9103,8 @@ module ContractCatalog =
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let all =
-        [| signFunctionalIndex
+        [| roundedFunctionalIndexes
+           signFunctionalIndex
            constantNullFallbackIndexes
            tableStatisticsCache
            missingTableDiagnostics
