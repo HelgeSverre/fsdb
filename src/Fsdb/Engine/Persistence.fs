@@ -728,26 +728,28 @@ let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
       ExpressionCollation = None
       Srid = srid }
 
-let private lowercaseIndexColumnPrefix = "\u0000L:"
-let private uppercaseIndexColumnPrefix = "\u0000U:"
-let private trimmedIndexColumnPrefix = "\u0000T:"
-let private reversedIndexColumnPrefix = "\u0000R:"
-let private characterLengthIndexColumnPrefix = "\u0000C:"
-let private byteLengthIndexColumnPrefix = "\u0000O:"
-let private bitLengthIndexColumnPrefix = "\u0000B:"
-let private firstByteIndexColumnPrefix = "\u0000Q:"
-let private firstCharacterCodeIndexColumnPrefix = "\u0000K:"
-let private decodedHexIndexColumnPrefix = "\u0000X:"
-let private encodedHexIndexColumnPrefix = "\u0000Y:"
-let private md5IndexColumnPrefix = "\u0000M:"
-let private sha1IndexColumnPrefix = "\u0000P:"
-let private absoluteValueIndexColumnPrefix = "\u0000A:"
-let private isNullResultIndexColumnPrefix = "\u0000J:"
-let private signumIndexColumnPrefix = "\u0000G:"
-let private flooredIndexColumnPrefix = "\u0000F:"
-let private ceiledIndexColumnPrefix = "\u0000H:"
-let private roundedIndexColumnPrefix = "\u0000Z:"
-let private squareRootIndexColumnPrefix = "\u0000V:"
+// These tags are persisted in snapshots and WAL records. Keep existing bytes stable.
+let private directIndexColumnPrefixes =
+    [ Lowercase, "\u0000L:"
+      Uppercase, "\u0000U:"
+      Trimmed, "\u0000T:"
+      Reversed, "\u0000R:"
+      CharacterLength, "\u0000C:"
+      ByteLength, "\u0000O:"
+      BitLength, "\u0000B:"
+      FirstByte, "\u0000Q:"
+      FirstCharacterCode, "\u0000K:"
+      DecodedHex, "\u0000X:"
+      EncodedHex, "\u0000Y:"
+      Md5Digest, "\u0000M:"
+      Sha1Digest, "\u0000P:"
+      AbsoluteValue, "\u0000A:"
+      IsNullResult, "\u0000J:"
+      Signum, "\u0000G:"
+      Floored, "\u0000F:"
+      Ceiled, "\u0000H:"
+      Rounded, "\u0000Z:"
+      SquareRooted, "\u0000V:" ]
 let private expressionIndexColumnPrefix = "\u0000E:"
 let private descendingIndexColumnPrefix = "\u0000D:"
 let private literalIndexColumnPrefix = "\u0000N:"
@@ -761,35 +763,30 @@ let private (|Prefixed|_|) (prefix: string) (value: string) =
     else
         None
 
+let private (|DirectIndexTransform|_|) value =
+    directIndexColumnPrefixes
+    |> List.tryPick (fun (transform, prefix) ->
+        match value with
+        | Prefixed prefix name -> Some(name, transform)
+        | _ -> None)
+
 // Tagged formats encode ordinary names too, so no identifier can be
 // mistaken for an in-band key-part attribute after recovery.
 let private encodeIndexColumn (format: SnapshotFormat) column =
     let encoded =
         match column.Transform, column.PrefixLength with
-        | Some Lowercase, _ -> lowercaseIndexColumnPrefix + column.Name
-        | Some Uppercase, _ -> uppercaseIndexColumnPrefix + column.Name
-        | Some Trimmed, _ -> trimmedIndexColumnPrefix + column.Name
-        | Some Reversed, _ -> reversedIndexColumnPrefix + column.Name
-        | Some CharacterLength, _ -> characterLengthIndexColumnPrefix + column.Name
-        | Some ByteLength, _ -> byteLengthIndexColumnPrefix + column.Name
-        | Some BitLength, _ -> bitLengthIndexColumnPrefix + column.Name
-        | Some FirstByte, _ -> firstByteIndexColumnPrefix + column.Name
-        | Some FirstCharacterCode, _ -> firstCharacterCodeIndexColumnPrefix + column.Name
-        | Some DecodedHex, _ -> decodedHexIndexColumnPrefix + column.Name
-        | Some EncodedHex, _ -> encodedHexIndexColumnPrefix + column.Name
-        | Some Md5Digest, _ -> md5IndexColumnPrefix + column.Name
-        | Some Sha1Digest, _ -> sha1IndexColumnPrefix + column.Name
-        | Some AbsoluteValue, _ -> absoluteValueIndexColumnPrefix + column.Name
-        | Some IsNullResult, _ -> isNullResultIndexColumnPrefix + column.Name
-        | Some Signum, _ -> signumIndexColumnPrefix + column.Name
-        | Some Floored, _ -> flooredIndexColumnPrefix + column.Name
-        | Some Ceiled, _ -> ceiledIndexColumnPrefix + column.Name
-        | Some Rounded, _ -> roundedIndexColumnPrefix + column.Name
-        | Some SquareRooted, _ -> squareRootIndexColumnPrefix + column.Name
         | Some(Expression expression), _ ->
             let expressionBytes = Writer()
             encodeExpr expressionBytes expression
             expressionIndexColumnPrefix + Convert.ToBase64String(expressionBytes.ToArray())
+        | Some transform, _ ->
+            let prefix =
+                directIndexColumnPrefixes
+                |> List.tryPick (fun (candidate, prefix) ->
+                    if candidate = transform then Some prefix else None)
+                |> Option.defaultWith (fun () -> failwithf "Persistence: unsupported index transform %A" transform)
+
+            prefix + column.Name
         | None, None when format.TaggedIndexColumns -> literalIndexColumnPrefix + column.Name
         | None, None -> column.Name
         | None, Some length -> sprintf "%s%d:%s" lengthIndexColumnPrefix length column.Name
@@ -817,26 +814,7 @@ let private decodeIndexColumn (format: SnapshotFormat) (columnNames: Set<string>
     else
         match encoded with
         | Prefixed literalIndexColumnPrefix name when format.TaggedIndexColumns -> column direction name None None
-        | Prefixed lowercaseIndexColumnPrefix name -> column direction name None (Some Lowercase)
-        | Prefixed uppercaseIndexColumnPrefix name -> column direction name None (Some Uppercase)
-        | Prefixed trimmedIndexColumnPrefix name -> column direction name None (Some Trimmed)
-        | Prefixed reversedIndexColumnPrefix name -> column direction name None (Some Reversed)
-        | Prefixed characterLengthIndexColumnPrefix name -> column direction name None (Some CharacterLength)
-        | Prefixed byteLengthIndexColumnPrefix name -> column direction name None (Some ByteLength)
-        | Prefixed bitLengthIndexColumnPrefix name -> column direction name None (Some BitLength)
-        | Prefixed firstByteIndexColumnPrefix name -> column direction name None (Some FirstByte)
-        | Prefixed firstCharacterCodeIndexColumnPrefix name -> column direction name None (Some FirstCharacterCode)
-        | Prefixed decodedHexIndexColumnPrefix name -> column direction name None (Some DecodedHex)
-        | Prefixed encodedHexIndexColumnPrefix name -> column direction name None (Some EncodedHex)
-        | Prefixed md5IndexColumnPrefix name -> column direction name None (Some Md5Digest)
-        | Prefixed sha1IndexColumnPrefix name -> column direction name None (Some Sha1Digest)
-        | Prefixed absoluteValueIndexColumnPrefix name -> column direction name None (Some AbsoluteValue)
-        | Prefixed isNullResultIndexColumnPrefix name -> column direction name None (Some IsNullResult)
-        | Prefixed signumIndexColumnPrefix name -> column direction name None (Some Signum)
-        | Prefixed flooredIndexColumnPrefix name -> column direction name None (Some Floored)
-        | Prefixed ceiledIndexColumnPrefix name -> column direction name None (Some Ceiled)
-        | Prefixed roundedIndexColumnPrefix name -> column direction name None (Some Rounded)
-        | Prefixed squareRootIndexColumnPrefix name -> column direction name None (Some SquareRooted)
+        | DirectIndexTransform(name, transform) -> column direction name None (Some transform)
         | Prefixed expressionIndexColumnPrefix expression ->
             try
                 let expression = expression |> Convert.FromBase64String |> Reader |> decodeExpr

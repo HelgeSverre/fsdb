@@ -520,15 +520,20 @@ let firstCharacterCode encodeText value =
     |> Array.fold (fun code part -> code * 256L + int64 part) 0L
     |> VInt
 
+let private numericInputWithStatus = function
+    | (VString _ | VBytes _) as textValue ->
+        let text = textValue |> toText |> Option.defaultValue ""
+        let number, truncated = coerceLeadingDouble text
+        number, (if truncated then Some text else None)
+    | value -> toDouble value, None
+
 let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble: float -> float) value =
     match value with
     | VInt _ | VUInt _ -> value, None
     | VDecimal number -> VDecimal(roundDecimal number), None
-    | (VString _ | VBytes _) as textValue ->
-        let text = textValue |> toText |> Option.defaultValue ""
-        let number, truncated = coerceLeadingDouble text
-        VDouble(roundDouble number), (if truncated then Some text else None)
-    | value -> VDouble(roundDouble (toDouble value)), None
+    | value ->
+        let number, truncated = numericInputWithStatus value
+        VDouble(roundDouble number), truncated
 
 let hexValueWithStatus encodeText value =
     let encodedBytes (bytes: byte[]) = VString(Convert.ToHexString bytes), false
@@ -614,31 +619,20 @@ let rec projectValueWithStatus encodeText transform value =
             (fun number -> Math.Round(number, MidpointRounding.ToEven))
             value
     | Some SquareRooted, value ->
-        let number, truncated =
-            match value with
-            | (VString _ | VBytes _) as textValue ->
-                let text = textValue |> toText |> Option.defaultValue ""
-                let number, truncated = coerceLeadingDouble text
-                number, (if truncated then Some text else None)
-            | value -> toDouble value, None
-
+        let number, truncated = numericInputWithStatus value
         (if number < 0.0 then VNull else VDouble(Math.Sqrt number)), truncated
-    | Some Signum, ((VString _ | VBytes _) as value) ->
-        let text = value |> toText |> Option.defaultValue ""
-        let number, truncated = coerceLeadingDouble text
-        VInt(int64 (sign number)), (if truncated then Some text else None)
-    | Some Signum, value -> VInt(int64 (sign (toDouble value))), None
+    | Some Signum, value ->
+        let number, truncated = numericInputWithStatus value
+        VInt(int64 (sign number)), truncated
     | Some AbsoluteValue, VInt Int64.MinValue -> raise SignedOutOfRange
     | Some AbsoluteValue, VInt value -> VInt(abs value), None
     | Some AbsoluteValue, VUInt value -> VUInt value, None
     | Some AbsoluteValue, VBit(_, value) -> VUInt value, None
     | Some AbsoluteValue, VDouble value -> VDouble(abs value), None
     | Some AbsoluteValue, VDecimal value -> VDecimal(abs value), None
-    | Some AbsoluteValue, ((VString _ | VBytes _) as value) ->
-        let text = value |> toText |> Option.defaultValue ""
-        let number, truncated = coerceLeadingDouble text
-        VDouble(abs number), (if truncated then Some text else None)
-    | Some AbsoluteValue, value -> VDouble(abs (toDouble value)), None
+    | Some AbsoluteValue, value ->
+        let number, truncated = numericInputWithStatus value
+        VDouble(abs number), truncated
     | Some(Expression expression), value ->
         match tryPhysicalExpression expression with
         | None -> value, None
