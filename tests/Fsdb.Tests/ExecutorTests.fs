@@ -13596,6 +13596,31 @@ let tests =
                         |> explainRow
                     Expect.equal alternateGroup.Key (Some "ix_second") "GROUP BY selects another permitted key"
 
+                testCase "table index hints control joined-table probes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE hint_left(id INT PRIMARY KEY,v INT)" |> ignore
+                    runDefault store "CREATE TABLE hint_right(id INT PRIMARY KEY,v INT,KEY ix_v(v))" |> ignore
+                    runDefault store "INSERT INTO hint_left VALUES(1,4),(2,9),(3,16)" |> ignore
+                    runDefault store "INSERT INTO hint_right VALUES(11,4),(12,9),(13,16)" |> ignore
+                    let rightPlan hint =
+                        runDefault store (sprintf "EXPLAIN SELECT l.id,r.id FROM hint_left l STRAIGHT_JOIN hint_right r %s ON r.v=l.v" hint)
+                        |> explainRows
+                        |> List.item 1
+                    Expect.equal (rightPlan "").Key (Some "ix_v") "unhinted join probes the right index"
+                    for hint in [ "IGNORE INDEX FOR JOIN(ix_v)"; "USE INDEX FOR JOIN()" ] do
+                        let plan = rightPlan hint
+                        Expect.equal plan.Key None (sprintf "%s excludes the join key" hint)
+                        Expect.equal plan.AccessType (Some "ALL") (sprintf "%s scans the right table" hint)
+                    runDefault store "CREATE TABLE hint_right_choice(id INT PRIMARY KEY,v INT,KEY ix_first(v),KEY ix_second(v))" |> ignore
+                    runDefault store "INSERT INTO hint_right_choice VALUES(11,4),(12,9),(13,16)" |> ignore
+                    for hint in [ "IGNORE INDEX FOR JOIN(ix_first)"; "USE INDEX FOR JOIN(ix_second)" ] do
+                        let plan =
+                            runDefault store (sprintf "EXPLAIN SELECT l.id,r.id FROM hint_left l STRAIGHT_JOIN hint_right_choice r %s ON r.v=l.v" hint)
+                            |> explainRows
+                            |> List.item 1
+                        Expect.equal plan.Key (Some "ix_second") (sprintf "%s selects another join key" hint)
+
                 testCase "integer writes reject overflow in strict mode and clamp it otherwise"
                 <| fun _ ->
                     let store = newStore ()

@@ -8875,14 +8875,20 @@ and private sameIndexSemantics (left: ColumnDef) (right: ColumnDef) : bool =
         (not (InformationSchema.isStringy left.Type)
          || (left.Charset = right.Charset && left.Collation = right.Collation && left.Collation.IsSome))
 
+and private indexAllowedForJoinSource = function
+    | Some(FromTable tableRef) -> indexAllowedBy (indexHintsFor IndexJoin tableRef)
+    | _ -> fun _ -> true
+
 and private tryIndexProbe
+    (allowed: string -> bool)
     (table: Table)
     (indexedColumns: ColumnDef list)
     (indexToProbe: (int * int) list)
     : IndexedJoinProbe option =
     let indexedNames = indexToProbe |> List.map (fun (indexedIndex, _) -> indexedColumns.[indexedIndex].Name)
 
-    Storage.tryEqualityIndexCoveredByColumns table indexedNames
+    Storage.equalityIndexMatchesCoveredByColumns table indexedNames
+    |> List.tryFind (fun matched -> allowed matched.Index.Name)
     |> Option.bind (fun index ->
         index.ColumnIndices
         |> traverse (fun indexedIndex ->
@@ -8907,7 +8913,8 @@ and private tryIndexedJoinProbe
     | (InnerJoin | StraightJoin | NaturalJoin | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin), _, Some table, _ :: _
         when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
-        equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe table rightColumns
+        let allowed = indexAllowedForJoinSource (Some join.Table)
+        equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe allowed table rightColumns
     | _ -> None
 
 and private chooseIndexedJoinPath
@@ -9045,6 +9052,7 @@ and private tryFullTextDrivenJoinOrder
 and private tryIndexedPreservedRightProbe
     (store: Store)
     (join: Join)
+    (leftOperand: FromItem option)
     (leftColumns: ColumnDef list)
     (rightColumns: ColumnDef list)
     (physicalTable: Table option)
@@ -9054,7 +9062,8 @@ and private tryIndexedPreservedRightProbe
     | (RightJoin | NaturalRightJoin), _, Some table, _ :: _
         when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
-        equiKeys |> tryIndexProbe table leftColumns
+        let allowed = indexAllowedForJoinSource leftOperand
+        equiKeys |> tryIndexProbe allowed table leftColumns
     | _ -> None
 
 and private sourceReferencesPreceding store dbName (preceding: (string * ColumnDef list) list) item =
@@ -9867,7 +9876,7 @@ and private applyPreparedJoin
             |> Option.filter (fun table -> sameLength table.Columns combinedColumnsSoFar)
         let candidateIndexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns rightIndexTable equiKeys
         let preservedRightProbe =
-            tryIndexedPreservedRightProbe store join combinedColumnsSoFar joinColumns leftIndexTable equiKeys
+            tryIndexedPreservedRightProbe store join leftOperand combinedColumnsSoFar joinColumns leftIndexTable equiKeys
 
         let leftQualifiers = sourcesSoFar |> List.map (fst >> _.ToLowerInvariant()) |> Set.ofList
 
