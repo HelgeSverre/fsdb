@@ -1349,7 +1349,12 @@ let tests =
                           "-IF(1, -2, 3)"
                           "CASE WHEN 1=1 THEN 2 ELSE 3 END"
                           "CASE 2 WHEN 2 THEN 2 ELSE 3 END"
-                          "CASE WHEN NULL THEN 3 ELSE 2 END" ] do
+                          "CASE WHEN NULL THEN 3 ELSE 2 END"
+                          "CASE WHEN 1=1 AND NOT(2=3) THEN 2 ELSE 3 END"
+                          "CASE WHEN 2 BETWEEN 1 AND 3 THEN 2 ELSE 3 END"
+                          "CASE WHEN 2 IN (1,2) THEN 2 ELSE 3 END"
+                          "CASE WHEN 1 IS TRUE THEN 2 ELSE 3 END"
+                          "CASE WHEN 0 OR 1 THEN 2 ELSE 3 END" ] do
                         match runDefault store (sprintf "EXPLAIN SELECT v FROM users WHERE id = %s" bound) with
                         | ResultSet(_, [ [ _; _; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
                             ()

@@ -11659,21 +11659,20 @@ and private isNumericIndexValue = function
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let safeFallbacks = set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST" ]
 
-    let rec isSafe = function
+    let rec isSafe expression =
+        let safeChildren () = Expression.children expression |> List.forall isSafe
+
+        match expression with
         | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
-        | Neg expression -> isSafe expression
-        | BinOp((Add | Sub | SignedSub | Mul | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
-            isSafe left && isSafe right
-        | Case(subject, branches, otherwise) ->
-            Option.forall isSafe subject
-            && (branches |> List.forall (fun (condition, result) -> isSafe condition && isSafe result))
-            && Option.forall isSafe otherwise
-        | Expression.CollationOverride(expression, _) -> isSafe expression
-        | FuncCall(name, arguments)
+        | Neg _ | Not _ | IsNull _ | IsNotNull _ | IsTrue _ | IsFalse _
+        | Between _ | In _ | Case _ | Expression.CollationOverride _ -> safeChildren ()
+        | BinOp((Add | Sub | SignedSub | Mul | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq | And | Or | Xor), _, _) ->
+            safeChildren ()
+        | FuncCall(name, _)
             when ((FunctionalIndex.tryBuiltin name |> Option.isSome)
                   || Set.contains (name.ToUpperInvariant()) safeFallbacks)
                  && Functions.isUnmodifiedBuiltinScalar name registry ->
-            arguments |> List.forall isSafe
+            safeChildren ()
         | _ -> false
 
     let context = lazy (contextFactory store registry Storage.defaultDatabase Map.empty Map.empty None [||])

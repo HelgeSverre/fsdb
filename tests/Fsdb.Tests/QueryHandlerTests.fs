@@ -2128,6 +2128,11 @@ let tests =
               Expect.equal result (ResultSet([ "id" ], [])) "missing CASE bound"
               Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292 ] "missing CASE warning"
 
+              let session, result =
+                  handle session "SELECT id FROM bound_warnings WHERE id=CASE WHEN ABS('1x')=1 AND 2 BETWEEN 1 AND 3 THEN 2 ELSE 3 END"
+              Expect.equal result (ResultSet([ "id" ], [ [ Some "2" ] ])) "matching CASE condition"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292; 1292 ] "CASE condition warnings"
+
           testCase "floating integer probes preserve out-of-range and rounded neighbors"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
