@@ -3819,7 +3819,7 @@ let tests =
                     "INSERT INTO lookup_hex VALUES (1, 'A'), (2, 'a')"
                     "CREATE TABLE lookup_digest (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_md5_value ((MD5(value))), INDEX ix_sha_value ((SHA1(value))))"
                     "INSERT INTO lookup_digest VALUES (1, 'A'), (2, 'B')"
-                    "CREATE TABLE lookup_round (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_floor_value ((FLOOR(value))), INDEX ix_ceil_value ((CEIL(value))), INDEX ix_round_value ((ROUND(value))), INDEX ix_sqrt_value ((SQRT(value))), INDEX ix_sqrt_abs ((SQRT(ABS(value)))))"
+                    "CREATE TABLE lookup_round (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_floor_value ((FLOOR(value))), INDEX ix_ceil_value ((CEIL(value))), INDEX ix_round_value ((ROUND(value))), INDEX ix_sqrt_value ((SQRT(value))), INDEX ix_sqrt_abs ((SQRT(ABS(value)))), INDEX ix_exp_value ((EXP(value))))"
                     "INSERT INTO lookup_round VALUES (1, -2.50), (2, 0.01), (3, 2.99)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
                     "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
@@ -3995,6 +3995,10 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "WAL recovery rebuilds the square-root index"
               | other -> failtestf "expected recovered square-root lookup rows, got %A" other
 
+              match handle (Fsdb.Session.create 58 reloaded) "SELECT id FROM lookup_round WHERE EXP(value) > 2e0" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "WAL recovery rebuilds the exponential index"
+              | other -> failtestf "expected recovered exponential lookup rows, got %A" other
+
               match handle (Fsdb.Session.create 56 reloaded) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "WAL recovery rebuilds the composed numeric index"
               | other -> failtestf "expected recovered composed numeric lookup rows, got %A" other
@@ -4081,6 +4085,10 @@ let tests =
               match handle (Fsdb.Session.create 55 fromSnapshot) "SELECT id FROM lookup_round WHERE SQRT(value) > 1e0" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "the snapshot restores the square-root index"
               | other -> failtestf "expected snapshot square-root lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 59 fromSnapshot) "SELECT id FROM lookup_round WHERE EXP(value) > 2e0" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "the snapshot restores the exponential index"
+              | other -> failtestf "expected snapshot exponential lookup rows, got %A" other
 
               match handle (Fsdb.Session.create 57 fromSnapshot) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "the snapshot restores the composed numeric index"

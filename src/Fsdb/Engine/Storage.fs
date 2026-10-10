@@ -2950,7 +2950,10 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
     let transformed, truncated =
         try
             FunctionalIndex.projectValueWithStatus encodeText transform value
-        with SignedOutOfRange ->
+        with
+        | FunctionalIndex.ExponentialOutOfRange ->
+            raise (IndexExpressionError(1690, sprintf "DOUBLE value is out of range in 'exp(%s)'" (SqlText.quoteIdentifier column.Name)))
+        | SignedOutOfRange ->
             let expression =
                 transform
                 |> Option.bind FunctionalIndex.tryBuiltinName

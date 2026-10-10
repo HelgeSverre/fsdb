@@ -8,6 +8,8 @@ open System.Globalization
 open Fsdb.Ast
 open Fsdb.Value
 
+exception ExponentialOutOfRange
+
 type private Builtin =
     { CanonicalName: string
       Aliases: string list
@@ -73,7 +75,10 @@ let private definitions =
         Transform = Rounded }
       { CanonicalName = "SQRT"
         Aliases = []
-        Transform = SquareRooted } ]
+        Transform = SquareRooted }
+      { CanonicalName = "EXP"
+        Aliases = []
+        Transform = Exponentiated } ]
 
 let private namesOf definition =
     definition.CanonicalName :: definition.Aliases
@@ -170,7 +175,8 @@ let rec hasTextResult = function
     | Floored
     | Ceiled
     | Rounded
-    | SquareRooted -> false
+    | SquareRooted
+    | Exponentiated -> false
 
 let tryRebaseColumn column = function
     | Expression expression ->
@@ -239,7 +245,8 @@ let private supportsSingleTransform transform columnType =
     | Floored
     | Ceiled
     | Rounded
-    | SquareRooted ->
+    | SquareRooted
+    | Exponentiated ->
         isNumeric columnType || isTextOrBinary columnType
     | IsNullResult -> true
     | Expression _ -> false
@@ -271,7 +278,8 @@ let private isNumericTransform = function
     | Floored
     | Ceiled
     | Rounded
-    | SquareRooted -> true
+    | SquareRooted
+    | Exponentiated -> true
     | _ -> false
 
 type private NumericKeyResult =
@@ -296,7 +304,8 @@ let private numericKeyResult columnType transforms =
         (fun result transform ->
             match transform with
             | Signum -> SignedInteger
-            | SquareRooted -> Approximate
+            | SquareRooted
+            | Exponentiated -> Approximate
             | _ -> result)
         sourceResult
 
@@ -467,8 +476,8 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
         value |> toDouble |> VDouble |> Some
     | (Some Floored | Some Ceiled | Some Rounded), _ ->
         tryRoundedProbe columnType value |> Option.orElseWith (fun () -> normalizeStored value)
-    | Some SquareRooted, VDouble number when Double.IsFinite number -> Some(VDouble number)
-    | Some SquareRooted, _ -> None
+    | (Some SquareRooted | Some Exponentiated), VDouble number when Double.IsFinite number -> Some(VDouble number)
+    | (Some SquareRooted | Some Exponentiated), _ -> None
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _
@@ -621,6 +630,11 @@ let rec projectValueWithStatus encodeText transform value =
     | Some SquareRooted, value ->
         let number, truncated = numericInputWithStatus value
         (if number < 0.0 then VNull else VDouble(Math.Sqrt number)), truncated
+    | Some Exponentiated, value ->
+        let number, truncated = numericInputWithStatus value
+        let result = Math.Exp number
+        if Double.IsInfinity result then raise ExponentialOutOfRange
+        (if Double.IsNaN result then VNull else VDouble result), truncated
     | Some Signum, value ->
         let number, truncated = numericInputWithStatus value
         VInt(int64 (sign number)), truncated

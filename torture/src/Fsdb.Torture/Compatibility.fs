@@ -5030,6 +5030,26 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE numeric_compositions" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private expFunctionalIndexes =
+        { Name = "exp-functional-indexes"
+          Setup =
+            [| "CREATE TABLE exp_probe(id INT PRIMARY KEY,n DECIMAL(8,2),d DOUBLE,s VARCHAR(20),UNIQUE KEY ux_exp_n ((EXP(n))),KEY ix_exp_d ((EXP(d))),KEY ix_exp_s ((EXP(s))))"
+               "INSERT INTO exp_probe VALUES(1,0,0,'0'),(2,1,1,'1'),(3,-1,-1,'-1'),(4,NULL,NULL,NULL)" |]
+          Steps =
+            [| Contract.query "values" "SELECT id,EXP(n),EXP(d),EXP(s) FROM exp_probe ORDER BY id"
+               Contract.query "decimal-lookup" "SELECT id FROM exp_probe WHERE EXP(n)=1e0"
+               Contract.query "double-lookup" "SELECT id FROM exp_probe WHERE EXP(d)=1e0"
+               Contract.query "text-lookup" "SELECT id FROM exp_probe WHERE EXP(s)=1e0"
+               Contract.query "range" "SELECT id FROM exp_probe WHERE EXP(n)>1e0 ORDER BY EXP(n)"
+               Contract.query "grouping" "SELECT EXP(n),COUNT(*) FROM exp_probe GROUP BY EXP(n) ORDER BY EXP(n)"
+               Contract.execute "duplicate" "INSERT INTO exp_probe VALUES(5,0,2,'2')" |> Contract.fails 1062 "23000"
+               Contract.execute "overflow" "INSERT INTO exp_probe VALUES(6,1000,1000,'1000')" |> Contract.fails 1690 "22003"
+               Contract.execute "update" "UPDATE exp_probe SET n=2 WHERE id=1"
+               Contract.query "old-key" "SELECT id FROM exp_probe WHERE EXP(n)=1e0"
+               Contract.query "new-key" "SELECT id FROM exp_probe WHERE EXP(n)>7e0" |]
+          Cleanup = [| "DROP TABLE exp_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private numericConstantIndexBounds =
         { Name = "numeric-constant-index-bounds"
           Setup =
@@ -9773,6 +9793,7 @@ module ContractCatalog =
     let all =
         [| roundedFunctionalIndexes
            numericComposedFunctionalIndexes
+           expFunctionalIndexes
            numericConstantIndexBounds
            elidedWhereBindings
            missingFunctionMutations

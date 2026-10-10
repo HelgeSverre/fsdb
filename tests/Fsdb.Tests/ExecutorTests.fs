@@ -9147,6 +9147,45 @@ let tests =
                         (ResultSet([ "id" ], [ [ Some "2" ] ]))
                         "updates insert the new square-root key"
 
+                testCase "EXP functional keys support lookup range grouping and uniqueness"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE exp_keys(id INT PRIMARY KEY,n DECIMAL(8,2),d DOUBLE,s VARCHAR(20),KEY ix_n ((EXP(n))),KEY ix_d ((EXP(d))),KEY ix_s ((EXP(s))))"
+                    |> ignore
+                    runDefault store "INSERT INTO exp_keys VALUES(1,0,0,'0'),(2,1,1,'1'),(3,-1,-1,'-1'),(4,NULL,NULL,NULL)"
+                    |> ignore
+
+                    for column, key in [ "n", "ix_n"; "d", "ix_d"; "s", "ix_s" ] do
+                        let query = sprintf "SELECT id FROM exp_keys WHERE EXP(%s)=1e0" column
+                        Expect.equal (runDefault store query) (ResultSet([ "id" ], [ [ Some "1" ] ])) query
+                        let plan = runDefault store ("EXPLAIN " + query) |> explainRow
+                        Expect.equal plan.Key (Some key) (sprintf "EXP equality uses %s" key)
+
+                    let range = "SELECT id FROM exp_keys WHERE EXP(n)>1e0 ORDER BY id"
+                    Expect.equal (runDefault store range) (ResultSet([ "id" ], [ [ Some "2" ] ])) "EXP range"
+                    let rangePlan = runDefault store "EXPLAIN SELECT id FROM exp_keys WHERE EXP(n)>1e0" |> explainRow
+                    Expect.equal rangePlan.Key (Some "ix_n") "EXP range uses its key"
+
+                    let grouped = "SELECT EXP(n),COUNT(*) FROM exp_keys GROUP BY EXP(n) ORDER BY EXP(n)"
+                    let groupedPlan = runDefault store ("EXPLAIN " + grouped) |> explainRow
+                    Expect.equal groupedPlan.Key (Some "ix_n") "EXP grouping uses its key"
+
+                    runDefault store "CREATE TABLE unique_exp(id INT PRIMARY KEY,n DECIMAL(8,2),UNIQUE KEY ux_exp ((EXP(n))))"
+                    |> ignore
+                    runDefault store "INSERT INTO unique_exp VALUES(1,0),(2,NULL),(3,NULL)" |> ignore
+                    match runDefault store "INSERT INTO unique_exp VALUES(4,0)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected EXP uniqueness violation, got %A" other
+                    match runDefault store "INSERT INTO unique_exp VALUES(5,1000)" with
+                    | Err(1690, _) -> ()
+                    | other -> failtestf "expected EXP overflow to reject the row, got %A" other
+
+                    runDefault store "UPDATE exp_keys SET n=2 WHERE id=1" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM exp_keys WHERE EXP(n)=1e0")
+                        (ResultSet([ "id" ], []))
+                        "updates remove the old EXP key"
+
                 testCase "numeric unary compositions keep their functional keys"
                 <| fun _ ->
                     let store = newStore ()
