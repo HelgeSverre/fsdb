@@ -189,6 +189,11 @@ let tryGlobalVariable (store: Store) (name: string) : string option option =
     | true, v -> Some v
     | false, _ -> liveDefaults store |> Map.tryFind name
 
+let eventSchedulerEnabled store =
+    tryGlobalVariable store "event_scheduler"
+    |> Option.flatten
+    |> Option.exists (fun value -> value = "1" || value.Equals("ON", StringComparison.OrdinalIgnoreCase))
+
 let initialRoles store account =
     let applicable = Fsdb.Auth.applicableRolesForAccount store account
 

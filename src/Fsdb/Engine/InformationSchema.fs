@@ -1341,6 +1341,10 @@ let listProcesses () : ProcessEntry list =
 
 let connectedThreads () = processes.Count
 
+let private runningThreads schedulerEnabled =
+    let active = processes.Values |> Seq.filter (fun entry -> entry.Command <> "Sleep") |> Seq.length
+    active + if schedulerEnabled && not processes.IsEmpty then 1 else 0
+
 let private processlistColumns =
     [ intCol "ID"
       strCol "USER"
@@ -4248,7 +4252,7 @@ type ConnectionStatus =
       SslVersion: string option
       AuthenticationRsaPublicKeys: Map<Authentication.Plugin, string> }
 
-let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) (connection: ConnectionStatus) (likeOpt: string option) : ShowResult =
+let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) schedulerEnabled (connection: ConnectionStatus) (likeOpt: string option) : ShowResult =
     let statusCounters = if isGlobal then processStatusCounters else sessionCounters
 
     let compressionRows =
@@ -4275,6 +4279,7 @@ let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) (connection: C
           "Questions", string statusCounters.Questions
           "Slow_queries", string statusCounters.SlowQueries
           "Threads_connected", string (connectedThreads ())
+          "Threads_running", string (runningThreads schedulerEnabled)
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
         @ compressionRows
         @ (reportedCommandNames |> List.map (fun name -> name, string (statusCounters.CommandCount name)))

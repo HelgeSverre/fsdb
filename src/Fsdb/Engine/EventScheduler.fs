@@ -172,11 +172,6 @@ let private execute
             complete store entry started final
     }
 
-let private enabled (store: Storage.Store) =
-    Session.tryGlobalVariable store "event_scheduler"
-    |> Option.flatten
-    |> Option.exists (fun value -> value = "1" || value.Equals("ON", StringComparison.OrdinalIgnoreCase))
-
 let private tryReserveExecution (state: State) (generation: CancellationTokenSource) =
     lock stateLock (fun () ->
         if
@@ -217,7 +212,7 @@ let private startExecution store state (cancellation: CancellationToken) functio
         raise error
 
 let private scan (store: Storage.Store) (state: State) (generation: CancellationTokenSource) =
-    if enabled store then
+    if Session.eventSchedulerEnabled store then
         let now = Functions.truncateToSecond DateTime.Now
 
         for entry in eventEntries store do

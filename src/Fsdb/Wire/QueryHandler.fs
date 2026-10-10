@@ -4535,7 +4535,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
               AuthenticationRsaPublicKeys = session.AuthenticationRsaPublicKeys }
 
         session,
-        InformationSchema.showStatus isGlobal session.StatusCounters connectionStatus (statusFilter sql)
+        InformationSchema.showStatus
+            isGlobal
+            session.StatusCounters
+            (Session.eventSchedulerEnabled session.Store)
+            connectionStatus
+            (statusFilter sql)
         |> showResult
     | ShowEngines -> session, InformationSchema.showEngines () |> showResult
     | ShowEngineInnodbStatus ->

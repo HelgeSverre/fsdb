@@ -8706,6 +8706,28 @@ let tests =
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected an empty set, got %A" other
 
+          TestSupport.processGlobalCase "Threads_running counts active connections and the scheduler"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let entry = Fsdb.InformationSchema.registerProcess 987654321L "root" "localhost"
+              let running sql =
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ Some "Threads_running"; Some count ] ]) -> int count
+                  | other -> failtestf "expected Threads_running status, got %A" other
+
+              try
+                  let sleeping = running "SHOW SESSION STATUS LIKE 'Threads_running'"
+                  Fsdb.InformationSchema.beginProcessQuery entry "SELECT 1"
+                  let active = running "SHOW SESSION STATUS LIKE 'Threads_running'"
+                  Expect.equal active (sleeping + 1) "active connection adds one running thread"
+                  Expect.equal (running "SHOW GLOBAL STATUS LIKE 'Threads_running'") active "both scopes report the same process count"
+                  Fsdb.InformationSchema.finishProcessQuery entry
+                  let _, setting = handle session "SET GLOBAL event_scheduler=OFF"
+                  Expect.equal setting (Affected 0UL) "scheduler can be disabled"
+                  Expect.equal (running "SHOW SESSION STATUS LIKE 'Threads_running'") (sleeping - 1) "disabled scheduler removes its running thread"
+              finally
+                  Fsdb.InformationSchema.unregisterProcess entry.Id
+
           testCase "SHOW STATUS reports core command counters"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -8721,7 +8743,7 @@ let tests =
                   | ResultSet(_, [ [ Some actual; Some value ] ]) when actual = name && int64 value > 0L -> ()
                   | other -> failtestf "expected a positive %s counter, got %A" name other
 
-          testCase "long_query_time counts completed slow statements per session"
+          TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let status session =
@@ -8782,7 +8804,7 @@ let tests =
                   (ResultSet([ "@@SESSION.long_query_time" ], [ [ Some "0.000000" ] ]))
                   "clamped value retains decimal display"
 
-          testCase "LOAD DATA slow timing includes time before row decoding"
+          TestSupport.processGlobalCase "LOAD DATA slow timing includes time before row decoding"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE slow_load_rows (id INT)"
