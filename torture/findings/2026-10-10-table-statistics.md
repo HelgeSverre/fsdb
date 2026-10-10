@@ -38,6 +38,14 @@ duplicate-value probe. fsdb computes exact B-tree prefix counts with the same
 key projection used by its maintained indexes, and uses the row count for
 FULLTEXT/SPATIAL entries. The snapshot survives WAL and snapshot recovery;
 the native contract checks `INFORMATION_SCHEMA.STATISTICS` and `SHOW INDEX`.
+Zero-expiry index reads remain an open edge. In an isolated MySQL probe, a
+first read after three inserts returned secondary and primary cardinalities
+of 2 and 3; after a delete, `PRIMARY` fell to 2 while the secondary estimate
+remained 2. Under the differential harness's preceding metadata reads, the
+same three-row first read returned 1 for both indexes, and a composite
+secondary's second prefix changed from 3 to 2 after a delete. The existing
+fsdb cache cannot derive those state-dependent InnoDB samples. It reports
+the cached estimate when present rather than fabricating a sampled value.
 
 The remaining divergence is InnoDB's approximate row sampling, page-derived
 `DATA_LENGTH`/`INDEX_LENGTH` and `AVG_ROW_LENGTH`, and its sampled
