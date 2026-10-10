@@ -770,6 +770,14 @@ The mode-matched native MySQL 8.4.11 contract run passed 123 cases and
 16,517 steps after the change; the pinned Linux mode-0 run reported only its
 nine previously documented identifier-case differences.
 
+An [original-parser](benchmarks/results/2026-10-10-numeric-parser-baseline.md)
+versus [whole-number fast-path](benchmarks/results/2026-10-10-numeric-parser-fast.md)
+comparison did not isolate the regex as the dominant cost: the single-cast
+query measured about 31 milliseconds in both runs, while the combined query's
+small difference overlaps short-run variation. The fast path was discarded;
+further work should profile aggregate evaluation rather than assume parsing
+is the main remaining cost.
+
 The [window snapshot](benchmarks/results/01e61930-windows.md) identifies offset
 RANGE boundary lookup and stored-function window inputs as profiling candidates.
 Smaller-size controls exceed the repeatability threshold under competing host
