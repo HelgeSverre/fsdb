@@ -5034,7 +5034,10 @@ module ContractCatalog =
         { Name = "numeric-constant-index-bounds"
           Setup =
             [| "CREATE TABLE numeric_bounds(id INT PRIMARY KEY,label VARCHAR(20))"
-               "INSERT INTO numeric_bounds VALUES(-2,'minus two'),(1,'one'),(2,'two'),(3,'three'),(4,'four'),(20,'twenty')" |]
+               "INSERT INTO numeric_bounds VALUES(-2,'minus two'),(1,'one'),(2,'two'),(3,'three'),(4,'four'),(20,'twenty')"
+               "CREATE TABLE numeric_bounds_scanned(id INT)"
+               "INSERT INTO numeric_bounds_scanned VALUES(1),(2),(3)"
+               "CREATE TABLE numeric_bounds_empty(id INT PRIMARY KEY)" |]
           Steps =
             [| Contract.query "mod-positive" "SELECT label FROM numeric_bounds WHERE id=MOD(5,3)"
                Contract.query "mod-negative" "SELECT label FROM numeric_bounds WHERE id=MOD(-5,3)"
@@ -5045,8 +5048,19 @@ module ContractCatalog =
                Contract.query "integral-decimal" "SELECT label FROM numeric_bounds WHERE id=2.0"
                Contract.query "fractional-decimal" "SELECT label FROM numeric_bounds WHERE id=2.5"
                Contract.query "range" "SELECT id FROM numeric_bounds WHERE id>=TRUNCATE(29,-1) ORDER BY id"
-               Contract.query "zero-divisor" "SELECT label FROM numeric_bounds WHERE id=MOD(5,0)" |]
-          Cleanup = [| "DROP TABLE numeric_bounds" |]
+               Contract.query "zero-divisor" "SELECT label FROM numeric_bounds WHERE id=MOD(5,0)"
+               Contract.query "zero-divisor-warnings" "SHOW WARNINGS"
+               Contract.query "division-operator" "SELECT label FROM numeric_bounds WHERE id=1/0"
+               Contract.query "division-operator-warnings" "SHOW WARNINGS"
+               Contract.query "nested-division" "SELECT label FROM numeric_bounds WHERE id=TRUNCATE(1/0,0)"
+               Contract.query "nested-division-warnings" "SHOW WARNINGS"
+               Contract.query "empty-index-zero-divisor" "SELECT id FROM numeric_bounds_empty WHERE id=MOD(5,0)"
+               Contract.query "empty-index-zero-divisor-warnings" "SHOW WARNINGS"
+               Contract.query "scan-zero-divisor" "SELECT id FROM numeric_bounds_scanned WHERE id=MOD(5,0)"
+               Contract.query "scan-zero-divisor-warnings" "SHOW WARNINGS"
+               Contract.query "project-zero-divisor" "SELECT MOD(5,0) FROM numeric_bounds_scanned"
+               Contract.query "project-zero-divisor-warnings" "SHOW WARNINGS" |]
+          Cleanup = [| "DROP TABLE numeric_bounds_empty"; "DROP TABLE numeric_bounds_scanned"; "DROP TABLE numeric_bounds" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private tableStatisticsCache =

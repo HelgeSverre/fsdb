@@ -16,16 +16,23 @@ fractional decimals, and an ordered range bound.
 The native and Expecto probes also cover an exact `BIGINT` decimal bound above
 the double-precision integer limit (`9007199254740993.0`).
 
-The `numeric-constant-index-bounds` contract in run
-`20261010T114104362-62206` matched MySQL 8.4.11 on all ten query steps.
-The complete run retained the same nine documented
-identifier-case differences elsewhere.
+The expanded `numeric-constant-index-bounds` contract in run
+`20261010T115652161-64008` matched MySQL 8.4.11 on all 21 steps.
+The complete run retained the same nine documented identifier-case
+differences elsewhere.
 
-## Remaining diagnostic difference
+## Division warning lifetime
 
 For `id=MOD(5,0)`, MySQL returns no rows and emits two division-by-zero
 warnings when `id` is indexed, even when the table is empty. Without an index,
 it emits one warning regardless of row count; projecting `MOD(5,0)` emits one
-warning per projected row. Fsdb returns the same empty result, but its indexed
-constant probe currently emits one warning. This requires a broader treatment
-of constant-predicate warning lifetime than the index-bound change.
+warning per projected row. Fsdb now follows those counts for `MOD(5,0)`,
+`1/0`, and nested `TRUNCATE(1/0,0)` bounds. The index planner evaluates the
+division bound once when a B-tree lookup is available; the prepared comparison
+evaluates it once more, including for an empty indexed table. The audited
+unindexed table evaluates the predicate only once.
+
+Boolean branches around warning-producing bounds remain a separate gap:
+MySQL skips an unreachable `0 AND id=MOD(5,0)` branch, and its warning count
+for reachable `AND` and `OR` branches also depends on access planning. Fsdb's
+current planner can evaluate those branches before short-circuiting.

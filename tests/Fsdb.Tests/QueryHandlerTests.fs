@@ -85,7 +85,50 @@ let private safeUpdateRejection =
 let tests =
     testList
         "QueryHandler"
-        [ testCase "unqualified missing functions require a selected database"
+        [ testCase "constant division warnings follow indexed and scan predicates"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE warning_indexed(id INT PRIMARY KEY)"
+                        "CREATE TABLE warning_scanned(id INT)"
+                        "CREATE TABLE warning_empty(id INT PRIMARY KEY)"
+                        "INSERT INTO warning_indexed VALUES(1),(2),(3)"
+                        "INSERT INTO warning_scanned VALUES(1),(2),(3)" ]
+
+              let warnings expected description =
+                  match run "SHOW WARNINGS" with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows.Length expected description
+                      for row in rows do
+                          Expect.equal row [ Some "Warning"; Some "1365"; Some "Division by 0" ] description
+                  | other -> failtestf "expected division warnings, got %A" other
+
+              for expression in [ "MOD(5,0)"; "1/0"; "TRUNCATE(1/0,0)" ] do
+                  Expect.equal
+                      (run (sprintf "SELECT id FROM warning_indexed WHERE id=%s" expression))
+                      (ResultSet([ "id" ], []))
+                      expression
+                  warnings 2 (sprintf "indexed %s" expression)
+
+              Expect.equal
+                  (run "SELECT id FROM warning_empty WHERE id=MOD(5,0)")
+                  (ResultSet([ "id" ], []))
+                  "empty indexed table"
+              warnings 2 "empty indexed table still evaluates the constant twice"
+
+              Expect.equal
+                  (run "SELECT id FROM warning_scanned WHERE id=MOD(5,0)")
+                  (ResultSet([ "id" ], []))
+                  "scan predicate"
+              warnings 1 "a scan evaluates a constant predicate once"
+
+              Expect.equal
+                  (run "SELECT MOD(5,0) FROM warning_scanned")
+                  (ResultSet([ "MOD(5,0)" ], [ [ None ]; [ None ]; [ None ] ]))
+                  "projections evaluate per row"
+              warnings 3 "projections retain per-row diagnostics"
+
+          testCase "unqualified missing functions require a selected database"
           <| fun _ ->
               let run = queryFixture []
               let missing = Err(1046, "No database selected")

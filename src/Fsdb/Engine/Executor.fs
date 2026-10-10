@@ -8521,19 +8521,32 @@ and private prepareWhereMatches
     let context = { ctxFor [||] with Clause = WhereClause }
     let evaluate expression row = evalExpr { ctxFor row with Clause = WhereClause } expression
 
-    let directComparison op columnExpression literalExpression columnOnLeft =
-        match tryDirectColumnForExpr context columnExpression, literalExpression with
-        | Some(index, column), LiteralValue _ ->
-            match evalExpr context literalExpression with
-            | Error error -> Some(fun _ -> Error error)
-            | Ok literal ->
-                Some(fun (row: Value[]) ->
+    let rec containsDivision expression =
+        match expression with
+        | BinOp((Div | IntDiv), _, _) -> true
+        | FuncCall(name, _) when equalsIgnoreCase name "MOD" -> true
+        | _ -> Expression.children expression |> List.exists containsDivision
+
+    let directComparison op columnExpression constantExpression columnOnLeft =
+        match tryDirectColumnForExpr context columnExpression with
+        | Some(index, column)
+            when (match constantExpression with
+                  | LiteralValue _ -> true
+                  | expression ->
+                      containsDivision expression
+                      && isLiteralConstantExpression context.Registry expression) ->
+            // A closed predicate operand has one evaluation per scan, including an empty scan.
+            let boundResult = evalExpr context constantExpression
+            Some(fun (row: Value[]) ->
+                match boundResult with
+                | Error error -> Error error
+                | Ok bound ->
                     let stored = row.[index]
 
                     if columnOnLeft then
-                        comparisonResultWithNulls context columnExpression (Some column) stored literalExpression None op literal
+                        comparisonResultWithNulls context columnExpression (Some column) stored constantExpression None op bound
                     else
-                        comparisonResultWithNulls context literalExpression None literal columnExpression (Some column) op stored)
+                        comparisonResultWithNulls context constantExpression None bound columnExpression (Some column) op stored)
         | _ -> None
 
     let rec prepare expression =
@@ -8546,10 +8559,10 @@ and private prepareWhereMatches
             let evaluateLeft = prepare left
             let evaluateRight = prepare right
             fun row -> evalLogicalOr (evaluateLeft row) (fun () -> evaluateRight row)
-        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), column, (LiteralValue _ as literal)) ->
-            directComparison op column literal true |> Option.defaultWith (fun () -> evaluate expression)
-        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (LiteralValue _ as literal), column) ->
-            directComparison op column literal false |> Option.defaultWith (fun () -> evaluate expression)
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), left, right) ->
+            directComparison op left right true
+            |> Option.orElseWith (fun () -> directComparison op right left false)
+            |> Option.defaultWith (fun () -> evaluate expression)
         | _ -> evaluate expression
 
     match where with
@@ -11650,7 +11663,7 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
         | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
         | Neg _ | Not _ | IsNull _ | IsNotNull _ | IsTrue _ | IsFalse _
         | Between _ | In _ | Case _ | Expression.CollationOverride _ -> safeChildren ()
-        | BinOp((Add | Sub | SignedSub | Mul | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq | And | Or | Xor), _, _) ->
+        | BinOp((Add | Sub | SignedSub | Mul | Div | IntDiv | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq | And | Or | Xor), _, _) ->
             safeChildren ()
         | FuncCall(name, _)
             when ((FunctionalIndex.tryBuiltin name |> Option.isSome)
@@ -12090,7 +12103,9 @@ and private tryEqualityAccessInTableWith
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedRowsMatchReadRows store table.Columns) then
+    // Do not evaluate a warning-producing lookup bound for a table that must scan.
+    if not (storedRowsMatchReadRows store table.Columns)
+       || not (table.Indexes |> List.exists (fun index -> index.Visible && index.Kind = BTree)) then
         None
     else
         let equalities = pointLookupEqualities store registry table tref whereExpr
