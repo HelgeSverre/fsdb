@@ -8236,15 +8236,18 @@ module ContractCatalog =
 
     let private safeUpdateMode =
         let reset =
-            [ "DROP TABLE IF EXISTS safe_update_probe"
+            [ "DROP TABLE IF EXISTS safe_update_lookup"
+              "DROP TABLE IF EXISTS safe_update_probe"
               "CREATE TABLE safe_update_probe(id INT PRIMARY KEY, value INT)"
+              "CREATE TABLE safe_update_lookup(id INT PRIMARY KEY, value INT)"
               "INSERT INTO safe_update_probe VALUES(1,0),(2,0)"
+              "INSERT INTO safe_update_lookup VALUES(1,0),(2,0)"
               "SET sql_safe_updates=ON" ]
 
         let cases =
             let mutationCase name rejected sql =
                 name,
-                (if rejected then Some(4, 1175, "HY000") else None),
+                (if rejected then Some(7, 1175, "HY000") else None),
                 reset @ [ sql; "SELECT id,value FROM safe_update_probe ORDER BY id" ]
 
             [ mutationCase "unrestricted-update" true "UPDATE safe_update_probe SET value=1"
@@ -8253,6 +8256,17 @@ module ContractCatalog =
               mutationCase "limit-update" false "UPDATE safe_update_probe SET value=1 LIMIT 1"
               mutationCase "unrestricted-delete" true "DELETE FROM safe_update_probe"
               mutationCase "key-delete" false "DELETE FROM safe_update_probe WHERE id=1"
+              mutationCase "joined-target-scan" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE p.value=0"
+              mutationCase "joined-lookup-filter" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
+              mutationCase "straight-join-lookup-filter" true "UPDATE safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
+              mutationCase "joined-lookup-write" true "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET l.value=1 WHERE l.value=0"
+              mutationCase "joined-target-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
+              mutationCase "straight-join-target-delete" true "DELETE p FROM safe_update_probe p STRAIGHT_JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
+              mutationCase "joined-lookup-delete" true "DELETE l FROM safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id WHERE l.value=0"
+              "joined-large-lookup", Some(8, 1175, "HY000"),
+                  reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
+                            "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"
+                            "SELECT id,value FROM safe_update_probe ORDER BY id" ]
               "disabled", None,
                   reset @ [ "SET sql_safe_updates=OFF"
                             "UPDATE safe_update_probe SET value=1"
@@ -8262,7 +8276,7 @@ module ContractCatalog =
         { Name = "safe-update-mode"
           Setup = [||]
           Steps = isolatedScriptSteps cases
-          Cleanup = [| "DROP TABLE IF EXISTS safe_update_probe" |]
+          Cleanup = [| "DROP TABLE IF EXISTS safe_update_lookup"; "DROP TABLE IF EXISTS safe_update_probe" |]
           Coverage =
             [| "statement:set", [| "text-differential" |]
                "statement:update", [| "text-differential" |]

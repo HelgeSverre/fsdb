@@ -24631,21 +24631,26 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
     let unsafeError =
         1175, "You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column. "
 
+    let tableQualifier (tableRef: TableRef) = tableRef.Alias |> Option.defaultValue tableRef.Table
+
+    let hasLeadingIndexColumn (table: Table) name =
+        table.Indexes
+        |> List.exists (fun index ->
+            index.Visible && index.Kind = BTree
+            && (index.KeyColumns |> List.tryHead |> Option.exists (fun key ->
+                key.Transform.IsNone && equalsIgnoreCase key.Name name)))
+
     let hasIndexedInequality (table: Table) (tableRef: TableRef) left right =
         let indexedColumn = function
             | Col name -> Some name
             | QualifiedCol(qualifier, name)
-                when equalsIgnoreCase qualifier (tableRef.Alias |> Option.defaultValue tableRef.Table) -> Some name
+                when equalsIgnoreCase qualifier (tableQualifier tableRef) -> Some name
             | _ -> None
 
         indexedColumn left
         |> Option.exists (fun name ->
             isLiteralConstantExpression registry right
-            && (table.Indexes
-                |> List.exists (fun index ->
-                   index.Visible && index.Kind = BTree
-                   && (index.KeyColumns |> List.tryHead |> Option.exists (fun key ->
-                       key.Transform.IsNone && equalsIgnoreCase key.Name name)))))
+            && hasLeadingIndexColumn table name)
 
     let rec usesKey (table: Table) (tableRef: TableRef) (predicate: Expr) =
         match predicate with
@@ -24656,11 +24661,38 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             || hasIndexedInequality table tableRef right left
         | _ -> tryPhysicalCandidatesInTable store registry table tableRef (Some predicate) |> Option.isSome
 
-    let check (sources: FromItem list) (whereExpr: Expr option) (limit: Expr option) =
+    let hasKeyedJoinFilter (targetRef: TableRef) (joins: Join list) (predicate: Expr) =
+        match joins, physicalFastPathTable store dbName targetRef with
+        | [ join ], Some targetTable when join.Kind = InnerJoin ->
+            let lookupCanDrive joinedRef =
+                physicalFastPathTable store dbName joinedRef
+                |> Option.exists (fun joinedTable -> joinedTable.RowsArray.Count <= targetTable.RowsArray.Count)
+
+            match join.Table, predicate with
+            | FromTable joinedRef, BinOp(Eq, QualifiedCol(filterOwner, _), LiteralValue _)
+            | FromTable joinedRef, BinOp(Eq, LiteralValue _, QualifiedCol(filterOwner, _))
+                when equalsIgnoreCase filterOwner (tableQualifier joinedRef)
+                     && lookupCanDrive joinedRef ->
+                join.On
+                |> conjuncts
+                |> List.exists (function
+                    | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, _))
+                        when equalsIgnoreCase leftOwner (tableQualifier targetRef)
+                             && equalsIgnoreCase rightOwner (tableQualifier joinedRef) ->
+                        hasLeadingIndexColumn targetTable leftName
+                    | BinOp(Eq, QualifiedCol(leftOwner, _), QualifiedCol(rightOwner, rightName))
+                        when equalsIgnoreCase rightOwner (tableQualifier targetRef)
+                             && equalsIgnoreCase leftOwner (tableQualifier joinedRef) ->
+                        hasLeadingIndexColumn targetTable rightName
+                    | _ -> false)
+            | _ -> false
+        | _ -> false
+
+    let check (targetRef: TableRef) (joins: Join list) (whereExpr: Expr option) (limit: Expr option) (singleTarget: bool) =
         if limit.IsSome then Ok()
         else
             let tables =
-                sources
+                (FromTable targetRef :: (joins |> List.map _.Table))
                 |> List.collect FromItem.leaves
                 |> List.choose (function
                     | FromTable tableRef ->
@@ -24670,12 +24702,19 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
 
             match whereExpr with
             | Some predicate when tables |> List.exists (fun (table, tableRef) -> usesKey table tableRef predicate) -> Ok()
+            | Some predicate when singleTarget && hasKeyedJoinFilter targetRef joins predicate -> Ok()
             | _ when tables.IsEmpty -> Ok()
             | _ -> Error unsafeError
 
     match statement with
-    | Update update -> check (FromTable update.From :: (update.Joins |> List.map _.Table)) update.Where update.Limit
-    | Delete delete -> check (FromTable delete.From :: (delete.Joins |> List.map _.Table)) delete.Where delete.Limit
+    | Update update ->
+        let target = tableQualifier update.From
+        let singleTarget = update.Assignments |> List.forall (fun assignment -> assignment.Table |> Option.forall (equalsIgnoreCase target))
+        check update.From update.Joins update.Where update.Limit singleTarget
+    | Delete delete ->
+        let target = tableQualifier delete.From
+        let singleTarget = delete.Targets |> List.forall (equalsIgnoreCase target)
+        check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
 
 let transactionWriteTargets

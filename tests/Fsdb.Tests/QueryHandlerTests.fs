@@ -3521,10 +3521,21 @@ let tests =
                     "DELETE FROM t", true
                     "DELETE FROM t WHERE v=0", true
                     "DELETE FROM t WHERE id=1", false
-                    "DELETE FROM t LIMIT 1", false ] do
+                    "DELETE FROM t LIMIT 1", false
+                    "UPDATE t JOIN l ON l.id=t.id SET t.v=1", true
+                    "UPDATE t JOIN l ON l.id=t.id SET t.v=1 WHERE t.v=0", true
+                    "UPDATE t JOIN l ON l.id=t.id SET t.v=1 WHERE l.v=0", false
+                    "UPDATE t STRAIGHT_JOIN l ON l.id=t.id SET t.v=1 WHERE l.v=0", true
+                    "UPDATE t JOIN l ON l.id=t.id SET l.v=1 WHERE l.v=0", true
+                    "UPDATE t JOIN l ON l.id=t.id SET t.v=1,l.v=1 WHERE l.v=0", true
+                    "DELETE t FROM t JOIN l ON l.id=t.id WHERE l.v=0", false
+                    "DELETE t FROM t STRAIGHT_JOIN l ON l.id=t.id WHERE l.v=0", true
+                    "DELETE l FROM t JOIN l ON l.id=t.id WHERE l.v=0", true ] do
                   let session = create 1 (Fsdb.Storage.create ())
                   let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "CREATE TABLE l(id INT PRIMARY KEY,v INT)"
                   let session, _ = handle session "INSERT INTO t VALUES(1,0),(2,0)"
+                  let session, _ = handle session "INSERT INTO l VALUES(1,0),(2,0)"
                   let session, setting = handle session "SET sql_safe_updates=1"
                   Expect.equal setting (Affected 0UL) "setting is accepted"
                   let session, result = handle session sql
@@ -3534,6 +3545,18 @@ let tests =
                       Expect.equal rows (ResultSet([ "id"; "v" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) (sql + " remains atomic")
                   else
                       Expect.isNone (errorInfo result) sql
+
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
+              let session, _ = handle session "CREATE TABLE l(id INT PRIMARY KEY,v INT)"
+              let session, _ = handle session "INSERT INTO t VALUES(1,0),(2,0)"
+              let lookupRows = [ 1..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ","
+              let session, _ = handle session ("INSERT INTO l VALUES" + lookupRows)
+              let session, _ = handle session "SET sql_safe_updates=1"
+              let session, result = handle session "UPDATE t JOIN l ON l.id=t.id SET t.v=1 WHERE l.v=0"
+              Expect.equal result (Err(1175, unsafeMessage)) "a larger lookup drives a target scan"
+              let _, rows = handle session "SELECT id,v FROM t ORDER BY id"
+              Expect.equal rows (ResultSet([ "id"; "v" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) "rejected join leaves target unchanged"
 
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
