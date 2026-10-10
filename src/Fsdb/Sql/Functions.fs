@@ -5885,6 +5885,52 @@ let private geometrySridFn: Scalar =
     | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
     | _ -> nativeParameterCountError "st_srid"
 
+let private geometryTransformFn: Scalar =
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ value; targetValue ] ->
+        let geometry = geometryArgument "ST_Transform" value
+        let targetSrid = geometrySrid "ST_Transform" targetValue
+        let sourceSrid = geometry.Srid
+        if sourceSrid = targetSrid then
+            VGeometry geometry
+        else
+            if sourceSrid = 0 then
+                raise (SqlError(3741, "Transformation from SRID 0 is not supported."))
+            if targetSrid = 0 then
+                raise (SqlError(3742, "Transformation to SRID 0 is not supported."))
+            spatialReferenceSystem "ST_Transform" sourceSrid |> ignore
+            spatialReferenceSystem "ST_Transform" targetSrid |> ignore
+            let radius = 6378137.0
+            let transform =
+                match sourceSrid, targetSrid with
+                | 4326, 3857 ->
+                    fun (latitude, longitude) ->
+                        radius * longitude * Math.PI / 180.0,
+                        radius * Math.Log(Math.Tan(Math.PI / 4.0 + latitude * Math.PI / 360.0))
+                | 3857, 4326 ->
+                    fun (x, y) ->
+                        (2.0 * Math.Atan(Math.Exp(y / radius)) - Math.PI / 2.0) * 180.0 / Math.PI,
+                        x * 180.0 / (radius * Math.PI)
+                | _ -> geometryError "ST_Transform" "the coordinate transformation is not supported"
+            let atMercatorPole =
+                sourceSrid = 4326
+                && (SpatialReferenceSystems.coordinates geometry.Shape
+                    |> List.exists (fun (latitude, _) -> abs latitude >= 90.0))
+            let transformed = SpatialReferenceSystems.mapGeometry transform geometry
+            if atMercatorPole
+               || (SpatialReferenceSystems.tryCoordinateDomainError transformed |> Option.isSome
+                   && targetSrid = 4326) then
+                VNull
+            else
+                let finite =
+                    SpatialReferenceSystems.coordinates transformed.Shape
+                    |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
+                if not finite then VNull
+                else VGeometry(SpatialReferenceSystems.withSrid targetSrid transformed)
+    | _ -> nativeParameterCountError "st_transform"
+
 let private geometryPropertyFn functionName property: Scalar =
     function
     | [ VNull ] -> VNull
@@ -6377,6 +6423,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalarResult "ST_ASBINARY" binaryResult (geometryToWkbFn "ST_AsBinary")
     |> registerScalarResult "ASBINARY" binaryResult (geometryToWkbFn "AsBinary")
     |> registerScalar "ST_SRID" geometrySridFn
+    |> registerScalar "ST_TRANSFORM" geometryTransformFn
     |> registerScalar "ST_GEOMETRYTYPE" geometryTypeFn
     |> registerScalar "GEOMETRYTYPE" geometryTypeFn
     |> registerScalar "ST_DIMENSION" geometryDimensionFn

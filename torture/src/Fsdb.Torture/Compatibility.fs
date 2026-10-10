@@ -3149,6 +3149,42 @@ module ContractCatalog =
                    "SELECT SRS_NAME,SRS_ID,ORGANIZATION,ORGANIZATION_COORDSYS_ID,DEFINITION,DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=3857"
                |> Contract.comparingValues
                Contract.query
+                   "spatial-transform-forward"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3857)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3857)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3857)),5)"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-transform-reverse"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(1196929.428907435 8380593.569947172)',3857),4326)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(1196929.428907435 8380593.569947172)',3857),4326)),6),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(1196929.428907435 8380593.569947172)',3857),4326)),6)"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-transform-linestring"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),3857)),ROUND(ST_X(ST_PointN(ST_Transform(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),3857),2)),5),ROUND(ST_Y(ST_PointN(ST_Transform(ST_GeomFromText('LINESTRING(0 0,1 1)',4326),3857),2)),5)"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-transform-collection-member"
+                   "SELECT ST_SRID(ST_GeometryN(ST_Transform(ST_GeomFromText('GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,1 1))',4326),3857),1)),ROUND(ST_X(ST_GeometryN(ST_Transform(ST_GeomFromText('GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,1 1))',4326),3857),1)),5)"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-transform-same-srid-and-null"
+                   "SELECT ST_AsText(ST_Transform(ST_GeomFromText('POINT(1 2)',4326),4326)),ST_AsText(ST_Transform(ST_GeomFromText('POINT(1 2)'),0)),ST_Transform(NULL,3857),ST_Transform(ST_GeomFromText('POINT(1 2)',4326),NULL)"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-transform-mercator-pole"
+                   "SELECT ST_Transform(ST_GeomFromText('POINT(90 0)',4326),3857) IS NULL"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-transform-from-srid-zero"
+                   "SELECT ST_Transform(ST_GeomFromText('POINT(0 0)'),3857)"
+               |> Contract.fails 3741 "22S00"
+               Contract.query
+                   "spatial-transform-to-srid-zero"
+                   "SELECT ST_Transform(ST_GeomFromText('POINT(0 0)',3857),0)"
+               |> Contract.fails 3742 "22S00"
+               Contract.query
+                   "spatial-transform-unknown-srid"
+                   "SELECT ST_Transform(ST_GeomFromText('POINT(0 0)',4326),9999)"
+               |> Contract.fails 3548 "SR001"
+               Contract.query
                    "projected-point-axis-order"
                    "SELECT ST_AsText(ST_GeomFromText('POINT(1 2)',3857)),ST_AsText(ST_GeomFromText('POINT(1 2)',3857,'axis-order=lat-long'))"
                |> Contract.comparingValues

@@ -6645,7 +6645,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                     ColumnLength = 16u
                     Decimals = 31uy
                     Flags = BinaryFlag }
-        | ("ST_ENVELOPE" | "ST_CONVEXHULL" | "ST_BUFFER" | "ST_INTERSECTION" | "ST_UNION" | "ST_DIFFERENCE" | "ST_SYMDIFFERENCE"
+        | ("ST_ENVELOPE" | "ST_CONVEXHULL" | "ST_BUFFER" | "ST_INTERSECTION" | "ST_UNION" | "ST_DIFFERENCE" | "ST_SYMDIFFERENCE" | "ST_TRANSFORM"
           | "ST_STARTPOINT" | "ST_ENDPOINT" | "ST_POINTN" | "ST_EXTERIORRING" | "ST_INTERIORRINGN" | "ST_GEOMETRYN"), _ ->
             geometry
         | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY" | "ST_ISVALID" | "ST_ISCLOSED" | "ST_NUMPOINTS"

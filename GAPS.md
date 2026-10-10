@@ -236,7 +236,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining geographic spatial behavior | non-point distance and topology beyond line length, plus reference systems beyond EPSG 4326 | low |
+| Remaining geographic spatial behavior | non-point distance and topology beyond line length, plus transformations and reference systems beyond EPSG 4326/3857 | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
@@ -904,7 +904,8 @@ implementation effort:
    coordinate domains, ellipsoidal point distance, line length, spherical
    point/multipoint distance, and linear units are covered alongside planar
    spatial indexes and operations; EPSG 3857 projected geometry uses planar
-   metric operations. Broader non-point geographic distance and topology,
+   metric operations, with `ST_Transform` between EPSG 4326 and 3857.
+   Broader non-point geographic distance and topology,
    plus other reference systems, remain absent.
 
 5. Extensible authentication providers. The built-in caching-SHA2, SHA-256,

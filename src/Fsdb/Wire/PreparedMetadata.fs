@@ -75,7 +75,7 @@ let private geometryFunctions =
           "ST_ASBINARY"; "ST_ASTEXT"; "ST_ASWKB"; "ST_ASWKT"; "ST_BUFFER"; "ST_CONTAINS"; "ST_CONVEXHULL"; "ST_DIMENSION"
           "ST_DIFFERENCE"; "ST_DISJOINT"; "ST_DISTANCE"; "ST_DISTANCE_SPHERE"; "ST_ENVELOPE"; "ST_EQUALS"; "ST_GEOMETRYTYPE"; "ST_INTERSECTION"; "ST_INTERSECTS"
           "ST_ISEMPTY"; "ST_ISVALID"; "ST_ISCLOSED"; "ST_SYMDIFFERENCE"; "ST_UNION"
-          "ST_LENGTH"; "ST_SRID"; "ST_TOUCHES"; "ST_WITHIN"; "ST_X"; "ST_Y"; "X"; "Y"
+          "ST_LENGTH"; "ST_SRID"; "ST_TRANSFORM"; "ST_TOUCHES"; "ST_WITHIN"; "ST_X"; "ST_Y"; "X"; "Y"
           "ST_NUMPOINTS"; "ST_STARTPOINT"; "ST_ENDPOINT"; "ST_POINTN"
           "ST_NUMINTERIORRING"; "ST_NUMINTERIORRINGS"; "ST_EXTERIORRING"; "ST_INTERIORRINGN"
           "ST_NUMGEOMETRIES"; "ST_GEOMETRYN" ]
@@ -147,7 +147,7 @@ let private functionParameterMetadata (registry: Registry) (name: string) index 
         Some binary
     | None when name = "ST_DISTANCE_SPHERE" && index = 2 ->
         Some floatingPoint
-    | None when name = "ST_SRID" && index = 1 ->
+    | None when (name = "ST_SRID" || name = "ST_TRANSFORM") && index = 1 ->
         Some signedInteger
     | None when Functions.isWkbGeometryConstructor name && index = 0 ->
         Some binary

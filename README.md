@@ -520,7 +520,8 @@ current boundaries live in [GAPS.md](GAPS.md).
   ordinary and recursive CTEs, JSON paths, `JSON_TABLE`, planar spatial
   predicates, overlays, independently configurable buffer strategies, and
   EPSG 4326 point distance and line length with axis-order and linear-unit
-  handling, EPSG 3857 projected planar distance and length, plus spherical
+  handling, EPSG 3857 projected planar distance and length, 4326↔3857
+  `ST_Transform`, plus spherical
   point and multipoint distance.
 - Writes and schema: `INSERT`, `INSERT ... SELECT`, `REPLACE`, multi-table
   `UPDATE`/`DELETE`, generated columns, foreign keys, HASH partition metadata,

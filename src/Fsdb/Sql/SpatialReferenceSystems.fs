@@ -146,15 +146,22 @@ let rec private mapShape (transform: float * float -> float * float) shape =
     | GMultiPolygon polygons -> GMultiPolygon(List.map (List.map mapPoints) polygons)
     | GGeometryCollection geometries -> GGeometryCollection(List.map (mapGeometry transform) geometries)
 
-and private mapGeometry transform (geometry: Geometry) =
+and internal mapGeometry transform (geometry: Geometry) =
     { geometry with Shape = mapShape transform geometry.Shape }
+
+let rec internal withSrid srid (geometry: Geometry) =
+    { Srid = srid
+      Shape =
+        match geometry.Shape with
+        | GGeometryCollection children -> GGeometryCollection(List.map (withSrid srid) children)
+        | shape -> shape }
 
 let internal withAxisOrder axisOrder (geometry: Geometry) =
     match axisOrder with
     | LatitudeLongitude -> geometry
     | LongitudeLatitude -> mapGeometry (fun (longitude, latitude) -> latitude, longitude) geometry
 
-let rec private coordinates = function
+let rec internal coordinates = function
     | GEmpty -> []
     | GPoint(x, y) -> [ x, y ]
     | GLineString points
