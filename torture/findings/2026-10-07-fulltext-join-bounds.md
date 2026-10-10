@@ -133,6 +133,19 @@ is written on an ordinary `names d JOIN labels o` and MySQL drives from `o`,
 fsdb still returns only ID 2 where MySQL returns IDs 1 and 2. Broader join
 graphs are likewise open.
 
+A repeatable native 8.4.11 plan probe with the indexed `names` table above
+adds a second constraint on the next implementation. With one `labels` row,
+both written `d.k IN (1,NULL)` and `o.k IN (1,NULL)` return IDs 1 and 2;
+`EXPLAIN FORMAT=TREE` drives from `labels`, filters `o.k`, and looks up `names`
+through its key. After adding `labels('other')`, the written `d.k` predicate
+uses a hash join with a `d.k` filter in the plan, yet still returns IDs 1 and
+2. The written `o.k` predicate continues to drive from `labels` and returns
+IDs 1 and 2. Thus plan-text filter ownership alone does not predict the
+membership difference observed in the controlled straight-join cases. The
+oracle script now asserts both plan placement and result rows, and compares
+full-text scores with a same-instance baseline because rounded relevance can
+vary between fresh servers.
+
 A second MySQL 8.4.11 probe isolates why this cannot be decided from the
 written predicate alone. With `names` containing `(1,'①'), (2,'1'),
 (3,'other')` and `labels` initially containing just `'1'`, the ordinary

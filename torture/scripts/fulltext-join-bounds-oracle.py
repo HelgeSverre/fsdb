@@ -19,7 +19,9 @@ def verify(client, _):
     values = [f"({i},{i % 100},'{ 'ordinary' if i % 5 == 0 else 'needle'}')"
               for i in range(1, 1001)]
     client.query("INSERT INTO docs VALUES " + ",".join(values))
-    expected = "\n".join(f"{i}\t0.009392" for i in range(42, 1001, 100))
+    expected = client.query(
+        "SELECT id,ROUND(MATCH(body) AGAINST('needle'),6) FROM docs "
+        "WHERE owner_id=42 AND MATCH(body) AGAINST('needle') ORDER BY id")
     for label, joins, bound in [
         ("direct", "JOIN owners o ON o.id=d.owner_id", "o.id=42"),
         ("transitive", "JOIN owners o ON o.id=d.owner_id JOIN bounds b ON b.id=o.id", "42=b.id"),
@@ -46,7 +48,10 @@ def verify(client, _):
         query = ("SELECT d.id,ROUND(MATCH(d.body) AGAINST('needle'),6) FROM docs d "
                  "JOIN owners o ON o.id=d.owner_id WHERE " + bound
                  + " AND MATCH(d.body) AGAINST('needle')")
-        expected = "\n".join(f"{i}\t0.009392" for i in range(1, 1001) if i % 100 in selected)
+        expected = client.query(
+            "SELECT id,ROUND(MATCH(body) AGAINST('needle'),6) FROM docs "
+            "WHERE owner_id IN (" + ",".join(map(str, selected))
+            + ") AND MATCH(body) AGAINST('needle') ORDER BY id")
         native["expect"](bound, client.query(query + " ORDER BY d.id"), expected)
         native["expect"](bound + " explicit bound", client.query(
             query + " AND " + bound.replace("o.id", "d.owner_id") + " ORDER BY d.id"), expected)
@@ -120,6 +125,21 @@ def verify(client, _):
         plan = client.query("EXPLAIN FORMAT=TREE " + query)
         native["expect"](label + " filter owner", f"({filter_owner}.k in (1,NULL))" in plan, True)
         print(plan, flush=True)
+
+    for label, extra_labels, predicate, expected_ids, filter_owner in [
+        ("costed original names bound", False, "d.k IN (1,NULL)", "1\n2", "o"),
+        ("costed original labels bound", False, "o.k IN (1,NULL)", "1\n2", "o"),
+        ("costed expanded names bound", True, "d.k IN (1,NULL)", "1\n2", "d"),
+        ("costed expanded labels bound", True, "o.k IN (1,NULL)", "1\n2", "o"),
+    ]:
+        if extra_labels and client.query("SELECT COUNT(*) FROM labels") == "1":
+            client.query("INSERT INTO labels VALUES('other')")
+        query = ("SELECT d.id FROM names d JOIN labels o ON o.k=d.k WHERE "
+                 + predicate + " ORDER BY d.id")
+        native["expect"](label, client.query(query), expected_ids)
+        plan = client.query("EXPLAIN FORMAT=TREE " + query)
+        print(label + ":\n" + plan, flush=True)
+        native["expect"](label + " filter owner", f"({filter_owner}.k in (1,NULL))" in plan, True)
 
     client.query("INSERT INTO names VALUES(4,'missing','needle')")
     native["expect"]("outer join retains unmatched rows", client.query(
