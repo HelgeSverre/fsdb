@@ -99,6 +99,12 @@ execution, and disposal on an open connection; it does not measure repeated
 execution of a retained prepared handle. Include `PointSelectByPk` via
 `FSDB_BENCH_METHODS` when collecting a loopback baseline alongside these cases.
 
+`scripts/point-lookup-pipeline.fsx` profiles the in-process parse,
+pre-parsed-executor, and text-session paths for fixed and expression-derived
+primary-key hits. Build `src/Fsdb/Fsdb.fsproj` in Release before running it;
+`FSDB_PROFILE_ITERATIONS`, `FSDB_PROFILE_TRIALS`, and
+`FSDB_PROFILE_ACTION` can narrow a run.
+
 ### Focused window snapshot
 
 `scripts/window-snapshot.fsx` measures grouped text SUM, prefix and sliding

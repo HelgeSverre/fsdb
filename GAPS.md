@@ -801,6 +801,11 @@ finds fsdb's fixed primary-key lookup around 220–248 µs versus MySQL's
 41–43 µs. `ROUND(PI())` and `BIT_COUNT(7)` lookups fall within the run-to-run
 variation of that control, so the shared lookup/query pipeline is the next
 profile target rather than a proven expression-folding regression.
+An [in-process decomposition](benchmarks/results/2026-10-10-point-lookup-pipeline.md)
+places parsing, execution, and session handling at about 24, 12, and 85 µs
+for the fixed lookup; their allocations are about 70, 39, and 254 KB per call.
+The stages are measured separately, and the remaining session-path cost needs
+more targeted profiling before an optimization is justified.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes
