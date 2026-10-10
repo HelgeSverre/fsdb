@@ -8609,6 +8609,29 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an ABS override reports a scan"
                     Expect.equal overriddenPlan.Key None "an ABS override does not claim the functional index"
 
+                testCase "ISNULL functional keys index NULL results and follow writes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE null_keys(id INT PRIMARY KEY, value VARCHAR(20), KEY ix_isnull ((ISNULL(value))))" |> ignore
+                    runDefault store "INSERT INTO null_keys VALUES(1,NULL),(2,'a'),(3,NULL),(4,'b')" |> ignore
+
+                    let nullIds () = runDefault store "SELECT id FROM null_keys WHERE ISNULL(value)=1 ORDER BY id"
+                    Expect.equal (nullIds ()) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ] ])) "NULL rows share the true bucket"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM null_keys WHERE ISNULL(value)=0 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "2" ]; [ Some "4" ] ]))
+                        "non-NULL rows share the false bucket"
+
+                    let plan = runDefault store "EXPLAIN SELECT id FROM null_keys WHERE ISNULL(value)=1" |> explainRow
+                    Expect.equal plan.Key (Some "ix_isnull") "NULL equality uses its maintained key"
+
+                    runDefault store "UPDATE null_keys SET value=NULL WHERE id=2" |> ignore
+                    Expect.equal (nullIds ()) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ])) "updates move rows into the true bucket"
+
+                    let overridden = builtins |> registerScalar "ISNULL" (fun _ -> VInt 99L)
+                    let overridePlan = run store overridden "EXPLAIN SELECT id FROM null_keys WHERE ISNULL(value)=99" |> explainRow
+                    Expect.equal overridePlan.Key None "an overridden ISNULL cannot claim its stored key"
+
                 testCase "SIGN functional keys serve equality, range, and maintained writes"
                 <| fun _ ->
                     let store = newStore ()

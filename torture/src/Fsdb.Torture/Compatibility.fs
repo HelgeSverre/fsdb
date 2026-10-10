@@ -4781,6 +4781,20 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE wide_double_probe"; "DROP TABLE narrow_double_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private isNullFunctionalIndex =
+        { Name = "isnull-functional-index"
+          Setup =
+            [| "CREATE TABLE null_probe(id INT PRIMARY KEY,v VARCHAR(20),KEY ix_isnull ((ISNULL(v))))"
+               "INSERT INTO null_probe VALUES(1,NULL),(2,'a'),(3,NULL),(4,'b')" |]
+          Steps =
+            [| Contract.query "nulls" "SELECT id,ISNULL(v) FROM null_probe WHERE ISNULL(v)=1 ORDER BY id"
+               Contract.query "non-nulls" "SELECT id,ISNULL(v) FROM null_probe WHERE ISNULL(v)=0 ORDER BY id"
+               Contract.query "unknown" "SELECT id FROM null_probe WHERE ISNULL(v)=NULL ORDER BY id"
+               Contract.execute "update" "UPDATE null_probe SET v=NULL WHERE id=2"
+               Contract.query "nulls-after-update" "SELECT id FROM null_probe WHERE ISNULL(v)=1 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE null_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private signFunctionalIndex =
         { Name = "sign-functional-index"
           Setup =
@@ -9169,6 +9183,7 @@ module ContractCatalog =
         [| roundedFunctionalIndexes
            integralDoubleIndexProbes
            signFunctionalIndex
+           isNullFunctionalIndex
            constantNullFallbackIndexes
            tableStatisticsCache
            missingTableDiagnostics

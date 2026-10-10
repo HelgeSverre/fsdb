@@ -3802,6 +3802,8 @@ let tests =
                     "INSERT INTO lookup_abs VALUES (1, -5), (2, 9)"
                     "CREATE TABLE lookup_sign (id INT PRIMARY KEY, value INT, INDEX ix_sign_value ((SIGN(value))))"
                     "INSERT INTO lookup_sign VALUES (1, -5), (2, 0), (3, 9)"
+                    "CREATE TABLE lookup_isnull (id INT PRIMARY KEY, value INT, INDEX ix_isnull_value ((ISNULL(value))))"
+                    "INSERT INTO lookup_isnull VALUES (1, NULL), (2, 0)"
                     "CREATE TABLE lookup_round (id INT PRIMARY KEY, value DECIMAL(8,2), INDEX ix_floor_value ((FLOOR(value))), INDEX ix_ceil_value ((CEIL(value))))"
                     "INSERT INTO lookup_round VALUES (1, -2.50), (2, 0.01), (3, 2.99)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
@@ -3896,6 +3898,17 @@ let tests =
 
               Expect.equal signPlan.Key (Some "ix_sign_value") "WAL recovery rebuilds the sign index"
 
+              match handle (Fsdb.Session.create 26 reloaded) "SELECT id FROM lookup_isnull WHERE ISNULL(value) = 1" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "WAL recovery rebuilds the NULL-result index"
+              | other -> failtestf "expected recovered ISNULL lookup rows, got %A" other
+
+              let isNullPlan =
+                  handle (Fsdb.Session.create 27 reloaded) "EXPLAIN SELECT id FROM lookup_isnull WHERE ISNULL(value) = 1"
+                  |> snd
+                  |> TestSupport.Sql.explainRow
+
+              Expect.equal isNullPlan.Key (Some "ix_isnull_value") "the recovered ISNULL lookup reports its key"
+
               match handle (Fsdb.Session.create 23 reloaded) "SELECT id FROM lookup_round WHERE FLOOR(value) = 2" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "WAL recovery rebuilds the floor index"
               | other -> failtestf "expected recovered floor lookup rows, got %A" other
@@ -3950,6 +3963,10 @@ let tests =
               match handle (Fsdb.Session.create 22 fromSnapshot) "SELECT id FROM lookup_sign WHERE SIGN(value) = 1" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "the snapshot restores the sign index"
               | other -> failtestf "expected snapshot sign lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 28 fromSnapshot) "SELECT id FROM lookup_isnull WHERE ISNULL(value) = 0" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ] ] "the snapshot restores the ISNULL index"
+              | other -> failtestf "expected snapshot ISNULL lookup rows, got %A" other
 
               match handle (Fsdb.Session.create 25 fromSnapshot) "SELECT id FROM lookup_round WHERE CEIL(value) = -2" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the snapshot restores the ceiling index"

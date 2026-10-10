@@ -406,6 +406,7 @@ and IndexTransform =
     | ByteLength
     | BitLength
     | AbsoluteValue
+    | IsNullResult
     | Expression of Expr
     | Signum
     | Floored

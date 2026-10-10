@@ -736,6 +736,7 @@ let private characterLengthIndexColumnPrefix = "\u0000C:"
 let private byteLengthIndexColumnPrefix = "\u0000O:"
 let private bitLengthIndexColumnPrefix = "\u0000B:"
 let private absoluteValueIndexColumnPrefix = "\u0000A:"
+let private isNullResultIndexColumnPrefix = "\u0000J:"
 let private signumIndexColumnPrefix = "\u0000G:"
 let private flooredIndexColumnPrefix = "\u0000F:"
 let private ceiledIndexColumnPrefix = "\u0000H:"
@@ -765,6 +766,7 @@ let private encodeIndexColumn (format: SnapshotFormat) column =
         | Some ByteLength, _ -> byteLengthIndexColumnPrefix + column.Name
         | Some BitLength, _ -> bitLengthIndexColumnPrefix + column.Name
         | Some AbsoluteValue, _ -> absoluteValueIndexColumnPrefix + column.Name
+        | Some IsNullResult, _ -> isNullResultIndexColumnPrefix + column.Name
         | Some Signum, _ -> signumIndexColumnPrefix + column.Name
         | Some Floored, _ -> flooredIndexColumnPrefix + column.Name
         | Some Ceiled, _ -> ceiledIndexColumnPrefix + column.Name
@@ -807,6 +809,7 @@ let private decodeIndexColumn (format: SnapshotFormat) (columnNames: Set<string>
         | Prefixed byteLengthIndexColumnPrefix name -> column direction name None (Some ByteLength)
         | Prefixed bitLengthIndexColumnPrefix name -> column direction name None (Some BitLength)
         | Prefixed absoluteValueIndexColumnPrefix name -> column direction name None (Some AbsoluteValue)
+        | Prefixed isNullResultIndexColumnPrefix name -> column direction name None (Some IsNullResult)
         | Prefixed signumIndexColumnPrefix name -> column direction name None (Some Signum)
         | Prefixed flooredIndexColumnPrefix name -> column direction name None (Some Floored)
         | Prefixed ceiledIndexColumnPrefix name -> column direction name None (Some Ceiled)

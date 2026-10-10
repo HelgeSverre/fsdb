@@ -5021,12 +5021,6 @@ let private nullIfFn: Scalar =
     | [ a; b ] -> if Value.equals a b = Some true then VNull else a
     | _ -> VNull
 
-let private isNullFn: Scalar =
-    function
-    | [ VNull ] -> VInt 1L
-    | [ _ ] -> VInt 0L
-    | _ -> VNull
-
 let private baseDigits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 /// CONV/BIN/OCT work in MySQL's 64-bit *unsigned* domain: a negative input
@@ -6706,7 +6700,7 @@ let private registerNumericBuiltins registry =
     |> registerScalarResult "LEAST" (CombineArguments everyArgument) (minimumArity "LEAST" 1 leastFn)
     |> registerScalarResult "NULLIF" (InheritArgument 0) (exactArity "NULLIF" 2 nullIfFn)
     |> registerScalarResult "ANY_VALUE" (InheritArgument 0) anyValueFn
-    |> registerScalar "ISNULL" (exactArity "ISNULL" 1 isNullFn)
+    |> registerFunctionalScalar IsNullResult
     |> registerScalar "CONV" (exactArity "CONV" 3 convFn)
     |> registerScalar "BIN" (exactArity "BIN" 1 binFn)
     |> registerScalar "BIT_COUNT" (exactArity "BIT_COUNT" 1 bitCountFn)

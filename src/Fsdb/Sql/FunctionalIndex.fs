@@ -38,6 +38,9 @@ let private definitions =
       { CanonicalName = "ABS"
         Aliases = []
         Transform = AbsoluteValue }
+      { CanonicalName = "ISNULL"
+        Aliases = []
+        Transform = IsNullResult }
       { CanonicalName = "SIGN"
         Aliases = []
         Transform = Signum }
@@ -132,6 +135,7 @@ let rec hasTextResult = function
     | ByteLength
     | BitLength
     | AbsoluteValue
+    | IsNullResult
     | Signum
     | Floored
     | Ceiled -> false
@@ -197,6 +201,7 @@ let private supportsSingleTransform transform columnType =
     | Floored
     | Ceiled ->
         isNumeric columnType || isTextOrBinary columnType
+    | IsNullResult -> true
     | Expression _ -> false
 
 let private isTextTransform = function
@@ -236,6 +241,7 @@ let rec fixedKeyLength = function
     | ByteLength
     | BitLength
     | Signum -> Some 8
+    | IsNullResult -> Some 4
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> fixedKeyLength))
@@ -363,6 +369,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _
+    | Some IsNullResult, _
     | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
     | Some(Expression expression), _ ->
         tryPhysicalExpression expression
@@ -395,6 +402,8 @@ let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble
 
 let rec projectValueWithStatus encodeText transform value =
     match transform, value with
+    | Some IsNullResult, VNull -> VInt 1L, None
+    | Some IsNullResult, _ -> VInt 0L, None
     | Some _, VNull -> VNull, None
     | Some Lowercase, value -> mapTextOrBytes _.ToLowerInvariant() id value, None
     | Some Uppercase, value -> mapTextOrBytes _.ToUpperInvariant() id value, None
