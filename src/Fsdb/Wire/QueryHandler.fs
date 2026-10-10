@@ -8163,8 +8163,7 @@ let tryPrepareLoad (session: Session) (sql: string) : Result<Parser.LoadRequest 
 
 /// Keeps the parsed field and SET mappings until the client upload has been
 /// decoded; an ordinary INSERT AST cannot represent either mapping.
-let executeLoadedData (session: Session) (load: Parser.LoadRequest) (rows: Value list list) : Session * QueryResult =
-    let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
+let internal executeLoadedDataStartedAt startedAt (session: Session) (load: Parser.LoadRequest) (rows: Value list list) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
     let statement =
         LoadData
@@ -8187,10 +8186,19 @@ let executeLoadedData (session: Session) (load: Parser.LoadRequest) (rows: Value
     recordSlowQueryIfNeeded session startedAt |> ignore
     syncTransactionView executed, result
 
-let executeServerLoad (session: Session) (load: Parser.LoadRequest) : Session * QueryResult =
+let executeLoadedData session load rows =
+    executeLoadedDataStartedAt (System.Diagnostics.Stopwatch.GetTimestamp()) session load rows
+
+let internal executeServerLoadStartedAt startedAt (session: Session) (load: Parser.LoadRequest) : Session * QueryResult =
     match LoadData.readServerFile session.SecureFiles Limits.maxLoadDataBytes load.FileName |> Result.bind (LoadData.decode load) with
-    | Ok rows -> executeLoadedData session load rows
-    | Error(code, message) -> recordDiagnostics session false (fun () -> session, Err(code, message))
+    | Ok rows -> executeLoadedDataStartedAt startedAt session load rows
+    | Error(code, message) ->
+        let outcome = recordDiagnostics session false (fun () -> session, Err(code, message))
+        recordSlowQueryIfNeeded session startedAt |> ignore
+        outcome
+
+let executeServerLoad session load =
+    executeServerLoadStartedAt (System.Diagnostics.Stopwatch.GetTimestamp()) session load
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it

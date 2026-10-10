@@ -1952,9 +1952,10 @@ let private handleConnection
                                                             }
                                                         | Result.Ok(Some load) when not load.Local ->
                                                             async {
+                                                                let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
                                                                 return
                                                                     runCancellable statement (fun () ->
-                                                                        QueryHandler.executeServerLoad session load)
+                                                                        QueryHandler.executeServerLoadStartedAt startedAt session load)
                                                                     |> Option.map (fun (nextSession, result) ->
                                                                         nextSession, result, seqId)
                                                             }
@@ -1971,6 +1972,7 @@ let private handleConnection
                                                             }
                                                         | Result.Ok(Some load) ->
                                                             async {
+                                                                let startedAt = System.Diagnostics.Stopwatch.GetTimestamp()
                                                                 let! uploadSeqId =
                                                                     writePacketAsync stream { SeqId = seqId; Payload = localInfileRequestPayload load.FileName }
 
@@ -1985,7 +1987,7 @@ let private handleConnection
                                                                     | Result.Ok rows ->
                                                                         return
                                                                             runCancellable statement (fun () ->
-                                                                                QueryHandler.executeLoadedData session load rows)
+                                                                                QueryHandler.executeLoadedDataStartedAt startedAt session load rows)
                                                                             |> Option.map (fun (nextSession, result) ->
                                                                                 nextSession, result, responseSeqId)
                                                             }

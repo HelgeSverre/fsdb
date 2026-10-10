@@ -8782,6 +8782,32 @@ let tests =
                   (ResultSet([ "@@SESSION.long_query_time" ], [ [ Some "0.000000" ] ]))
                   "clamped value retains decimal display"
 
+          testCase "LOAD DATA slow timing includes time before row decoding"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE slow_load_rows (id INT)"
+              let session, _ = handle session "SET SESSION long_query_time=1"
+              let load =
+                  match tryPrepareLoad session "LOAD DATA LOCAL INFILE 'slow.tsv' INTO TABLE slow_load_rows" with
+                  | Ok(Some request) -> request
+                  | other -> failtestf "expected a prepared load, got %A" other
+
+              let beforeUpload = System.Diagnostics.Stopwatch.GetTimestamp() - 2L * System.Diagnostics.Stopwatch.Frequency
+              let session, result = executeLoadedDataStartedAt beforeUpload session load [ [ VInt 1L ] ]
+              Expect.equal result (Affected 1UL) "uploaded row is stored"
+              Expect.equal session.StatusCounters.SlowQueries 1L "receive time is included in the slow-query count"
+
+              let fileLoad =
+                  match tryPrepareLoad session "LOAD DATA INFILE '/missing/slow.tsv' INTO TABLE slow_load_rows" with
+                  | Ok(Some request) -> request
+                  | other -> failtestf "expected a prepared server-side load, got %A" other
+
+              let session, result = executeServerLoadStartedAt beforeUpload session fileLoad
+              match result with
+              | Err _ -> ()
+              | other -> failtestf "expected a missing-file error, got %A" other
+              Expect.equal session.StatusCounters.SlowQueries 2L "file-read failure retains full statement time"
+
           TestSupport.processGlobalCase "SHOW STATUS reports transaction and FLUSH command counters"
           <| fun _ ->
               Fsdb.InformationSchema.resetCommandCounts ()

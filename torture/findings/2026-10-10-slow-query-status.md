@@ -11,11 +11,18 @@ resets session counters but leaves the global count accumulated.
 
 Fsdb now tracks that counter per session and globally using the same status
 counter lifecycle as `Questions` and `Com_*`. The text, parsed prepared, and
-decoded `LOAD DATA` execution paths record elapsed wall time against the
-session threshold that was active when the statement began. Focused tests
+`LOAD DATA` execution paths record elapsed wall time against the
+session threshold that was active when the statement began. The wire path
+starts the timer before a local upload or server-side file read. Focused tests
 cover the zero threshold, self-counting status reads, prepared execution,
-session isolation, fractional settings, and `FLUSH STATUS`.
+session isolation, fractional settings, `FLUSH STATUS`, and load time before
+row decoding.
 
-The counter does not yet include time spent receiving an upload or reading a
-server-side load file before row decoding. MySQL's wider engine and latency
-status families remain outside fsdb's registry.
+A separate native MySQL 8.4.11 probe set `long_query_time=0.1`, then loaded
+one row from a local FIFO whose writer waited 0.4 seconds after the client
+opened it. The subsequent session status reported `Slow_queries=1`; the
+table contained the row. This confirms that the local upload interval belongs
+to the statement's slow-query time.
+
+Uploads rejected before row decoding do not yet update the counter. MySQL's
+wider engine and latency status families remain outside fsdb's registry.
