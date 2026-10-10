@@ -65,6 +65,9 @@ let private definitions =
       { CanonicalName = "SIGN"
         Aliases = []
         Transform = Signum }
+      { CanonicalName = "BIT_COUNT"
+        Aliases = []
+        Transform = BitCounted }
       { CanonicalName = "FLOOR"
         Aliases = []
         Transform = Floored }
@@ -218,6 +221,7 @@ let private transformFamily = function
     | DecodedHex -> DecodedBinaryResult
     | AbsoluteValue
     | Signum
+    | BitCounted
     | Floored
     | Ceiled
     | Rounded -> NumericGeneral
@@ -342,7 +346,7 @@ let private numericKeyResult columnType transforms =
     |> List.fold
         (fun result transform ->
             match transform with
-            | Signum -> SignedInteger
+            | Signum | BitCounted -> SignedInteger
             | transform when producesDoubleResult transform -> Approximate
             | _ -> result)
         sourceResult
@@ -375,7 +379,8 @@ let rec fixedKeyLength = function
     | ByteLength
     | BitLength
     | FirstCharacterCode
-    | Signum -> Some 8
+    | Signum
+    | BitCounted -> Some 8
     | FirstByte
     | IsNullResult -> Some 4
     | Expression expression ->
@@ -522,7 +527,8 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some FirstByte, _
     | Some FirstCharacterCode, _
     | Some IsNullResult, _
-    | Some Signum, _ -> tryExactInt64 value |> Option.map VInt
+    | Some Signum, _
+    | Some BitCounted, _ -> tryExactInt64 value |> Option.map VInt
     | Some DecodedHex, _ -> tryBinaryProbe value
     | Some transform, _ when isEncodedTextTransform transform -> tryTextResultProbe value
     | Some(Expression expression), _ ->
@@ -596,6 +602,48 @@ let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble
     | value ->
         let number, truncated = numericInputWithStatus value
         VDouble(roundDouble number), truncated
+
+type BitCountWarning =
+    | TextConversion of string
+    | BinaryConversion of string
+
+/// Exact integer bits must not pass through double, which loses the top half
+/// of BIGINT UNSIGNED and saturates negative signed patterns.
+let integerBitPattern value : uint64 =
+    match value with
+    | VUInt number -> number
+    | VBit(_, number) -> number
+    | VInt number -> uint64 number
+    | _ ->
+        let number = toDouble value
+        if number >= 1.8446744073709552e19 then UInt64.MaxValue
+        elif number < 0.0 then uint64 (int64 (max number -9.2233720368547758e18))
+        else uint64 number
+
+/// Binary strings count every byte; numeric values count the rounded 64-bit pattern.
+/// Text takes the integer cast path, which truncates instead of rounding.
+let bitCountValueWithStatus value =
+    let bits, warning =
+        match value with
+        | VBytes bytes | VEncodedString("binary", bytes) ->
+            let bits = bytes |> Array.sumBy (fun byte -> int64 (Numerics.BitOperations.PopCount(uint32 byte)))
+            bits, None
+        | VBinaryLiteral bytes when bytes.Length > 8 ->
+            let literal = sprintf "x'%s'" (Convert.ToHexString(bytes).ToLowerInvariant())
+            0L, Some(BinaryConversion literal)
+        | VString text ->
+            let _, truncated = coerceLeadingDouble text
+            let warning =
+                if truncated || String.IsNullOrWhiteSpace text then Some(TextConversion text) else None
+            int64 (Numerics.BitOperations.PopCount(integerBitPattern value)), warning
+        | VDecimal number ->
+            let rounded = VDecimal(Math.Round(number, MidpointRounding.AwayFromZero))
+            int64 (Numerics.BitOperations.PopCount(integerBitPattern rounded)), None
+        | VDouble number ->
+            let rounded = VDouble(Math.Round(number, MidpointRounding.ToEven))
+            int64 (Numerics.BitOperations.PopCount(integerBitPattern rounded)), None
+        | _ -> int64 (Numerics.BitOperations.PopCount(integerBitPattern value)), None
+    VInt bits, warning
 
 let hexValueWithStatus encodeText value =
     let encodedBytes (bytes: byte[]) = VString(Convert.ToHexString bytes), false
@@ -700,6 +748,9 @@ let rec projectValueWithStatus encodeText transform value =
     | Some Signum, value ->
         let number, truncated = numericInputWithStatus value
         VInt(int64 (sign number)), truncated
+    | Some BitCounted, value ->
+        let counted, warning = bitCountValueWithStatus value
+        counted, (warning |> Option.map (function TextConversion text | BinaryConversion text -> text))
     | Some AbsoluteValue, VInt Int64.MinValue -> raise SignedOutOfRange
     | Some AbsoluteValue, VInt value -> VInt(abs value), None
     | Some AbsoluteValue, VUInt value -> VUInt value, None

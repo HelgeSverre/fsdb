@@ -371,16 +371,7 @@ let private arityRange name minimum maximum (invoke: Scalar) : Scalar =
 /// of the domain — it saturates `int64` at 2^63-1 — so `VUInt`/`VInt` pass
 /// through their exact bits and only inexact inputs go via `double`.
 let private toUInt64 (v: Value) : uint64 =
-    match v with
-    | VUInt u -> u
-    | VBit(_, value) -> value
-    | VInt i -> uint64 i
-    | _ ->
-        let d = toDouble v
-
-        if d >= 1.8446744073709552e19 then UInt64.MaxValue
-        elif d < 0.0 then uint64 (int64 (max d -9.2233720368547758e18))
-        else uint64 d
+    FunctionalIndex.integerBitPattern v
 
 /// A numeric argument to an integer-domain builtin (BIT_COUNT, EXPORT_SET,
 /// MAKEDATE, CONV's bases), rounded the way MySQL rounds it: DECIMAL half
@@ -4492,21 +4483,12 @@ let private exportSetFn: Scalar =
 let private bitCountFn: Scalar =
     function
     | [ v ] when not (anyNull [ v ]) ->
-        let count =
-            match v with
-            | VBytes bytes | VEncodedString("binary", bytes) ->
-                bytes |> Array.sumBy (fun byte -> int64 (Numerics.BitOperations.PopCount(uint32 byte)))
-            | VBinaryLiteral bytes when bytes.Length > 8 ->
-                let literal = sprintf "x'%s'" (Convert.ToHexString(bytes).ToLowerInvariant())
-                Diagnostics.numericConversion "BINARY" literal
-                0L
-            | VString text ->
-                let _, truncated = coerceLeadingDouble text
-                if truncated || String.IsNullOrWhiteSpace text then
-                    Diagnostics.numericConversion "INTEGER" text
-                int64 (Numerics.BitOperations.PopCount(toUInt64 v))
-            | _ -> int64 (Numerics.BitOperations.PopCount(toUInt64 (roundNumeric v)))
-        VInt count
+        let counted, warning = FunctionalIndex.bitCountValueWithStatus v
+        warning
+        |> Option.iter (function
+            | FunctionalIndex.TextConversion text -> Diagnostics.numericConversion "INTEGER" text
+            | FunctionalIndex.BinaryConversion literal -> Diagnostics.numericConversion "BINARY" literal)
+        counted
     | _ -> VNull
 
 let private bitwiseUnary (operation: uint64 -> uint64) : Scalar =

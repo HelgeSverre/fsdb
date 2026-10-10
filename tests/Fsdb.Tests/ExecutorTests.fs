@@ -9114,6 +9114,28 @@ let tests =
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected SIGN uniqueness to reject a second negative value, got %A" other
 
+                testCase "BIT_COUNT functional keys maintain numeric, text, and binary values"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE counted_keys(id INT PRIMARY KEY, bits INT, text_bits VARCHAR(20), binary_bits VARBINARY(8), KEY ix_count ((BIT_COUNT(bits))), KEY ix_text_count ((BIT_COUNT(text_bits))), KEY ix_binary_count ((BIT_COUNT(binary_bits))))" |> ignore
+                    runDefault store "INSERT INTO counted_keys VALUES(1,7,'7',X'07'),(2,8,'8',X'08'),(3,3,'3',X'03')" |> ignore
+                    for expression, key in [ "BIT_COUNT(bits)", "ix_count"; "BIT_COUNT(text_bits)", "ix_text_count"; "BIT_COUNT(binary_bits)", "ix_binary_count" ] do
+                        let sql = sprintf "SELECT id FROM counted_keys WHERE %s=3" expression
+                        Expect.equal (runDefault store sql) (ResultSet([ "id" ], [ [ Some "1" ] ])) expression
+                        Expect.equal (runDefault store ("EXPLAIN " + sql) |> explainRow).Key (Some key) expression
+                    runDefault store "UPDATE counted_keys SET bits=15,text_bits='15',binary_bits=X'0F' WHERE id=1" |> ignore
+                    Expect.equal (runDefault store "SELECT id FROM counted_keys WHERE BIT_COUNT(bits)=3") (ResultSet([ "id" ], [])) "old bucket removed"
+                    Expect.equal (runDefault store "SELECT id FROM counted_keys WHERE BIT_COUNT(bits)=4") (ResultSet([ "id" ], [ [ Some "1" ] ])) "new bucket stored"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM counted_keys WHERE BIT_COUNT(bits) BETWEEN 1 AND 2 ORDER BY BIT_COUNT(bits),id")
+                        (ResultSet([ "id" ], [ [ Some "2" ]; [ Some "3" ] ]))
+                        "ordered range uses current counts"
+                    runDefault store "CREATE TABLE unique_counts(id INT PRIMARY KEY,bits INT,UNIQUE KEY uq_count ((BIT_COUNT(bits))))" |> ignore
+                    runDefault store "INSERT INTO unique_counts VALUES(1,7),(2,8)" |> ignore
+                    match runDefault store "INSERT INTO unique_counts VALUES(3,11)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected duplicate BIT_COUNT key, got %A" other
+
                 testCase "FLOOR and CEIL functional keys retain exact and text values"
                 <| fun _ ->
                     let store = newStore ()

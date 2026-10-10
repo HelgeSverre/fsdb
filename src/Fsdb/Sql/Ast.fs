@@ -415,6 +415,7 @@ and IndexTransform =
     | IsNullResult
     | Expression of Expr
     | Signum
+    | BitCounted
     | Floored
     | Ceiled
     | Rounded

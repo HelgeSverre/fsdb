@@ -445,7 +445,7 @@ different access pattern:
   `UPPER`/`UCASE`, `TRIM`, `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`,
   `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, `ASCII`, `ORD`, `HEX`, `UNHEX`,
   `MD5`, `SHA1`/`SHA`, `ISNULL`,
-  or numeric/text/binary `ABS`, `SIGN`, `FLOOR`, `CEIL`/`CEILING`, `ROUND`, `SQRT`,
+  or numeric/text/binary `ABS`, `SIGN`, `BIT_COUNT`, `FLOOR`, `CEIL`/`CEILING`, `ROUND`, `SQRT`,
   `EXP`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, unary `ATAN`/`ATAN2`, `COT`, `DEGREES`,
   `RADIANS`, `LOG`, `LN`, `LOG2`, and `LOG10` parts.
   Compatible unary parts can be composed, such as `UPPER(TRIM(name))`,

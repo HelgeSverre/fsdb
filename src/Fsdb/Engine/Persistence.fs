@@ -746,6 +746,7 @@ let private directIndexColumnPrefixes =
       AbsoluteValue, "\u0000A:"
       IsNullResult, "\u0000J:"
       Signum, "\u0000G:"
+      BitCounted, "\u0000q:"
       Floored, "\u0000F:"
       Ceiled, "\u0000H:"
       Rounded, "\u0000Z:"

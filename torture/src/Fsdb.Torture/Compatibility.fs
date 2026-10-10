@@ -4963,6 +4963,27 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE sign_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private bitCountFunctionalIndex =
+        { Name = "bit-count-functional-index"
+          Setup =
+            [| "CREATE TABLE bit_count_probe(id INT PRIMARY KEY,bits INT,text_bits VARCHAR(20),binary_bits VARBINARY(8),KEY ix_bits ((BIT_COUNT(bits))),KEY ix_text ((BIT_COUNT(text_bits))),KEY ix_binary ((BIT_COUNT(binary_bits))))"
+               "INSERT INTO bit_count_probe VALUES(1,7,'7',X'07'),(2,8,'8',X'08'),(3,3,'3',X'03')" |]
+          Steps =
+            [| Contract.query "numeric" "SELECT id FROM bit_count_probe WHERE BIT_COUNT(bits)=3 ORDER BY id"
+               Contract.query "text" "SELECT id FROM bit_count_probe WHERE BIT_COUNT(text_bits)=3 ORDER BY id"
+               Contract.query "binary" "SELECT id FROM bit_count_probe WHERE BIT_COUNT(binary_bits)=3 ORDER BY id"
+               Contract.query "range" "SELECT id FROM bit_count_probe WHERE BIT_COUNT(bits) BETWEEN 1 AND 2 ORDER BY id"
+               Contract.execute "update" "UPDATE bit_count_probe SET bits=15,text_bits='15',binary_bits=X'0F' WHERE id=1"
+               Contract.query "old-key" "SELECT id FROM bit_count_probe WHERE BIT_COUNT(bits)=3 ORDER BY id"
+               Contract.query "new-key" "SELECT id FROM bit_count_probe WHERE BIT_COUNT(bits)=4 ORDER BY id"
+               Contract.execute "strict-truncated-index" "INSERT INTO bit_count_probe VALUES(4,0,'12x',X'00')" |> Contract.fails 3751 "01000"
+               Contract.execute "permissive-mode" "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+               Contract.execute "permissive-truncated-index" "INSERT INTO bit_count_probe VALUES(4,0,'12x',X'00')"
+               Contract.query "truncated-warning" "SHOW WARNINGS"
+               Contract.query "truncated-key" "SELECT id FROM bit_count_probe WHERE BIT_COUNT(text_bits)=2 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE bit_count_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private roundedFunctionalIndexes =
         { Name = "rounded-functional-indexes"
           Setup =
@@ -9923,6 +9944,7 @@ module ContractCatalog =
            missingFunctionViewDefinitions
            integralDoubleIndexProbes
            signFunctionalIndex
+           bitCountFunctionalIndex
            isNullFunctionalIndex
            asciiFunctionalIndex
            ordFunctionalIndex
