@@ -2953,19 +2953,19 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
         with
         | FunctionalIndex.InvalidLogarithmArgument ->
             raise (IndexExpressionError(3020, "Invalid argument for logarithm"))
-        | FunctionalIndex.ExponentialOutOfRange ->
-            let rec failingExp = function
+        | FunctionalIndex.DoubleOutOfRange functionName ->
+            let rec failingCall = function
                 | FuncCall(name, [ argument ]) as expression ->
-                    match failingExp argument with
+                    match failingCall argument with
                     | Some inner -> Some inner
-                    | None when name.Equals("EXP", StringComparison.OrdinalIgnoreCase) -> Some expression
+                    | None when name.Equals(functionName, StringComparison.OrdinalIgnoreCase) -> Some expression
                     | None -> None
                 | _ -> None
             let expression =
                 match transform with
                 | Some(Expression expression) ->
-                    expression |> failingExp |> Option.defaultValue expression |> SqlText.expression
-                | _ -> sprintf "exp(%s)" (SqlText.quoteIdentifier column.Name)
+                    expression |> failingCall |> Option.defaultValue expression |> SqlText.expression
+                | _ -> sprintf "%s(%s)" (functionName.ToLowerInvariant()) (SqlText.quoteIdentifier column.Name)
             raise (IndexExpressionError(1690, sprintf "DOUBLE value is out of range in '%s'" expression))
         | SignedOutOfRange ->
             let expression =

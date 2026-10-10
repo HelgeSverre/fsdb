@@ -9308,6 +9308,63 @@ let tests =
                         (Err(1062, "Duplicate entry '1' for key 'null_key.ux_null'"))
                         "the duplicate diagnostic names the projected key"
 
+                testCase "angle conversion and cotangent functional keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE angle_keys(id INT PRIMARY KEY,n DOUBLE,KEY ix_degrees ((DEGREES(n))),KEY ix_radians ((RADIANS(n))))"
+                    |> ignore
+                    Expect.equal
+                        (runDefault store "INSERT INTO angle_keys VALUES(1,0),(2,1),(3,-1),(4,180),(5,NULL)")
+                        (Affected 5UL)
+                        "angle source rows"
+
+                    for expression, key in [ "DEGREES(n)", "ix_degrees"; "RADIANS(n)", "ix_radians" ] do
+                        let query = sprintf "SELECT id FROM angle_keys WHERE %s=0e0" expression
+                        Expect.equal (runDefault store query) (ResultSet([ "id" ], [ [ Some "1" ] ])) query
+                        Expect.equal ((runDefault store ("EXPLAIN " + query) |> explainRow).Key) (Some key) query
+
+                    let range = "SELECT id FROM angle_keys WHERE RADIANS(n)>1e0"
+                    Expect.equal (runDefault store range) (ResultSet([ "id" ], [ [ Some "4" ] ])) range
+                    Expect.equal ((runDefault store ("EXPLAIN " + range) |> explainRow).Key) (Some "ix_radians") range
+                    Expect.equal
+                        ((runDefault store "EXPLAIN SELECT DEGREES(n),COUNT(*) FROM angle_keys GROUP BY DEGREES(n) ORDER BY DEGREES(n)" |> explainRow).Key)
+                        (Some "ix_degrees")
+                        "angle grouping key"
+
+                    Expect.equal
+                        (runDefault store "SELECT RADIANS(1e308) IS NOT NULL")
+                        (ResultSet([ "RADIANS(1e308) IS NOT NULL" ], [ [ Some "1" ] ]))
+                        "radians divides before multiplying to retain finite large values"
+                    runDefault store "CREATE TABLE large_radians(id INT PRIMARY KEY,n DOUBLE,KEY ix_radians ((RADIANS(n))))"
+                    |> ignore
+                    Expect.equal
+                        (runDefault store "INSERT INTO large_radians VALUES(1,1e308)")
+                        (Affected 1UL)
+                        "large finite radians key"
+                    runDefault store "CREATE TABLE large_degrees(id INT PRIMARY KEY,n DOUBLE,KEY ix_degrees ((DEGREES(n))))"
+                    |> ignore
+                    Expect.equal
+                        (runDefault store "INSERT INTO large_degrees VALUES(1,1e308)")
+                        (Err(1690, "DOUBLE value is out of range in 'degrees(`n`)'"))
+                        "degrees reports overflow"
+
+                    runDefault store "CREATE TABLE cot_keys(id INT PRIMARY KEY,n DOUBLE,UNIQUE KEY ux_cot ((COT(n))))"
+                    |> ignore
+                    Expect.equal
+                        (runDefault store "INSERT INTO cot_keys VALUES(1,1),(2,-1),(3,NULL),(4,NULL)")
+                        (Affected 4UL)
+                        "cotangent source rows"
+                    let cotRange = "SELECT id FROM cot_keys WHERE COT(n)>0e0"
+                    Expect.equal (runDefault store cotRange) (ResultSet([ "id" ], [ [ Some "1" ] ])) cotRange
+                    Expect.equal ((runDefault store ("EXPLAIN " + cotRange) |> explainRow).Key) (Some "ux_cot") cotRange
+                    match runDefault store "INSERT INTO cot_keys VALUES(5,1)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected duplicate cotangent key, got %A" other
+                    Expect.equal
+                        (runDefault store "INSERT INTO cot_keys VALUES(6,0)")
+                        (Err(1690, "DOUBLE value is out of range in 'cot(`n`)'"))
+                        "zero cotangent is out of range"
+
                 testCase "logarithm functional keys keep distinct function identities"
                 <| fun _ ->
                     let store = newStore ()

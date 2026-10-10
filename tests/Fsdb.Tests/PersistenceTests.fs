@@ -3799,6 +3799,13 @@ let tests =
                           (handle (Fsdb.Session.create 62 recovered) sql |> snd)
                           (ResultSet([ "id" ], [ [ Some id ] ]))
                           (sprintf "%s restores %s" source functionName)
+              let verifyAngleLookups source recovered =
+                  for functionName in [ "COT"; "DEGREES"; "RADIANS" ] do
+                      let sql = sprintf "SELECT id FROM lookup_angle WHERE %s(value)>0e0" functionName
+                      Expect.equal
+                          (handle (Fsdb.Session.create 63 recovered) sql |> snd)
+                          (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                          (sprintf "%s restores %s" source functionName)
 
               let run (session: Fsdb.Session.Session) (sql: string) =
                   match handle session sql with
@@ -3850,6 +3857,8 @@ let tests =
                     "INSERT INTO lookup_log VALUES (1, 1), (2, 2), (3, 10), (4, NULL)"
                     "CREATE TABLE lookup_trig (id INT PRIMARY KEY, value DOUBLE, INDEX ix_sin ((SIN(value))), INDEX ix_cos ((COS(value))), INDEX ix_tan ((TAN(value))), INDEX ix_asin ((ASIN(value))), INDEX ix_acos ((ACOS(value))), INDEX ix_atan ((ATAN(value))))"
                     "INSERT INTO lookup_trig VALUES (1, 0), (2, 1), (3, -1), (4, NULL), (5, 2)"
+                    "CREATE TABLE lookup_angle (id INT PRIMARY KEY, value DOUBLE, INDEX ix_cot ((COT(value))), INDEX ix_degrees ((DEGREES(value))), INDEX ix_radians ((RADIANS(value))))"
+                    "INSERT INTO lookup_angle VALUES (1, 1), (2, -1), (3, NULL)"
                     "CREATE TABLE lookup_abs_text (id INT PRIMARY KEY, value VARCHAR(20), INDEX ix_abs_text ((ABS(value))))"
                     "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
                     "INSERT INTO lookup_abs_text VALUES (1, '12x'), (2, 'Other')"
@@ -4030,6 +4039,7 @@ let tests =
 
               verifyLogarithmLookups "WAL replay" reloaded
               verifyTrigonometricLookups "WAL replay" reloaded
+              verifyAngleLookups "WAL replay" reloaded
 
               match handle (Fsdb.Session.create 56 reloaded) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "WAL recovery rebuilds the composed numeric index"
@@ -4124,6 +4134,7 @@ let tests =
 
               verifyLogarithmLookups "snapshot" fromSnapshot
               verifyTrigonometricLookups "snapshot" fromSnapshot
+              verifyAngleLookups "snapshot" fromSnapshot
 
               match handle (Fsdb.Session.create 57 fromSnapshot) "SELECT id FROM lookup_round WHERE SQRT(ABS(value)) > 1e0 ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "the snapshot restores the composed numeric index"

@@ -8,7 +8,7 @@ open System.Globalization
 open Fsdb.Ast
 open Fsdb.Value
 
-exception ExponentialOutOfRange
+exception DoubleOutOfRange of string
 exception InvalidLogarithmArgument
 
 type private Builtin =
@@ -98,6 +98,15 @@ let private definitions =
       { CanonicalName = "ATAN"
         Aliases = []
         Transform = ArcTangent }
+      { CanonicalName = "COT"
+        Aliases = []
+        Transform = Cotangent }
+      { CanonicalName = "DEGREES"
+        Aliases = []
+        Transform = Degrees }
+      { CanonicalName = "RADIANS"
+        Aliases = []
+        Transform = Radians }
       // MySQL stores LOG and LN as distinct functional expressions.
       { CanonicalName = "LOG"
         Aliases = []
@@ -215,6 +224,9 @@ let rec hasTextResult = function
     | ArcSine
     | ArcCosine
     | ArcTangent
+    | Cotangent
+    | Degrees
+    | Radians
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -295,6 +307,9 @@ let private supportsSingleTransform transform columnType =
     | ArcSine
     | ArcCosine
     | ArcTangent
+    | Cotangent
+    | Degrees
+    | Radians
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -338,6 +353,9 @@ let private isNumericTransform = function
     | ArcSine
     | ArcCosine
     | ArcTangent
+    | Cotangent
+    | Degrees
+    | Radians
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -353,6 +371,9 @@ let private producesDoubleResult = function
     | ArcSine
     | ArcCosine
     | ArcTangent
+    | Cotangent
+    | Degrees
+    | Radians
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm
@@ -617,10 +638,15 @@ let private logarithmValue logarithm value =
     if number <= 0.0 then raise InvalidLogarithmArgument
     (if Double.IsNaN number then VNull else VDouble(logarithm number)), truncated
 
-let private trigonometricValue operation value =
+let private approximateFunctionValue name operation value =
     let number, truncated = numericInputWithStatus value
     let result = operation number
+    if Double.IsInfinity result then raise (DoubleOutOfRange name)
     (if Double.IsNaN result then VNull else VDouble result), truncated
+
+let cotangent number = 1.0 / Math.Tan number
+let degrees number = number * 180.0 / Math.PI
+let radians number = number / 180.0 * Math.PI
 
 let private roundFunctionalValue (roundDecimal: decimal -> decimal) (roundDouble: float -> float) value =
     match value with
@@ -716,17 +742,16 @@ let rec projectValueWithStatus encodeText transform value =
     | Some SquareRooted, value ->
         let number, truncated = numericInputWithStatus value
         (if number < 0.0 then VNull else VDouble(Math.Sqrt number)), truncated
-    | Some Exponentiated, value ->
-        let number, truncated = numericInputWithStatus value
-        let result = Math.Exp number
-        if Double.IsInfinity result then raise ExponentialOutOfRange
-        (if Double.IsNaN result then VNull else VDouble result), truncated
-    | Some Sine, value -> trigonometricValue Math.Sin value
-    | Some Cosine, value -> trigonometricValue Math.Cos value
-    | Some Tangent, value -> trigonometricValue Math.Tan value
-    | Some ArcSine, value -> trigonometricValue Math.Asin value
-    | Some ArcCosine, value -> trigonometricValue Math.Acos value
-    | Some ArcTangent, value -> trigonometricValue Math.Atan value
+    | Some Exponentiated, value -> approximateFunctionValue "EXP" Math.Exp value
+    | Some Sine, value -> approximateFunctionValue "SIN" Math.Sin value
+    | Some Cosine, value -> approximateFunctionValue "COS" Math.Cos value
+    | Some Tangent, value -> approximateFunctionValue "TAN" Math.Tan value
+    | Some ArcSine, value -> approximateFunctionValue "ASIN" Math.Asin value
+    | Some ArcCosine, value -> approximateFunctionValue "ACOS" Math.Acos value
+    | Some ArcTangent, value -> approximateFunctionValue "ATAN" Math.Atan value
+    | Some Cotangent, value -> approximateFunctionValue "COT" cotangent value
+    | Some Degrees, value -> approximateFunctionValue "DEGREES" degrees value
+    | Some Radians, value -> approximateFunctionValue "RADIANS" radians value
     | Some Logarithm, value
     | Some NaturalLogarithm, value -> logarithmValue Math.Log value
     | Some BinaryLogarithm, value -> logarithmValue Math.Log2 value

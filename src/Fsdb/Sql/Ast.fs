@@ -426,6 +426,9 @@ and IndexTransform =
     | ArcSine
     | ArcCosine
     | ArcTangent
+    | Cotangent
+    | Degrees
+    | Radians
     | Logarithm
     | NaturalLogarithm
     | BinaryLogarithm

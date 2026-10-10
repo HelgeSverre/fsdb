@@ -5102,6 +5102,27 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE projected_null_probe" |]
           Coverage = [| "statement:insert", [| "text-differential" |] |] }
 
+    let private angleFunctionalIndexes =
+        { Name = "angle-functional-indexes"
+          Setup =
+            [| "CREATE TABLE angle_probe(id INT PRIMARY KEY,n DOUBLE,KEY ix_degrees ((DEGREES(n))),KEY ix_radians ((RADIANS(n))))"
+               "INSERT INTO angle_probe VALUES(1,0),(2,1),(3,-1),(4,180),(5,NULL)"
+               "CREATE TABLE cot_probe(id INT PRIMARY KEY,n DOUBLE,UNIQUE KEY ux_cot ((COT(n))))"
+               "INSERT INTO cot_probe VALUES(1,1),(2,-1),(3,NULL),(4,NULL)"
+               "CREATE TABLE large_radians_probe(id INT PRIMARY KEY,n DOUBLE,KEY ix_radians ((RADIANS(n))))" |]
+          Steps =
+            [| Contract.query "degrees-equality" "SELECT id FROM angle_probe WHERE DEGREES(n)=0e0"
+               Contract.query "radians-equality" "SELECT id FROM angle_probe WHERE RADIANS(n)=0e0"
+               Contract.query "radians-range" "SELECT id FROM angle_probe WHERE RADIANS(n)>1e0"
+               Contract.query "degrees-grouping" "SELECT COUNT(*) FROM angle_probe GROUP BY DEGREES(n) ORDER BY DEGREES(n)"
+               Contract.query "cot-range" "SELECT id FROM cot_probe WHERE COT(n)>0e0"
+               Contract.execute "cot-duplicate" "INSERT INTO cot_probe VALUES(5,1)" |> Contract.fails 1062 "23000"
+               Contract.execute "cot-zero" "INSERT INTO cot_probe VALUES(6,0)" |> Contract.fails 1690 "22003"
+               Contract.execute "large-radians" "INSERT INTO large_radians_probe VALUES(1,1e308)"
+               Contract.query "large-radians-range" "SELECT id FROM large_radians_probe WHERE RADIANS(n)>1e306" |]
+          Cleanup = [| "DROP TABLE large_radians_probe"; "DROP TABLE cot_probe"; "DROP TABLE angle_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private logarithmFunctionalIndexes =
         { Name = "logarithm-functional-indexes"
           Setup =
@@ -9872,6 +9893,7 @@ module ContractCatalog =
            trigonometricFunctionalIndexes
            inverseTrigonometricFunctionalIndexes
            projectedNullnessUniqueKey
+           angleFunctionalIndexes
            logarithmFunctionalIndexes
            numericConstantIndexBounds
            elidedWhereBindings

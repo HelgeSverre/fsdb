@@ -4898,7 +4898,7 @@ let private positiveLog (name: string) (f: float -> float) : Scalar =
 
 let private cotFn: Scalar =
     function
-    | [ value ] when not (anyNull [ value ]) -> mathResult "cot" (1.0 / Math.Tan(toDouble value))
+    | [ value ] when not (anyNull [ value ]) -> mathResult "cot" (FunctionalIndex.cotangent (toDouble value))
     | _ -> VNull
 
 let private atanFn: Scalar =
@@ -6659,10 +6659,10 @@ let private registerNumericBuiltins registry =
     |> registerScalar "ATAN2" (arityRange "ATAN2" 1 2 atan2Fn)
     |> registerScalar
         "DEGREES"
-        (exactArity "DEGREES" 1 (unaryMath "degrees" (fun value -> value * 180.0 / Math.PI)))
+        (exactArity "DEGREES" 1 (unaryMath "degrees" FunctionalIndex.degrees))
     |> registerScalar
         "RADIANS"
-        (exactArity "RADIANS" 1 (unaryMath "radians" (fun value -> value * Math.PI / 180.0)))
+        (exactArity "RADIANS" 1 (unaryMath "radians" FunctionalIndex.radians))
     |> registerFunctionalScalar Signum
     |> registerScalar "TRUNCATE" (exactArity "TRUNCATE" 2 truncateFn)
     |> registerScalar "RAND" (arityRange "RAND" 0 1 randFn)

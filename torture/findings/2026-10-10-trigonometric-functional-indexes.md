@@ -43,3 +43,15 @@ unrelated identifier-case differences in the full run.
 The follow-up `20261010T150621125-93504` run passed that contract and all
 three `functional-unique-projected-nullness` steps, again retaining only the
 nine existing identifier-case differences.
+
+Native MySQL 8.4.11 also accepts `COT`, `DEGREES`, and `RADIANS` functional
+keys. In the audited rows, equality on zero uses the angle-conversion keys,
+`RADIANS(n)>1e0` uses a range, and a `COT` unique key accepts multiple source
+`NULL`s but rejects a duplicate finite result. Inserting zero into indexed
+`COT(n)` fails with 1690/22003. MySQL computes `RADIANS(1e308)` as a finite
+value; dividing by 180 before multiplying by π now preserves that result in
+both fsdb's scalar and indexed paths. The focused regression and WAL/snapshot
+recovery checks cover these keys.
+The `angle-functional-indexes` differential contract passed all nine steps
+in pinned MySQL 8.4.11 run `20261010T151654993-95961`. The full run retained
+the same nine identifier-case differences outside this contract.
