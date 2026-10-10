@@ -33,6 +33,12 @@ request did not create an `Init DB` row. Closing the TCP socket without
 `COM_QUIT` also did not create a `Quit` row in the observed session. The
 client's `COM_PING` did not create a general-log row.
 
+A follow-up raw-protocol probe sent `COM_FIELD_LIST` with the `%` wildcard.
+MySQL recorded `Field List` with argument `user %` for an existing table and
+`fsdb_missing_field_list_probe %` for a missing table (which returned 1146).
+`COM_RESET_CONNECTION` and `COM_SET_OPTION` produced no general-log entries
+in the same probe.
+
 `log_output='NONE,FILE'` is accepted while `general_log=ON`; the `NONE`
 destination suppresses output despite the `FILE` member. fsdb permits this
 combination without requiring a file sink.
@@ -49,5 +55,6 @@ remove the log entry. Bound values are rendered in `Execute` arguments while
 credential statements remain redacted. The `NONE` destination suppresses
 output as in MySQL. With the default `FILE` destination, enabling general
 logging is refused explicitly because there is no compatible file sink yet.
+`COM_FIELD_LIST` is also recorded with its wildcard, including a failed lookup.
 Other wire commands remain outside this path. These boundaries remain open in
 `GAPS.md`.

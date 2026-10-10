@@ -248,7 +248,7 @@ type private Command =
     | Debug
     | Ping
     | ChangeUser of ChangeUserRequest
-    | FieldList of table: string
+    | FieldList of table: string * wildcard: string
     | StmtPrepare of sql: string
     /// COM_STMT_EXECUTE payload after the command byte.
     | StmtExecute of payload: byte[]
@@ -289,7 +289,16 @@ let private parseCommand (capabilities: uint32) (payload: byte[]) : Command opti
                 | CommandByte.Quit -> Quit
                 | CommandByte.InitDatabase -> InitDb(rest ())
                 | CommandByte.Query -> Query(sql ())
-                | CommandByte.FieldList -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
+                | CommandByte.FieldList ->
+                    let bytes = restBytes ()
+                    let separator = bytes |> Array.tryFindIndex ((=) 0uy) |> Option.defaultValue bytes.Length
+                    let table = Encoding.UTF8.GetString(bytes, 0, separator)
+                    let wildcard =
+                        if separator < bytes.Length then
+                            Encoding.UTF8.GetString(bytes, separator + 1, bytes.Length - separator - 1)
+                        else ""
+
+                    FieldList(table, wildcard)
                 | CommandByte.Statistics -> Statistics
                 | CommandByte.ProcessInfo -> ProcessInfo
                 | CommandByte.ProcessKill -> ProcessKill(int64 (Reader(restBytes ()).ReadInt32LE()))
@@ -2116,7 +2125,8 @@ let private handleConnection
                                     |> Async.Ignore
 
                                 return! loop session
-                            | Some(FieldList table) ->
+                            | Some(FieldList(table, wildcard)) ->
+                                Session.recordGeneralCommand session "Field List" (table + " " + wildcard)
                                 // Deprecated in MySQL 8.0, but PDO/mysqlnd's
                                 // metadata probing can still send it —
                                 // reply with the table's columns, EOF-terminated,

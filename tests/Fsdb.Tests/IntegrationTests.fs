@@ -347,6 +347,16 @@ let tests =
                   let! selected = readPacketAsync stream
                   Expect.equal selected.Value.Payload.[0] 0uy "COM_INIT_DB succeeds"
 
+                  let fieldList =
+                      Array.concat
+                          [ [| 0x04uy |]
+                            Text.Encoding.UTF8.GetBytes "fsdb_missing_field_list_probe"
+                            [| 0uy |]
+                            Text.Encoding.UTF8.GetBytes "%" ]
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = fieldList } |> Async.Ignore
+                  let! missingFields = readPacketAsync stream
+                  Expect.equal missingFields.Value.Payload.[0] 0xffuy "missing COM_FIELD_LIST table is rejected"
+
                   do! writePacketAsync stream { SeqId = 0uy; Payload = [| 0x01uy |] } |> Async.Ignore
                   let! closed = readPacketAsync stream
                   Expect.isNone closed "COM_QUIT closes the connection"
@@ -355,12 +365,15 @@ let tests =
                   let _, entries =
                       Fsdb.QueryHandler.handle
                           admin
-                          "SELECT command_type, argument FROM mysql.general_log WHERE command_type IN ('Connect','Init DB','Quit')"
+                          "SELECT command_type, argument FROM mysql.general_log WHERE command_type IN ('Connect','Init DB','Field List','Quit')"
 
                   match entries with
                   | ResultSet(_, rows) ->
-                      Expect.equal rows.Length 3 "only successful wire events are logged"
+                      Expect.equal rows.Length 4 "expected wire events are logged"
                       Expect.isTrue (List.contains [ Some "Init DB"; Some "mysql" ] rows) "successful database selection is logged"
+                      Expect.isTrue
+                          (List.contains [ Some "Field List"; Some "fsdb_missing_field_list_probe %" ] rows)
+                          "failed field listing retains its wildcard in the general log"
                       Expect.isTrue (List.contains [ Some "Quit"; Some "" ] rows) "explicit quit is logged"
                       let connection =
                           rows
