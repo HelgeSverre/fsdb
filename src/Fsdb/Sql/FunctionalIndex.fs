@@ -378,7 +378,9 @@ let supportsColumnType transform columnType =
             | _ -> false)
     | transform -> supportsSingleTransform transform columnType
 
-let rec fixedKeyLength = function
+/// These transforms return exact integer values; their encoded key width also
+/// supplies metadata for the hidden functional column.
+let rec private integerKeyLength = function
     | CharacterLength
     | ByteLength
     | BitLength
@@ -390,8 +392,11 @@ let rec fixedKeyLength = function
     | IsNullResult -> Some 4
     | Expression expression ->
         tryPhysicalExpression expression
-        |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> fixedKeyLength))
+        |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> integerKeyLength))
     | _ -> None
+
+let fixedKeyLength = integerKeyLength
+let hasExactIntegerResult transform = integerKeyLength transform |> Option.isSome
 
 let private trimBinarySpaces (bytes: byte[]) =
     let mutable first = 0

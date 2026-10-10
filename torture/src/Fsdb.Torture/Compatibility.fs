@@ -5009,6 +5009,22 @@ module ContractCatalog =
                "DROP TABLE crc32_unique_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private exactIntegerFunctionalBounds =
+        { Name = "exact-integer-functional-bounds"
+          Setup =
+            [| "CREATE TABLE integer_function_probe(id INT PRIMARY KEY,v INT,txt VARCHAR(20),KEY ix_bit ((BIT_COUNT(v))),KEY ix_sign ((SIGN(v))),KEY ix_len ((CHAR_LENGTH(txt))),KEY ix_crc ((CRC32(txt))))"
+               "INSERT INTO integer_function_probe VALUES(1,7,'abc'),(2,8,'def'),(3,-1,'x')" |]
+          Steps =
+            [| Contract.query "bit-count" "SELECT id FROM integer_function_probe WHERE BIT_COUNT(v)=BIT_COUNT(7) ORDER BY id"
+               Contract.query "sign" "SELECT id FROM integer_function_probe WHERE SIGN(v)=SIGN(-2) ORDER BY id"
+               Contract.query "length" "SELECT id FROM integer_function_probe WHERE CHAR_LENGTH(txt)=CHAR_LENGTH('abc') ORDER BY id"
+               Contract.query "checksum" "SELECT id FROM integer_function_probe WHERE CRC32(txt)=CRC32('abc') ORDER BY id"
+               Contract.query "membership" "SELECT id FROM integer_function_probe WHERE BIT_COUNT(v) IN (BIT_COUNT(7),BIT_COUNT(8)) ORDER BY id"
+               Contract.execute "update" "UPDATE integer_function_probe SET txt='changed' WHERE BIT_COUNT(v)=BIT_COUNT(7)"
+               Contract.query "after-update" "SELECT id FROM integer_function_probe WHERE CRC32(txt)=CRC32('changed') ORDER BY id" |]
+          Cleanup = [| "DROP TABLE integer_function_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private roundedFunctionalIndexes =
         { Name = "rounded-functional-indexes"
           Setup =
@@ -9971,6 +9987,7 @@ module ContractCatalog =
            signFunctionalIndex
            bitCountFunctionalIndex
            crc32FunctionalIndex
+           exactIntegerFunctionalBounds
            isNullFunctionalIndex
            asciiFunctionalIndex
            ordFunctionalIndex

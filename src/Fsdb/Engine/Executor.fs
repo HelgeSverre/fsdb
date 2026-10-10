@@ -11818,10 +11818,11 @@ and private isDigestIndexColumn column =
     | Some Md5Digest | Some Sha1Digest -> true
     | _ -> false
 
-and private isChecksumIndexColumn column = finalIndexTransform column = Some Checksum32
+and private isExactIntegerIndexColumn (_, transform) =
+    transform |> Option.exists FunctionalIndex.hasExactIntegerResult
 
 and private plannerIndexedConstantValue store registry table column expression =
-    if isDirectNumericIndexColumn table column || isChecksumIndexColumn column then
+    if isDirectNumericIndexColumn table column || isExactIntegerIndexColumn column then
         numericPlannerConstantEvaluator store registry expression
     elif isDigestIndexColumn column then
         plannerConstantEvaluator store registry expression
@@ -11845,7 +11846,7 @@ and private pointLookupEqualities
         storedIndexedColumnFor registry tref expression
         |> Option.filter (fun column ->
             isDirectNumericIndexColumn table column
-            || isChecksumIndexColumn column
+            || isExactIntegerIndexColumn column
             || isDigestIndexColumn column)
 
     let tryPair indexed constant =

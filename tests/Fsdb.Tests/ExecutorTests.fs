@@ -9163,6 +9163,28 @@ let tests =
                         |> explainRow
                     Expect.equal overriddenPlan.Key None "an overridden CRC32 cannot claim its stored key"
 
+                testCase "constant functions probe exact-integer functional keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE integer_function_keys(id INT PRIMARY KEY,v INT,txt VARCHAR(20),KEY ix_bit ((BIT_COUNT(v))),KEY ix_sign ((SIGN(v))),KEY ix_len ((CHAR_LENGTH(txt))))" |> ignore
+                    runDefault store "INSERT INTO integer_function_keys VALUES(1,7,'abc'),(2,8,'def'),(3,-1,'x')" |> ignore
+                    for predicate, key in
+                        [ "BIT_COUNT(v)=BIT_COUNT(7)", "ix_bit"
+                          "SIGN(v)=SIGN(-2)", "ix_sign"
+                          "CHAR_LENGTH(txt)=CHAR_LENGTH('abc')", "ix_len" ] do
+                        let sql = "SELECT id FROM integer_function_keys WHERE " + predicate
+                        let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
+                        Expect.equal plan.Key (Some key) predicate
+                    let inPlan =
+                        runDefault store "EXPLAIN SELECT id FROM integer_function_keys WHERE BIT_COUNT(v) IN (BIT_COUNT(7),BIT_COUNT(8))"
+                        |> explainRow
+                    Expect.equal inPlan.Key (Some "ix_bit") "constant-function IN probes use the bit-count key"
+                    let overridden = builtins |> registerScalar "BIT_COUNT" (fun _ -> VInt 99L)
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM integer_function_keys WHERE BIT_COUNT(v)=BIT_COUNT(7)"
+                        |> explainRow
+                    Expect.equal overriddenPlan.Key None "overridden functions do not use stored projections"
+
                 testCase "FLOOR and CEIL functional keys retain exact and text values"
                 <| fun _ ->
                     let store = newStore ()
