@@ -49,7 +49,11 @@ comma join, and the audited three-table chain. An equality inside `OR`, or
 one on unindexed columns, does not supply the key probe. MySQL also accepts
 a source-local filter supplied only by `ON`, but rejects a target-only
 `WHERE` filter even when `ON` filters the lookup. Fsdb follows these same
-boundaries.
+boundaries. MySQL also accepts `JOIN ... USING(id)` for the audited filtered
+UPDATE, DELETE, and three-table chain, while rejecting target-only,
+unfiltered, and target-first writes. Fsdb treats a `USING` column as an
+indexed link when it exists on both sources and leads an index on the
+earlier source.
 
 An `ON`-filtered lookup treats a constant-true `WHERE` like no `WHERE`.
 False or NULL conditions, including a false or NULL conjunct with an
@@ -60,8 +64,8 @@ row-dependent expressions.
 
 The `sql_safe_updates` Expecto regression and the pinned MySQL 8.4.11
 `safe-update-mode` contract cover the accepted and rejected forms, error
-codes, and unchanged rows after rejection. All 722 safe-update steps passed
-in run `20261010T094631593-50877`; the complete contract run had only the
+codes, and unchanged rows after rejection. All 794 safe-update steps passed
+in run `20261010T095943924-52733`; the complete contract run had only the
 nine documented identifier-case-policy differences on Linux mode 0. Other
 multi-target access paths, filter shapes, and optimizer-dependent source
 choices remain open.

@@ -8397,6 +8397,12 @@ module ContractCatalog =
               mutationCase "false-or-false" false "UPDATE safe_update_probe SET value=1 WHERE 1=0 OR 2=3"
               chainCase "on-false-and-target" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id AND l.value=0 SET p.value=1 WHERE 1=0 AND p.value=0"
               chainCase "on-true-or-target" false "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id AND l.value=0 SET p.value=1 WHERE 1=1 OR p.value=0"
+              chainCase "using-lookup-update" false "UPDATE safe_update_probe p JOIN safe_update_lookup l USING(id) SET p.value=1 WHERE l.value=0"
+              chainCase "using-target-update" true "UPDATE safe_update_probe p JOIN safe_update_lookup l USING(id) SET p.value=1 WHERE p.value=0"
+              chainCase "using-no-filter" true "UPDATE safe_update_probe p JOIN safe_update_lookup l USING(id) SET p.value=1"
+              chainCase "using-lookup-delete" false "DELETE p FROM safe_update_probe p JOIN safe_update_lookup l USING(id) WHERE l.value=0"
+              chainCase "using-straight" true "UPDATE safe_update_probe p STRAIGHT_JOIN safe_update_lookup l USING(id) SET p.value=1 WHERE l.value=0"
+              chainCase "using-chain" false "UPDATE safe_update_probe p JOIN safe_update_lookup l USING(id) JOIN safe_update_middle m USING(id) SET p.value=1 WHERE m.value=0"
               "joined-large-lookup", Some(8, 1175, "HY000"),
                   reset @ [ "INSERT INTO safe_update_lookup VALUES" + ([ 3..100 ] |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ",")
                             "UPDATE safe_update_probe p JOIN safe_update_lookup l ON l.id=p.id SET p.value=1 WHERE l.value=0"

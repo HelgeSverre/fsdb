@@ -3668,6 +3668,18 @@ let tests =
                   let run = safeUpdateJoinFixture ()
                   Expect.equal (run sql) expected sql
 
+          testCase "sql_safe_updates follows a USING key"
+          <| fun _ ->
+              for sql, expected in
+                  [ "UPDATE t JOIN l USING(id) SET t.v=1 WHERE l.v=0", Affected 2UL
+                    "UPDATE t JOIN l USING(id) SET t.v=1 WHERE t.v=0", safeUpdateRejection
+                    "UPDATE t JOIN l USING(id) SET t.v=1", safeUpdateRejection
+                    "DELETE t FROM t JOIN l USING(id) WHERE l.v=0", Affected 2UL
+                    "UPDATE t STRAIGHT_JOIN l USING(id) SET t.v=1 WHERE l.v=0", safeUpdateRejection
+                    "UPDATE t JOIN l USING(id) JOIN m USING(id) SET t.v=1 WHERE m.v=0", Affected 2UL ] do
+                  let run = safeUpdateJoinFixture ()
+                  Expect.equal (run sql) expected sql
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -24708,7 +24708,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             joins
             |> List.choose (fun join ->
                 match join.Kind, join.Table with
-                | (InnerJoin | CrossJoin), FromTable tableRef when join.Using.IsEmpty -> Some tableRef
+                | (InnerJoin | CrossJoin), FromTable tableRef -> Some tableRef
                 | _ -> None)
 
         let sources =
@@ -24746,11 +24746,20 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             let edges =
                 joins
                 |> List.mapi (fun index join ->
-                    let joinedQualifier = sources.[index + 1] |> fst |> tableQualifier
+                    let joinedRef, joinedTable = sources.[index + 1]
+                    let joinedQualifier = tableQualifier joinedRef
                     [ for earlierRef, earlierTable in sources |> List.take (index + 1) do
                           let earlierQualifier = tableQualifier earlierRef
-                          if (conjuncts join.On @ whereConditions)
-                             |> List.exists (probesIndexedKey earlierQualifier earlierTable joinedQualifier) then
+                          let usingProbe =
+                              join.Using
+                              |> List.exists (fun column ->
+                                  tableHasColumn joinedTable column
+                                  && tableHasColumn earlierTable column
+                                  && hasLeadingIndexColumn earlierTable column)
+                          let equalityProbe =
+                              (conjuncts join.On @ whereConditions)
+                              |> List.exists (probesIndexedKey earlierQualifier earlierTable joinedQualifier)
+                          if usingProbe || equalityProbe then
                               yield joinedQualifier, earlierQualifier ])
                 |> List.concat
 
