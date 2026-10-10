@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <Version>0.1.0-preview.3</Version>
+    <Version>0.1.0-preview.4</Version>
     <PackageId>Fsdb</PackageId>
     <Authors>Helge Sverre</Authors>
     <Description>An embeddable F# database with a MySQL-compatible SQL engine and wire protocol.</Description>
