@@ -12183,13 +12183,16 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
             | _ -> None
         | _ -> None)
 
-and private tryStoredEqualityMatchLookup
+and private tryStoredEqualityMatchLookupWhere
+    (allowed: string -> bool)
     (store: Store)
     (table: Table)
     (equalities: (string * Value) list)
     : (Storage.EqualityIndexMatch * Storage.EqualityIndexMatchLookup) option =
     let columnNames, values = List.unzip equalities
-    let matches = Storage.equalityIndexMatchesCoveredByColumns table columnNames
+    let matches =
+        Storage.equalityIndexMatchesCoveredByColumns table columnNames
+        |> List.filter (fun matched -> allowed matched.Index.Name)
 
     let pinsOneOrderedKey (matched: Storage.EqualityIndexMatch) =
         matched.UsesFullKey
@@ -12215,6 +12218,9 @@ and private tryStoredEqualityMatchLookup
         |> Option.bind (Storage.tryEqualityLookupForMatch store table matched)
         |> Option.map (fun lookup -> matched, lookup))
 
+and private tryStoredEqualityMatchLookup store table equalities =
+    tryStoredEqualityMatchLookupWhere (fun _ -> true) store table equalities
+
 and private tryEqualityAccessInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
@@ -12228,6 +12234,7 @@ and private tryEqualityAccessInTableWith
        || not (table.Indexes |> List.exists (fun index -> index.Visible && index.Kind = BTree)) then
         None
     else
+        let allowed = indexHintsFor IndexJoin tref |> indexAllowedBy
         let equalities = pointLookupEqualities store registry table tref whereExpr
         let storedEqualities =
             equalities
@@ -12235,7 +12242,7 @@ and private tryEqualityAccessInTableWith
                 if equality.Transform.IsNone then Some(equality.Column, equality.Value) else None)
 
         let covered =
-            tryStoredEqualityMatchLookup store table storedEqualities
+            tryStoredEqualityMatchLookupWhere allowed store table storedEqualities
             |> Option.bind (fun (matched, lookup) ->
                 equalityAccessPlanForMatch policy table matched lookup)
 
@@ -12243,7 +12250,8 @@ and private tryEqualityAccessInTableWith
         |> Option.orElseWith (fun () ->
             equalities
             |> List.tryPick (fun equality ->
-                Storage.tryEqualityIndexForTransform table equality.Column equality.Transform
+                Storage.equalityIndexesForTransform table equality.Column equality.Transform
+                |> List.tryFind (fun index -> allowed index.Name)
                 |> Option.bind (fun index ->
                     (if equality.Transform.IsSome then
                          Storage.tryProjectedEqualityRowIdsForIndex store table index [ equality.Value ]
@@ -12283,6 +12291,7 @@ and private tryInAccessInTableWith
     if not (storedRowsMatchReadRows store table.Columns) then
         None
     else
+        let allowed = indexHintsFor IndexJoin tref |> indexAllowedBy
         plannerInProbes store registry table tref whereExpr
         |> List.tryPick (fun probe ->
             let values =
@@ -12296,12 +12305,14 @@ and private tryInAccessInTableWith
                 let access =
                     match probe.Columns, first with
                     | [ (column, transform) ], [ value ] when transform.IsSome ->
-                        Storage.tryEqualityIndexForTransform table column transform
+                        Storage.equalityIndexesForTransform table column transform
+                        |> List.tryFind (fun index -> allowed index.Name)
                         |> Option.bind (fun index ->
                             Storage.tryProjectedEqualityRowIdsForIndex store table index [ value ]
                             |> Option.map (fun _ -> table, index))
                     | columns, _ when columns |> List.forall (snd >> Option.isNone) ->
-                        Storage.tryEqualityIndexForColumns table (columns |> List.map fst)
+                        Storage.equalityIndexesForColumns table (columns |> List.map fst)
+                        |> List.tryFind (fun index -> allowed index.Name)
                         |> Option.map (fun index -> table, index)
                     | _ -> None
 

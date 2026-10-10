@@ -13504,6 +13504,27 @@ let tests =
                         |> explainRow
                     Expect.equal forced.Key (Some "ix_v") "FORCE INDEX keeps a broad range on the named key"
 
+                testCase "table index hints choose another eligible equality key"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE hinted_choice(id INT PRIMARY KEY,a INT,b INT,KEY ix_a(a),KEY ix_b(b))" |> ignore
+                    runDefault store "INSERT INTO hinted_choice VALUES(1,1,9),(2,2,8),(3,3,7)" |> ignore
+                    for hint in [ "USE INDEX(ix_b)"; "IGNORE INDEX(ix_a)" ] do
+                        let plan =
+                            runDefault store (sprintf "EXPLAIN SELECT id FROM hinted_choice %s WHERE a=1 AND b=9" hint)
+                            |> explainRow
+                        Expect.equal plan.Key (Some "ix_b") (sprintf "%s selects the eligible key" hint)
+                    runDefault store "CREATE TABLE same_key_choice(id INT PRIMARY KEY,v INT,KEY ix_first(v),KEY ix_second(v))" |> ignore
+                    runDefault store "INSERT INTO same_key_choice VALUES(1,4),(2,9),(3,16)" |> ignore
+                    let sameColumn =
+                        runDefault store "EXPLAIN SELECT id FROM same_key_choice USE INDEX(ix_second) WHERE v=9"
+                        |> explainRow
+                    Expect.equal sameColumn.Key (Some "ix_second") "USE INDEX can select a second key on the same column"
+                    let membership =
+                        runDefault store "EXPLAIN SELECT id FROM same_key_choice USE INDEX(ix_second) WHERE v IN (9,16)"
+                        |> explainRow
+                    Expect.equal membership.Key (Some "ix_second") "USE INDEX can select a second membership key"
+
                 testCase "integer writes reject overflow in strict mode and clamp it otherwise"
                 <| fun _ ->
                     let store = newStore ()

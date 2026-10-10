@@ -5172,28 +5172,33 @@ let private equalityIndex unique (group: IndexKeyGroup) =
       Transforms = group.Transforms
       Unique = unique }
 
-let internal tryEqualityIndexForTransform
+let internal equalityIndexesForTransform
     (table: Table)
     (columnName: string)
     (transform: IndexTransform option)
-    : EqualityIndex option =
+    : EqualityIndex list =
     match resolveColumn table.Columns columnName with
-    | Error _ -> None
+    | Error _ -> []
     | Ok index ->
-        uniqueKeyGroups table
-        |> visibleGroups
-        |> List.choose trySingleColumnKeyGroup
-        |> List.tryFind (fun group -> group.ColumnIndex = index && group.Transform = transform)
-        |> Option.map (fun group -> equalityIndex true group.Group)
-        |> Option.orElseWith (fun () ->
+        let matching (group: SingleColumnKeyGroup) =
+            group.ColumnIndex = index && group.Transform = transform
+        let unique =
+            uniqueKeyGroups table
+            |> visibleGroups
+            |> List.choose trySingleColumnKeyGroup
+            |> List.filter matching
+            |> List.map (fun group -> equalityIndex true group.Group)
+        let secondary =
             secondaryKeyGroups table
             |> visibleGroups
             |> List.choose trySingleColumnKeyGroup
-            |> List.tryFind (fun group ->
-                group.ColumnIndex = index
-                && group.Transform = transform
-                && Map.containsKey group.Group.Name table.SecondaryIndex)
-            |> Option.map (fun group -> equalityIndex false group.Group))
+            |> List.filter (fun group ->
+                matching group && Map.containsKey group.Group.Name table.SecondaryIndex)
+            |> List.map (fun group -> equalityIndex false group.Group)
+        unique @ secondary
+
+let internal tryEqualityIndexForTransform table columnName transform =
+    equalityIndexesForTransform table columnName transform |> List.tryHead
 
 /// Finds a stored-column equality index, preferring a unique key.
 let tryEqualityIndex (table: Table) (columnName: string) : EqualityIndex option =
@@ -5462,11 +5467,11 @@ let trySpatialLookup
     tableAt store dbName tableName
     |> Option.bind (fun table -> trySpatialLookupInTable table columnName relation geometry)
 
-let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : EqualityIndex option =
+let internal equalityIndexesForColumns (table: Table) (columnNames: string list) : EqualityIndex list =
     columnNames
     |> traverse (resolveColumn table.Columns)
     |> Result.toOption
-    |> Option.bind (fun requested ->
+    |> Option.map (fun requested ->
         let matches (_, (group: IndexKeyGroup)) =
             sameLength group.Indices requested
             && Set.ofList group.Indices = Set.ofList requested
@@ -5474,8 +5479,12 @@ let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : Equal
 
         (uniqueKeyGroups table |> visibleGroups |> List.map (fun group -> true, group))
         @ (secondaryKeyGroups table |> visibleGroups |> List.map (fun group -> false, group))
-        |> List.tryFind matches
-        |> Option.map (fun (unique, group) -> equalityIndex unique group))
+        |> List.filter matches
+        |> List.map (fun (unique, group) -> equalityIndex unique group))
+    |> Option.defaultValue []
+
+let tryEqualityIndexForColumns table columnNames =
+    equalityIndexesForColumns table columnNames |> List.tryHead
 
 let internal equalityIndexMatchesCoveredByColumns (table: Table) (columnNames: string list) =
     columnNames
