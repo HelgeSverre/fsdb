@@ -111,6 +111,23 @@ let tests =
               conn.Query "SET time_zone = '+03:00'" |> ignore
               Expect.equal (one "SELECT FROM_UNIXTIME(0)") (Some "1970-01-01 03:00:00") "updated timezone"
 
+          testCase "unchanged async scope still restores a value changed by its body"
+          <| fun _ ->
+              let slot = Threading.AsyncLocal<string>()
+              slot.Value <- "initial"
+              Fsdb.DynamicScope.withValue slot "initial" (fun () ->
+                  slot.Value <- "inner"
+                  Expect.equal slot.Value "inner" "body can update its scope")
+              Expect.equal slot.Value "initial" "outer value is restored"
+              Expect.throws
+                  (fun () ->
+                      Fsdb.DynamicScope.withValue slot "other" (fun () ->
+                          slot.Value <- "inner"
+                          failwith "scope failure")
+                      |> ignore)
+                  "exception propagates"
+              Expect.equal slot.Value "initial" "outer value survives an exception"
+
           testCase "Db.connect persists USE and session state across queries, with registered functions in scope"
           <| fun _ ->
               let shout =
