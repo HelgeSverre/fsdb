@@ -11818,6 +11818,15 @@ and private isDigestIndexColumn (_, transform) =
     | Some transform -> isDigest transform
     | None -> false
 
+and private plannerIndexedConstantValue store registry table column expression =
+    if isDirectNumericIndexColumn table column then
+        numericPlannerConstantEvaluator store registry expression
+    elif isDigestIndexColumn column then
+        plannerConstantEvaluator store registry expression
+        |> Option.filter (function VString _ -> true | _ -> false)
+    else
+        None
+
 and private pointLookupEqualities
     (store: Store)
     (registry: Registry)
@@ -11825,17 +11834,10 @@ and private pointLookupEqualities
     (tref: TableRef)
     (whereExpr: Expr option)
     : PointEquality list =
-    let tryNumericConstant = numericPlannerConstantEvaluator store registry
-    let tryConstant = plannerConstantEvaluator store registry
-
     let tryNonLiteralConstant column expression =
         match expression with
         | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> None
-        | _ when isDirectNumericIndexColumn table column -> tryNumericConstant expression
-        | _ when isDigestIndexColumn column ->
-            tryConstant expression
-            |> Option.filter (function VString _ -> true | _ -> false)
-        | _ -> None
+        | _ -> plannerIndexedConstantValue store registry table column expression
 
     let tryIndexedColumn expression =
         storedIndexedColumnFor registry tref expression
@@ -11936,15 +11938,9 @@ and private plannerInProbes
     (tref: TableRef)
     (whereExpr: Expr option)
     : IndexInProbe list =
-    let tryNumericConstant = numericPlannerConstantEvaluator store registry
-
     let plannerValue column = function
         | LiteralValue value -> Some value
-        | expression when isDirectNumericIndexColumn table column -> tryNumericConstant expression
-        | expression when isDigestIndexColumn column ->
-            plannerConstantEvaluator store registry expression
-            |> Option.filter (function VString _ -> true | _ -> false)
-        | _ -> None
+        | expression -> plannerIndexedConstantValue store registry table column expression
 
     inProbesWith (storedIndexedColumnFor registry tref) plannerValue whereExpr
 
