@@ -796,6 +796,12 @@ text-to-number aggregate scan costs. Its repeatability check passes, but
 between-run variation and the absence of a pre-change baseline limit it to
 profiling guidance rather than a regression claim.
 
+A [three-run indexed constant-bound snapshot](benchmarks/results/2026-10-10-constant-index-bounds.md)
+finds fsdb's fixed primary-key lookup around 220–248 µs versus MySQL's
+41–43 µs. `ROUND(PI())` and `BIT_COUNT(7)` lookups fall within the run-to-run
+variation of that control, so the shared lookup/query pipeline is the next
+profile target rather than a proven expression-folding regression.
+
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes
 or one, versus 6.56 ms for the scan-shaped expression; MySQL takes about
