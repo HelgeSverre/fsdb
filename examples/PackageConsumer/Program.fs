@@ -23,12 +23,12 @@ let run () =
     expectAffected "CREATE TABLE items (id INT PRIMARY KEY, quantity INT)" []
     expectAffected "INSERT INTO items VALUES (?, ?)" [ VInt 1L; VInt 21L ]
 
-    let result =
-        connection.QueryValuesAsync(
-            "SELECT DOUBLE_IT(quantity) AS doubled FROM items WHERE id = ?",
-            [ VInt 1L ],
-            CancellationToken.None
-        ).GetAwaiter().GetResult()
+    use lookup =
+        match connection.Prepare "SELECT DOUBLE_IT(quantity) AS doubled FROM items WHERE id = ?" with
+        | Ok command -> command
+        | Error error -> failwithf "Could not prepare lookup: %A" error
+
+    let result = lookup.QueryValuesAsync([ VInt 1L ], CancellationToken.None).GetAwaiter().GetResult()
 
     match result with
     | Ok([ "doubled" ], [ [ Some(VInt 42L) ] ]) ->

@@ -51,6 +51,39 @@ let tests =
               Expect.equal columns [ "answer" ] "projection name"
               Expect.equal rows [ [ Some(VInt 42L) ] ] "typed async row"
 
+          testCase "prepared command reuses SQL with changing values and owns its lifetime"
+          <| fun _ ->
+              use conn = Fsdb.Db.create () |> Fsdb.Db.connect
+              conn.Query "CREATE TABLE prepared_items (id INT PRIMARY KEY, payload BLOB)" |> ignore
+              let prepare sql =
+                  match conn.Prepare sql with
+                  | Ok command -> command
+                  | Error error -> failtestf "prepare failed: %A" error
+              use insert = prepare "INSERT INTO prepared_items VALUES (?, ?)"
+              for id in 1L..3L do
+                  match insert.Execute [ VInt id; VBytes [| byte id |] ] with
+                  | Affected 1UL -> ()
+                  | other -> failtestf "insert failed: %A" other
+              use select = prepare "SELECT payload FROM prepared_items WHERE id=?"
+              for id in 1L..3L do
+                  match select.QueryValues [ VInt id ] with
+                  | Ok(_, [ [ Some(VBytes bytes) ] ]) -> Expect.sequenceEqual bytes [| byte id |] "selected payload"
+                  | other -> failtestf "select failed: %A" other
+              match select.QueryValuesAsync([ VInt 2L ], Threading.CancellationToken.None).GetAwaiter().GetResult() with
+              | Ok(_, [ [ Some(VBytes bytes) ] ]) -> Expect.sequenceEqual bytes [| 2uy |] "async payload"
+              | other -> failtestf "async select failed: %A" other
+              (select :> IDisposable).Dispose()
+              Expect.throwsT<ObjectDisposedException> (fun () -> select.Execute [ VInt 1L ] |> ignore) "disposed command"
+              (conn :> IDisposable).Dispose()
+              Expect.throwsT<ObjectDisposedException> (fun () -> insert.Execute [ VInt 4L; VNull ] |> ignore) "disposed connection"
+
+          testCase "prepared command reports invalid SQL at preparation"
+          <| fun _ ->
+              use conn = Fsdb.Db.create () |> Fsdb.Db.connect
+              match conn.Prepare "SELECT FROM" with
+              | Error _ -> ()
+              | Ok _ -> failtest "invalid SQL should fail to prepare"
+
           testCase "Db.connect persists USE and session state across queries, with registered functions in scope"
           <| fun _ ->
               let shout =

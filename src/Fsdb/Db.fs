@@ -190,6 +190,45 @@ let subscribeCommits (db: Db) : CommitSubscription = new CommitSubscription(db.S
 /// wire-protocol server's own positive connection ids.
 let private connectionCounter = ref 0
 
+let private typedResult result : Result<string list * Value option list list, SqlState.Error> =
+    let detachValue =
+        function
+        | VBytes bytes -> VBytes(Array.copy bytes)
+        | VBinaryLiteral bytes -> VBinaryLiteral(Array.copy bytes)
+        | VEncodedString(charset, bytes) -> VEncodedString(charset, Array.copy bytes)
+        | value -> value
+    match Executor.typedRows result with
+    | Some(columns, rows) ->
+        Ok(columns, rows |> List.map (Array.toList >> List.map (function VNull -> None | value -> Some(detachValue value))))
+    | None ->
+        match Executor.errorInfo result with
+        | Some error -> Error error
+        | None -> Error(SqlState.create 1105 "Statement did not return typed rows")
+
+/// Reuses a parsed statement on its originating connection. Dispose it when no longer needed.
+type PreparedCommand internal (execute: Value list -> QueryHandler.QueryResult) =
+    let gate = obj ()
+    let mutable disposed = false
+
+    member _.Execute(parameters: Value list) =
+        lock gate (fun () ->
+            if disposed then raise (System.ObjectDisposedException(nameof PreparedCommand))
+            execute parameters)
+
+    member this.QueryValues(parameters: Value list) =
+        this.Execute(parameters) |> typedResult
+
+    member this.ExecuteAsync(parameters: Value list, cancellation: CancellationToken) : Task<QueryHandler.QueryResult> =
+        Task.Run((fun () ->
+            DynamicScope.withThreadValue Storage.queryCancellation cancellation (fun () -> this.Execute(parameters))), cancellation)
+
+    member this.QueryValuesAsync(parameters: Value list, cancellation: CancellationToken) : Task<Result<string list * Value option list list, SqlState.Error>> =
+        Task.Run((fun () ->
+            DynamicScope.withThreadValue Storage.queryCancellation cancellation (fun () -> this.QueryValues(parameters))), cancellation)
+
+    interface System.IDisposable with
+        member _.Dispose() = lock gate (fun () -> disposed <- true)
+
 /// An in-process connection — no socket, no wire protocol, just
 /// `QueryHandler.handle` over its own private session, so per-connection
 /// state (`USE`, variables, open transaction) persists across `Query` calls
@@ -232,22 +271,23 @@ type Connection internal (db: Db) =
                 let statement = QueryHandler.createPreparedStatement preparedSession sql ast count
                 QueryHandler.executePrepared preparedSession statement parameters)
 
+    /// Parses and validates SQL once; the returned command remains bound to this connection and its current database.
+    member this.Prepare(sql: string) : Result<PreparedCommand, SqlState.Error> =
+        let prepared =
+            lock gate (fun () ->
+                if disposed then raise (System.ObjectDisposedException(nameof Connection))
+                let updated, result = QueryHandler.prepareStatementWithDiagnostics session sql
+                session <- updated
+                result |> Result.map (fun (ast, count) -> QueryHandler.createPreparedStatement updated sql ast count))
+        prepared
+        |> Result.map (fun statement ->
+            new PreparedCommand(fun parameters ->
+                this.Run(fun current -> QueryHandler.executePrepared current statement parameters)))
+        |> Result.mapError (fun (code, message) -> SqlState.create code message)
+
     /// Returns engine values for SELECT statements, preserving SQL NULL as `None`.
     member this.QueryValues(sql: string, parameters: Value list) : Result<string list * Value option list list, SqlState.Error> =
-        let result = this.Execute(sql, parameters)
-        let detachValue =
-            function
-            | VBytes bytes -> VBytes(Array.copy bytes)
-            | VBinaryLiteral bytes -> VBinaryLiteral(Array.copy bytes)
-            | VEncodedString(charset, bytes) -> VEncodedString(charset, Array.copy bytes)
-            | value -> value
-        match Executor.typedRows result with
-        | Some(columns, rows) ->
-            Ok(columns, rows |> List.map (Array.toList >> List.map (function VNull -> None | value -> Some(detachValue value))))
-        | None ->
-            match Executor.errorInfo result with
-            | Some error -> Error error
-            | None -> Error(SqlState.create 1105 "Statement did not return typed rows")
+        this.Execute(sql, parameters) |> typedResult
 
     /// Runs a query on a worker thread and propagates cancellation to the engine and extensions.
     member this.QueryAsync(sql: string, cancellation: CancellationToken) : Task<QueryHandler.QueryResult> =

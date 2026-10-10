@@ -706,11 +706,22 @@ let demo () =
 
     let pending = connection.QueryValuesAsync("SELECT ? AS answer", [ VInt 42L ], CancellationToken.None)
     pending.GetAwaiter().GetResult() |> ignore
+
+    use lookup =
+        match connection.Prepare "SELECT quantity FROM items WHERE id = ?" with
+        | Ok command -> command
+        | Error error -> failwithf "Prepare failed: %A" error
+    lookup.QueryValues([ VInt 1L ]) |> ignore
+    lookup.QueryValues([ VInt 2L ]) |> ignore
 ```
 
 `QueryValues` returns `Value option` cells, with SQL NULL as `None`; its error
-case retains the SQL code, state, and message. `Query` remains available for
-text-protocol-shaped results. Dispose a connection before its host, and avoid
+case retains the SQL code, state, and message. `Prepare` parses and validates
+SQL once and returns a disposable command bound to its connection and selected
+database. Its `Execute`, `QueryValues`, and async methods accept new positional
+values on each call; use it when executing the same SQL repeatedly. `Query`
+remains available for text-protocol-shaped results. Dispose a connection before
+its host, and avoid
 using the same connection concurrently for independent transactions. `Db.own`
 takes exclusive ownership of the configured database; stop any separate wire
 listener before disposing its host.
