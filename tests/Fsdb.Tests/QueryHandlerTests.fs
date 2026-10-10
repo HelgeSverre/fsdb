@@ -3500,6 +3500,41 @@ let tests =
               | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES, got %A" other
 
+          testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
+          <| fun _ ->
+              let unsafeMessage =
+                  "You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column. "
+
+              for sql, rejected in
+                  [ "UPDATE t SET v=1", true
+                    "UPDATE t SET v=1 WHERE v=0", true
+                    "UPDATE t SET v=1 WHERE id=1 OR v=0", true
+                    "UPDATE t SET v=1 WHERE id IS NOT NULL", true
+                    "UPDATE t SET v=1 WHERE id+0=1", true
+                    "UPDATE t SET v=1 WHERE id=1", false
+                    "UPDATE t SET v=1 WHERE id<>1", false
+                    "UPDATE t SET v=1 WHERE id=1 AND v=0", false
+                    "UPDATE t SET v=1 WHERE id=1 OR id=2", false
+                    "UPDATE t SET v=1 WHERE id>0", false
+                    "UPDATE t SET v=1 WHERE id BETWEEN 1 AND 2", false
+                    "UPDATE t SET v=1 LIMIT 1", false
+                    "DELETE FROM t", true
+                    "DELETE FROM t WHERE v=0", true
+                    "DELETE FROM t WHERE id=1", false
+                    "DELETE FROM t LIMIT 1", false ] do
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "CREATE TABLE t(id INT PRIMARY KEY,v INT)"
+                  let session, _ = handle session "INSERT INTO t VALUES(1,0),(2,0)"
+                  let session, setting = handle session "SET sql_safe_updates=1"
+                  Expect.equal setting (Affected 0UL) "setting is accepted"
+                  let session, result = handle session sql
+                  if rejected then
+                      Expect.equal result (Err(1175, unsafeMessage)) sql
+                      let _, rows = handle session "SELECT id,v FROM t ORDER BY id"
+                      Expect.equal rows (ResultSet([ "id"; "v" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) (sql + " remains atomic")
+                  else
+                      Expect.isNone (errorInfo result) sql
+
           testCase "sql_mode validates names and canonicalizes composite modes atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

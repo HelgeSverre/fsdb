@@ -384,6 +384,7 @@ let private numericSystemVariables =
           "performance_schema"
           "query_cache_size"
           "sql_notes"
+          "sql_safe_updates"
           "sql_log_bin"
           "tmp_table_size"
           "transaction_read_only"
@@ -1556,6 +1557,9 @@ let private systemSetAction
     | Ok(value, sideEffects) when name = "binlog_format" ->
         normalizeEnumVariable name [ "MIXED"; "STATEMENT"; "ROW" ] value
         |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
+    | Ok(value, sideEffects) when name = "sql_safe_updates" ->
+        normalizeOnOff name value
+        |> Result.map (fun value -> SetVarAction(name, Some(if value = "ON" then "1" else "0"), isGlobal), sideEffects)
     | Ok(value, sideEffects) when name = "sql_log_bin" ->
         normalizeOnOff name value
         |> Result.map (fun value -> SetVarAction(name, Some(if value = "ON" then "1" else "0"), isGlobal), sideEffects)
@@ -3171,7 +3175,15 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
                     let (lastInsertId, lastGeneratedId), result =
                         withExecutionLimits (fun () ->
-                            Executor.executeAs store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows (accountOf session) stmt)
+                            let ids = session.LastInsertId, session.LastGeneratedId
+                            let safety =
+                                match sessionValue session "sql_safe_updates" with
+                                | Some("1" | "ON") -> Executor.validateSafeMutation store registry dbName stmt
+                                | _ -> Ok()
+
+                            match safety with
+                            | Ok() -> Executor.executeAs store registry dbName ids foundRows (accountOf session) stmt
+                            | Error(code, message) -> ids, Err(code, message))
 
                     let metadata =
                         match stmt, result with

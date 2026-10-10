@@ -24627,6 +24627,57 @@ let rec executeAs
     | Explain(format, inner) ->
         ids, explainStatement format store registry dbName inner
 
+let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (statement: Statement) =
+    let unsafeError =
+        1175, "You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column. "
+
+    let hasIndexedInequality (table: Table) (tableRef: TableRef) left right =
+        let indexedColumn = function
+            | Col name -> Some name
+            | QualifiedCol(qualifier, name)
+                when equalsIgnoreCase qualifier (tableRef.Alias |> Option.defaultValue tableRef.Table) -> Some name
+            | _ -> None
+
+        indexedColumn left
+        |> Option.exists (fun name ->
+            isLiteralConstantExpression registry right
+            && (table.Indexes
+                |> List.exists (fun index ->
+                   index.Visible && index.Kind = BTree
+                   && (index.KeyColumns |> List.tryHead |> Option.exists (fun key ->
+                       key.Transform.IsNone && equalsIgnoreCase key.Name name)))))
+
+    let rec usesKey (table: Table) (tableRef: TableRef) (predicate: Expr) =
+        match predicate with
+        | BinOp(And, left, right) -> usesKey table tableRef left || usesKey table tableRef right
+        | BinOp(Or, left, right) -> usesKey table tableRef left && usesKey table tableRef right
+        | BinOp(Neq, left, right) ->
+            hasIndexedInequality table tableRef left right
+            || hasIndexedInequality table tableRef right left
+        | _ -> tryPhysicalCandidatesInTable store registry table tableRef (Some predicate) |> Option.isSome
+
+    let check (sources: FromItem list) (whereExpr: Expr option) (limit: Expr option) =
+        if limit.IsSome then Ok()
+        else
+            let tables =
+                sources
+                |> List.collect FromItem.leaves
+                |> List.choose (function
+                    | FromTable tableRef ->
+                        physicalFastPathTable store dbName tableRef
+                        |> Option.map (fun table -> table, tableRef)
+                    | _ -> None)
+
+            match whereExpr with
+            | Some predicate when tables |> List.exists (fun (table, tableRef) -> usesKey table tableRef predicate) -> Ok()
+            | _ when tables.IsEmpty -> Ok()
+            | _ -> Error unsafeError
+
+    match statement with
+    | Update update -> check (FromTable update.From :: (update.Joins |> List.map _.Table)) update.Where update.Limit
+    | Delete delete -> check (FromTable delete.From :: (delete.Joins |> List.map _.Table)) delete.Where delete.Limit
+    | _ -> Ok()
+
 let transactionWriteTargets
     (store: Store)
     (registry: Registry)

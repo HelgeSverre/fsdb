@@ -8234,6 +8234,40 @@ module ContractCatalog =
           Cleanup = [||]
           Coverage = [| "statement:set", [| "text-differential" |] |] }
 
+    let private safeUpdateMode =
+        let reset =
+            [ "DROP TABLE IF EXISTS safe_update_probe"
+              "CREATE TABLE safe_update_probe(id INT PRIMARY KEY, value INT)"
+              "INSERT INTO safe_update_probe VALUES(1,0),(2,0)"
+              "SET sql_safe_updates=ON" ]
+
+        let cases =
+            let mutationCase name rejected sql =
+                name,
+                (if rejected then Some(4, 1175, "HY000") else None),
+                reset @ [ sql; "SELECT id,value FROM safe_update_probe ORDER BY id" ]
+
+            [ mutationCase "unrestricted-update" true "UPDATE safe_update_probe SET value=1"
+              mutationCase "unindexed-update" true "UPDATE safe_update_probe SET value=1 WHERE value=0"
+              mutationCase "key-update" false "UPDATE safe_update_probe SET value=1 WHERE id=1"
+              mutationCase "limit-update" false "UPDATE safe_update_probe SET value=1 LIMIT 1"
+              mutationCase "unrestricted-delete" true "DELETE FROM safe_update_probe"
+              mutationCase "key-delete" false "DELETE FROM safe_update_probe WHERE id=1"
+              "disabled", None,
+                  reset @ [ "SET sql_safe_updates=OFF"
+                            "UPDATE safe_update_probe SET value=1"
+                            "SELECT @@sql_safe_updates AS value"
+                            "SELECT id,value FROM safe_update_probe ORDER BY id" ] ]
+
+        { Name = "safe-update-mode"
+          Setup = [||]
+          Steps = isolatedScriptSteps cases
+          Cleanup = [| "DROP TABLE IF EXISTS safe_update_probe" |]
+          Coverage =
+            [| "statement:set", [| "text-differential" |]
+               "statement:update", [| "text-differential" |]
+               "statement:delete", [| "text-differential" |] |] }
+
     let private alterCopyCounts =
         let operations =
             [
@@ -9385,6 +9419,7 @@ module ContractCatalog =
            alterCopyCounts
            alterDefaultBinlogSafety
            binlogSettings
+           safeUpdateMode
            integerCastConditions
            triggerWarningLifetimes
            deleteIgnoreForeignKeys

@@ -76,6 +76,7 @@ let defaultVariables: Map<string, string option> =
           "foreign_key_checks", "1"
           "unique_checks", "1"
           "sql_notes", "1"
+          "sql_safe_updates", "0"
           "transaction_isolation", "REPEATABLE-READ"
           "transaction_read_only", "0"
           "tx_read_only", "0"
