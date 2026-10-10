@@ -4711,6 +4711,21 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE negation_values" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential" |] |] }
 
+    let private constantNullFallbackIndexes =
+        { Name = "constant-null-fallback-indexes"
+          Setup =
+            [| "CREATE TABLE constant_null_fallback(id INT PRIMARY KEY,v INT)"
+               "INSERT INTO constant_null_fallback VALUES(1,10),(2,20),(3,30)" |]
+          Steps =
+            [| Contract.query "coalesce-equality"
+                   "SELECT v FROM constant_null_fallback WHERE id=COALESCE(NULL,2)"
+               Contract.query "ifnull-equality"
+                   "SELECT v FROM constant_null_fallback WHERE id=IFNULL(NULL,2)"
+               Contract.query "coalesce-range"
+                   "SELECT id FROM constant_null_fallback WHERE id BETWEEN IFNULL(NULL,2) AND COALESCE(NULL,3) ORDER BY id" |]
+          Cleanup = [| "DROP TABLE constant_null_fallback" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private tableStatisticsCache =
         let rows =
             "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='table_stats_probe'"
@@ -9054,7 +9069,8 @@ module ContractCatalog =
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let all =
-        [| tableStatisticsCache
+        [| constantNullFallbackIndexes
+           tableStatisticsCache
            missingTableDiagnostics
            regexpPosixClasses
            mixedTypeJoinIn

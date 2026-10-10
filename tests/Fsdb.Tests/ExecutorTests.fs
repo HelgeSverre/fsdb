@@ -1339,6 +1339,16 @@ let tests =
                         ()
                     | other -> failtestf "expected a const plan for a deterministic numeric function, got %A" other
 
+                    for bound in [ "COALESCE(NULL, 2)"; "IFNULL(NULL, 2)" ] do
+                        match runDefault store (sprintf "EXPLAIN SELECT v FROM users WHERE id = %s" bound) with
+                        | ResultSet(_, [ [ _; _; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
+                            ()
+                        | other -> failtestf "expected a const plan for %s, got %A" bound other
+
+                        match runDefault store (sprintf "SELECT v FROM users WHERE id = %s" bound) with
+                        | ResultSet([ "v" ], [ [ Some "20" ] ]) -> ()
+                        | other -> failtestf "expected the indexed row for %s, got %A" bound other
+
                     match runDefault store "EXPLAIN UPDATE users SET v = 5 WHERE id = 1 + 1" with
                     | ResultSet(_, [ [ _; Some "UPDATE"; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
                         ()
@@ -1397,6 +1407,25 @@ let tests =
                     | other -> failtestf "expected overridden ABS to retain row-by-row semantics, got %A" other
 
                     Expect.isGreaterThan calls 2 "the overridden function remains on the scan path"
+
+                    let mutable coalesceCalls = 0
+                    let overriddenCoalesce =
+                        builtins
+                        |> registerScalar "COALESCE" (fun _ ->
+                            coalesceCalls <- coalesceCalls + 1
+                            VInt 2L)
+
+                    match run store overriddenCoalesce "EXPLAIN SELECT id FROM users WHERE id = COALESCE(NULL, 1)" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "ALL"; _; _; _; _; Some "3"; _; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected an overridden COALESCE to retain scan access, got %A" other
+
+                    Expect.equal coalesceCalls 0 "planning does not call the overridden COALESCE"
+
+                    match run store overriddenCoalesce "SELECT id FROM users WHERE id = COALESCE(NULL, 1)" with
+                    | ResultSet([ "id" ], [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected overridden COALESCE to retain runtime semantics, got %A" other
+
+                    Expect.isGreaterThan coalesceCalls 2 "the overridden COALESCE remains on the scan path"
 
                 testCase "EXPLAIN reports primary-key literal and constant IN lists as ranges"
                 <| fun _ ->

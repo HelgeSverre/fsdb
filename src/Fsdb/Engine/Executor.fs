@@ -11643,7 +11643,9 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
         | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafe left && isSafe right
         | Expression.CollationOverride(expression, _) -> isSafe expression
         | FuncCall(name, arguments)
-            when FunctionalIndex.tryBuiltin name |> Option.isSome
+            when ((FunctionalIndex.tryBuiltin name |> Option.isSome)
+                  || equalsIgnoreCase name "COALESCE"
+                  || equalsIgnoreCase name "IFNULL")
                  && Functions.isUnmodifiedBuiltinScalar name registry ->
             arguments |> List.forall isSafe
         | _ -> false
