@@ -230,13 +230,13 @@ or locking retain the general SELECT pipeline.
   hashing, and UUIDs;
 - IPv4 and IPv6 conversion and predicates;
 - NULL-selection, comparison, and session identity functions;
-- OGC geometry construction, serialization, inspection, and member access,
+- OGC geometry construction, serialization, inspection, coordinate swapping, and member access,
   including typed text/binary constructors, line endpoints and indexing,
   polygon rings, multi-geometry members, and closure checks.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining geographic spatial behavior | non-point distance and topology beyond line length, plus transformations and reference systems beyond EPSG 4326/3857/3395 | low |
+| Remaining spatial behavior | geographic non-point distance and topology beyond line length; `ST_LineInterpolatePoint`, `ST_LineInterpolatePoints`, and `ST_PointAtDistance`; transformations and reference systems beyond EPSG 4326/3857/3395 | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
@@ -900,13 +900,14 @@ implementation effort:
    handlers, SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential
    data-changing statements.
 
-4. Broader geographic SRS behavior. EPSG 4326 construction, axis order,
+4. Broader spatial behavior. EPSG 4326 construction, axis order,
    coordinate domains, ellipsoidal point distance, line length, spherical
    point/multipoint distance, and linear units are covered alongside planar
    spatial indexes and operations; EPSG 3857 and 3395 projected geometry use planar
    metric operations, with `ST_Transform` among EPSG 4326, 3857, and 3395.
-   Broader non-point geographic distance and topology,
-   plus other reference systems, remain absent.
+   `ST_SwapXY` covers all supported geometry shapes. Line interpolation,
+   broader non-point geographic distance and topology, and other reference
+   systems remain absent.
 
 5. Extensible authentication providers. The built-in caching-SHA2, SHA-256,
    and native password exchanges are covered; external identity providers and

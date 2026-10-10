@@ -3213,6 +3213,31 @@ module ContractCatalog =
                    "SELECT ST_Transform(ST_GeomFromText('POINT(0 0)',4326),9999)"
                |> Contract.fails 3548 "SR001"
                Contract.query
+                   "spatial-swapxy-point-and-line"
+                   "SELECT ST_AsText(ST_SwapXY(ST_GeomFromText('POINT(1 2)'))),ST_AsText(ST_SwapXY(ST_GeomFromText('LINESTRING(0 1,2 3)'))),ST_SRID(ST_SwapXY(ST_GeomFromText('POINT(1 2)',3857)))"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-swapxy-collection"
+                   "SELECT ST_AsText(ST_SwapXY(ST_GeomFromText('GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(3 4,5 6))')))"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "spatial-swapxy-prepared"
+                   "SELECT ST_AsText(ST_SwapXY(ST_GeomFromText(?)))"
+                   [| box "POINT(1 2)" |]
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-swapxy-geographic-domain"
+                   "SELECT ST_AsText(ST_SwapXY(ST_GeomFromText('POINT(20 100)',4326)))"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-swapxy-null"
+                   "SELECT ST_SwapXY(NULL)"
+               |> Contract.comparingValues
+               Contract.query
+                   "spatial-swapxy-arity"
+                   "SELECT ST_SwapXY(ST_GeomFromText('POINT(1 2)'),1)"
+               |> Contract.fails 1582 "42000"
+               Contract.query
                    "projected-point-axis-order"
                    "SELECT ST_AsText(ST_GeomFromText('POINT(1 2)',3857)),ST_AsText(ST_GeomFromText('POINT(1 2)',3857,'axis-order=lat-long'))"
                |> Contract.comparingValues

@@ -5916,6 +5916,15 @@ let private geometryTransformFn: Scalar =
                 VGeometry(SpatialReferenceSystems.withSrid targetSrid transformed)
     | _ -> nativeParameterCountError "st_transform"
 
+let private geometrySwapXYFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        geometryArgument "ST_SwapXY" value
+        |> SpatialReferenceSystems.mapGeometry (fun (x, y) -> y, x)
+        |> VGeometry
+    | _ -> nativeParameterCountError "st_swapxy"
+
 let private geometryPropertyFn functionName property: Scalar =
     function
     | [ VNull ] -> VNull
@@ -6409,6 +6418,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalarResult "ASBINARY" binaryResult (geometryToWkbFn "AsBinary")
     |> registerScalar "ST_SRID" geometrySridFn
     |> registerScalar "ST_TRANSFORM" geometryTransformFn
+    |> registerScalar "ST_SWAPXY" geometrySwapXYFn
     |> registerScalar "ST_GEOMETRYTYPE" geometryTypeFn
     |> registerScalar "GEOMETRYTYPE" geometryTypeFn
     |> registerScalar "ST_DIMENSION" geometryDimensionFn
