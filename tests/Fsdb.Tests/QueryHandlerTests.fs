@@ -2128,6 +2128,8 @@ let tests =
               | Err(3751, message) -> Expect.stringContains message "ix_abs_value" "strict functional-index error"
               | other -> failtestf "expected strict text conversion to fail, got %A" other
 
+              Expect.equal (Fsdb.SqlState.forCode 3751) "01000" "functional-index truncation SQLSTATE"
+
               match handle session "SELECT COUNT(*) FROM measured_text" |> snd with
               | ResultSet(_, [ [ Some "3" ] ]) -> ()
               | other -> failtestf "expected the failed batch to remain atomic, got %A" other

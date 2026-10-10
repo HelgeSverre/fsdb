@@ -1339,7 +1339,14 @@ let tests =
                         ()
                     | other -> failtestf "expected a const plan for a deterministic numeric function, got %A" other
 
-                    for bound in [ "COALESCE(NULL, 2)"; "IFNULL(NULL, 2)" ] do
+                    for bound in
+                        [ "COALESCE(NULL, 2)"
+                          "IFNULL(NULL, 2)"
+                          "IF(1, 2, 3)"
+                          "NULLIF(2, 3)"
+                          "GREATEST(1, 2)"
+                          "LEAST(2, 3)"
+                          "-IF(1, -2, 3)" ] do
                         match runDefault store (sprintf "EXPLAIN SELECT v FROM users WHERE id = %s" bound) with
                         | ResultSet(_, [ [ _; _; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
                             ()

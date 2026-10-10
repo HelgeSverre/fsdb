@@ -11638,14 +11638,16 @@ and private isNumericIndexValue = function
     | _ -> false
 
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
+    let safeFallbacks = set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST" ]
+
     let rec isSafe = function
         | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
+        | Neg expression -> isSafe expression
         | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafe left && isSafe right
         | Expression.CollationOverride(expression, _) -> isSafe expression
         | FuncCall(name, arguments)
             when ((FunctionalIndex.tryBuiltin name |> Option.isSome)
-                  || equalsIgnoreCase name "COALESCE"
-                  || equalsIgnoreCase name "IFNULL")
+                  || Set.contains (name.ToUpperInvariant()) safeFallbacks)
                  && Functions.isUnmodifiedBuiltinScalar name registry ->
             arguments |> List.forall isSafe
         | _ -> false

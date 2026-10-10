@@ -4721,6 +4721,16 @@ module ContractCatalog =
                    "SELECT v FROM constant_null_fallback WHERE id=COALESCE(NULL,2)"
                Contract.query "ifnull-equality"
                    "SELECT v FROM constant_null_fallback WHERE id=IFNULL(NULL,2)"
+               Contract.query "if-equality"
+                   "SELECT v FROM constant_null_fallback WHERE id=IF(1,2,3)"
+               Contract.query "nullif-equality"
+                   "SELECT v FROM constant_null_fallback WHERE id=NULLIF(2,3)"
+               Contract.query "greatest-equality"
+                   "SELECT v FROM constant_null_fallback WHERE id=GREATEST(1,2)"
+               Contract.query "least-equality"
+                   "SELECT v FROM constant_null_fallback WHERE id=LEAST(2,3)"
+               Contract.query "negative-if-equality"
+                   "SELECT v FROM constant_null_fallback WHERE id=-IF(1,-2,3)"
                Contract.query "coalesce-range"
                    "SELECT id FROM constant_null_fallback WHERE id BETWEEN IFNULL(NULL,2) AND COALESCE(NULL,3) ORDER BY id" |]
           Cleanup = [| "DROP TABLE constant_null_fallback" |]
@@ -4756,7 +4766,15 @@ module ContractCatalog =
                Contract.query "ordered" "SELECT id,FLOOR(exact_value),CEILING(exact_value) FROM rounded_probe ORDER BY id"
                Contract.execute "update" "UPDATE rounded_probe SET exact_value=4.01 WHERE id=3"
                Contract.query "floor-after-update" "SELECT id FROM rounded_probe WHERE FLOOR(exact_value)=2"
-               Contract.query "ceil-after-update" "SELECT id FROM rounded_probe WHERE CEILING(exact_value)=5" |]
+               Contract.query "ceil-after-update" "SELECT id FROM rounded_probe WHERE CEILING(exact_value)=5"
+               Contract.execute "strict-truncated-index"
+                   "INSERT INTO rounded_probe VALUES(4,12.00,'12x')" |> Contract.fails 3751 "01000"
+               Contract.execute "permissive-mode" "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+               Contract.execute "permissive-truncated-index"
+                   "INSERT INTO rounded_probe VALUES(4,12.00,'12x')"
+               Contract.query "truncated-index-warning" "SHOW WARNINGS"
+               Contract.query "truncated-index-lookup"
+                   "SELECT id FROM rounded_probe WHERE FLOOR(text_value)=12" |]
           Cleanup = [| "DROP TABLE rounded_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
