@@ -2,8 +2,8 @@
 
 `src/Fsdb/Fsdb.fsproj` produces the `Fsdb` NuGet library for .NET 10.
 `src/Fsdb.Cli/Fsdb.Cli.fsproj` produces the server executable and is not part
-of the library package. The first candidate is `0.1.0-preview.1`; the repository
-has no earlier release tags. Its public embedding entry point is `Fsdb.Db`.
+of the library package. `0.1.0-preview.1` was the first published release;
+the current source targets `0.1.0-preview.2`. Its public embedding entry point is `Fsdb.Db`.
 This is a prerelease interface: package consumers should expect API changes
 before a stable `1.0` release.
 
@@ -33,7 +33,7 @@ The NuGet account owner must register a GitHub Actions trusted-publishing policy
 - Scope: push new packages and package versions, restricted to `Fsdb`
 
 After reviewing and committing the exact release source, push the tag matching
-the project version, starting with `v0.1.0-preview.1`. The tag runs
+the project version. The tag runs
 `.github/workflows/publish-nuget.yml`, which checks the version, builds and tests,
 verifies package consumption, and packs from that commit. It then exchanges a
 GitHub OIDC token for a short-lived NuGet key and pushes the package and symbol

@@ -28,6 +28,11 @@ type QueryResult =
 
 let ResultSet(columns, rows) = Rows(columns, rows, Set.empty)
 let internal ResultSetWithRawColumns(columns, rows, rawColumns) = Rows(columns, rows, rawColumns)
+let private typedValues = System.Runtime.CompilerServices.ConditionalWeakTable<QueryResult, Value[] list>()
+let internal ResultSetWithValues(columns, rows, rawColumns, values) =
+    let result = ResultSetWithRawColumns(columns, rows, rawColumns)
+    typedValues.Add(result, values)
+    result
 let Affected affectedRows = RowCount affectedRows
 let Err(code, message) = Failure(SqlState.create code message)
 let ErrState(code, state, message) = Failure(SqlState.createWithState code state message)
@@ -44,6 +49,14 @@ let (|ResultSet|Affected|Err|MultipleResults|) =
 let errorInfo =
     function
     | Failure error -> Some error
+    | _ -> None
+
+let internal typedRows result =
+    match result with
+    | Rows(columns, _, _) ->
+        match typedValues.TryGetValue result with
+        | true, values -> Some(columns, values)
+        | false, _ -> None
     | _ -> None
 
 let internal rawResultColumns = function
@@ -11720,66 +11733,106 @@ and private runUnlockedSelectStmt
                 resolveFromItem store registry dbName fromItem
                 |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
 
+        let tryVirtualScan (tref: TableRef) =
+            let schema = tref.Database |> Option.defaultValue dbName
+            if not (equalsIgnoreCase schema "fsdb") then None
+            else
+                store.VirtualTables
+                |> Map.tryFind (tref.Table.ToLowerInvariant())
+                |> Option.bind (fun table ->
+                    table.Scan
+                    |> Option.map (fun scan ->
+                        let qualifier = tref.Alias |> Option.defaultValue tref.Table
+                        let column = function
+                            | Col name -> Some name
+                            | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some name
+                            | _ -> None
+                        let equalities =
+                            select.Where
+                            |> Option.map conjuncts
+                            |> Option.defaultValue []
+                            |> List.choose (function
+                                | BinOp(Eq, candidate, LiteralValue value)
+                                | BinOp(Eq, LiteralValue value, candidate) ->
+                                    column candidate |> Option.map (fun name -> name, value)
+                                | _ -> None)
+                        let limit =
+                            if select.Where.IsNone && select.OrderBy.IsEmpty && select.GroupBy.IsEmpty
+                               && select.Having.IsNone && not select.Distinct && select.Offset.IsNone
+                               && not select.CalculateFoundRows
+                               && (select.Projections |> List.forall (fun projection ->
+                                   match projection.Expression with
+                                   | Col _ | QualifiedCol _ | Star _ -> true
+                                   | _ -> false)) then
+                                match select.Limit with
+                                | Some(LiteralValue(VInt count)) when count >= 0L && count <= int64 System.Int32.MaxValue -> Some(int count)
+                                | _ -> None
+                            else None
+                        table.Columns, (if planningProbe.Value then [] else scan { Equalities = equalities; Limit = limit })))
+
         match fromItem, select.Joins with
         | FromTable _, _ when not select.Locking.IsEmpty ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []
             | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, [] ->
-            match tryGroupIndexOrder store registry dbName tref select with
-            | Some plan -> runResolved (ContiguousGroupRows plan.Groups) plan.Columns plan.Rows None select
+            match tryVirtualScan tref with
+            | Some(columns, rows) -> runArbitrary columns rows None select
             | None ->
-                match tryIndexedSemiJoin store registry dbName select tref with
-                | Error error -> error, [], []
-                | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows None narrowed
-                | Ok None ->
-                    let physicalCandidates =
-                        physicalFastPathTable store dbName tref
-                        |> Option.map (fun table ->
-                            physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where)
-                        |> Option.defaultValue []
+                match tryGroupIndexOrder store registry dbName tref select with
+                | Some plan -> runResolved (ContiguousGroupRows plan.Groups) plan.Columns plan.Rows None select
+                | None ->
+                    match tryIndexedSemiJoin store registry dbName select tref with
+                    | Error error -> error, [], []
+                    | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows None narrowed
+                    | Ok None ->
+                        let physicalCandidates =
+                            physicalFastPathTable store dbName tref
+                            |> Option.map (fun table ->
+                                physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where)
+                            |> Option.defaultValue []
 
-                    let equalityAccess =
-                        physicalCandidates
-                        |> List.tryPick (function
-                            | EqualityAccess plan -> Some plan
-                            | _ -> None)
+                        let equalityAccess =
+                            physicalCandidates
+                            |> List.tryPick (function
+                                | EqualityAccess plan -> Some plan
+                                | _ -> None)
 
-                    let physicalAccess = choosePhysicalAccess physicalCandidates
+                        let physicalAccess = choosePhysicalAccess physicalCandidates
 
-                    let orderedPrefix =
-                        tryEqualityPrefixOrder store registry dbName tref select equalityAccess
+                        let orderedPrefix =
+                            tryEqualityPrefixOrder store registry dbName tref select equalityAccess
 
-                    match orderedPrefix with
-                    | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
-                    | None ->
-                        let indexOrder = tryIndexOrder store registry dbName tref select
-                        let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder indexOrder physicalCandidates
-
-                        match earlyPhysicalAccess |> Option.map physicalAccessRows with
-                        | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
+                        match orderedPrefix with
+                        | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
                         | None ->
-                            let projectedLookup =
-                                tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
-                                |> Option.orElseWith (fun () -> tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where)
+                            let indexOrder = tryIndexOrder store registry dbName tref select
+                            let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder indexOrder physicalCandidates
 
-                            match projectedLookup with
-                            | Some(columns, rows) -> runArbitrary columns rows None select
+                            match earlyPhysicalAccess |> Option.map physicalAccessRows with
+                            | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                             | None ->
-                                match indexOrder with
-                                | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
-                                | None ->
-                                    let resolved =
-                                        physicalAccess
-                                        |> Option.map (physicalAccessRows >> fun (columns, rows) -> Ok(columns, rows |> List.map snd))
-                                        |> Option.orElseWith (fun () ->
-                                            tryInformationSchemaNarrow store registry dbName tref select.Where
-                                            |> Option.map Ok)
-                                        |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+                                let projectedLookup =
+                                    tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
+                                    |> Option.orElseWith (fun () -> tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where)
 
-                                    match resolved with
-                                    | Error e -> e, [], []
-                                    | Ok(columns, rows) -> runArbitrary columns rows None select
+                                match projectedLookup with
+                                | Some(columns, rows) -> runArbitrary columns rows None select
+                                | None ->
+                                    match indexOrder with
+                                    | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
+                                    | None ->
+                                        let resolved =
+                                            physicalAccess
+                                            |> Option.map (physicalAccessRows >> fun (columns, rows) -> Ok(columns, rows |> List.map snd))
+                                            |> Option.orElseWith (fun () ->
+                                                tryInformationSchemaNarrow store registry dbName tref select.Where
+                                                |> Option.map Ok)
+                                            |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+
+                                        match resolved with
+                                        | Error e -> e, [], []
+                                        | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then

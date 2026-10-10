@@ -642,8 +642,9 @@ thresholds with `wal_rotate_bytes` and `wal_rotate_entries`.
 
 ## Embedding & extensibility
 
-`Fsdb` is also built as a .NET 10 library package. The first NuGet candidate is
-`0.1.0-preview.1`; it is not published yet. Run `just package-check` to pack it
+`Fsdb` is also built as a .NET 10 library package. The first NuGet release,
+`0.1.0-preview.1`, is [published on nuget.org](https://www.nuget.org/packages/Fsdb/).
+Run `just package-check` to pack the current source
 and exercise it through the package-only F# example with an isolated NuGet
 cache. The command-line server lives in the separate `Fsdb.Cli` project. See
 [distribution](docs/distribution.md) for the
@@ -682,6 +683,37 @@ Runtime and extension APIs are similarly small:
 | `Db.connect` | Open a stateful in-process SQL session without a socket. |
 | `Db.serve` | Start a background listener and return its bound endpoint. |
 | `Db.listen` | Run a listener until its returned `Async` stops. |
+| `Db.own` | Own in-process connections and subscriptions, then checkpoint durable storage on disposal. |
+| `Db.subscribeCommits` | Receive ordered commits through a disposable queue. |
+
+The in-process connection also supports positional `?` parameters, engine-typed
+rows, and cancellable asynchronous calls:
+
+```fsharp
+open System.Threading
+open Fsdb.Value
+
+let demo () =
+    use host = Db.create () |> Db.own
+    use connection = host.Connect()
+
+    connection.Execute("CREATE TABLE items (id INT PRIMARY KEY, quantity INT)", []) |> ignore
+    connection.Execute("INSERT INTO items VALUES (?, ?)", [ VInt 1L; VInt 21L ]) |> ignore
+
+    match connection.QueryValues("SELECT quantity FROM items WHERE id = ?", [ VInt 1L ]) with
+    | Ok([ "quantity" ], [ [ Some(VInt quantity) ] ]) -> printfn "%d" quantity
+    | other -> failwithf "Unexpected result: %A" other
+
+    let pending = connection.QueryValuesAsync("SELECT ? AS answer", [ VInt 42L ], CancellationToken.None)
+    pending.GetAwaiter().GetResult() |> ignore
+```
+
+`QueryValues` returns `Value option` cells, with SQL NULL as `None`; its error
+case retains the SQL code, state, and message. `Query` remains available for
+text-protocol-shaped results. Dispose a connection before its host, and avoid
+using the same connection concurrently for independent transactions. `Db.own`
+takes exclusive ownership of the configured database; stop any separate wire
+listener before disposing its host.
 
 ### Create an embedded host
 
@@ -841,9 +873,9 @@ query, so cancellation and host-side timeouts still matter.
 
 ### Expose host data as a virtual table
 
-Virtual tables are read-only overlays in the reserved `fsdb` schema. Their row
-provider runs once per referencing statement before SQL filtering, so it
-should return a bounded snapshot rather than an unbounded stream.
+Virtual tables are read-only overlays in the reserved `fsdb` schema. The
+basic row provider runs once per referencing statement before SQL filtering,
+so it should return a bounded snapshot rather than an unbounded stream.
 
 ```fsharp
 let models =
@@ -874,8 +906,11 @@ other types can use an `Ast.ColumnDef`.
 
 Names are case-insensitive. Re-registering a name replaces its provider, and a
 virtual table shadows a physical table with the same name. Writes are rejected.
-Call `registerTable` after `withDataDir`, because `withDataDir` replaces the
-store.
+An optional `VirtualTable.withScan` provider receives literal equality hints
+for simple single-table reads, plus a `Limit` hint only when early limiting is
+safe. A provider may ignore equality hints; fsdb still applies SQL filtering.
+Other query shapes use the basic row provider. Tables registered before
+`withDataDir` are retained.
 
 ### Consume committed changes
 
@@ -919,6 +954,11 @@ A handler exception can make the statement report an error, but it cannot roll
 back data that has already been published. Handlers should therefore capture
 their own failures.
 
+For application work, prefer `Db.subscribeCommits db`. Its `Reader` is a
+`ChannelReader<Storage.CommitEvent>` that receives ordered commits without
+running host code in the commit path. Dispose the subscription to unregister
+it. The queue is unbounded, so drain it continuously in a long-running host.
+
 ### Run SQL in-process or over the wire
 
 `Db.connect` creates a stateful session without a socket. The selected
@@ -952,7 +992,7 @@ Db.create ()
 ```
 
 Durability, logging, and TLS are builder-style options too. Configure the
-store before registering virtual tables or commit subscribers:
+store before registering commit subscribers:
 
 ```fsharp
 let db =

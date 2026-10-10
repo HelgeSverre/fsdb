@@ -231,7 +231,7 @@ let private crc32Update (crc: uint32) (data: byte[]) (count: int) : uint32 =
     c
 
 /// Signal registrations must remain rooted or finalization unregisters them.
-let private shutdownRegistrations = ResizeArray<IDisposable>()
+let private shutdownRegistrations = ResizeArray<Store * IDisposable list>()
 
 [<DllImport("libc", SetLastError = true)>]
 extern int private fsync(int fd)
@@ -2448,7 +2448,26 @@ let attach (dataDir: string) (store: Store) : unit =
         | Some _ -> invalidOp "Durability is already attached to this store."
         | None -> store.Durability.Sink <- Some sink)
 
-    let onShutdown (_: PosixSignalContext) = sink.EnqueueCheckpoint() ()
+    let onShutdown (_: PosixSignalContext) =
+        lock store.CommitLock (fun () ->
+            if store.Durability.Sink.IsSome then sink.EnqueueCheckpoint() ())
 
-    shutdownSignals (OperatingSystem.IsWindows())
-    |> List.iter (fun signal -> shutdownRegistrations.Add(PosixSignalRegistration.Create(signal, onShutdown)))
+    let registrations =
+        shutdownSignals (OperatingSystem.IsWindows())
+        |> List.map (fun signal -> PosixSignalRegistration.Create(signal, onShutdown) :> IDisposable)
+    lock shutdownRegistrations (fun () -> shutdownRegistrations.Add(store, registrations))
+
+/// Flushes a final checkpoint and disconnects a durable store after its callers have stopped.
+let detach (store: Store) : unit =
+    lock store.CommitLock (fun () ->
+        match store.Durability.Sink with
+        | None -> ()
+        | Some sink ->
+            sink.EnqueueCheckpoint() ()
+            store.Durability.Sink <- None)
+    lock shutdownRegistrations (fun () ->
+        for index in shutdownRegistrations.Count - 1 .. -1 .. 0 do
+            let attached, registrations = shutdownRegistrations.[index]
+            if obj.ReferenceEquals(attached, store) then
+                registrations |> List.iter (fun registration -> registration.Dispose())
+                shutdownRegistrations.RemoveAt index)

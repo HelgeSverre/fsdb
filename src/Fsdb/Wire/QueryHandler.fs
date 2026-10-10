@@ -3065,7 +3065,9 @@ let private formatResultForProtocol metadata (typedRows: Value[] list) result =
             | _ -> text
         let rows =
             List.map2 (fun text values -> List.map3 render metadata text (Array.toList values)) rows typedRows
-        ResultSetWithRawColumns(columns, rows, rawResultColumns result)
+        ResultSetWithValues(columns, rows, rawResultColumns result, typedRows)
+    | ResultSet(columns, rows) ->
+        ResultSetWithValues(columns, rows, rawResultColumns result, typedRows)
     | _ -> result
 
 let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =

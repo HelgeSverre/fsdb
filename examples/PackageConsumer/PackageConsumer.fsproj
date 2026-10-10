@@ -10,7 +10,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Fsdb" Version="0.1.0-preview.1" />
+    <PackageReference Include="Fsdb" Version="0.1.0-preview.2" />
   </ItemGroup>
 
 </Project>

@@ -15,6 +15,42 @@ let tests =
     testList
         "Embedding integration"
         [
+          testCase "embedded prepared queries preserve typed values and parameter semantics"
+          <| fun _ ->
+              use conn = Fsdb.Db.create () |> Fsdb.Db.connect
+              conn.Query "CREATE TABLE typed_items (id BIGINT PRIMARY KEY, amount DECIMAL(10,2), payload BLOB)" |> ignore
+
+              match conn.Execute("INSERT INTO typed_items VALUES (?,?,?)", [ VInt 7L; VDecimal 12.50M; VBytes [| 0uy; 255uy |] ]) with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected one insert, got %A" other
+
+              match conn.QueryValues("SELECT id,amount,payload FROM typed_items WHERE id=?", [ VInt 7L ]) with
+              | Ok([ "id"; "amount"; "payload" ], [ [ Some(VInt 7L); Some(VDecimal 12.50M); Some(VBytes bytes) ] ]) ->
+                  Expect.sequenceEqual bytes [| 0uy; 255uy |] "binary value survives without text rendering"
+                  bytes.[0] <- 42uy
+              | other -> failtestf "expected typed row, got %A" other
+
+              match conn.QueryValues("SELECT payload FROM typed_items WHERE id=?", [ VInt 7L ]) with
+              | Ok(_, [ [ Some(VBytes bytes) ] ]) ->
+                  Expect.sequenceEqual bytes [| 0uy; 255uy |] "caller mutation cannot change stored bytes"
+              | other -> failtestf "expected unchanged binary row, got %A" other
+
+          testCase "embedded async query observes cancellation and typed values"
+          <| fun _ ->
+              use conn = Fsdb.Db.create () |> Fsdb.Db.connect
+              use cancelled = new Threading.CancellationTokenSource()
+              cancelled.Cancel()
+              Expect.throwsT<Threading.Tasks.TaskCanceledException>
+                  (fun () -> conn.QueryAsync("SELECT 1", cancelled.Token).GetAwaiter().GetResult() |> ignore)
+                  "pre-cancelled query does not run"
+
+              let columns, rows =
+                  match conn.QueryValuesAsync("SELECT ? AS answer", [ VInt 42L ], Threading.CancellationToken.None).GetAwaiter().GetResult() with
+                  | Ok result -> result
+                  | Error error -> failtestf "unexpected async query error: %A" error
+              Expect.equal columns [ "answer" ] "projection name"
+              Expect.equal rows [ [ Some(VInt 42L) ] ] "typed async row"
+
           testCase "Db.connect persists USE and session state across queries, with registered functions in scope"
           <| fun _ ->
               let shout =
@@ -55,6 +91,72 @@ let tests =
 
               Expect.equal (commits a) 1 "subscriber A sees exactly one TransactionCommitted wrapping both inserts"
               Expect.equal (commits b) 1 "subscriber B sees the same single TransactionCommitted"
+
+          testCase "queued commit subscription unregisters on dispose"
+          <| fun _ ->
+              let db = Fsdb.Db.create ()
+              let subscription = Fsdb.Db.subscribeCommits db
+              use conn = Fsdb.Db.connect db
+              conn.Query "CREATE TABLE queued_events (n INT)" |> ignore
+              let mutable first = Unchecked.defaultof<Fsdb.Storage.CommitEvent>
+              Expect.isTrue (subscription.Reader.TryRead(&first)) "the queue receives committed DDL"
+              (subscription :> IDisposable).Dispose()
+              conn.Query "INSERT INTO queued_events VALUES (1)" |> ignore
+              let mutable later = Unchecked.defaultof<Fsdb.Storage.CommitEvent>
+              Expect.isFalse (subscription.Reader.TryRead(&later)) "disposed subscription receives no new event"
+
+          testCase "owned database host checkpoints and closes its connections"
+          <| fun _ ->
+              let directory = IO.Path.Combine(IO.Path.GetTempPath(), "fsdb-owned-" + Guid.NewGuid().ToString("N"))
+              try
+                  let connection =
+                      use host = Fsdb.Db.create () |> Fsdb.Db.withDataDir directory |> Fsdb.Db.own
+                      let conn = host.Connect()
+                      conn.Query "CREATE TABLE owned_rows (n INT)" |> ignore
+                      conn.Query "INSERT INTO owned_rows VALUES (8)" |> ignore
+                      conn
+
+                  Expect.throwsT<ObjectDisposedException>
+                      (fun () -> connection.Query "SELECT 1" |> ignore)
+                      "the host closes owned connections"
+
+                  use reopened = Fsdb.Db.create () |> Fsdb.Db.withDataDir directory |> Fsdb.Db.own
+                  use conn = reopened.Connect()
+                  match conn.Query "SELECT n FROM owned_rows" with
+                  | ResultSet(_, [ [ Some "8" ] ]) -> ()
+                  | other -> failtestf "expected checkpointed row, got %A" other
+              finally
+                  if IO.Directory.Exists directory then IO.Directory.Delete(directory, true)
+
+          testCase "virtual table scan receives safe equality and limit hints"
+          <| fun _ ->
+              let requests = ResizeArray<Fsdb.Functions.VirtualTableRequest>()
+              let source () = [ for n in 1L .. 5L -> [| VInt n |] ]
+              let table =
+                  Fsdb.Functions.VirtualTable.create "numbers" [ Fsdb.Functions.VirtualTable.bigint "n" ] source
+                  |> Fsdb.Functions.VirtualTable.withScan (fun request ->
+                      requests.Add request
+                      source ()
+                      |> List.filter (fun row ->
+                          request.Equalities
+                          |> List.forall (fun (column, value) -> column = "n" && row.[0] = value))
+                      |> fun rows ->
+                          match request.Limit with
+                          | Some count -> List.truncate count rows
+                          | None -> rows)
+              use conn = Fsdb.Db.create () |> Fsdb.Db.registerTable table |> Fsdb.Db.connect
+              match conn.Query "SELECT n FROM fsdb.numbers WHERE n = 4" with
+              | ResultSet(_, [ [ Some "4" ] ]) -> ()
+              | other -> failtestf "expected narrowed row, got %A" other
+              Expect.equal requests.[requests.Count - 1].Equalities [ "n", VInt 4L ] "equality reaches provider"
+              match conn.Query "SELECT n FROM fsdb.numbers LIMIT 2" with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected bounded rows, got %A" other
+              Expect.equal requests.[requests.Count - 1].Limit (Some 2) "safe limit reaches provider"
+              match conn.Query "SELECT COUNT(*) FROM fsdb.numbers LIMIT 2" with
+              | ResultSet(_, [ [ Some "5" ] ]) -> ()
+              | other -> failtestf "aggregate must see all rows, got %A" other
+              Expect.equal requests.[requests.Count - 1].Limit None "aggregate suppresses early limit"
 
           testCase "Db.serve exposes its bound address and port until stopped"
           <| fun _ ->

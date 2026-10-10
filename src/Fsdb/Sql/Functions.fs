@@ -70,7 +70,12 @@ module ScalarFunction =
 type VirtualTable =
     { Name: string
       Columns: Ast.ColumnDef list
-      Rows: unit -> Value[] list }
+      Rows: unit -> Value[] list
+      Scan: (VirtualTableRequest -> Value[] list) option }
+
+and VirtualTableRequest =
+    { Equalities: (string * Value) list
+      Limit: int option }
 
 module VirtualTable =
     /// Creates a nullable column with server-default charset and collation.
@@ -97,7 +102,11 @@ module VirtualTable =
     let double (name: string) : Ast.ColumnDef = col name (Ast.TDouble false)
 
     let create (name: string) (columns: Ast.ColumnDef list) (rows: unit -> Value[] list) : VirtualTable =
-        { Name = name; Columns = columns; Rows = rows }
+        { Name = name; Columns = columns; Rows = rows; Scan = None }
+
+    /// Supplies a provider for simple single-source equality and LIMIT scans.
+    let withScan (scan: VirtualTableRequest -> Value[] list) (table: VirtualTable) : VirtualTable =
+        { table with Scan = Some scan }
 
 /// An aggregate over already-evaluated, non-NULL argument values.
 /// `COUNT(*)` is handled directly by the executor.

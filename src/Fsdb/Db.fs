@@ -5,7 +5,11 @@ module Fsdb.Db
 open System.Net
 open System.Security.Cryptography
 open System.Security.Cryptography.X509Certificates
+open System.Threading
+open System.Threading.Tasks
+open System.Threading.Channels
 open Fsdb.Functions
+open Fsdb.Value
 
 /// An embeddable fsdb instance: its storage plus whatever custom functions
 /// have been registered so far. Immutable, like every other piece of fsdb's
@@ -41,7 +45,10 @@ let private configureFullTextStopwordTables (tables: StorageOptions.StopwordTabl
 /// reusing the one `create` made. Chains like every other `Db` builder:
 /// `Db.create () |> Db.withDataDir "/var/lib/fsdb" |> Db.listen ...`.
 let withDataDir (dataDir: string) (db: Db) : Db =
+    if db.Store.OnCommit.Count > 0 then
+        invalidOp "Configure durable storage before registering commit subscribers."
     let store = Persistence.load dataDir
+    store.VirtualTables <- db.Store.VirtualTables
     Storage.configureNgramTokenSize db.Store.NgramTokenSize store
     Storage.configureFullTextWordLengths db.Store.FullTextWordLengths store
     let stopwordsEnabled = Session.tryGlobalVariable db.Store "innodb_ft_enable_stopword" <> Some(Some "OFF")
@@ -144,8 +151,7 @@ let registerFunction (fn: ScalarFunction) (db: Db) : Db =
 /// the real `fsdb` database (also the default one): a registered name wins
 /// over a same-named real table, other real tables resolve unchanged, and
 /// re-registering a name replaces it (names are case-insensitive). Register
-/// before serving traffic, and after `withDataDir` — that builder replaces
-/// `db.Store`, dropping tables registered before it.
+/// before serving traffic. Tables configured before `withDataDir` are retained.
 let registerTable (table: VirtualTable) (db: Db) : Db =
     db.Store.VirtualTables <- Map.add (table.Name.ToLowerInvariant()) table db.Store.VirtualTables
     db
@@ -157,6 +163,28 @@ let onCommit (handler: Storage.CommitEvent -> unit) (db: Db) : Db =
     lock db.Store.CommitLock (fun () -> db.Store.OnCommit.Add handler)
     db
 
+/// An ordered, non-blocking commit queue. Dispose it to unregister from the store.
+/// The queue is unbounded; consumers should drain it continuously.
+type CommitSubscription internal (store: Storage.Store) =
+    let channel = Channel.CreateUnbounded<Storage.CommitEvent>(UnboundedChannelOptions(SingleReader = false, SingleWriter = false))
+    let enqueue event = channel.Writer.TryWrite event |> ignore
+    let mutable disposed = false
+
+    do lock store.CommitLock (fun () -> store.OnCommit.Add enqueue)
+
+    member _.Reader : ChannelReader<Storage.CommitEvent> = channel.Reader
+
+    interface System.IDisposable with
+        member _.Dispose() =
+            lock store.CommitLock (fun () ->
+                if not disposed then
+                    disposed <- true
+                    store.OnCommit.Remove enqueue |> ignore
+                    channel.Writer.TryComplete() |> ignore)
+
+/// Subscribes to committed changes without running host code in the commit path.
+let subscribeCommits (db: Db) : CommitSubscription = new CommitSubscription(db.Store)
+
 /// Distinguishes in-process `connect` sessions from each other (for
 /// `CONNECTION_ID()`); negative so they can never collide with the
 /// wire-protocol server's own positive connection ids.
@@ -167,13 +195,22 @@ let private connectionCounter = ref 0
 /// state (`USE`, variables, open transaction) persists across `Query` calls
 /// exactly as it would on a real connection.
 type Connection internal (db: Db) =
+    let gate = obj ()
+    let mutable disposed = false
     let mutable session =
         { (Session.create (System.Threading.Interlocked.Decrement connectionCounter) db.Store
            |> Session.withServerOptions db.Transport) with
             CustomFunctions = db.Functions }
 
-    member _.Query(sql: string) : QueryHandler.QueryResult =
-        let updated, result =
+    member private _.Run(action: Session.Session -> Session.Session * QueryHandler.QueryResult) =
+        lock gate (fun () ->
+            if disposed then raise (System.ObjectDisposedException(nameof Connection))
+            let updated, result = action session
+            session <- updated
+            result)
+
+    member this.Query(sql: string) : QueryHandler.QueryResult =
+        this.Run(fun session ->
             match QueryHandler.tryPrepareLoad session sql with
             | Error result -> session, result
             | Ok(Some load) when not load.Local -> QueryHandler.executeServerLoad session load
@@ -183,14 +220,60 @@ type Connection internal (db: Db) =
                     3948,
                     "Loading local data is disabled; this must be enabled on both the client and server sides"
                 )
-            | Ok None -> QueryHandler.handle session sql
+            | Ok None -> QueryHandler.handle session sql)
 
-        session <- updated
-        result
+    /// Executes positional `?` parameters through the same prepared-statement binder as the wire protocol.
+    member this.Execute(sql: string, parameters: Value list) : QueryHandler.QueryResult =
+        this.Run(fun session ->
+            let preparedSession, prepared = QueryHandler.prepareStatementWithDiagnostics session sql
+            match prepared with
+            | Error(code, message) -> preparedSession, Executor.Err(code, message)
+            | Ok(ast, count) ->
+                let statement = QueryHandler.createPreparedStatement preparedSession sql ast count
+                QueryHandler.executePrepared preparedSession statement parameters)
+
+    /// Returns engine values for SELECT statements, preserving SQL NULL as `None`.
+    member this.QueryValues(sql: string, parameters: Value list) : Result<string list * Value option list list, SqlState.Error> =
+        let result = this.Execute(sql, parameters)
+        let detachValue =
+            function
+            | VBytes bytes -> VBytes(Array.copy bytes)
+            | VBinaryLiteral bytes -> VBinaryLiteral(Array.copy bytes)
+            | VEncodedString(charset, bytes) -> VEncodedString(charset, Array.copy bytes)
+            | value -> value
+        match Executor.typedRows result with
+        | Some(columns, rows) ->
+            Ok(columns, rows |> List.map (Array.toList >> List.map (function VNull -> None | value -> Some(detachValue value))))
+        | None ->
+            match Executor.errorInfo result with
+            | Some error -> Error error
+            | None -> Error(SqlState.create 1105 "Statement did not return typed rows")
+
+    /// Runs a query on a worker thread and propagates cancellation to the engine and extensions.
+    member this.QueryAsync(sql: string, cancellation: CancellationToken) : Task<QueryHandler.QueryResult> =
+        Task.Run((fun () ->
+            DynamicScope.withThreadValue Storage.queryCancellation cancellation (fun () -> this.Query sql)), cancellation)
+
+    /// Async positional prepared execution with the same cancellation behavior as `QueryAsync`.
+    member this.ExecuteAsync(sql: string, parameters: Value list, cancellation: CancellationToken) : Task<QueryHandler.QueryResult> =
+        Task.Run((fun () ->
+            DynamicScope.withThreadValue Storage.queryCancellation cancellation (fun () -> this.Execute(sql, parameters))), cancellation)
+
+    /// Async typed query with positional parameters.
+    member this.QueryValuesAsync(sql: string, parameters: Value list, cancellation: CancellationToken) : Task<Result<string list * Value option list list, SqlState.Error>> =
+        Task.Run((fun () ->
+            DynamicScope.withThreadValue Storage.queryCancellation cancellation (fun () -> this.QueryValues(sql, parameters))), cancellation)
+
+    interface System.IDisposable with
+        member _.Dispose() =
+            lock gate (fun () ->
+                if not disposed then
+                    disposed <- true
+                    QueryHandler.closeSession session)
 
 /// Opens an in-process connection to `db` — the sanctioned way for a host
 /// to run SQL against its own embedded instance without a socket.
-let connect (db: Db) : Connection = Connection(db)
+let connect (db: Db) : Connection = new Connection(db)
 
 /// A server started by `serve`. `Address` and `Port` describe the bound
 /// listener; `Stop` stops accepting new connections. `IDisposable` lets a
@@ -224,3 +307,38 @@ let serve (address: IPAddress) (port: int) (db: Db) : RunningServer =
     { Address = endpoint.Address
       Port = endpoint.Port
       Stop = fun () -> listener.Stop() }
+
+/// Owns in-process connections and subscriptions, then checkpoints durable storage.
+/// Do not share the underlying `Db` with a wire listener or other connections
+/// after taking ownership; disposal detaches its durable commit sink.
+[<Sealed>]
+type DatabaseHost internal (db: Db) =
+    let gate = obj ()
+    let resources = ResizeArray<System.IDisposable>()
+    let mutable disposed = false
+
+    member _.Connect() =
+        lock gate (fun () ->
+            if disposed then raise (System.ObjectDisposedException(nameof DatabaseHost))
+            let connection = connect db
+            resources.Add connection
+            connection)
+
+    member _.SubscribeCommits() =
+        lock gate (fun () ->
+            if disposed then raise (System.ObjectDisposedException(nameof DatabaseHost))
+            let subscription = subscribeCommits db
+            resources.Add subscription
+            subscription)
+
+    interface System.IDisposable with
+        member _.Dispose() =
+            lock gate (fun () ->
+                if not disposed then
+                    disposed <- true
+                    for resource in Seq.rev resources do resource.Dispose()
+                    resources.Clear()
+                    Persistence.detach db.Store)
+
+/// Takes exclusive ownership after configuration; use the returned host in a `use` binding.
+let own (db: Db) : DatabaseHost = new DatabaseHost(db)
