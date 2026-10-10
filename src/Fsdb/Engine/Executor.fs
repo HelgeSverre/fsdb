@@ -8869,6 +8869,32 @@ and private physicalFastPathTable (store: Store) (dbName: string) (tableRef: Tab
     |> Result.toOption
     |> Option.flatten
 
+and private validateTableIndexHintSources
+    (store: Store)
+    (dbName: string)
+    (cteNames: Set<string>)
+    (from: FromItem option)
+    (joins: Join list)
+    : Result<unit, QueryResult> =
+    let validate = function
+        | FromTable tableRef
+            when not tableRef.IndexHints.IsEmpty
+                 && not (tableRef.Database.IsNone && Set.contains (tableRef.Table.ToLowerInvariant()) cteNames) ->
+            let tableDb = tableRef.Database |> Option.defaultValue dbName
+            match tryStoredView store tableDb tableRef.Table with
+            | Some view -> validateUnindexedRelationHints tableRef view.Name
+            | None when equalsIgnoreCase tableDb "information_schema" ->
+                match InformationSchema.scan store.Catalog tableRef.Table None with
+                | Some _ -> validateUnindexedRelationHints tableRef tableRef.Table
+                | None -> Ok()
+            | None -> tryPhysicalTableRef store dbName tableRef |> Result.map ignore
+        | _ -> Ok()
+
+    (Option.toList from @ (joins |> List.map _.Table))
+    |> List.collect FromItem.leaves
+    |> traverse validate
+    |> Result.map ignore
+
 and private sameIndexSemantics (left: ColumnDef) (right: ColumnDef) : bool =
     left.Type = right.Type
     &&
@@ -10399,6 +10425,7 @@ and private runMutationJoin
     let resolved =
         let cteNames = currentCteScope () |> Map.keys |> Set.ofSeq
         validateRelationNames dbName cteNames [] (Some(FromTable from)) joins
+        |> Result.bind (fun () -> validateTableIndexHintSources store dbName cteNames (Some(FromTable from)) joins)
         |> Result.bind (fun () ->
             match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
             | Some source -> Ok(source.Columns, source.Rows, source.IdentityOf)
@@ -11438,27 +11465,10 @@ and private runSelectStmt
     let cteNames =
         Set.union (currentCteScope () |> Map.keys |> Set.ofSeq)
             (select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList)
-    let validateHintedSource = function
-        | FromTable tableRef
-            when not tableRef.IndexHints.IsEmpty
-                 && not (tableRef.Database.IsNone && Set.contains (tableRef.Table.ToLowerInvariant()) cteNames) ->
-            let tableDb = tableRef.Database |> Option.defaultValue dbName
-            match tryStoredView store tableDb tableRef.Table with
-            | Some view -> validateUnindexedRelationHints tableRef view.Name
-            | None when equalsIgnoreCase tableDb "information_schema" ->
-                match InformationSchema.scan store.Catalog tableRef.Table None with
-                | Some _ -> validateUnindexedRelationHints tableRef tableRef.Table
-                | None -> Ok()
-            | None -> tryPhysicalTableRef store dbName tableRef |> Result.map ignore
-        | _ -> Ok()
-
-    let validateSources () =
-        (Option.toList select.From @ (select.Joins |> List.map _.Table))
-        |> List.collect FromItem.leaves
-        |> traverse validateHintedSource
-        |> Result.map ignore
-
-    match validateRelationNames dbName cteNames select.Ctes select.From select.Joins |> Result.bind (fun () -> validateSources ()) with
+    match
+        validateRelationNames dbName cteNames select.Ctes select.From select.Joins
+        |> Result.bind (fun () -> validateTableIndexHintSources store dbName cteNames select.From select.Joins)
+    with
     | Error error -> error, [], []
     | Ok() ->
         if SelectStmt.hasDestination select then

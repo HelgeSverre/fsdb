@@ -13561,6 +13561,15 @@ let tests =
                     match runDefault store "WITH c AS (SELECT 1 AS x) SELECT x FROM c USE INDEX(no_such_index)" with
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected CTE hint to remain accepted, got %A" other
+                    runDefault store "CREATE TABLE hinted_other(id INT PRIMARY KEY,v INT,KEY ix_v(v))" |> ignore
+                    match runDefault store "UPDATE hinted_name h JOIN hinted_other o USE INDEX(no_such_index) ON o.v=h.v SET h.v=1" with
+                    | Err(1176, message) ->
+                        Expect.equal message "Key 'no_such_index' doesn't exist in table 'hinted_other'" "joined UPDATE validates the key"
+                    | other -> failtestf "expected missing joined UPDATE key error, got %A" other
+                    match runDefault store "DELETE h FROM hinted_name h JOIN hinted_other o USE INDEX(no_such_index) ON o.v=h.v" with
+                    | Err(1176, message) ->
+                        Expect.equal message "Key 'no_such_index' doesn't exist in table 'hinted_other'" "joined DELETE validates the key"
+                    | other -> failtestf "expected missing joined DELETE key error, got %A" other
 
                 testCase "table index hints control index ordering"
                 <| fun _ ->
