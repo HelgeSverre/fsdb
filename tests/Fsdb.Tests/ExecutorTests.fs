@@ -6401,6 +6401,16 @@ let tests =
                         let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
                         Expect.equal plan.Key (Some "PRIMARY") (sprintf "constant %s uses the primary key" expression)
 
+                    let bitCountTextResult, bitCountTextWarnings =
+                        Fsdb.Diagnostics.capture (fun () ->
+                            runDefault store "SELECT label FROM numeric_bounds WHERE id=BIT_COUNT('12x')")
+                    Expect.equal bitCountTextResult (ResultSet([ "label" ], [ [ Some "two" ] ])) "truncated BIT_COUNT bound"
+                    Expect.equal
+                        (bitCountTextWarnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1292, "Truncated incorrect INTEGER value: '12x'"
+                          1292, "Truncated incorrect INTEGER value: '12x'" ]
+                        "indexed BIT_COUNT conversion warnings"
+
                     Expect.equal
                         (runDefault store "SELECT label FROM numeric_bounds WHERE id=2.5")
                         (ResultSet([ "label" ], []))

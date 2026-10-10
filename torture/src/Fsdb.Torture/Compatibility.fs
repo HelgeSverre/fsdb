@@ -5168,6 +5168,7 @@ module ContractCatalog =
                Contract.query "bit-count" "SELECT label FROM numeric_bounds WHERE id=BIT_COUNT(7)"
                Contract.query "crc32" "SELECT label FROM numeric_bounds WHERE id=CRC32('abc')"
                Contract.query "bit-count-text" "SELECT label FROM numeric_bounds WHERE id=BIT_COUNT('12x')"
+               Contract.query "bit-count-text-warnings" "SHOW WARNINGS"
                Contract.query "crc32-utf8" "SELECT CRC32('é')"
                Contract.query "integral-decimal" "SELECT label FROM numeric_bounds WHERE id=2.0"
                Contract.query "fractional-decimal" "SELECT label FROM numeric_bounds WHERE id=2.5"

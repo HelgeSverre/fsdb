@@ -4491,7 +4491,13 @@ let private exportSetFn: Scalar =
 /// (`BIT_COUNT(3.5)` counts 4's bits, giving 1).
 let private bitCountFn: Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Numerics.BitOperations.PopCount(toUInt64 (roundNumeric v))))
+    | [ v ] when not (anyNull [ v ]) ->
+        match v with
+        | VString text ->
+            let _, truncated = coerceLeadingDouble text
+            if truncated then Diagnostics.numericConversion "INTEGER" text
+        | _ -> ()
+        VInt(int64 (Numerics.BitOperations.PopCount(toUInt64 (roundNumeric v))))
     | _ -> VNull
 
 let private bitwiseUnary (operation: uint64 -> uint64) : Scalar =
