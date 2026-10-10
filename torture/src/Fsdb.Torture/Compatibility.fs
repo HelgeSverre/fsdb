@@ -3149,6 +3149,30 @@ module ContractCatalog =
                    "SELECT SRS_NAME,SRS_ID,ORGANIZATION,ORGANIZATION_COORDSYS_ID,DEFINITION,DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=3857"
                |> Contract.comparingValues
                Contract.query
+                   "world-mercator-srs-catalog"
+                   "SELECT SRS_NAME,SRS_ID,ORGANIZATION,ORGANIZATION_COORDSYS_ID,DEFINITION,DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=3395"
+               |> Contract.comparingValues
+               Contract.query
+                   "world-mercator-forward"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5)"
+               |> Contract.comparingValues
+               Contract.query
+                   "world-mercator-reverse"
+                   "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(1196929.428907435 8343586.513829184)',3395),4326)),6),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(1196929.428907435 8343586.513829184)',3395),4326)),6)"
+               |> Contract.comparingValues
+               Contract.query
+                   "world-mercator-from-web-mercator"
+                   "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(1000000 8000000)',3857),3395)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(1000000 8000000)',3857),3395)),5)"
+               |> Contract.comparingValues
+               Contract.query
+                   "world-mercator-to-web-mercator"
+                   "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(1000000 8000000)',3395),3857)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(1000000 8000000)',3395),3857)),5)"
+               |> Contract.comparingValues
+               Contract.query
+                   "world-mercator-planar-distance"
+                   "SELECT ST_Distance(ST_GeomFromText('POINT(1 2)',3395),ST_GeomFromText('POINT(4 6)',3395))"
+               |> Contract.comparingValues
+               Contract.query
                    "spatial-transform-forward"
                    "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3857)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3857)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3857)),5)"
                |> Contract.comparingValues
@@ -3170,8 +3194,12 @@ module ContractCatalog =
                |> Contract.comparingValues
                Contract.query
                    "spatial-transform-mercator-pole"
-                   "SELECT ST_Transform(ST_GeomFromText('POINT(90 0)',4326),3857) IS NULL"
+                   "SELECT ST_Transform(ST_GeomFromText('POINT(90 0)',4326),3857) IS NULL,ST_AsText(ST_Transform(ST_GeomFromText('POINT(90 0)',4326),3857)) IS NULL,ST_Transform(ST_GeomFromText('POINT(-90 0)',4326),3395) IS NULL,ST_AsText(ST_Transform(ST_GeomFromText('POINT(-90 0)',4326),3395)) IS NULL"
                |> Contract.comparingValues
+               Contract.query
+                   "spatial-transform-mercator-pole-invalid-srid-read"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(90 0)',4326),3857))"
+               |> Contract.fails 3037 "22023"
                Contract.query
                    "spatial-transform-from-srid-zero"
                    "SELECT ST_Transform(ST_GeomFromText('POINT(0 0)'),3857)"

@@ -40,6 +40,18 @@ let private pseudoMercatorDefinition =
       ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"X\",EAST],AXIS[\"Y\",NORTH],AUTHORITY[\"EPSG\",\"3857\"]]" ]
     |> String.concat ""
 
+let private worldMercatorDefinition =
+    [ "PROJCS[\"WGS 84 / World Mercator\","
+      wgs84Definition
+      ",PROJECTION[\"Mercator (variant A)\",AUTHORITY[\"EPSG\",\"9804\"]]"
+      ",PARAMETER[\"Latitude of natural origin\",0,AUTHORITY[\"EPSG\",\"8801\"]]"
+      ",PARAMETER[\"Longitude of natural origin\",0,AUTHORITY[\"EPSG\",\"8802\"]]"
+      ",PARAMETER[\"Scale factor at natural origin\",1,AUTHORITY[\"EPSG\",\"8805\"]]"
+      ",PARAMETER[\"False easting\",0,AUTHORITY[\"EPSG\",\"8806\"]]"
+      ",PARAMETER[\"False northing\",0,AUTHORITY[\"EPSG\",\"8807\"]]"
+      ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"3395\"]]" ]
+    |> String.concat ""
+
 let internal all =
     [ { Name = ""
         Srid = 0
@@ -70,9 +82,67 @@ let internal all =
         AxisOrder = LongitudeLatitude
         SemiMajorAxis = None
         InverseFlattening = None
+        LinearUnitInMetres = Some 1.0 }
+      { Name = "WGS 84 / World Mercator"
+        Srid = 3395
+        Organization = Some "EPSG"
+        OrganizationCoordinateSystemId = Some 3395
+        Definition = worldMercatorDefinition
+        Description = None
+        AxisOrder = LongitudeLatitude
+        SemiMajorAxis = None
+        InverseFlattening = None
         LinearUnitInMetres = Some 1.0 } ]
 
 let internal tryFind srid = all |> List.tryFind (fun referenceSystem -> referenceSystem.Srid = srid)
+
+let private earthRadius = 6378137.0
+let private eccentricity =
+    let flattening = 1.0 / 298.257223563
+    sqrt (flattening * (2.0 - flattening))
+
+let private pseudoMercatorForward (latitude, longitude) =
+    if abs latitude >= 90.0 then
+        Double.PositiveInfinity, Double.PositiveInfinity
+    else
+        earthRadius * longitude * Math.PI / 180.0,
+        earthRadius * log (tan (Math.PI / 4.0 + latitude * Math.PI / 360.0))
+
+let private pseudoMercatorInverse (x, y) =
+    (2.0 * atan (exp (y / earthRadius)) - Math.PI / 2.0) * 180.0 / Math.PI,
+    x * 180.0 / (earthRadius * Math.PI)
+
+let private worldMercatorForward (latitude, longitude) =
+    if abs latitude >= 90.0 then
+        Double.PositiveInfinity, Double.PositiveInfinity
+    else
+        let latitudeRadians = latitude * Math.PI / 180.0
+        let sine = sin latitudeRadians
+        let correction = ((1.0 - eccentricity * sine) / (1.0 + eccentricity * sine)) ** (eccentricity / 2.0)
+        earthRadius * longitude * Math.PI / 180.0,
+        earthRadius * log (tan (Math.PI / 4.0 + latitudeRadians / 2.0) * correction)
+
+let private worldMercatorInverse (x, y) =
+    let t = exp (-y / earthRadius)
+    let rec latitudeAt iteration latitude =
+        if iteration = 0 then latitude
+        else
+            let sine = sin latitude
+            let correction = ((1.0 - eccentricity * sine) / (1.0 + eccentricity * sine)) ** (eccentricity / 2.0)
+            latitudeAt (iteration - 1) (Math.PI / 2.0 - 2.0 * atan (t * correction))
+    let latitude = latitudeAt 8 (atan (sinh (y / earthRadius)))
+    latitude * 180.0 / Math.PI, x * 180.0 / (earthRadius * Math.PI)
+
+let internal tryCoordinateTransform sourceSrid targetSrid =
+    let compose first second point = second (first point)
+    match sourceSrid, targetSrid with
+    | 4326, 3857 -> Some pseudoMercatorForward
+    | 3857, 4326 -> Some pseudoMercatorInverse
+    | 4326, 3395 -> Some worldMercatorForward
+    | 3395, 4326 -> Some worldMercatorInverse
+    | 3857, 3395 -> Some(compose pseudoMercatorInverse worldMercatorForward)
+    | 3395, 3857 -> Some(compose worldMercatorInverse pseudoMercatorForward)
+    | _ -> None
 
 let internal linearUnits =
     [ "British chain (Benoit 1895 A)", 20.1167824
@@ -170,6 +240,10 @@ let rec internal coordinates = function
     | GMultiLineString rings -> List.concat rings
     | GMultiPolygon polygons -> polygons |> List.collect List.concat
     | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> coordinates geometry.Shape)
+
+let internal hasNonFiniteCoordinates (geometry: Geometry) =
+    coordinates geometry.Shape
+    |> List.exists (fun (x, y) -> not (Double.IsFinite x && Double.IsFinite y))
 
 let internal tryPointDomainError (latitude, longitude) =
     if latitude < -90.0 || latitude > 90.0 then

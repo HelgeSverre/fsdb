@@ -5796,10 +5796,9 @@ let private geometryFromWkbFn requiredKind functionName: Scalar =
 
 let private geometryToTextFn functionName: Scalar =
     let serialize value axisOrder =
-        geometryArgument functionName value
-        |> prepareSerializedGeometry functionName axisOrder
-        |> geometryToText
-        |> VString
+        let geometry = geometryArgument functionName value
+        if SpatialReferenceSystems.hasNonFiniteCoordinates geometry then VNull
+        else geometry |> prepareSerializedGeometry functionName axisOrder |> geometryToText |> VString
 
     function
     | [ VNull ]
@@ -5881,7 +5880,11 @@ let private pointCoordinateFn functionName select: Scalar =
 let private geometrySridFn: Scalar =
     function
     | [ VNull ] -> VNull
-    | [ value ] -> geometryArgument "ST_SRID" value |> fun geometry -> VInt(int64 geometry.Srid)
+    | [ value ] ->
+        let geometry = geometryArgument "ST_SRID" value
+        if SpatialReferenceSystems.hasNonFiniteCoordinates geometry then
+            raise (SqlError(3037, "Invalid GIS data provided to function st_srid."))
+        VInt(int64 geometry.Srid)
     | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
     | _ -> nativeParameterCountError "st_srid"
 
@@ -5902,33 +5905,15 @@ let private geometryTransformFn: Scalar =
                 raise (SqlError(3742, "Transformation to SRID 0 is not supported."))
             spatialReferenceSystem "ST_Transform" sourceSrid |> ignore
             spatialReferenceSystem "ST_Transform" targetSrid |> ignore
-            let radius = 6378137.0
             let transform =
-                match sourceSrid, targetSrid with
-                | 4326, 3857 ->
-                    fun (latitude, longitude) ->
-                        radius * longitude * Math.PI / 180.0,
-                        radius * Math.Log(Math.Tan(Math.PI / 4.0 + latitude * Math.PI / 360.0))
-                | 3857, 4326 ->
-                    fun (x, y) ->
-                        (2.0 * Math.Atan(Math.Exp(y / radius)) - Math.PI / 2.0) * 180.0 / Math.PI,
-                        x * 180.0 / (radius * Math.PI)
-                | _ -> geometryError "ST_Transform" "the coordinate transformation is not supported"
-            let atMercatorPole =
-                sourceSrid = 4326
-                && (SpatialReferenceSystems.coordinates geometry.Shape
-                    |> List.exists (fun (latitude, _) -> abs latitude >= 90.0))
+                SpatialReferenceSystems.tryCoordinateTransform sourceSrid targetSrid
+                |> Option.defaultWith (fun () -> geometryError "ST_Transform" "the coordinate transformation is not supported")
             let transformed = SpatialReferenceSystems.mapGeometry transform geometry
-            if atMercatorPole
-               || (SpatialReferenceSystems.tryCoordinateDomainError transformed |> Option.isSome
-                   && targetSrid = 4326) then
+            if SpatialReferenceSystems.tryCoordinateDomainError transformed |> Option.isSome
+               && targetSrid = 4326 then
                 VNull
             else
-                let finite =
-                    SpatialReferenceSystems.coordinates transformed.Shape
-                    |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
-                if not finite then VNull
-                else VGeometry(SpatialReferenceSystems.withSrid targetSrid transformed)
+                VGeometry(SpatialReferenceSystems.withSrid targetSrid transformed)
     | _ -> nativeParameterCountError "st_transform"
 
 let private geometryPropertyFn functionName property: Scalar =
