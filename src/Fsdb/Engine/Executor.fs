@@ -19944,13 +19944,15 @@ let private validateBindingsWith describeColumns validateFunction store registry
 
     validate statement
 
-let validatePreparedBindings store registry schema statement =
-    let validateFunction = validateFunctionName registry schema
-    validateBindingsWith (describeQueryColumnsCheckingFunctions schema) validateFunction store registry schema statement
-
-let private validateViewBindings store registry schema functionDatabase statement =
+let private validateBindings store registry schema functionDatabase statement =
     let validateFunction = validateFunctionName registry functionDatabase
     validateBindingsWith (describeQueryColumnsCheckingFunctions functionDatabase) validateFunction store registry schema statement
+
+let validatePreparedBindings store registry schema statement =
+    validateBindings store registry schema schema statement
+
+let private validateViewBindings store registry schema functionDatabase statement =
+    validateBindings store registry schema functionDatabase statement
 
 let private statementSources store schema (select: SelectStmt) =
     (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
