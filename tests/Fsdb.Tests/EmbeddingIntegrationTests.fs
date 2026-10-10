@@ -84,6 +84,33 @@ let tests =
               | Error _ -> ()
               | Ok _ -> failtest "invalid SQL should fail to prepare"
 
+          testCase "session functions reflect changes after repeated lookups"
+          <| fun _ ->
+              use conn = Fsdb.Db.create () |> Fsdb.Db.connect
+              let one sql =
+                  match conn.Query sql with
+                  | ResultSet(_, [ [ value ] ]) -> value
+                  | other -> failtestf "expected one value from %s, got %A" sql other
+
+              conn.Query "CREATE DATABASE registry_a" |> ignore
+              conn.Query "CREATE DATABASE registry_b" |> ignore
+              conn.Query "USE registry_a" |> ignore
+              Expect.equal (one "SELECT DATABASE()") (Some "registry_a") "initial database"
+              Expect.equal (one "SELECT DATABASE()") (Some "registry_a") "repeated lookup"
+              conn.Query "USE registry_b" |> ignore
+              Expect.equal (one "SELECT DATABASE()") (Some "registry_b") "database change"
+
+              conn.Query "CREATE TABLE ids (id INT AUTO_INCREMENT PRIMARY KEY)" |> ignore
+              conn.Query "INSERT INTO ids VALUES (NULL)" |> ignore
+              Expect.equal (one "SELECT LAST_INSERT_ID()") (Some "1") "generated identity"
+              conn.Query "INSERT INTO ids VALUES (NULL)" |> ignore
+              Expect.equal (one "SELECT LAST_INSERT_ID()") (Some "2") "new generated identity"
+
+              conn.Query "SET time_zone = '+02:00'" |> ignore
+              Expect.equal (one "SELECT FROM_UNIXTIME(0)") (Some "1970-01-01 02:00:00") "first timezone"
+              conn.Query "SET time_zone = '+03:00'" |> ignore
+              Expect.equal (one "SELECT FROM_UNIXTIME(0)") (Some "1970-01-01 03:00:00") "updated timezone"
+
           testCase "Db.connect persists USE and session state across queries, with registered functions in scope"
           <| fun _ ->
               let shout =

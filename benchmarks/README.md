@@ -105,9 +105,13 @@ primary-key hits. Build `src/Fsdb/Fsdb.fsproj` in Release before running it;
 `FSDB_PROFILE_ITERATIONS`, `FSDB_PROFILE_TRIALS`, and
 `FSDB_PROFILE_ACTION` can narrow a run.
 
-`EmbeddedApiPerf` compares repeated point lookups through the embedding
-interface. It seeds 1,000 rows, warms each path, then reports median latency
-and thread allocation over five 500-call trials. Run it without other heavy
+`EmbeddedApiPerf` first validates one reused prepared lookup independently of
+the implementation tests: it changes parameter values, checks SQL `NULL` and a
+missing row, and proves that the command retains its preparation database while
+restoring the connection's current database. Any mismatch fails the executable.
+It then compares repeated point lookups through the embedding interface. It
+seeds 1,000 rows, warms each path, then reports separate median latency and
+thread allocation over five 500-call trials. Run it without other heavy
 workloads:
 
 ```sh
@@ -116,7 +120,10 @@ dotnet run --project benchmarks/EmbeddedApiPerf -c Release
 
 This is an in-process API comparison, not a MySQL parity benchmark. The
 prepared cases measure repeated use of one `Connection.Prepare` handle;
-preparation itself is outside the timed loop.
+preparation itself is outside the timed loop. Set
+`FSDB_EMBEDDED_API_TRIALS` and `FSDB_EMBEDDED_API_ITERATIONS` to positive
+integers when collecting a longer local sample; results are measurements, not
+pass/fail thresholds.
 
 `scripts/functional-bound-pipeline.fsx` compares a constant-function bound
 with a literal bound and an identically seeded scan twin. Its

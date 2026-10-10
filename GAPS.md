@@ -804,8 +804,16 @@ profile target rather than a proven expression-folding regression.
 An [in-process decomposition](benchmarks/results/2026-10-10-point-lookup-pipeline.md)
 places parsing, execution, and session handling at about 24, 12, and 85 µs
 for the fixed lookup; their allocations are about 70, 39, and 254 KB per call.
-The stages are measured separately, and the remaining session-path cost needs
-more targeted profiling before an optimization is justified.
+The stages are measured separately; their unexplained session-path cost
+motivated the next profile.
+
+A [prepared-lookup follow-up](benchmarks/results/2026-10-11-embedded-registry-cache.md)
+identified per-statement function-registry construction as a major cost. A
+session-input cache reduced the independent validator's prepared typed lookup
+from about 95 to 68 µs and from about 322 to 132 KB per call while preserving
+changing session function values. The remaining allocation and wire-path
+overhead still need profiling; this does not close the broader point-lookup
+performance gap.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes

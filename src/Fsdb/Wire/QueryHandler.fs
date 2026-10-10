@@ -522,9 +522,9 @@ type private AdvisoryLockTable =
 let private advisoryLocksByStore =
     ConditionalWeakTable<obj, AdvisoryLockTable>()
 
-let private advisoryLocks (session: Session) =
+let private advisoryLocks (store: Store) =
     advisoryLocksByStore.GetValue(
-        session.Store.Lock,
+        store.Lock,
         fun _ ->
             { Locks = System.Collections.Generic.Dictionary(StringComparer.Ordinal)
               OwnedNames = System.Collections.Generic.Dictionary() }
@@ -557,7 +557,7 @@ let private advisoryLockName = function
 
         Some name
 
-let private getAdvisoryLock (session: Session) = function
+let private getAdvisoryLock store connectionId = function
     | [ name; timeout ] ->
         match advisoryLockName name, timeout with
         | None, _
@@ -570,21 +570,21 @@ let private getAdvisoryLock (session: Session) = function
             else
                 let infinite = seconds < 0.0 || Double.IsPositiveInfinity seconds
                 let deadline = Stopwatch.StartNew()
-                let table = advisoryLocks session
+                let table = advisoryLocks store
 
                 lock table (fun () ->
                     let rec acquire () =
                         match table.Locks.TryGetValue name with
                         | false, _ ->
-                            let owned = advisoryNamesForOwner table session.ConnectionId
+                            let owned = advisoryNamesForOwner table connectionId
 
                             if owned.Count >= Limits.maxAdvisoryLocksPerSession then
                                 raise (Functions.SqlError(1235, "This version of MySQL doesn't yet support more user-level locks in one session"))
 
-                            table.Locks.[name] <- { Owner = session.ConnectionId; Count = 1 }
+                            table.Locks.[name] <- { Owner = connectionId; Count = 1 }
                             owned.Add name |> ignore
                             VInt 1L
-                        | true, current when current.Owner = session.ConnectionId ->
+                        | true, current when current.Owner = connectionId ->
                             table.Locks.[name] <- { current with Count = current.Count + 1 }
                             VInt 1L
                         | _ when not infinite && deadline.Elapsed.TotalSeconds >= seconds -> VInt 0L
@@ -600,33 +600,33 @@ let private getAdvisoryLock (session: Session) = function
                     acquire ())
     | _ -> raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'GET_LOCK'"))
 
-let private releaseAdvisoryLock (session: Session) = function
+let private releaseAdvisoryLock store connectionId = function
     | [ value ] ->
         match advisoryLockName value with
         | None -> VNull
         | Some name ->
-            let table = advisoryLocks session
+            let table = advisoryLocks store
 
             lock table (fun () ->
                 match table.Locks.TryGetValue name with
                 | false, _ -> VNull
-                | true, current when current.Owner <> session.ConnectionId -> VInt 0L
+                | true, current when current.Owner <> connectionId -> VInt 0L
                 | true, current when current.Count > 1 ->
                     table.Locks.[name] <- { current with Count = current.Count - 1 }
                     VInt 1L
                 | true, _ ->
                     table.Locks.Remove name |> ignore
-                    forgetAdvisoryName table session.ConnectionId name
+                    forgetAdvisoryName table connectionId name
                     Threading.Monitor.PulseAll table
                     VInt 1L)
     | _ -> raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'RELEASE_LOCK'"))
 
-let private releaseAllAdvisoryLocks (session: Session) =
-    let table = advisoryLocks session
+let private releaseAllAdvisoryLocks store connectionId =
+    let table = advisoryLocks store
 
     lock table (fun () ->
         let owned =
-            match table.OwnedNames.TryGetValue session.ConnectionId with
+            match table.OwnedNames.TryGetValue connectionId with
             | true, names ->
                 names
                 |> Seq.choose (fun name ->
@@ -637,19 +637,19 @@ let private releaseAllAdvisoryLocks (session: Session) =
             | false, _ -> []
 
         owned |> List.iter (fst >> table.Locks.Remove >> ignore)
-        table.OwnedNames.Remove session.ConnectionId |> ignore
+        table.OwnedNames.Remove connectionId |> ignore
 
         if not owned.IsEmpty then
             Threading.Monitor.PulseAll table
 
         owned |> List.sumBy snd)
 
-let private inspectAdvisoryLock (session: Session) inUse = function
+let private inspectAdvisoryLock store inUse = function
     | [ value ] ->
         match advisoryLockName value with
         | None -> VNull
         | Some name ->
-            let table = advisoryLocks session
+            let table = advisoryLocks store
 
             lock table (fun () ->
                 match table.Locks.TryGetValue name with
@@ -661,12 +661,53 @@ let private inspectAdvisoryLock (session: Session) inUse = function
         let name = if inUse then "IS_USED_LOCK" else "IS_FREE_LOCK"
         raise (Functions.SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
 
-let private registryFor (session: Session) : Functions.Registry =
+type private RegistryInputs =
+    { StoreIdentity: Store
+      FunctionIdentity: Functions.Registry
+      VariableIdentity: Map<string, string option>
+      SelectedDatabase: string option
+      EffectiveUser: string
+      EffectiveAccountHost: string
+      EffectiveRoles: Auth.Account list
+      LoginIdentity: string
+      PeerHost: string
+      ConnectionIdentity: int
+      GeneratedId: int64
+      AffectedRows: int64
+      FoundRowCount: uint64
+      GeometryPointOverride: int option }
+
+type private RegistryCache =
+    { mutable Entry: (RegistryInputs * Functions.Registry) option }
+
+let private registryCaches = ConditionalWeakTable<StatusCounters, RegistryCache>()
+
+let private sameRegistryInputs left right =
+    obj.ReferenceEquals(left.StoreIdentity, right.StoreIdentity)
+    && obj.ReferenceEquals(left.FunctionIdentity, right.FunctionIdentity)
+    && obj.ReferenceEquals(left.VariableIdentity, right.VariableIdentity)
+    && obj.ReferenceEquals(left.EffectiveRoles, right.EffectiveRoles)
+    && left.SelectedDatabase = right.SelectedDatabase
+    && left.EffectiveUser = right.EffectiveUser
+    && left.EffectiveAccountHost = right.EffectiveAccountHost
+    && left.LoginIdentity = right.LoginIdentity
+    && left.PeerHost = right.PeerHost
+    && left.ConnectionIdentity = right.ConnectionIdentity
+    && left.GeneratedId = right.GeneratedId
+    && left.AffectedRows = right.AffectedRows
+    && left.FoundRowCount = right.FoundRowCount
+    && left.GeometryPointOverride = right.GeometryPointOverride
+
+let private buildRegistryFor (session: Session) : Functions.Registry =
+    let databaseName = session.Database
+    let user = session.User
+    let store = session.Store
+    let connectionId = session.ConnectionId
     let collapseExtension name (extension: Functions.ScalarFunction) registry =
         let invoke args =
             let context: Functions.QueryContext =
-                { Database = session.Database
-                  User = session.User
+                { Database = databaseName
+                  User = user
                   Cancellation = Storage.queryCancellation.Value }
 
             extension.Fn context args
@@ -697,7 +738,7 @@ let private registryFor (session: Session) : Functions.Registry =
             |> Map.fold (fun registry name extension -> collapseExtension name extension registry) current
         |> fun current -> { current with Extensions = session.CustomFunctions.Extensions }
 
-    let database _ = session.Database |> Option.map VString |> Option.defaultValue VNull
+    let database _ = databaseName |> Option.map VString |> Option.defaultValue VNull
     let blockEncryptionMode = sessionValue session "block_encryption_mode" |> Option.defaultValue "aes-128-ecb"
     let timeLocale =
         sessionValue session "lc_time_names"
@@ -705,7 +746,7 @@ let private registryFor (session: Session) : Functions.Registry =
         |> Option.defaultValue Functions.defaultTimeLocale
     let timeZone =
         sessionValue session "time_zone"
-        |> Option.bind (TimeZones.resolve session.Store)
+        |> Option.bind (TimeZones.resolve store)
         |> Option.defaultValue Temporal.SystemTimeZone
     let defaultWeekFormat =
         sessionValue session "default_week_format"
@@ -717,6 +758,13 @@ let private registryFor (session: Session) : Functions.Registry =
         |> Option.defaultValue Limits.defaultMaxPointsInGeometry
 
     let loginUser = if session.LoginUser = "" then session.User else session.LoginUser
+    let clientHost = session.ClientHost
+    let version = sessionValue session "version" |> Option.map VString |> Option.defaultValue VNull
+    let currentUser = Auth.formatAccount (accountOf session)
+    let currentRole = Auth.formatCurrentRoles session.ActiveRoles
+    let lastGeneratedId = session.LastGeneratedId
+    let lastRowCount = session.LastRowCount
+    let foundRows = session.FoundRows
 
     registry
     |> Functions.registerStringScalar
@@ -744,33 +792,57 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "TIMESTAMP" (Functions.timestampFn timeZone)
     |> Functions.registerScalar "UNIX_TIMESTAMP" (Functions.unixTimestampFn timeZone)
     |> Functions.registerScalar "FROM_UNIXTIME" (Functions.fromUnixTimeFn timeZone timeLocale)
-    |> Functions.registerScalar "CONVERT_TZ" (Functions.convertTzFn (TimeZones.resolve session.Store))
+    |> Functions.registerScalar "CONVERT_TZ" (Functions.convertTzFn (TimeZones.resolve store))
     |> Functions.registerScalar "WEEK" (Functions.weekFn defaultWeekFormat)
     |> Functions.registerScalar
         "ST_BUFFER_STRATEGY"
         (Functions.geometryBufferStrategyFn maxPointsInGeometry)
     |> Functions.registerScalar "DATABASE" database
     |> Functions.registerScalar "SCHEMA" database
-    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
-    |> Functions.registerScalar "ROW_COUNT" (fun _ -> VInt session.LastRowCount)
-    |> Functions.registerScalar "FOUND_ROWS" (fun _ -> VUInt session.FoundRows)
-    |> Functions.registerScalar
-        "VERSION"
-        (fun _ -> sessionValue session "version" |> Option.map VString |> Option.defaultValue VNull)
-    |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
-    |> Functions.registerScalar "GET_LOCK" (getAdvisoryLock session)
-    |> Functions.registerScalar "RELEASE_LOCK" (releaseAdvisoryLock session)
-    |> Functions.registerScalar "IS_FREE_LOCK" (inspectAdvisoryLock session false)
-    |> Functions.registerScalar "IS_USED_LOCK" (inspectAdvisoryLock session true)
+    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt lastGeneratedId)
+    |> Functions.registerScalar "ROW_COUNT" (fun _ -> VInt lastRowCount)
+    |> Functions.registerScalar "FOUND_ROWS" (fun _ -> VUInt foundRows)
+    |> Functions.registerScalar "VERSION" (fun _ -> version)
+    |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 connectionId))
+    |> Functions.registerScalar "GET_LOCK" (getAdvisoryLock store connectionId)
+    |> Functions.registerScalar "RELEASE_LOCK" (releaseAdvisoryLock store connectionId)
+    |> Functions.registerScalar "IS_FREE_LOCK" (inspectAdvisoryLock store false)
+    |> Functions.registerScalar "IS_USED_LOCK" (inspectAdvisoryLock store true)
     |> Functions.registerScalar "RELEASE_ALL_LOCKS" (fun args ->
         if args.IsEmpty then
-            VInt(int64 (releaseAllAdvisoryLocks session))
+            VInt(int64 (releaseAllAdvisoryLocks store connectionId))
         else
             raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'RELEASE_ALL_LOCKS'")))
-    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(Auth.formatAccount (accountOf session)))
-    |> Functions.registerScalar "CURRENT_ROLE" (fun _ -> VString(Auth.formatCurrentRoles session.ActiveRoles))
-    |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
-    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString currentUser)
+    |> Functions.registerScalar "CURRENT_ROLE" (fun _ -> VString currentRole)
+    |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + clientHost))
+    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + clientHost))
+
+let private registryFor (session: Session) : Functions.Registry =
+    let inputs =
+        { StoreIdentity = session.Store
+          FunctionIdentity = session.CustomFunctions
+          VariableIdentity = session.Variables
+          SelectedDatabase = session.Database
+          EffectiveUser = session.User
+          EffectiveAccountHost = session.AccountHost
+          EffectiveRoles = session.ActiveRoles
+          LoginIdentity = session.LoginUser
+          PeerHost = session.ClientHost
+          ConnectionIdentity = session.ConnectionId
+          GeneratedId = session.LastGeneratedId
+          AffectedRows = session.LastRowCount
+          FoundRowCount = session.FoundRows
+          GeometryPointOverride = maxPointsInGeometryOverride.Value }
+    // StatusCounters is the session-owned cell retained across immutable record updates.
+    let cache = registryCaches.GetValue(session.StatusCounters, fun _ -> { Entry = None })
+    lock cache (fun () ->
+        match cache.Entry with
+        | Some(previous, registry) when sameRegistryInputs previous inputs -> registry
+        | _ ->
+            let registry = buildRegistryFor session
+            cache.Entry <- Some(inputs, registry)
+            registry)
 
 let private storedFunctionEntries store =
     match Storage.scanList store "mysql" "functions" with
@@ -2784,7 +2856,7 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
 
 /// Rolls an abandoned connection's transaction back.
 let closeSession (session: Session) : unit =
-    releaseAllAdvisoryLocks session |> ignore
+    releaseAllAdvisoryLocks session.Store session.ConnectionId |> ignore
     rollbackSession session |> ignore
     TableLocks.releaseExplicit session.Store session.ConnectionId
     TableLocks.releaseGlobalRead session.Store session.ConnectionId
