@@ -1084,10 +1084,12 @@ let private updateSqlMode (store: Store) (name: string) (active: bool) (update: 
 
 let setSqlMode (store: Store) (value: string) : unit =
     lock store.Lock (fun () ->
-        store.ExecutionSettings <-
-            { store.ExecutionSettings with
-                SqlMode = SqlMode.settingsFor value
-                SqlModeText = value })
+        let settings = store.ExecutionSettings
+        if not (String.Equals(settings.SqlModeText, value, StringComparison.Ordinal)) then
+            store.ExecutionSettings <-
+                { settings with
+                    SqlMode = SqlMode.settingsFor value
+                    SqlModeText = value })
 
 let setStrictMode (store: Store) (strict: bool) : unit =
     updateSqlMode store "STRICT_TRANS_TABLES" strict (fun mode -> { mode with Strict = strict })
