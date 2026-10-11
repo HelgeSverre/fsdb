@@ -30,5 +30,11 @@ internal-vertex crossing, and longitude wrap. Differential contracts
 compare crossing, touching, and overlap with MySQL. Planar
 longitude-latitude segments alone would misclassify the antimeridian case.
 
-Broader line/line `ST_Contains`, `ST_Within`, and `ST_Equals` behavior,
-as well as near-tangent numerical boundaries, remains open.
+Fsdb also covers audited line/line `ST_Contains`, `ST_Within`, and
+`ST_Equals` behavior. Identical, reversed, and differently segmented paths
+compare equal; a contained subsegment is within its carrier; a bent path
+sharing only its endpoints is not. MySQL treats a zero-length line at a
+carrier line's interior as contained but one at its boundary as not
+contained. The implementation checks covered vertices and samples the
+covered geodesic path between them. Near-tangent and unsampled path
+deviations remain precision limits.

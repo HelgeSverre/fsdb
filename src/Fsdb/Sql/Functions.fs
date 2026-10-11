@@ -6512,12 +6512,15 @@ let private geometryPredicateFn functionName predicate =
                             pointLinePredicate referenceSystem lineFirst points lines
                         | None ->
                             match linework first.Shape, linework second.Shape, functionName with
-                            | Some firstLines, Some secondLines, ("ST_CROSSES" | "ST_TOUCHES" | "ST_OVERLAPS") ->
+                            | Some firstLines, Some secondLines, ("ST_CROSSES" | "ST_TOUCHES" | "ST_OVERLAPS" | "ST_CONTAINS" | "ST_WITHIN" | "ST_EQUALS") ->
                                 let topology = geographicLineLineTopology referenceSystem firstLines secondLines
                                 match functionName with
                                 | "ST_CROSSES" -> Some topology.Crosses
                                 | "ST_TOUCHES" -> Some topology.Touches
-                                | _ -> Some topology.Overlaps
+                                | "ST_OVERLAPS" -> Some topology.Overlaps
+                                | "ST_CONTAINS" -> Some topology.FirstContainsSecond
+                                | "ST_WITHIN" -> Some topology.SecondContainsFirst
+                                | _ -> Some(topology.FirstContainsSecond && topology.SecondContainsFirst)
                             | _ ->
                                 let intersects =
                                     match functionName with

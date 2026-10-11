@@ -14833,6 +14833,28 @@ let tests =
                         | ResultSet(_, [ row ]) when row = expected -> ()
                         | result -> failtestf "expected MySQL geographic line topology for %s and %s, got %A" firstText secondText result
 
+                testCase "geographic line containment and equality follow full paths"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "LINESTRING(0 -1,0 1)", "LINESTRING(0 -1,0 1)", [ Some "1"; Some "1"; Some "1" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(0 1,0 -1)", [ Some "1"; Some "1"; Some "1" ]
+                          "LINESTRING(0 -2,0 2)", "LINESTRING(0 -1,0 1)", [ Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(0 0,0 2)", [ Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(0 -1,0 0,0 1)", [ Some "1"; Some "1"; Some "1" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(0 -1,1 0,0 1)", [ Some "0"; Some "0"; Some "0" ]
+                          "MULTILINESTRING((0 -2,0 2),(5 5,6 6))", "LINESTRING(0 -1,0 1)", [ Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(0 0,0 0)", [ Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(0 -1,0 -1)", [ Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(0 0,0 0)", "LINESTRING(0 0,0 0)", [ Some "1"; Some "1"; Some "1" ] ]
+                    for firstText, secondText, expected in cases do
+                        let first = sprintf "ST_GeomFromText('%s',4326)" firstText
+                        let second = sprintf "ST_GeomFromText('%s',4326)" secondText
+                        let sql = sprintf "SELECT ST_Contains(%s,%s),ST_Within(%s,%s),ST_Equals(%s,%s)" first second first second first second
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = expected -> ()
+                        | result -> failtestf "expected MySQL geographic line containment for %s and %s, got %A" firstText secondText result
+
                 testCase "geographic line-polygon intersections include containment and boundaries"
                 <| fun _ ->
                     let store = newStore ()

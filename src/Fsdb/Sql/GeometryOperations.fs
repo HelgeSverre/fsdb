@@ -431,7 +431,9 @@ let private geographicArcsIntersect firstStart firstEnd secondStart secondEnd =
 type internal GeographicLineTopology =
     { Crosses: bool
       Touches: bool
-      Overlaps: bool }
+      Overlaps: bool
+      FirstContainsSecond: bool
+      SecondContainsFirst: bool }
 
 let internal geographicLineLineTopology referenceSystem firstLines secondLines =
     let firstSegments = firstLines |> List.collect List.pairwise
@@ -470,12 +472,31 @@ let internal geographicLineLineTopology referenceSystem firstLines secondLines =
     let commonInterval =
         pairs |> List.exists (fun (first, second) -> List.length (sharedEndpoints first second) >= 2)
     let covers covering covered =
-        covered
-        |> List.collect id
-        |> List.forall (fun point ->
-            covering |> List.exists (fun line ->
-                line |> List.pairwise |> List.exists (onSegment point)))
-    let overlaps = commonInterval && not (covers firstLines secondLines || covers secondLines firstLines)
+        let coveredPoints = covered |> List.collect id |> List.distinct
+        let onLine point =
+            covering
+            |> List.exists (fun line -> line |> List.pairwise |> List.exists (onSegment point))
+        let nearLine point =
+            onLine point
+            || (geographicPointLineDistance referenceSystem point covering
+                |> Option.exists (fun distance -> distance < 0.01))
+        let segmentCovered (start, endpoint) =
+            if not (onLine start && onLine endpoint) then false
+            else
+                let length = geographicPointDistance referenceSystem start endpoint
+                [ 0.25; 0.5; 0.75 ]
+                |> List.forall (fun fraction ->
+                    geographicPointAlong referenceSystem start endpoint (length * fraction)
+                    |> nearLine)
+        match coveredPoints with
+        | [ point ] -> position point covering = GeographicPointLinePosition.Interior
+        | [] -> false
+        | _ -> covered |> List.collect List.pairwise |> List.forall segmentCovered
+    let pointLike lines = lines |> List.collect id |> List.distinct |> List.length = 1
+    let firstContainsSecond, secondContainsFirst =
+        (if commonInterval || pointLike secondLines then covers firstLines secondLines else false),
+        (if commonInterval || pointLike firstLines then covers secondLines firstLines else false)
+    let overlaps = commonInterval && not (firstContainsSecond || secondContainsFirst)
     // A shared vertex can lie in the interior of both complete lines.
     let crosses =
         pairs
@@ -496,7 +517,9 @@ let internal geographicLineLineTopology referenceSystem firstLines secondLines =
                 || position point secondLines = GeographicPointLinePosition.Boundary))
     { Crosses = crosses
       Touches = hasBoundaryContact && not crosses && not commonInterval
-      Overlaps = overlaps && not crosses }
+      Overlaps = overlaps && not crosses
+      FirstContainsSecond = firstContainsSecond
+      SecondContainsFirst = secondContainsFirst }
 
 let internal geographicLineLineDistance referenceSystem firstLines secondLines =
     let sample (start, endpoint) =
