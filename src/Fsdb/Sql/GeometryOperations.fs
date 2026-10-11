@@ -87,6 +87,15 @@ let internal geographicPointDistance referenceSystem first second =
             |> max -1.0
             |> min 1.0
 
+        let tinyMeridionalDistance =
+            if cosineDistance = 1.0 && firstLongitude = secondLongitude && firstLatitude <> secondLatitude then
+                let eccentricitySquared = flattening * (2.0 - flattening)
+                let middleLatitude = (firstLatitude + secondLatitude) / 2.0
+                let scale = 1.0 - eccentricitySquared * sin middleLatitude ** 2.0
+                let meridianRadius = semiMajorAxis * (1.0 - eccentricitySquared) / (scale * sqrt scale)
+                Some(meridianRadius * abs (secondLatitude - firstLatitude))
+            else None
+
         let angularDistance = acos cosineDistance
         let sineDistance = sin angularDistance
         let squaredDifference = (sinFirst - sinSecond) ** 2.0
@@ -109,7 +118,8 @@ let internal geographicPointDistance referenceSystem first second =
         let flatteningCorrection =
             -flattening / 4.0 * (firstCorrection * squaredDifference + secondCorrection * squaredSum)
 
-        semiMajorAxis * (angularDistance + flatteningCorrection)
+        tinyMeridionalDistance
+        |> Option.defaultValue (semiMajorAxis * (angularDistance + flatteningCorrection))
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
 
 /// Boost's default geographic line interpolation uses Andoyer for the initial
@@ -254,12 +264,20 @@ let private geographicPointSegmentDistance referenceSystem point start endpoint 
         if geographicPointsAwayFrom flattening start endpoint point then startDistance
         elif geographicPointsAwayFrom flattening endpoint start point then endDistance
         else
-            let distanceAt position =
-                geographicPointOnSegment referenceSystem flattening start endpoint position
-                |> pointDistance point
+            let pointLatitude, pointLongitude = point
+            let startLatitude, startLongitude = start
+            let endLatitude, endLongitude = endpoint
+            if startLatitude = 0.0 && endLatitude = 0.0 then
+                pointDistance point (0.0, pointLongitude)
+            elif startLongitude = endLongitude then
+                pointDistance point (pointLatitude, startLongitude)
+            else
+                let distanceAt position =
+                    geographicPointOnSegment referenceSystem flattening start endpoint position
+                    |> pointDistance point
 
-            // A half-earth segment shrinks below 2 mm after 48 golden-section steps.
-            min endpointDistance (minimumOnSegment 48 length distanceAt)
+                // A half-earth segment shrinks below 2 mm after 48 golden-section steps.
+                min endpointDistance (minimumOnSegment 48 length distanceAt)
 
 let internal geographicPointLineDistance referenceSystem point lines =
     lines

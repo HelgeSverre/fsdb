@@ -14699,6 +14699,21 @@ let tests =
                         | ResultSet(_, [ [ Some "1" ] ]) -> ()
                         | result -> failtestf "expected MySQL geographic point-line distance for %s, got %A" expression result
 
+                testCase "tiny geographic latitude offsets retain MySQL distance"
+                <| fun _ ->
+                    let store = newStore ()
+                    let origin = "ST_GeomFromText('POINT(0 1)',4326)"
+                    let latitudeOffset = "ST_GeomFromText('POINT(0.0000000001 1)',4326)"
+                    let longitudeOffset = "ST_GeomFromText('POINT(0 1.0000000001)',4326)"
+                    let equator = "ST_GeomFromText('LINESTRING(0 0,0 2)',4326)"
+                    let sql =
+                        sprintf
+                            "SELECT ABS(ST_Distance(%s,%s)-0.000011057302444142153)<0.00000001,ST_Distance(%s,%s)=0,ABS(ST_Distance(%s,%s)-0.000011057302444142153)<0.00000001"
+                            origin latitudeOffset origin longitudeOffset latitudeOffset equator
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL near-coincident geographic distances, got %A" result
+
                 testCase "geographic line-to-line distance covers crossing and disjoint segments"
                 <| fun _ ->
                     let store = newStore ()

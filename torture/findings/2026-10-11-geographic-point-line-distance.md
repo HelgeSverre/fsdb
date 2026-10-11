@@ -2,7 +2,6 @@
 
 Status: implemented for `POINT`/`MULTIPOINT` against `LINESTRING`/
 `MULTILINESTRING`, in either argument order, with optional linear units.
-Geographic line-to-line and polygon distance remain open.
 
 MySQL 8.4.11 measures the nearest point on each geographic line segment,
 rather than the nearest vertex or a planar projection. For EPSG 4326,
@@ -17,6 +16,13 @@ Fsdb minimizes its MySQL-compatible ellipsoidal point distance along each
 segment using the same geographic interpolation as `ST_LineInterpolatePoint`.
 Azimuth projection checks keep the search inside the segment, and endpoint
 distances use the original coordinates so a nearest endpoint remains exact.
+For an 11-micrometre latitude separation, MySQL returns
+0.000011057302444142153 metres while its near-coincident longitude
+separation rounds to zero. Fsdb retains that meridional distance when the
+general angular formula rounds to zero, and projects directly onto exact
+equatorial and meridian segments so their nearest point is not lost to search
+rounding. This also prevents a distinct near-line point from collapsing to
+zero distance in the audited case.
 
 Oracle example:
 
