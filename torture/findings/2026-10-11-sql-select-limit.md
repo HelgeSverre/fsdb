@@ -92,8 +92,8 @@ the inner grouping operation when an outer ORDER BY is present, and that an
 independent ORDER BY scalar moves to the inner grouping operation's
 `optimized_away_subqueries`, with no filesort in either wrapper. Fsdb now
 matches both audited cases. Other independent DISTINCT/ordering and
-HAVING/ORDER BY shapes, subqueries in more than one clause, nested scalar
-blocks, mixed derived/scalar plans, and broader optimizer placement remain open.
+HAVING/ORDER BY shapes, nested scalar blocks, mixed derived/scalar plans, and
+broader optimizer placement remain open.
 
 A further native DISTINCT probe used both a primary-key projection and a
 duplicate-prone non-key value ordered by an independent scalar. MySQL puts
@@ -102,3 +102,12 @@ duplicate-prone non-key value ordered by an independent scalar. MySQL puts
 non-key projection still reports `using_temporary_table: true`. Fsdb now
 matches the audited non-key case, including the child's independent/cacheable
 flags and table access. Other DISTINCT/ordering forms remain open.
+
+MySQL 8.4.11 also places two dependent scalars from different clauses under
+their separate owners: a projected scalar under the query block and a WHERE
+scalar under the source table, or a projected scalar and HAVING scalar together
+under an indexed grouping operation. Their child select IDs follow expression
+encounter order (projection first, predicate second). Fsdb now partitions the
+audited child blocks by clause and renders both without losing their IDs or
+table access. Other multi-clause combinations and optimizer-transformed
+`EXISTS`/`IN` subqueries remain open.

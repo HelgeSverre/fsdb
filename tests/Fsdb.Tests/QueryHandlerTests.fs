@@ -4300,6 +4300,24 @@ let tests =
               let mutable tableMessage = Unchecked.defaultof<System.Text.Json.JsonElement>
               Expect.isFalse (groupedTable.TryGetProperty("message", &tableMessage)) "operation flags do not leak into the table message"
 
+              let projectedAndFiltered =
+                  plan "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a WHERE a.id=(SELECT c.id FROM scalar_plan c WHERE c.id=a.id)"
+              let filteredChild =
+                  projectedAndFiltered.GetProperty("table").GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+              let projectedChild = projectedAndFiltered.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              Expect.equal (projectedChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "projection keeps its first child ID"
+              Expect.equal (filteredChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "WHERE keeps its second child ID"
+              Expect.equal (filteredChild.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "c" "WHERE owns its child access"
+
+              let projectedAndHaving =
+                  plan "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a GROUP BY a.id HAVING a.id=(SELECT c.id FROM scalar_plan c WHERE c.id=a.id)"
+              let mixedGrouping = projectedAndHaving.GetProperty("grouping_operation")
+              let groupedProjectionChild = mixedGrouping.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              let groupedHavingChild = mixedGrouping.GetProperty("having_subqueries").EnumerateArray() |> Seq.head
+              Expect.equal (groupedProjectionChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "grouped projection keeps its child ID"
+              Expect.equal (groupedHavingChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "grouped HAVING keeps its child ID"
+              Expect.equal (groupedHavingChild.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "c" "HAVING owns its child access"
+
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
               let unsafeMessage =
