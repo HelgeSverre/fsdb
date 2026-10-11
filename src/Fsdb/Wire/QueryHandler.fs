@@ -5323,6 +5323,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Error(code, message) -> session, Err(code, message)
         | Ok() ->
             InformationSchema.resetSessionStatuses ()
+            session.TransportMetrics.BytesReceived <- 0L
+            session.TransportMetrics.BytesSent <- 0L
             session, Affected 0UL
     | FlushTables ->
         match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_TABLES" [ "RELOAD"; "FLUSH_TABLES" ] with

@@ -162,6 +162,16 @@ type private ReadProgress() =
 type private CountingStream(inner: IO.Stream, metrics: TransportMetrics, progress: ReadProgress) =
     inherit IO.Stream()
 
+    let recordRead count =
+        metrics.BytesReceived <- metrics.BytesReceived + int64 count
+        if count > 0 then
+            InformationSchema.recordWireBytesReceived (int64 count)
+            progress.Notify()
+
+    let recordWrite count =
+        metrics.BytesSent <- metrics.BytesSent + int64 count
+        InformationSchema.recordWireBytesSent (int64 count)
+
     override _.CanRead = inner.CanRead
     override _.CanSeek = inner.CanSeek
     override _.CanWrite = inner.CanWrite
@@ -176,41 +186,38 @@ type private CountingStream(inner: IO.Stream, metrics: TransportMetrics, progres
 
     override _.Read(buffer, offset, count) =
         let read = inner.Read(buffer, offset, count)
-        metrics.BytesReceived <- metrics.BytesReceived + int64 read
-        if read > 0 then progress.Notify()
+        recordRead read
         read
 
     override _.ReadAsync(buffer, offset, count, cancellationToken) =
         task {
             let! read = inner.ReadAsync(buffer, offset, count, cancellationToken)
-            metrics.BytesReceived <- metrics.BytesReceived + int64 read
-            if read > 0 then progress.Notify()
+            recordRead read
             return read
         }
 
     override _.ReadAsync(buffer: Memory<byte>, cancellationToken) =
         Threading.Tasks.ValueTask<int>(task {
             let! read = inner.ReadAsync(buffer, cancellationToken)
-            metrics.BytesReceived <- metrics.BytesReceived + int64 read
-            if read > 0 then progress.Notify()
+            recordRead read
             return read
         })
 
     override _.Write(buffer, offset, count) =
         inner.Write(buffer, offset, count)
-        metrics.BytesSent <- metrics.BytesSent + int64 count
+        recordWrite count
 
     override _.WriteAsync(buffer, offset, count, cancellationToken) =
         task {
             do! inner.WriteAsync(buffer, offset, count, cancellationToken)
-            metrics.BytesSent <- metrics.BytesSent + int64 count
+            recordWrite count
         }
         :> Threading.Tasks.Task
 
     override _.WriteAsync(buffer: ReadOnlyMemory<byte>, cancellationToken) =
         Threading.Tasks.ValueTask(task {
             do! inner.WriteAsync(buffer, cancellationToken)
-            metrics.BytesSent <- metrics.BytesSent + int64 buffer.Length
+            recordWrite buffer.Length
         })
 
     override _.Seek(offset, origin) = inner.Seek(offset, origin)

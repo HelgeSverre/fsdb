@@ -3438,6 +3438,53 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          TestSupport.processGlobalCase "GLOBAL wire-byte status includes other connections"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let connectionString =
+                      sprintf "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None" server.Port
+
+                  use observer = new MySqlConnector.MySqlConnection(connectionString)
+                  use sender = new MySqlConnector.MySqlConnection(connectionString)
+                  do! observer.OpenAsync() |> Async.AwaitTask
+                  do! sender.OpenAsync() |> Async.AwaitTask
+
+                  let status (connection: MySqlConnector.MySqlConnection) scope name =
+                      async {
+                          use command = connection.CreateCommand()
+                          command.CommandText <- sprintf "SHOW %s STATUS LIKE '%s'" scope name
+                          use! reader = command.ExecuteReaderAsync() |> Async.AwaitTask
+                          let! hasRow = reader.ReadAsync() |> Async.AwaitTask
+                          Expect.isTrue hasRow (name + " status exists")
+                          return Int64.Parse(reader.GetString 1)
+                      }
+
+                  let! receivedBefore = status observer "GLOBAL" "Bytes_received"
+                  let! sentBefore = status observer "GLOBAL" "Bytes_sent"
+                  use payload = sender.CreateCommand()
+                  payload.CommandText <- "SELECT REPEAT('x', 8192) /* " + String.replicate 8192 "p" + " */"
+                  let! result = payload.ExecuteScalarAsync() |> Async.AwaitTask
+                  Expect.equal (string result).Length 8192 "the second connection exchanges the payload"
+
+                  let! receivedAfter = status observer "GLOBAL" "Bytes_received"
+                  let! sentAfter = status observer "GLOBAL" "Bytes_sent"
+                  let! observerSent = status observer "SESSION" "Bytes_sent"
+                  let! observerReceived = status observer "SESSION" "Bytes_received"
+                  Expect.isGreaterThan (receivedAfter - receivedBefore) 8192L "global received bytes include the sender's query"
+                  Expect.isGreaterThan (sentAfter - sentBefore) 8192L "global sent bytes include the sender's result"
+                  Expect.isGreaterThan sentAfter observerSent "session sent bytes remain connection-local"
+
+                  use flush = observer.CreateCommand()
+                  flush.CommandText <- "FLUSH STATUS"
+                  do! flush.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                  let! sentAfterFlush = status observer "GLOBAL" "Bytes_sent"
+                  let! receivedAfterFlush = status observer "SESSION" "Bytes_received"
+                  Expect.isGreaterThan sentAfterFlush sentAfter "FLUSH STATUS does not reset global wire bytes"
+                  Expect.isLessThan receivedAfterFlush observerReceived "FLUSH STATUS resets the issuing session's byte count"
+              }
+              |> Async.RunSynchronously
+
           testCase "malformed command packets return MySQL errors and keep the connection usable"
           <| fun _ ->
               async {

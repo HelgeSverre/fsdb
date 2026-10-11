@@ -948,6 +948,7 @@ type private AtomicCounter() =
     let mutable value = 0L
 
     member _.Increment() = Threading.Interlocked.Increment(&value) |> ignore
+    member _.Add amount = Threading.Interlocked.Add(&value, amount) |> ignore
     member _.Value = Threading.Interlocked.Read(&value)
     member _.Reset() = Threading.Interlocked.Exchange(&value, 0L) |> ignore
 
@@ -1280,7 +1281,12 @@ type StatusCounters internal (id: int64) =
         slowQueryCount.Reset()
 
 let private processStatusCounters = StatusCounters 0L
+let private wireBytesReceived = AtomicCounter()
+let private wireBytesSent = AtomicCounter()
 let private statusCounterId = ref 0L
+
+let internal recordWireBytesReceived count = wireBytesReceived.Add count
+let internal recordWireBytesSent count = wireBytesSent.Add count
 
 let private sessionStatusCounters =
     Collections.Concurrent.ConcurrentDictionary<int64, WeakReference<StatusCounters>>()
@@ -4282,8 +4288,8 @@ let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) schedulerEnabl
               "Compression_level", string connection.CompressionLevel ]
 
     let rows =
-        [ "Bytes_received", string connection.BytesReceived
-          "Bytes_sent", string connection.BytesSent
+        [ "Bytes_received", string (if isGlobal then wireBytesReceived.Value else connection.BytesReceived)
+          "Bytes_sent", string (if isGlobal then wireBytesSent.Value else connection.BytesSent)
           "Ssl_cipher", connection.SslCipher |> Option.defaultValue ""
           "Ssl_version", connection.SslVersion |> Option.defaultValue ""
           "Caching_sha2_password_rsa_public_key",
