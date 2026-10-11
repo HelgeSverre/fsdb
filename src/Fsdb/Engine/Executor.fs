@@ -3793,6 +3793,13 @@ let private hasCombinedResultCollation ctx name =
     | Some(Functions.CombineArguments _) -> true
     | _ -> false
 
+let private castCharacterCollation connectionCharset modifiers =
+    let charset = CharCastModifier.charset connectionCharset modifiers |> Charset.canonicalName
+    let collation =
+        if modifiers |> List.contains CastBinaryAttribute then charset + "_bin"
+        else Collation.defaultNameForCharset charset
+    charset, collation
+
 let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Result<CollationOperand, EvalError> =
     let connection coercibility = operand ctx.Store.ExecutionSettings.ConnectionCollation coercibility
     let named = namedCollationOperand
@@ -3834,10 +3841,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | CastCharset(_, _, charset) -> named (Collation.defaultNameForCharset charset) 2
     | CastCharAlias(_, _, alias) -> named (Collation.defaultNameForCharset (CharCastAlias.charset alias)) 2
     | CastCharTarget(_, _, modifiers) ->
-        let charset = CharCastModifier.charset ctx.Store.ExecutionSettings.ConnectionCharset modifiers |> Charset.canonicalName
-        let collation =
-            if modifiers |> List.contains CastBinaryAttribute then charset + "_bin"
-            else Collation.defaultNameForCharset charset
+        let _, collation = castCharacterCollation ctx.Store.ExecutionSettings.ConnectionCharset modifiers
         named collation 2
     | CastAsBinary _ -> named "binary" 2
     | Cast(_, TJson) -> named "utf8mb4_bin" 2
@@ -6835,10 +6839,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | CastCharAlias(value, length, alias) ->
         metadataOfExpr ctx (CastCharset(value, length, CharCastAlias.charset alias))
     | CastCharTarget(value, length, modifiers) ->
-        let charset = CharCastModifier.charset ctx.Store.ExecutionSettings.ConnectionCharset modifiers |> Charset.canonicalName
-        let collation =
-            if modifiers |> List.contains CastBinaryAttribute then charset + "_bin"
-            else Collation.defaultNameForCharset charset
+        let charset, collation = castCharacterCollation ctx.Store.ExecutionSettings.ConnectionCharset modifiers
         withCollation (CastCharset(value, length, charset)) collation
     | CastAsBinary(value, length) -> metadataOfExpr ctx (CastCharset(value, length, "binary"))
     | BinaryCast inner -> withCollation inner "binary"

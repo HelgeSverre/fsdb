@@ -1674,11 +1674,11 @@ let private validateCastPrecision maximum precision =
     if precision > maximum then
         raise (SemanticParseError(sprintf "Too-big precision %d specified for 'CAST'. Maximum is %d." precision maximum))
 
-let private castCharWidth: Parser<int option, unit> =
-    opt widthLen
+let private castWidth target: Parser<int option, unit> =
+    optWidthLen
     |>> (fun width ->
         if width |> Option.exists (fun value -> value < 0) then
-            raise (SemanticParseError "Invalid CHAR cast width")
+            raise (SemanticParseError(sprintf "Invalid %s cast width" target))
         width)
 
 let private castTargetType: Parser<CastTarget, unit> =
@@ -1688,16 +1688,13 @@ let private castTargetType: Parser<CastTarget, unit> =
           // `CAST(-1 AS UNSIGNED)` is 18446744073709551615, and
           // `CAST(x AS SIGNED)` likewise round-trips the full BIGINT range.
           attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% TypedCast(TBigInt true, None)
-          keyword "NCHAR" >>. castCharWidth |>> (fun width -> AliasedCharCast(NationalChar, width))
+          keyword "NCHAR" >>. castWidth "CHAR" |>> (fun width -> AliasedCharCast(NationalChar, width))
           attempt (keyword "NATIONAL" >>. (keyword "CHARACTER" <|> keyword "CHAR"))
-          >>. castCharWidth |>> (fun width -> AliasedCharCast(NationalChar, width))
-          (keyword "CHAR" <|> keyword "CHARACTER") >>. castCharWidth
+          >>. castWidth "CHAR" |>> (fun width -> AliasedCharCast(NationalChar, width))
+          (keyword "CHAR" <|> keyword "CHARACTER") >>. castWidth "CHAR"
           |>> (fun width -> TypedCast(TChar(defaultArg width 1), width))
-          (keyword "BINARY" >>. optWidthLen
-           |>> fun width ->
-               if width |> Option.exists (fun value -> value < 0) then
-                   raise (SemanticParseError "Invalid BINARY cast width")
-               TypedCast(TBinary(defaultArg width 1), width))
+          (keyword "BINARY" >>. castWidth "BINARY"
+           |>> fun width -> TypedCast(TBinary(defaultArg width 1), width))
           keyword "DECIMAL" >>. opt numericWidth
           |>> (fun size ->
               let precision, scale = size |> Option.defaultValue (10, None)
