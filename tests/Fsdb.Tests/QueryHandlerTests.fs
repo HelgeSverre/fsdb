@@ -3247,7 +3247,14 @@ let tests =
                     "' 12:34:56'", Some "12:34:56", [ 4096, "Delimiter ' ' in position 0 in datetime value ' 12:34:56' at row 1 is superfluous and is deprecated. Please remove." ]
                     "' 839:00:00 '", Some "838:59:59", [ 1292, "Truncated incorrect time value: ' 839:00:00 '"; 4096, "Delimiter ' ' in position 0 in datetime value ' 839:00:00 ' at row 1 is superfluous and is deprecated. Please remove." ]
                     "' x'", None, [ 1292, "Truncated incorrect time value: ' x'"; 4096, "Delimiter ' ' in position 0 in datetime value ' x' at row 1 is superfluous and is deprecated. Please remove." ]
-                    "'abc '", None, [ 1292, "Truncated incorrect time value: 'abc '" ] ] do
+                    "'abc '", None, [ 1292, "Truncated incorrect time value: 'abc '" ]
+                    "'12:34:56 x'", Some "12:34:56", [ 1292, "Truncated incorrect time value: '12:34:56 x'"; 4096, "Delimiter ' ' in position 8 in datetime value '12:34:56 x' at row 1 is superfluous and is deprecated. Please remove." ]
+                    "'12:34:56  x'", Some "12:34:56", [ 1292, "Truncated incorrect time value: '12:34:56  x'"; 4096, "Delimiter ' ' in position 8 in datetime value '12:34:56  x' at row 1 is superfluous and is deprecated. Please remove." ]
+                    "'12:34:56   x'", None, [ 1292, "Truncated incorrect time value: '12:34:56   x'" ]
+                    "'12:34 :56'", Some "12:34:00", [ 1292, "Truncated incorrect time value: '12:34 :56'"; 4096, "Delimiter ' ' in position 5 in datetime value '12:34 :56' at row 1 is superfluous and is deprecated. Please remove." ]
+                    "'12: 34:56'", Some "00:00:12", [ 1292, "Truncated incorrect time value: '12: 34:56'" ]
+                    "'12 :34:56'", Some "12:34:56", []
+                    "'12  :34:56'", Some "12:34:56", [ 4096, "Delimiter ' ' in position 2 in datetime value '12  :34:56' at row 1 is superfluous and is deprecated. Please remove." ] ] do
                   let sql = sprintf "SELECT CAST(%s AS TIME)" source
                   match handle session sql with
                   | session, ResultSet(_, [ [ actual ] ]) ->

@@ -155,5 +155,10 @@ It accepts `HH:MM` as a clock time, keeps a valid prefix before trailing
 text with warning 1292, and clamps overflowing text such as `'839:00:00'`
 to `838:59:59` with warning 1292. Leading or trailing spaces produce MySQL's
 warning 4096 on the audited inputs, after warning 1292 when both apply.
-Fsdb now matches these twelve value and warning cases. Internal delimiters,
-other source types, and the wider TIME conversion grammar remain open.
+Internal spaces after a valid time prefix now preserve MySQL's warning order:
+one or two spaces before trailing junk keep the prefix and warn 1292 then
+4096; three spaces return NULL with 1292. A space before the first colon is
+accepted, with 4096 for two or more spaces; a space after the first colon
+instead leaves a numeric prefix. Fsdb now matches these nineteen value and
+warning cases. Other delimiters, source types, and the wider TIME conversion
+grammar remain open.

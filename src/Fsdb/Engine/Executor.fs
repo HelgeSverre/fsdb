@@ -6153,31 +6153,42 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | _ -> false
                 let warn () =
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" raw)
-                let warnSuperfluousSpace parsed truncated =
+                let warnSuperfluousSpace parsed prefixEnd =
                     let position =
                         if raw.StartsWith(" ") then Some 0
-                        elif not truncated && raw.EndsWith(" ") then
-                            match parsed with
-                            | ParsedTime _ -> Some(raw.TrimEnd().Length)
+                        else
+                            match parsed, prefixEnd with
+                            | ParsedTime _, Some index when index < raw.Length && raw.[index] = ' ' -> Some index
+                            | ParsedTime _, None when raw.Contains(':') ->
+                                let beforeColon = raw.Substring(0, raw.IndexOf ':')
+                                let spaces = beforeColon.Length - beforeColon.TrimEnd(' ').Length
+                                if spaces >= 2 then Some(beforeColon.Length - spaces)
+                                elif raw.EndsWith(" ") then Some(raw.TrimEnd().Length)
+                                else None
+                            | ParsedTime _, None when raw.EndsWith(" ") -> Some(raw.TrimEnd().Length)
                             | _ -> None
-                        else None
                     position
                     |> Option.iter (fun index ->
                         Diagnostics.warning 4096
                             (sprintf "Delimiter ' ' in position %d in datetime value '%s' at row %d is superfluous and is deprecated. Please remove."
                                 index raw (Diagnostics.currentRowNumber ())))
-                let parsed, truncated =
+                let parsed, prefixEnd =
                     match parseTimeInput raw with
-                    | ParsedTime _ as result -> result, false
-                    | TimeComponentsOutOfRange as result -> result, false
+                    | ParsedTime _ as result -> result, None
+                    | TimeComponentsOutOfRange as result -> result, None
                     | NotATime ->
                         let input = raw.TrimStart()
-                        let pattern =
-                            if input.Contains(':') then leadingClockTimePrefixRegex
-                            else leadingNumericTimePrefixRegex
-                        let prefix = pattern.Match input
-                        if prefix.Success then parseTimeInput prefix.Value, true
-                        else NotATime, false
+                        let clockPrefix = leadingClockTimePrefixRegex.Match input
+                        let prefix =
+                            if clockPrefix.Success then clockPrefix
+                            else leadingNumericTimePrefixRegex.Match input
+                        if not prefix.Success then NotATime, None
+                        else
+                            let ending = raw.Length - input.Length + prefix.Length
+                            let remaining = raw.Substring ending
+                            let spaces = remaining |> Seq.takeWhile ((=) ' ') |> Seq.length
+                            if spaces >= 3 && spaces < remaining.Length then NotATime, None
+                            else parseTimeInput prefix.Value, Some ending
                 let result =
                     match parsed with
                     | ParsedTime ticks ->
@@ -6188,12 +6199,12 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                             warn ()
                             if isNumeric then VNull else VTime(timeValueOrClamp adjusted)
                         else
-                            if truncated then warn ()
+                            if Option.isSome prefixEnd then warn ()
                             VTime(timeValueOrClamp adjusted)
                     | NotATime | TimeComponentsOutOfRange ->
                         warn ()
                         VNull
-                warnSuperfluousSpace parsed truncated
+                warnSuperfluousSpace parsed prefixEnd
                 Ok result
             | (TDate | TDateTime _), _ ->
                 let source =

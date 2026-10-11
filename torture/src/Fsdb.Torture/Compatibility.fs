@@ -1178,7 +1178,9 @@ module ContractCatalog =
                for index, source in
                    [ "'abc'"; "'12:34:56x'"; "'123456x'"; "'12:34'";
                      "'839:00:00'"; "'12:99:56'"; "8390000";
-                     "'12:34:56 '"; "' 12:34:56'"; "' 839:00:00 '"; "' x'"; "'abc '" ] |> List.indexed do
+                     "'12:34:56 '"; "' 12:34:56'"; "' 839:00:00 '"; "' x'"; "'abc '";
+                     "'12:34:56 x'"; "'12:34:56  x'"; "'12:34:56   x'";
+                     "'12:34 :56'"; "'12: 34:56'"; "'12 :34:56'"; "'12  :34:56'" ] |> List.indexed do
                    yield Contract.query (sprintf "time-cast-value-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)
                          |> Contract.comparingValues
                    yield Contract.query (sprintf "time-cast-warnings-%d" index) "SHOW WARNINGS"

@@ -728,8 +728,10 @@ distinct year and numeric-origin behavior;
 audited TIME casts now return NULL with warning 1292 for invalid text and
 numeric overflow, accept a valid time prefix with a truncation warning, parse
 `HH:MM`, and clamp overflowing text with warning 1292; leading and trailing
-space delimiters now produce MySQL's 4096 warning on audited inputs, while
-internal delimiters and broader source expressions remain open;
+space delimiters now produce MySQL's 4096 warning on audited inputs, and
+the audited one- or two-space internal delimiter cases distinguish a retained
+time prefix from a NULL result; broader delimiter grammar and source
+expressions remain open;
 audited DECIMAL precision/scale limits follow MySQL's validation order and
 source-expression labels, including the zero-precision default. Negative
 FLOAT, TIME, DATETIME, and DECIMAL target precisions now fail as syntax in
