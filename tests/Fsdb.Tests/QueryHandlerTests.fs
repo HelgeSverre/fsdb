@@ -4198,6 +4198,21 @@ let tests =
               Expect.isTrue (orderedChild.GetProperty("dependent").GetBoolean()) "ORDER BY scalar depends on the source row"
               Expect.equal (orderedChild.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "ORDER BY child stays under ordering"
 
+              let independentOrder =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a ORDER BY (SELECT b.id FROM scalar_plan b WHERE b.id=1)"
+              let independentOrdering = independentOrder.GetProperty("ordering_operation")
+              Expect.isFalse (independentOrdering.GetProperty("using_filesort").GetBoolean()) "constant scalar ordering needs no filesort"
+              let optimizedOrder = independentOrdering.GetProperty("optimized_away_subqueries").EnumerateArray() |> Seq.head
+              Expect.isFalse (optimizedOrder.GetProperty("dependent").GetBoolean()) "independent order scalar is cacheable"
+              Expect.equal (optimizedOrder.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "optimized order scalar retains its child access"
+
+              let independentHaving =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a GROUP BY a.id HAVING a.id=(SELECT b.id FROM scalar_plan b WHERE b.id=1)"
+              let independentHavingChild =
+                  independentHaving.GetProperty("grouping_operation").GetProperty("having_subqueries").EnumerateArray() |> Seq.head
+              Expect.isFalse (independentHavingChild.GetProperty("dependent").GetBoolean()) "independent HAVING scalar remains under grouping"
+              Expect.equal (independentHavingChild.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "independent HAVING child retains its access"
+
               let projectionSql tail =
                   "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a " + tail
 

@@ -81,8 +81,12 @@ ordinal position,
 MySQL places `ordering_operation` outside `duplicates_removal`. The latter
 uses a temporary table and filesort, while the outer ordering reports no
 additional filesort. Fsdb now follows that audited ownership and flag split.
-Independent ORDER BY scalars can appear under the operation's
-`optimized_away_subqueries`, while independent HAVING scalars can have an
-optimized-away child block. Other DISTINCT/ordering combinations, subqueries
+An additional MySQL 8.4.11 probe of a single-table primary-key scan found that
+an independent scalar ORDER BY key belongs to the ordering operation's
+`optimized_away_subqueries` array, with `dependent: false`, `cacheable: true`,
+and `using_filesort: false`. An independent HAVING scalar stays in the grouping
+operation's `having_subqueries` array with the same dependence flags. Fsdb now
+matches these audited placements and retains the child table access. Other
+independent HAVING/ORDER BY shapes, DISTINCT/ordering combinations, subqueries
 in more than one clause, nested scalar blocks, mixed derived/scalar plans,
 and broader optimizer placement remain open.

@@ -20385,7 +20385,14 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                 if not dependent.IsEmpty then
                     target["select_list_subqueries"] <- dependent |> List.map subqueryNode |> jsonArray
             | ExplainHaving -> target["having_subqueries"] <- subqueries |> List.map subqueryNode |> jsonArray
-            | ExplainOrderBy -> target["order_by_subqueries"] <- subqueries |> List.map subqueryNode |> jsonArray
+            | ExplainOrderBy ->
+                let dependent, independent = subqueries |> List.partition fst
+
+                if not independent.IsEmpty then
+                    target["optimized_away_subqueries"] <- independent |> List.map subqueryNode |> jsonArray
+
+                if not dependent.IsEmpty then
+                    target["order_by_subqueries"] <- dependent |> List.map subqueryNode |> jsonArray
             | ExplainWhere -> target["attached_subqueries"] <- subqueries |> List.map subqueryNode |> jsonArray
 
         match nestedSubqueries with
@@ -20406,6 +20413,7 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
 
                 let hasFilesort = blockRows |> List.exists (fun row -> List.contains "Using filesort" row.Extra)
                 let hasTemporary = blockRows |> List.exists (fun row -> List.contains "Using temporary" row.Extra)
+                let hasDependentSubquery = subqueries |> List.exists fst
                 let source = JsonObject()
                 source["table"] <- block["table"].DeepClone()
                 block.Remove("table") |> ignore
@@ -20425,8 +20433,11 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                             match operations, operationKind with
                             | [ OrderingOperation; DistinctOperation ], DistinctOperation -> hasFilesort
                             | [ OrderingOperation; DistinctOperation ], OrderingOperation -> false
+                            | [ OrderingOperation ], OrderingOperation
+                                when clause = ExplainOrderBy && not hasDependentSubquery -> false
                             | _ ->
-                                (operationKind = OrderingOperation && (hasFilesort || clause = ExplainOrderBy))
+                                (operationKind = OrderingOperation
+                                 && (hasFilesort || (clause = ExplainOrderBy && hasDependentSubquery)))
                                 || (operations.Length = 1 && hasFilesort)
 
                         operation["using_filesort"] <- JsonValue.Create(filesort)
@@ -20520,6 +20531,9 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                     || row.SelectType = "DEPENDENT SUBQUERY"))
             && (match placement with
                 | Some { Clause = ExplainProjection; Operations = [] } -> true
+                | Some { Clause = ExplainOrderBy; Operations = [ OrderingOperation ] }
+                | Some { Clause = ExplainHaving; Operations = [ GroupingOperation ] } ->
+                    branchRows.Length = 1 && branchRows.Head.Table.IsSome
                 | Some _ ->
                     branchRows.Length = 1
                     && branchRows.Head.Table.IsSome
@@ -20723,8 +20737,8 @@ let private selectJsonSubqueryPlacement (select: SelectStmt) =
                     tableSource && dependent && ordersByProjectedValue
                 | ExplainWhere, [] -> tableSource && dependent
                 | ExplainHaving, [ GroupingOperation ]
-                | ExplainHaving, [ OrderingOperation; GroupingOperation ] -> tableSource && dependent
-                | ExplainOrderBy, [ OrderingOperation ]
+                | ExplainOrderBy, [ OrderingOperation ] -> tableSource
+                | ExplainHaving, [ OrderingOperation; GroupingOperation ]
                 | ExplainOrderBy, [ OrderingOperation; GroupingOperation ] -> tableSource && dependent
                 | _ -> false
 
