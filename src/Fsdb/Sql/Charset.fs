@@ -574,27 +574,27 @@ let private invalidSingleByteConvertBytes =
         (values.Split(' ') |> Array.map (fun value -> Convert.ToByte(value, 16)) |> Set.ofArray))
     |> Map.ofList
 
-let private isInvalidSingleByteConvertByte charset value =
+let private singleByteConversionInvalidByte name =
+    let charset = canonicalName name
     match charset with
-    | "swe7" -> value > 0x7Fuy
+    | "swe7" -> fun value -> value > 0x7Fuy
     | _ ->
         match SingleByteCharset.tryFind charset, Map.tryFind charset invalidSingleByteConvertBytes with
-        | Some mapping, _ -> value >= 0x80uy && mapping.[int value - 128] = 0
-        | _, Some invalid -> Set.contains value invalid
-        | _ -> false
+        | Some mapping, _ -> fun value -> value >= 0x80uy && mapping.[int value - 128] = 0
+        | _, Some invalid -> fun value -> Set.contains value invalid
+        | _ -> fun _ -> false
 
 let tryInvalidSingleByteConvertOffset name (bytes: byte[]) =
-    let charset = canonicalName name
-    bytes |> Array.tryFindIndex (isInvalidSingleByteConvertByte charset)
+    bytes |> Array.tryFindIndex (singleByteConversionInvalidByte name)
 
 let decodeSingleByteConversionSource name (bytes: byte[]) =
-    let charset = canonicalName name
-    let decoded = decodeBytes charset bytes
+    let decoded = decodeBytes name bytes
+    let isInvalid = singleByteConversionInvalidByte name
     // A single-byte codec decodes one character per byte. Invalid source
     // values stay byte-preserving until a text conversion needs replacement.
     String(
         Array.init bytes.Length (fun index ->
-            if isInvalidSingleByteConvertByte charset bytes.[index] then '?' else decoded.[index])
+            if isInvalid bytes.[index] then '?' else decoded.[index])
     )
 
 /// Conversion substitutes each invalid source byte while retaining valid sequences.
