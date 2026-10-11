@@ -14625,6 +14625,21 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "0"; None ] ]) -> ()
                     | result -> failtestf "expected MySQL point-set topology, got %A" result
 
+                testCase "ETRS89 and NAD83 retain their geographic definitions"
+                <| fun _ ->
+                    let store = newStore ()
+                    for srid in [ 4258; 4269 ] do
+                        let point = sprintf "ST_GeomFromText('POINT(40 -75)',%d)" srid
+                        let nextPoint = sprintf "ST_GeomFromText('POINT(41 -75)',%d)" srid
+                        let sql =
+                            sprintf "SELECT ST_AsText(%s), ABS(ST_Distance(%s,%s)-111045.29885197058)<0.01" point point nextPoint
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "POINT(40 -75)"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected geographic SRID %d coordinates and distance, got %A" srid result
+                    match runDefault store "SELECT SRS_ID,SRS_NAME FROM INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID IN (4258,4269) ORDER BY SRS_ID" with
+                    | ResultSet(_, [ [ Some "4258"; Some "ETRS89" ]; [ Some "4269"; Some "NAD83" ] ]) -> ()
+                    | result -> failtestf "expected MySQL geographic SRS catalog rows, got %A" result
+
                 testCase "EPSG 3857 uses planar metric operations"
                 <| fun _ ->
                     let store = newStore ()

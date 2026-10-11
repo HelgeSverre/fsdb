@@ -29,6 +29,12 @@ type internal SpatialReferenceSystem =
 let private wgs84Definition =
     "GEOGCS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]"
 
+let private etrs89Definition =
+    "GEOGCS[\"ETRS89\",DATUM[\"European Terrestrial Reference System 1989\",SPHEROID[\"GRS 1980\",6378137,298.257222101,AUTHORITY[\"EPSG\",\"7019\"]],TOWGS84[0,0,0,0,0,0,0],AUTHORITY[\"EPSG\",\"6258\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4258\"]]"
+
+let private nad83Definition =
+    "GEOGCS[\"NAD83\",DATUM[\"North American Datum 1983\",SPHEROID[\"GRS 1980\",6378137,298.257222101,AUTHORITY[\"EPSG\",\"7019\"]],TOWGS84[1,1,-1,0,0,0,0],AUTHORITY[\"EPSG\",\"6269\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4269\"]]"
+
 let private pseudoMercatorDefinition =
     [ "PROJCS[\"WGS 84 / Pseudo-Mercator\","
       wgs84Definition
@@ -72,6 +78,26 @@ let internal all =
         AxisOrder = LatitudeLongitude
         SemiMajorAxis = Some 6378137.0
         InverseFlattening = Some 298.257223563
+        LinearUnitInMetres = None }
+      { Name = "ETRS89"
+        Srid = 4258
+        Organization = Some "EPSG"
+        OrganizationCoordinateSystemId = Some 4258
+        Definition = etrs89Definition
+        Description = None
+        AxisOrder = LatitudeLongitude
+        SemiMajorAxis = Some 6378137.0
+        InverseFlattening = Some 298.257222101
+        LinearUnitInMetres = None }
+      { Name = "NAD83"
+        Srid = 4269
+        Organization = Some "EPSG"
+        OrganizationCoordinateSystemId = Some 4269
+        Definition = nad83Definition
+        Description = None
+        AxisOrder = LatitudeLongitude
+        SemiMajorAxis = Some 6378137.0
+        InverseFlattening = Some 298.257222101
         LinearUnitInMetres = None }
       { Name = "WGS 84 / Pseudo-Mercator"
         Srid = 3857
