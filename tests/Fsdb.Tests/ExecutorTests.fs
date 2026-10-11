@@ -1056,6 +1056,42 @@ let tests =
                             [ 1300, sprintf "Invalid %s character string: '%s'" charset hex ]
                             (sprintf "%s warning" charset)
 
+                testCase "CONVERT preserves single-byte charset bytes and reports invalid mappings"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for charset, hex, warned in
+                        [ "cp1250", "81", true
+                          "cp1251", "98", true
+                          "cp1256", "8A", true
+                          "cp1257", "A5", true
+                          "dec8", "A4", true
+                          "geostd8", "81", true
+                          "greek", "A4", true
+                          "hebrew", "A1", true
+                          "hp8", "FF", true
+                          "macce", "41", false
+                          "macroman", "41", false
+                          "tis620", "80", false
+                          "latin1", "81", false ] do
+                        let sql = sprintf "SELECT HEX(CONVERT(0x%s USING %s))" hex charset
+                        let result, warnings = Fsdb.Diagnostics.capture (fun () -> runDefault store sql)
+                        match result with
+                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual hex sql
+                        | other -> failtestf "expected preserved byte for %s, got %A" sql other
+                        let expected =
+                            [ if List.contains charset [ "dec8"; "hp8"; "macce"; "macroman" ] then
+                                  1287,
+                                  sprintf
+                                      "'%s' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
+                                      charset
+                              if warned then
+                                  1300, sprintf "Invalid %s character string: '%s'" charset hex ]
+                        Expect.equal
+                            (warnings |> List.map (fun warning -> warning.Code, warning.Message))
+                            expected
+                            (sprintf "%s warning" charset)
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

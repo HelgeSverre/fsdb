@@ -28,6 +28,11 @@ multibyte legacy family: SJIS, CP932, Big5, GBK, GB2312, GB18030, EUC-KR,
 and UJIS. MySQL returned NULL and one warning 1300 naming the charset and
 the invalid lead byte. Fsdb now reuses its existing binary-literal byte
 validator at conversion time and matches those value-and-warning outcomes.
-Some single-byte codecs differ: CP1251 preserves byte `98` with warning 1300,
-while TIS-620 preserves byte `80` without a warning. The broader single-byte
-invalid-byte matrix and other conversion contexts remain open.
+The single-byte oracle sweep covered every high byte (`80`–`FF`) in the 25
+supported single-byte charsets. MySQL preserves these raw bytes even when a
+charset marks them invalid. The warning sets vary by charset: CP1251 warns for
+`98`, while TIS-620 warns for none; ASCII and SWE7 warn for every high byte.
+Fsdb now preserves the raw bytes and emits warning 1300 for the audited holes.
+The same sweep showed that `dec8`, `hp8`, `macce`, and `macroman` also emit a
+preceding deprecation warning 1287, which the conversion path now preserves.
+Other conversion contexts remain open.

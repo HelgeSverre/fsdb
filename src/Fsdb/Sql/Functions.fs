@@ -2135,6 +2135,11 @@ let private convertFn: Scalar =
                 Diagnostics.warning 1300 (Charset.invalidCharacterMessage charset bytes offset)
                 VNull
             | "ucs2", _ -> VEncodedString(charset, bytes)
+            | charset, _ when Charset.isSingleByte charset ->
+                match Charset.tryInvalidSingleByteConvertOffset charset bytes with
+                | Some offset -> Diagnostics.warning 1300 (Charset.invalidCharacterMessage charset bytes offset)
+                | None -> ()
+                VEncodedString(charset, bytes)
             | _ ->
                 match Charset.tryInvalidBinaryLiteralByteOffset charset bytes with
                 | Some offset ->

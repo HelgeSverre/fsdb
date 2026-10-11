@@ -20,6 +20,9 @@ let private reportCharsetDeprecation (spelling: string) =
     | "utf8" -> Diagnostics.deprecatedUtf8Alias ()
     | "utf8mb3" -> Diagnostics.deprecatedUtf8mb3 ()
     | "ucs2" -> Diagnostics.deprecatedUcs2 ()
+    | ("dec8" | "hp8" | "macce" | "macroman") as charset ->
+        Diagnostics.warning 1287
+            (sprintf "'%s' is deprecated and will be removed in a future release. Please use utf8mb4 instead" charset)
     | _ -> ()
 
 let private reportCharsetConversions statement =

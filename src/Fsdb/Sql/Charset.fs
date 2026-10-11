@@ -342,6 +342,9 @@ let all = codecs |> List.map _.Info
 let tryFind name =
     tryCodec name |> Option.map _.Info
 
+let isSingleByte name =
+    tryFind name |> Option.exists (fun info -> info.MaxBytesPerCharacter = 1)
+
 let defaultCollationName name =
     tryFind name |> Option.map _.DefaultCollation
 
@@ -556,6 +559,31 @@ let tryInvalidTextByteOffset name bytes =
     match canonicalName name with
     | "ascii" -> bytes |> Array.tryFindIndex (fun value -> value > 0x7Fuy)
     | _ -> tryInvalidUnicodeByteOffset name bytes
+
+// MySQL retains the source byte for these unmapped single-byte values, but
+// reports warning 1300. The host code pages do not expose the same holes.
+let private invalidSingleByteConvertBytes =
+    [ "cp1250", "81 83 88 90 98"
+      "cp1251", "98"
+      "cp1256", "8A 8F 98 9A 9F AA C0 FF"
+      "cp1257", "81 83 88 8A 8C 90 98 9A 9C 9F A1 A5"
+      "greek", "A4 A5 AA AE D2 FF"
+      "hebrew", "A1 BF C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF D0 D1 D2 D3 D4 D5 D6 D7 D8 D9 DA DB DC DD DE FB FC FF" ]
+    |> List.map (fun (charset, values) ->
+        charset,
+        (values.Split(' ') |> Array.map (fun value -> Convert.ToByte(value, 16)) |> Set.ofArray))
+    |> Map.ofList
+
+let tryInvalidSingleByteConvertOffset name (bytes: byte[]) =
+    match canonicalName name with
+    | "swe7" -> bytes |> Array.tryFindIndex (fun value -> value > 0x7Fuy)
+    | charset ->
+        match SingleByteCharset.tryFind charset, Map.tryFind charset invalidSingleByteConvertBytes with
+        | Some mapping, _ ->
+            bytes
+            |> Array.tryFindIndex (fun value -> value >= 0x80uy && mapping.[int value - 128] = 0)
+        | _, Some invalid -> bytes |> Array.tryFindIndex (fun value -> Set.contains value invalid)
+        | _ -> None
 
 /// Conversion substitutes each invalid source byte while retaining valid sequences.
 let decodeWithByteReplacement name (bytes: byte[]) =

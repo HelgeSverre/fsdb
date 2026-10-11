@@ -965,6 +965,24 @@ module ContractCatalog =
                    yield Contract.query name (sprintf "SELECT HEX(CONVERT(0x%s USING %s))" hex charset)
                          |> Contract.comparingValues
                    yield Contract.query (name + "-warnings") "SHOW WARNINGS" |> Contract.comparingValues
+               for charset, hex in
+                   [ "cp1250", "81"
+                     "cp1251", "98"
+                     "cp1256", "8A"
+                     "cp1257", "A5"
+                     "dec8", "A4"
+                     "geostd8", "81"
+                     "greek", "A4"
+                     "hebrew", "A1"
+                     "hp8", "FF"
+                     "macce", "41"
+                     "macroman", "41"
+                     "tis620", "80"
+                     "latin1", "81" ] do
+                   let name = "convert-single-byte-" + charset
+                   yield Contract.query name (sprintf "SELECT HEX(CONVERT(0x%s USING %s))" hex charset)
+                         |> Contract.comparingValues
+                   yield Contract.query (name + "-warnings") "SHOW WARNINGS" |> Contract.comparingValues
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do
