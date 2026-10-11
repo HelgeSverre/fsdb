@@ -206,46 +206,47 @@ let internal geographicPointAlong referenceSystem first second distance =
         latitude * 180.0 / Math.PI, longitude * 180.0 / Math.PI
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
 
-let internal geographicPointLineDistance referenceSystem point lines =
+let private geographicPointSegmentDistance referenceSystem point start endpoint =
     let pointDistance = geographicPointDistance referenceSystem
-    let segmentDistance start endpoint =
-        let length = pointDistance start endpoint
-        let endpointDistance = min (pointDistance point start) (pointDistance point endpoint)
+    let length = pointDistance start endpoint
+    let endpointDistance = min (pointDistance point start) (pointDistance point endpoint)
 
-        if length = 0.0 then endpointDistance
-        else
-            let distanceAt position =
-                geographicPointAlong referenceSystem start endpoint position
-                |> pointDistance point
+    if length = 0.0 then endpointDistance
+    else
+        let distanceAt position =
+            geographicPointAlong referenceSystem start endpoint position
+            |> pointDistance point
 
-            let ratio = (sqrt 5.0 - 1.0) / 2.0
-            let mutable lower, upper = 0.0, length
-            let mutable left = upper - ratio * (upper - lower)
-            let mutable right = lower + ratio * (upper - lower)
-            let mutable leftDistance = distanceAt left
-            let mutable rightDistance = distanceAt right
+        let ratio = (sqrt 5.0 - 1.0) / 2.0
+        let mutable lower, upper = 0.0, length
+        let mutable left = upper - ratio * (upper - lower)
+        let mutable right = lower + ratio * (upper - lower)
+        let mutable leftDistance = distanceAt left
+        let mutable rightDistance = distanceAt right
 
-            // A half-earth segment shrinks below 2 mm after 48 golden-section steps.
-            for _ in 1 .. 48 do
-                if leftDistance <= rightDistance then
-                    upper <- right
-                    right <- left
-                    rightDistance <- leftDistance
-                    left <- upper - ratio * (upper - lower)
-                    leftDistance <- distanceAt left
-                else
-                    lower <- left
-                    left <- right
-                    leftDistance <- rightDistance
-                    right <- lower + ratio * (upper - lower)
-                    rightDistance <- distanceAt right
+        // A half-earth segment shrinks below 2 mm after 48 golden-section steps.
+        for _ in 1 .. 48 do
+            if leftDistance <= rightDistance then
+                upper <- right
+                right <- left
+                rightDistance <- leftDistance
+                left <- upper - ratio * (upper - lower)
+                leftDistance <- distanceAt left
+            else
+                lower <- left
+                left <- right
+                leftDistance <- rightDistance
+                right <- lower + ratio * (upper - lower)
+                rightDistance <- distanceAt right
 
-            min endpointDistance (min leftDistance rightDistance)
+        min endpointDistance (min leftDistance rightDistance)
+
+let internal geographicPointLineDistance referenceSystem point lines =
 
     lines
     |> List.collect List.pairwise
     |> List.fold (fun minimum (start, endpoint) ->
-        let distance = segmentDistance start endpoint
+        let distance = geographicPointSegmentDistance referenceSystem point start endpoint
         Some(match minimum with None -> distance | Some current -> min current distance)) None
 
 let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
