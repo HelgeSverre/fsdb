@@ -139,7 +139,7 @@ module CharCastAlias =
         | AsciiChar -> "latin1"
         | UnicodeChar -> "ucs2"
 
-    let target length alias =
+    let target (length: uint32 option) alias =
         let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
         match alias with
         | NationalChar -> "nchar" + width
@@ -253,13 +253,13 @@ type Expr =
     | Cast of Expr * ColumnType
     /// `CAST(expr AS CHAR[(n)] CHARACTER SET charset)` retains both its
     /// target encoding and whether a character limit was written.
-    | CastCharset of Expr * length: int option * charset: string
+    | CastCharset of Expr * length: uint32 option * charset: string
     /// Retains national and legacy CHAR spelling for its syntax warning.
-    | CastCharAlias of Expr * length: int option * alias: CharCastAlias
+    | CastCharAlias of Expr * length: uint32 option * alias: CharCastAlias
     /// CHAR width and ordered target modifiers preserve conversion and warning behavior.
-    | CastCharTarget of Expr * length: int option * modifiers: CharCastModifier list
+    | CastCharTarget of Expr * length: uint32 option * modifiers: CharCastModifier list
     /// `CAST(expr AS BINARY[(n)])` retains whether a byte width was written.
-    | CastAsBinary of Expr * length: int option
+    | CastAsBinary of Expr * length: uint32 option
     /// `expr COLLATE collation_name` — evaluates as its inner expression;
     /// the tag overrides the collation any *comparison* involving this
     /// expression resolves under (see `Executor.resolvedCollation`).

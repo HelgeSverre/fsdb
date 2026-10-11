@@ -8,6 +8,9 @@ open Fsdb.Functions
 open Fsdb.Storage
 open Fsdb.Value
 
+let private castWidth length =
+    length |> Option.map (fun width -> int (min width (uint32 Int32.MaxValue))) |> Option.defaultValue 1
+
 type private BoundColumn =
     { Qualifier: string
       Column: ColumnDef }
@@ -217,10 +220,10 @@ let private inferParameters
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
             | Cast(_, TTime _) -> Some(ColumnWire.parameterMetadataOfType(TDateTime 6))
             | Cast(_, ty) -> Some(ColumnWire.parameterMetadataOfType ty)
-            | CastCharset(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))
-            | CastCharAlias(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))
-            | CastCharTarget(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))
-            | CastAsBinary(_, length) -> Some(ColumnWire.parameterMetadataOfType(TBinary(defaultArg length 1)))
+            | CastCharset(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(castWidth length)))
+            | CastCharAlias(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(castWidth length)))
+            | CastCharTarget(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(castWidth length)))
+            | CastAsBinary(_, length) -> Some(ColumnWire.parameterMetadataOfType(TBinary(castWidth length)))
             | BinaryCast inner
             | Collate(inner, _)
             | Distinct inner
@@ -306,13 +309,13 @@ let private inferParameters
         | Cast(inner, TTime _) -> inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TDateTime 6))) InheritType inner
         | Cast(inner, ty) -> inferExpression scope (Some(ColumnWire.parameterMetadataOfType ty)) InheritType inner
         | CastCharset(inner, length, _) ->
-            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))) InheritType inner
+            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(castWidth length)))) InheritType inner
         | CastCharAlias(inner, length, _) ->
-            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))) InheritType inner
+            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(castWidth length)))) InheritType inner
         | CastCharTarget(inner, length, _) ->
-            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))) InheritType inner
+            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(castWidth length)))) InheritType inner
         | CastAsBinary(inner, length) ->
-            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBinary(defaultArg length 1)))) InheritType inner
+            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBinary(castWidth length)))) InheritType inner
         | FuncCall(name, values) when
             (name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
              || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase)

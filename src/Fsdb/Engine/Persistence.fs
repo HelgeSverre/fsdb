@@ -531,14 +531,14 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         w.WriteByte 0x1Duy
         encodeExpr w e
         match length with
-        | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
+        | Some value -> w.WriteByte 1uy; w.WriteUInt32LE value
         | None -> w.WriteByte 0uy
         writeStr w charset
     | CastCharAlias(e, length, alias) ->
         w.WriteByte 0x1Fuy
         encodeExpr w e
         match length with
-        | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
+        | Some value -> w.WriteByte 1uy; w.WriteUInt32LE value
         | None -> w.WriteByte 0uy
         w.WriteByte (
             match alias with
@@ -549,7 +549,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         w.WriteByte 0x20uy
         encodeExpr w e
         match length with
-        | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
+        | Some value -> w.WriteByte 1uy; w.WriteUInt32LE value
         | None -> w.WriteByte 0uy
         w.WriteInt32LE(List.length modifiers)
         for modifier in modifiers do
@@ -563,7 +563,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         w.WriteByte 0x1Euy
         encodeExpr w e
         match length with
-        | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
+        | Some value -> w.WriteByte 1uy; w.WriteUInt32LE value
         | None -> w.WriteByte 0uy
     | BinaryCast e -> w.WriteByte 0x1Auy; encodeExpr w e
     | Collate(e, name) -> w.WriteByte 0x14uy; encodeExpr w e; writeStr w name
@@ -638,11 +638,11 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
     | 0x13uy -> Cast(nested (), decodeColumnType r)
     | 0x1Duy ->
         let source = nested ()
-        let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+        let length = if r.ReadByte() = 0uy then None else Some(uint32 (r.ReadInt32LE()))
         CastCharset(source, length, readStr r)
     | 0x1Fuy ->
         let source = nested ()
-        let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+        let length = if r.ReadByte() = 0uy then None else Some(uint32 (r.ReadInt32LE()))
         let alias =
             match r.ReadByte() with
             | 0uy -> NationalChar
@@ -652,7 +652,7 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
         CastCharAlias(source, length, alias)
     | 0x20uy ->
         let source = nested ()
-        let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+        let length = if r.ReadByte() = 0uy then None else Some(uint32 (r.ReadInt32LE()))
         let modifiers =
             List.init (r.ReadInt32LE()) (fun _ ->
                 match r.ReadByte() with
@@ -665,7 +665,7 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
         CastCharTarget(source, length, modifiers)
     | 0x1Euy ->
         let source = nested ()
-        let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+        let length = if r.ReadByte() = 0uy then None else Some(uint32 (r.ReadInt32LE()))
         CastAsBinary(source, length)
     | 0x1Auy -> BinaryCast(nested ())
     | 0x1Buy -> IntroducedLiteral(decodeValue r, readStr r, ResolvedIntroducer)

@@ -5804,31 +5804,34 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | Some error -> Error error
         | None -> eval e
     | BinaryCast e -> eval e
-    | CastCharset(_, Some length, charset) when length > Limits.maxAllowedPacket ->
+    | CastCharset(_, Some length, charset)
+        when uint64 length * uint64 (Charset.maxBytes charset |> Option.defaultValue 1) > uint64 System.UInt32.MaxValue ->
+        Error(1690, "char(n) value is out of range in 'cast_as_char'")
+    | CastCharset(_, Some length, charset) when length > uint32 Limits.maxAllowedPacket ->
         oversizedCastResult (Charset.canonicalName charset = "binary")
     | CastCharset(e, length, charset) ->
         eval (FuncCall("CONVERT", [ e; Lit(VString charset) ]))
         |> Result.map (fun converted ->
             match converted, length with
-            | VBytes bytes, Some limit when bytes.Length > limit ->
-                truncateBinaryCast limit bytes
+            | VBytes bytes, Some limit when uint32 bytes.Length > limit ->
+                truncateBinaryCast (int limit) bytes
             | VEncodedString(source, bytes), Some limit ->
                 let offsets = Charset.characterByteOffsets source bytes
-                if offsets.Length - 1 > limit then
+                if uint32 (offsets.Length - 1) > limit then
                     Diagnostics.warning
                         1292
                         (sprintf
                             "Truncated incorrect CHAR(%d) value: '%s'"
                             limit
                             (Value.toText converted |> Option.defaultValue ""))
-                    VEncodedString(source, bytes.[0 .. offsets.[limit] - 1])
+                    VEncodedString(source, bytes.[0 .. offsets.[int limit] - 1])
                 else converted
             | _ -> converted)
     | CastCharAlias(e, length, alias) -> eval (CastCharset(e, length, CharCastAlias.charset alias))
     | CastCharTarget(e, length, modifiers) ->
         let charset = CharCastModifier.charset ctx.Store.ExecutionSettings.ConnectionCharset modifiers
         eval (CastCharset(e, length, charset))
-    | CastAsBinary(_, Some length) when length > Limits.maxAllowedPacket ->
+    | CastAsBinary(_, Some length) when length > uint32 Limits.maxAllowedPacket ->
         oversizedCastResult true
     | CastAsBinary(e, length) ->
         eval e
@@ -5843,10 +5846,10 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     let text = displayValueForText ctx e source |> Value.toText |> Option.defaultValue ""
                     VBytes(Charset.encode (sourceCharset ctx e) text)
             match converted, length with
-            | VBytes bytes, Some width when bytes.Length > width ->
-                truncateBinaryCast width bytes
-            | VBytes bytes, Some width when bytes.Length < width ->
-                VBytes(Array.append bytes (Array.zeroCreate (width - bytes.Length)))
+            | VBytes bytes, Some width when uint32 bytes.Length > width ->
+                truncateBinaryCast (int width) bytes
+            | VBytes bytes, Some width when uint32 bytes.Length < width ->
+                VBytes(Array.append bytes (Array.zeroCreate (int width - bytes.Length)))
             | _ -> converted)
     | Cast(e, ((TChar _ | TVarchar _ | TBinary _ | TVarBinary _) as ty))
         when (tryColumnDefForExpr ctx e |> Option.bind _.NumericDisplay |> Option.exists _.ZeroFill)
@@ -6822,7 +6825,10 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         |> Option.orElse (Some metadata)
     | CastCharset(value, length, charset) ->
         let binary = Charset.canonicalName charset = "binary"
-        let characters = length |> Option.defaultWith (fun () -> characterBound value)
+        let characters =
+            length
+            |> Option.map (fun width -> int (min width (uint32 System.Int32.MaxValue)))
+            |> Option.defaultWith (fun () -> characterBound value)
         withCollation (Cast(value, TChar characters)) (Collation.defaultNameForCharset charset)
         |> Option.map (fun metadata ->
             let columnLength =

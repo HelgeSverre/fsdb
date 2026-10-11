@@ -3407,7 +3407,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              let expression = CastCharset(Lit(VString "éx"), Some 1, "latin1")
+              let expression = CastCharset(Lit(VString "éx"), Some 1u, "latin1")
               let column = { mkCol "value" (TVarchar 8) with Default = Some(DExpression expression) }
               match createTable store defaultDatabase "cast_charset_default" [ column ] [] [] None None with
               | Ok() -> ()
@@ -3421,12 +3421,12 @@ let tests =
               snapshotNow dir store
               verify (load dir)
 
-          testCase "binary CAST width survives WAL and snapshot recovery"
+          testCase "large binary CAST width survives WAL and snapshot recovery"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              let expression = CastAsBinary(Lit(VString "ab"), Some 3)
+              let expression = CastAsBinary(Lit(VString "ab"), Some UInt32.MaxValue)
               let column = { mkCol "value" (TVarBinary 8) with Default = Some(DExpression expression) }
               match createTable store defaultDatabase "cast_binary_default" [ column ] [] [] None None with
               | Ok() -> ()
@@ -3445,7 +3445,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              let expression = CastCharAlias(Lit(VString "éx"), Some 1, NationalChar)
+              let expression = CastCharAlias(Lit(VString "éx"), Some 1u, NationalChar)
               let column = { mkCol "value" (TVarchar 8) with Default = Some(DExpression expression) }
               match createTable store defaultDatabase "cast_national_default" [ column ] [] [] None None with
               | Ok() -> ()
@@ -3467,7 +3467,7 @@ let tests =
               let expression =
                   CastCharTarget(
                       Lit(VString "éx"),
-                      Some 1,
+                      Some 1u,
                       [ CastBinaryAttribute; CastCharsetName "latin1" ])
               let column = { mkCol "value" (TVarchar 8) with Default = Some(DExpression expression) }
               match createTable store defaultDatabase "cast_char_modifiers_default" [ column ] [] [] None None with

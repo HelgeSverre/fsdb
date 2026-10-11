@@ -98,8 +98,8 @@ let tests =
 
               for sql, width in
                   [ "CAST(value AS CHAR CHARACTER SET latin1)", None
-                    "CAST(value AS CHAR(2) CHARACTER SET latin1)", Some 2
-                    "CAST(value AS CHAR(1) CHARACTER SET binary)", Some 1 ] do
+                    "CAST(value AS CHAR(2) CHARACTER SET latin1)", Some 2u
+                    "CAST(value AS CHAR(1) CHARACTER SET binary)", Some 1u ] do
                   match Fsdb.Parser.parseExpression sql with
                   | Ok(CastCharset(Col "value", actualWidth, _) as expression) ->
                       Expect.equal actualWidth width "explicit width survives parsing"
@@ -118,9 +118,9 @@ let tests =
 
               for sql, width in
                   [ "CAST(value AS BINARY)", None
-                    "CAST(value AS BINARY(0))", Some 0
-                    "CAST(value AS BINARY(3))", Some 3
-                    "CONVERT(value, BINARY(3))", Some 3 ] do
+                    "CAST(value AS BINARY(0))", Some 0u
+                    "CAST(value AS BINARY(3))", Some 3u
+                    "CONVERT(value, BINARY(3))", Some 3u ] do
                   match Fsdb.Parser.parseExpression sql with
                   | Ok(CastAsBinary(Col "value", actualWidth) as expression) ->
                       Expect.equal actualWidth width sql
@@ -129,9 +129,9 @@ let tests =
 
               for sql, alias, width in
                   [ "CAST(value AS NCHAR)", NationalChar, None
-                    "CAST(value AS NATIONAL CHARACTER(2))", NationalChar, Some 2
-                    "CONVERT(value, NCHAR(1))", NationalChar, Some 1
-                    "CAST(value AS CHAR(1) ASCII)", AsciiChar, Some 1
+                    "CAST(value AS NATIONAL CHARACTER(2))", NationalChar, Some 2u
+                    "CONVERT(value, NCHAR(1))", NationalChar, Some 1u
+                    "CAST(value AS CHAR(1) ASCII)", AsciiChar, Some 1u
                     "CONVERT(value, CHAR UNICODE)", UnicodeChar, None ] do
                   match Fsdb.Parser.parseExpression sql with
                   | Ok(CastCharAlias(Col "value", actualWidth, actualAlias) as expression) ->

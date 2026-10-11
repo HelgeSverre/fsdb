@@ -2987,6 +2987,33 @@ let tests =
                   Expect.isEmpty session.Diagnostics "packet-size boundary is accepted"
               | _, result -> failtestf "expected the exact packet-size width to remain valid, got %A" result
 
+          testCase "CAST widths use the unsigned 32-bit target domain"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              match handle session "SELECT CAST('a' AS CHAR(4294967295) CHARACTER SET latin1), CAST('a' AS BINARY(2147483648))" with
+              | session, ResultSet(_, [ [ None; None ] ]) ->
+                  Expect.equal (session.Diagnostics |> List.map _.Code) [ 1301; 1301 ] "packet warnings"
+              | _, result -> failtestf "expected oversized CAST results to be NULL, got %A" result
+              match handle session "SELECT CAST('a' AS CHAR(1073741823))" with
+              | session, ResultSet(_, [ [ None ] ]) ->
+                  Expect.equal (session.Diagnostics |> List.map _.Code) [ 1301 ] "largest utf8mb4 width"
+              | _, result -> failtestf "expected packet warning at utf8mb4 byte ceiling, got %A" result
+              for width in [ 1073741824L; 4294967295L ] do
+                  match handle session (sprintf "SELECT CAST('a' AS CHAR(%d))" width) with
+                  | _, Err(1690, message) ->
+                      Expect.equal message "char(n) value is out of range in 'cast_as_char'" "multibyte width"
+                  | _, result -> failtestf "expected multibyte width error for %d, got %A" width result
+              for target in [ "CHAR(4294967296)"; "BINARY(4294967296)" ] do
+                  for sql in [ sprintf "SELECT CAST('a' AS %s)" target; sprintf "SELECT CONVERT('a', %s)" target ] do
+                      match handle session sql with
+                      | _, Err(1439, message) ->
+                          Expect.equal message "Display width out of range for column 'cast as char' (max = 4294967295)" sql
+                      | _, result -> failtestf "expected width limit for %s, got %A" sql result
+              for target in [ "CHAR(-0)"; "BINARY(-0)" ] do
+                  match handle session (sprintf "SELECT CAST('a' AS %s)" target) with
+                  | _, Err(1064, _) -> ()
+                  | _, result -> failtestf "expected negative-zero syntax error for %s, got %A" target result
+
           testCase "zero CHAR widths truncate and negative widths are syntax errors"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

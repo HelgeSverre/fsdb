@@ -1094,6 +1094,27 @@ module ContractCatalog =
                      |> Contract.comparingValues
                yield Contract.query "cast-char-packet-boundary-warnings" "SHOW WARNINGS"
                      |> Contract.comparingValues
+               yield Contract.query "cast-uint32-width-values" "SELECT CAST('a' AS CHAR(4294967295) CHARACTER SET latin1), CAST('a' AS BINARY(2147483648))"
+                     |> Contract.comparingValues
+               yield Contract.query "cast-uint32-width-warnings" "SHOW WARNINGS"
+                     |> Contract.comparingValues
+               yield Contract.preparedQuery "cast-uint32-width-prepared" "SELECT CAST('a' AS CHAR(4294967295) CHARACTER SET latin1), CAST('a' AS BINARY(2147483648))" [||]
+                     |> Contract.comparingValues
+               yield Contract.query "cast-utf8mb4-byte-ceiling" "SELECT CAST('a' AS CHAR(1073741823))"
+                     |> Contract.comparingValues
+               yield Contract.query "cast-utf8mb4-byte-ceiling-warnings" "SHOW WARNINGS"
+                     |> Contract.comparingValues
+               for index, width in [ 1073741824L; 4294967295L ] |> List.indexed do
+                   yield Contract.query (sprintf "cast-multibyte-width-out-of-range-%d" index) (sprintf "SELECT CAST('a' AS CHAR(%d))" width)
+                         |> Contract.fails 1690 "22003"
+               for index, target in [ "CHAR(4294967296)"; "BINARY(4294967296)" ] |> List.indexed do
+                   yield Contract.query (sprintf "cast-width-out-of-range-%d" index) (sprintf "SELECT CAST('a' AS %s)" target)
+                         |> Contract.fails 1439 "42000"
+                   yield Contract.query (sprintf "convert-width-out-of-range-%d" index) (sprintf "SELECT CONVERT('a', %s)" target)
+                         |> Contract.fails 1439 "42000"
+               for index, target in [ "CHAR(-0)"; "BINARY(-0)" ] |> List.indexed do
+                   yield Contract.query (sprintf "cast-negative-zero-width-%d" index) (sprintf "SELECT CAST('a' AS %s)" target)
+                         |> Contract.fails 1064 "42000"
                let zeroCharCasts =
                    "SELECT HEX(CAST('abc' AS CHAR(0))), HEX(CAST('abc' AS NCHAR(0))), HEX(CAST('abc' AS CHAR(0) CHARACTER SET binary)), HEX(CONVERT('abc', CHAR(0))), CAST(NULL AS CHAR(0))"
                yield Contract.query "cast-char-zero-values" zeroCharCasts |> Contract.comparingValues

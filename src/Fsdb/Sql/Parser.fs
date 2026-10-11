@@ -56,6 +56,8 @@ let trySemanticError (detail: string) =
         Some(1425, message)
     | "For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '')." as message ->
         Some(1427, message)
+    | "Display width out of range for column 'cast as char' (max = 4294967295)" as message ->
+        Some(1439, message)
     | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
     | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
     | message when
@@ -1667,8 +1669,8 @@ let private windowCallAtom: Parser<Expr, unit> =
 /// cast target, not a column type, so they're handled here rather than in
 /// `columnType`.
 type private CastTarget =
-    | TypedCast of ColumnType * int option
-    | AliasedCharCast of CharCastAlias * int option
+    | TypedCast of ColumnType * uint32 option
+    | AliasedCharCast of CharCastAlias * uint32 option
 
 let private validateCastPrecision maximum precision =
     if precision < 0 then
@@ -1676,12 +1678,24 @@ let private validateCastPrecision maximum precision =
     elif precision > maximum then
         raise (SemanticParseError(sprintf "Too-big precision %d specified for 'CAST'. Maximum is %d." precision maximum))
 
-let private castWidth target: Parser<int option, unit> =
-    optWidthLen
-    |>> (fun width ->
-        if width |> Option.exists (fun value -> value < 0) then
-            raise (SemanticParseError(sprintf "Invalid %s cast width" target))
-        width)
+let private castWidth target: Parser<uint32 option, unit> =
+    let digits = many1Satisfy (fun c -> c >= '0' && c <= '9')
+    let width =
+        between (sym "(") (sym ")") (opt (pchar '-') .>>. digits .>> ws)
+        |>> fun (negative, text) ->
+            if negative.IsSome then
+                raise (SemanticParseError(sprintf "Invalid %s cast width" target))
+            let number = text.TrimStart('0')
+            let number = if number = "" then "0" else number
+            let maximum = string UInt32.MaxValue
+            if number.Length > maximum.Length
+               || (number.Length = maximum.Length && String.CompareOrdinal(number, maximum) > 0) then
+                raise (SemanticParseError(sprintf "Display width out of range for column 'cast as char' (max = %s)" maximum))
+            uint32 number
+    opt width
+
+let private columnTypeCastWidth width =
+    width |> Option.map (fun value -> int (min value (uint32 Int32.MaxValue))) |> Option.defaultValue 1
 
 let private castTargetType: Parser<CastTarget, unit> =
     choice
@@ -1694,9 +1708,9 @@ let private castTargetType: Parser<CastTarget, unit> =
           attempt (keyword "NATIONAL" >>. (keyword "CHARACTER" <|> keyword "CHAR"))
           >>. castWidth "CHAR" |>> (fun width -> AliasedCharCast(NationalChar, width))
           (keyword "CHAR" <|> keyword "CHARACTER") >>. castWidth "CHAR"
-          |>> (fun width -> TypedCast(TChar(defaultArg width 1), width))
+          |>> (fun width -> TypedCast(TChar(columnTypeCastWidth width), width))
           (keyword "BINARY" >>. castWidth "BINARY"
-           |>> fun width -> TypedCast(TBinary(defaultArg width 1), width))
+           |>> fun width -> TypedCast(TBinary(columnTypeCastWidth width), width))
           keyword "DECIMAL" >>. opt numericWidth
           |>> (fun size ->
               let precision, scale = size |> Option.defaultValue (10, None)

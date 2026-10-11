@@ -98,3 +98,17 @@ Fsdb already handled zero-width slicing, but negative widths reached the
 evaluator and produced an internal error. The cast-target parser now rejects
 them before evaluation. The focused regression and differential contract
 cover values, warning order, and the invalid spellings.
+
+Cast widths have an unsigned 32-bit ceiling, separate from the packet limit.
+Under a UTF-8 connection, MySQL accepts `CHAR(4294967295) CHARACTER SET
+latin1` and `BINARY(2147483648)`, returning NULL with warning 1301 at the
+current packet limit. Width `4294967296` instead fails with 1439/42000 and
+names column `cast as char` for either target, including typed `CONVERT`.
+Character targets also have a charset-dependent byte-width ceiling:
+`CHAR(1073741824)` under `utf8mb4` fails with 1690/22003 before the packet
+warning, while `CHAR(1073741823)` reaches that warning. A written negative
+sign is syntax even for `-0`. Fsdb previously parsed cast widths as signed
+32-bit integers and rejected the large accepted widths. The CAST-only parser
+and AST now retain the unsigned width so evaluation can apply the byte-width
+and packet limits in MySQL's order. The focused regression and differential
+contract cover these boundaries.
