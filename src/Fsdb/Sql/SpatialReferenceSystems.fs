@@ -52,6 +52,9 @@ let private etrs89Definition =
 let private nad83Definition =
     "GEOGCS[\"NAD83\",DATUM[\"North American Datum 1983\",SPHEROID[\"GRS 1980\",6378137,298.257222101,AUTHORITY[\"EPSG\",\"7019\"]],TOWGS84[1,1,-1,0,0,0,0],AUTHORITY[\"EPSG\",\"6269\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4269\"]]"
 
+let private nad27Definition =
+    "GEOGCS[\"NAD27\",DATUM[\"North American Datum 1927\",SPHEROID[\"Clarke 1866\",6378206.4,294.9786982138982,AUTHORITY[\"EPSG\",\"7008\"]],TOWGS84[-32.3841359,180.4090461,120.8442577,-2.1545854,-0.1498782,0.5742915,8.1049164],AUTHORITY[\"EPSG\",\"6267\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4267\"]]"
+
 let private pseudoMercatorDefinition =
     [ "PROJCS[\"WGS 84 / Pseudo-Mercator\","
       wgs84Definition
@@ -173,6 +176,16 @@ let internal all =
         AxisOrder = LatitudeLongitude
         SemiMajorAxis = Some 6378137.0
         InverseFlattening = Some 298.257222101
+        LinearUnitInMetres = None }
+      { Name = "NAD27"
+        Srid = 4267
+        Organization = Some "EPSG"
+        OrganizationCoordinateSystemId = Some 4267
+        Definition = nad27Definition
+        Description = None
+        AxisOrder = LatitudeLongitude
+        SemiMajorAxis = Some 6378206.4
+        InverseFlattening = Some 294.9786982138982
         LinearUnitInMetres = None }
       { Name = "WGS 84 / Pseudo-Mercator"
         Srid = 3857
@@ -313,24 +326,24 @@ let private utmInverse projection (x, y) =
     let latitude = recoverLatitude 8 conformal * 180.0 / Math.PI
     latitude, wrapProjectedLongitude longitude
 
-let private cartesianFromGeographic inverseFlattening (latitude, longitude) =
+let private cartesianFromGeographic semiMajorAxis inverseFlattening (latitude, longitude) =
     let latitude = latitude * Math.PI / 180.0
     let longitude = longitude * Math.PI / 180.0
     let flattening = 1.0 / inverseFlattening
     let eccentricitySquared = flattening * (2.0 - flattening)
-    let radius = earthRadius / sqrt (1.0 - eccentricitySquared * sin latitude ** 2.0)
+    let radius = semiMajorAxis / sqrt (1.0 - eccentricitySquared * sin latitude ** 2.0)
     radius * cos latitude * cos longitude,
     radius * cos latitude * sin longitude,
     radius * (1.0 - eccentricitySquared) * sin latitude
 
-let private geographicFromCartesian inverseFlattening (x, y, z) =
+let private geographicFromCartesian semiMajorAxis inverseFlattening (x, y, z) =
     let flattening = 1.0 / inverseFlattening
     let eccentricitySquared = flattening * (2.0 - flattening)
     let horizontal = sqrt (x * x + y * y)
     let rec latitudeAt iterations latitude =
         if iterations = 0 then latitude
         else
-            let radius = earthRadius / sqrt (1.0 - eccentricitySquared * sin latitude ** 2.0)
+            let radius = semiMajorAxis / sqrt (1.0 - eccentricitySquared * sin latitude ** 2.0)
             let next = atan2 (z + eccentricitySquared * radius * sin latitude) horizontal
             latitudeAt (iterations - 1) next
     let latitude = latitudeAt 8 (atan2 z (horizontal * (1.0 - eccentricitySquared)))
@@ -338,12 +351,47 @@ let private geographicFromCartesian inverseFlattening (x, y, z) =
 
 let private nad83ToWgs84 point =
     // NAD83's registered TOWGS84 parameters translate geocentric metres by (1, 1, -1).
-    let x, y, z = cartesianFromGeographic 298.257222101 point
-    geographicFromCartesian 298.257223563 (x + 1.0, y + 1.0, z - 1.0)
+    let x, y, z = cartesianFromGeographic earthRadius 298.257222101 point
+    geographicFromCartesian earthRadius 298.257223563 (x + 1.0, y + 1.0, z - 1.0)
 
 let private wgs84ToNad83 point =
-    let x, y, z = cartesianFromGeographic 298.257223563 point
-    geographicFromCartesian 298.257222101 (x - 1.0, y - 1.0, z + 1.0)
+    let x, y, z = cartesianFromGeographic earthRadius 298.257223563 point
+    geographicFromCartesian earthRadius 298.257222101 (x - 1.0, y - 1.0, z + 1.0)
+
+let private clarke1866SemiMajorAxis = 6378206.4
+let private nad27InverseFlattening = 294.9786982138982
+let private nad27Translation = -32.3841359, 180.4090461, 120.8442577
+let private nad27Rotation =
+    let arcsecondsToRadians value = value * Math.PI / (180.0 * 3600.0)
+    arcsecondsToRadians (-2.1545854),
+    arcsecondsToRadians (-0.1498782),
+    arcsecondsToRadians 0.5742915
+let private nad27Scale = 1.0 + 8.1049164e-6
+
+let private nad27RotationOffset (x, y, z) =
+    let rx, ry, rz = nad27Rotation
+    -rz * y + ry * z, rz * x - rx * z, -ry * x + rx * y
+
+let private nad27ToWgs84 point =
+    let x, y, z = cartesianFromGeographic clarke1866SemiMajorAxis nad27InverseFlattening point
+    let dx, dy, dz = nad27Translation
+    let ox, oy, oz = nad27RotationOffset (x, y, z)
+    geographicFromCartesian earthRadius 298.257223563
+        (dx + nad27Scale * (x + ox), dy + nad27Scale * (y + oy), dz + nad27Scale * (z + oz))
+
+let private wgs84ToNad27 point =
+    let x, y, z = cartesianFromGeographic earthRadius 298.257223563 point
+    let dx, dy, dz = nad27Translation
+    let initial = (x - dx) / nad27Scale, (y - dy) / nad27Scale, (z - dz) / nad27Scale
+    // The rotation terms are about 1e-5 radians, so this fixed-point inverse
+    // converges well within double precision after four steps.
+    let rec unrotate iterations (cx, cy, cz) =
+        if iterations = 0 then cx, cy, cz
+        else
+            let ox, oy, oz = nad27RotationOffset (cx, cy, cz)
+            let ux, uy, uz = initial
+            unrotate (iterations - 1) (ux - ox, uy - oy, uz - oz)
+    geographicFromCartesian clarke1866SemiMajorAxis nad27InverseFlattening (unrotate 4 initial)
 
 let internal tryCoordinateTransform sourceSrid targetSrid =
     let compose first second point = second (first point)
@@ -351,6 +399,7 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         match sourceSrid with
         | 4258 | 4326 -> Some id
         | 4269 -> Some nad83ToWgs84
+        | 4267 -> Some nad27ToWgs84
         | 3857 -> Some pseudoMercatorInverse
         | 3395 -> Some worldMercatorInverse
         | _ ->
@@ -363,6 +412,7 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         match targetSrid with
         | 4258 | 4326 -> Some id
         | 4269 -> Some wgs84ToNad83
+        | 4267 -> Some wgs84ToNad27
         | 3857 -> Some pseudoMercatorForward
         | 3395 -> Some worldMercatorForward
         | _ ->

@@ -15164,6 +15164,29 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected MySQL NAD83 projected-to-projected coordinates, got %A" result
 
+                testCase "NAD27 geography uses Clarke 1866 and seven-parameter datum shift"
+                <| fun _ ->
+                    let store = newStore ()
+                    match runDefault store "SELECT SRS_NAME FROM INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=4267" with
+                    | ResultSet(_, [ [ Some "NAD27" ] ]) -> ()
+                    | result -> failtestf "expected MySQL NAD27 catalog row, got %A" result
+                    let point = "ST_GeomFromText('POINT(49 -123)',4267)"
+                    let nextPoint = "ST_GeomFromText('POINT(50 -123)',4267)"
+                    let distance = sprintf "SELECT ABS(ST_Distance(%s,%s)-111220.55893752072)<0.01" point nextPoint
+                    match runDefault store distance with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL NAD27 ellipsoidal distance, got %A" result
+                    let forward = sprintf "ST_Transform(%s,4326)" point
+                    let forwardSql = sprintf "SELECT ABS(ST_X(%s)-48.999977750278994)<0.00000001,ABS(ST_Y(%s)+123.00196683602634)<0.00000001" forward forward
+                    match runDefault store forwardSql with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL NAD27 to WGS84 transform, got %A" result
+                    let reverse = "ST_Transform(ST_GeomFromText('POINT(48.999977750278994 -123.00196683602634)',4326),4267)"
+                    let reverseSql = sprintf "SELECT ABS(ST_X(%s)-49)<0.00000001,ABS(ST_Y(%s)+123)<0.00000001" reverse reverse
+                    match runDefault store reverseSql with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL WGS84 to NAD27 transform, got %A" result
+
                 testCase "projected transforms wrap geographic longitude"
                 <| fun _ ->
                     let store = newStore ()

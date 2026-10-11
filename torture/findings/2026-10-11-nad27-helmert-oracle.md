@@ -1,12 +1,12 @@
-# NAD27 datum and UTM oracle, pending implementation
+# NAD27 datum and UTM oracle
 
 MySQL 8.4.11 lists NAD27 as EPSG 4267 on the Clarke 1866 ellipsoid
 (`a = 6378206.4`, inverse flattening `294.9786982138982`). Its WKT1
 `TOWGS84` parameters are `[-32.3841359, 180.4090461, 120.8442577,
 -2.1545854, -0.1498782, 0.5742915, 8.1049164]`: translations in metres,
 rotations in arcseconds, and scale in parts per million. The catalog also has
-NAD27 / UTM zones 1N–22N at EPSG 26701–26722. These are **not yet supported**
-by fsdb.
+NAD27 / UTM zones 1N–22N at EPSG 26701–26722. Fsdb now supports geographic
+EPSG 4267; the projected NAD27 UTM zones remain open.
 
 At NAD27 `POINT(49 -123)`, MySQL transforms to WGS 84
 `POINT(48.999977750278994 -123.00196683602634)`. A direct geocentric
@@ -22,7 +22,9 @@ point with the same numeric latitude and longitude to EPSG 26710 gives
 cannot be skipped. The matching projected point transforms back to WGS 84 as
 `POINT(48.99997775027899 -123.00196683602647)`.
 
-Implementation should first add the NAD27 geographic SRS and validate its
-forward/inverse seven-parameter shift. The shared UTM projection then needs a
-per-datum semi-major axis (it currently uses WGS 84's axis), followed by the
-22 NAD27 UTM catalog rows and forward/reverse differential contracts.
+The geographic implementation exposes Clarke 1866 distance and uses a
+position-vector Helmert shift through geocentric coordinates in both transform
+directions. Its catalog definition, distance, and forward/reverse values are
+covered by Expecto and differential contracts. The shared UTM projection still
+needs a per-datum semi-major axis (it currently uses WGS 84's axis), followed
+by the 22 projected catalog rows and forward/reverse contracts.
