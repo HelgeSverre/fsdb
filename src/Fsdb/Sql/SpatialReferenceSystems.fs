@@ -26,6 +26,12 @@ type internal SpatialReferenceSystem =
       /// Projected coordinate-unit scale; absent for geographic and unitless SRID 0.
       LinearUnitInMetres: float option }
 
+type private UtmZone =
+    { Srid: int
+      Name: string
+      CentralMeridian: int
+      FalseNorthing: int }
+
 let private wgs84Definition =
     "GEOGCS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]"
 
@@ -75,22 +81,27 @@ let private utmDefinition name geographicDefinition centralMeridian falseNorthin
 
 let private etrs89Utm33NorthDefinition = utmDefinition "ETRS89 / UTM zone 33N" etrs89Definition 15 0 25833
 
-let private wgs84UtmSystems =
+let private wgs84UtmZones =
     [ for hemisphere, baseSrid, falseNorthing in [ "N", 32600, 0; "S", 32700, 10000000 ] do
         for zone in 1..60 do
-            let srid = baseSrid + zone
-            let name = sprintf "WGS 84 / UTM zone %d%s" zone hemisphere
-            let centralMeridian = zone * 6 - 183
-            { Name = name
-              Srid = srid
-              Organization = Some "EPSG"
-              OrganizationCoordinateSystemId = Some srid
-              Definition = utmDefinition name wgs84Definition centralMeridian falseNorthing srid
-              Description = None
-              AxisOrder = LongitudeLatitude
-              SemiMajorAxis = None
-              InverseFlattening = None
-              LinearUnitInMetres = Some 1.0 } ]
+            { Srid = baseSrid + zone
+              Name = sprintf "WGS 84 / UTM zone %d%s" zone hemisphere
+              CentralMeridian = zone * 6 - 183
+              FalseNorthing = falseNorthing } ]
+
+let private wgs84UtmSystems =
+    wgs84UtmZones
+    |> List.map (fun zone ->
+        { Name = zone.Name
+          Srid = zone.Srid
+          Organization = Some "EPSG"
+          OrganizationCoordinateSystemId = Some zone.Srid
+          Definition = utmDefinition zone.Name wgs84Definition zone.CentralMeridian zone.FalseNorthing zone.Srid
+          Description = None
+          AxisOrder = LongitudeLatitude
+          SemiMajorAxis = None
+          InverseFlattening = None
+          LinearUnitInMetres = Some 1.0 })
 
 let internal all =
     [ { Name = ""
@@ -253,16 +264,16 @@ let private utmProjection centralMeridian inverseFlattening falseNorthing =
 let private etrs89Utm33North = utmProjection 15.0 298.257222101 0.0
 
 let private wgs84UtmProjections =
-    [| for falseNorthing in [ 0.0; 10000000.0 ] do
-        for zone in 1..60 do
-            yield utmProjection (float (zone * 6 - 183)) 298.257223563 falseNorthing |]
+    wgs84UtmZones
+    |> List.map (fun zone ->
+        zone.Srid,
+        utmProjection (float zone.CentralMeridian) 298.257223563 (float zone.FalseNorthing))
+    |> Map.ofList
 
 let private tryUtmProjection srid =
     match srid with
     | 25833 -> Some etrs89Utm33North
-    | _ when srid >= 32601 && srid <= 32660 -> Some wgs84UtmProjections.[srid - 32601]
-    | _ when srid >= 32701 && srid <= 32760 -> Some wgs84UtmProjections.[60 + srid - 32701]
-    | _ -> None
+    | _ -> Map.tryFind srid wgs84UtmProjections
 
 let private utmSeries coefficients (xi, eta) =
     coefficients
