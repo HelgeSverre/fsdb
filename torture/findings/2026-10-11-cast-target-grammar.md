@@ -58,6 +58,12 @@ other text retains the year and warns 1292; leading whitespace is accepted
 without a warning, while trailing whitespace warns. Numeric fractions round
 half away from zero without a text-truncation warning. Fsdb now follows these
 audited CAST and typed-CONVERT cases without changing storage-column coercion.
+Date, datetime, and timestamp inputs now use their calendar year, including
+the YEAR range warning for 2156. Bare bit and hex literals retain their
+numeric origin; an out-of-range hex value's warning names its decimal number.
+TIME inputs use the current session-local year, including negative and
+extended-hour values. The focused regression compares them with
+`YEAR(CURDATE())` so it does not assume a fixed calendar year.
 
 DECIMAL CAST values use their declared precision as a result bound. MySQL
 8.4.11 rounds `CAST('1.239' AS DECIMAL(5,2))` to `1.24` without a condition,

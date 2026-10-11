@@ -3201,6 +3201,37 @@ let tests =
                           sql
                   | _, result -> failtestf "expected YEAR CAST result for %s, got %A" sql result
 
+          testCase "YEAR casts read temporal years and binary literal numbers"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for source, expected, warnings in
+                  [ "DATE '2020-01-02'", Some "2020", []
+                    "TIMESTAMP '2020-01-02 03:04:05'", Some "2020", []
+                    "DATE '2156-01-01'", None, [ 1292, "Truncated incorrect YEAR value: '2156'" ]
+                    "0x32303031", None, [ 1292, "Truncated incorrect YEAR value: '842018865'" ]
+                    "b'1'", Some "2001", [] ] do
+                  let sql = sprintf "SELECT CAST(%s AS YEAR)" source
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected temporal or binary YEAR CAST result for %s, got %A" sql result
+              let _, currentYearResult = handle session "SELECT YEAR(CURDATE())"
+              let currentYear =
+                  match currentYearResult with
+                  | ResultSet(_, [ [ Some year ] ]) -> year
+                  | result -> failtestf "expected current year, got %A" result
+              for source in [ "TIME '00:00:00'"; "TIME '-12:34:56'"; "TIME '838:59:59'" ] do
+                  let sql = sprintf "SELECT CAST(%s AS YEAR)" source
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some year ] ]) ->
+                      Expect.equal year currentYear sql
+                      Expect.isEmpty session.Diagnostics sql
+                  | _, result -> failtestf "expected TIME-to-YEAR CAST for %s, got %A" sql result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

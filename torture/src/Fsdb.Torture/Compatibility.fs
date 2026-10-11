@@ -1163,6 +1163,18 @@ module ContractCatalog =
                          |> Contract.comparingValues
                yield Contract.query "year-convert-invalid" "SELECT CONVERT('abc', YEAR)" |> Contract.comparingValues
                yield Contract.query "year-convert-invalid-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               for index, source in
+                   [ "DATE '2020-01-02'"
+                     "TIMESTAMP '2020-01-02 03:04:05'"
+                     "DATE '2156-01-01'"
+                     "0x32303031"
+                     "b'1'"
+                     "TIME '00:00:00'"
+                     "TIME '-12:34:56'" ] |> List.indexed do
+                   yield Contract.query (sprintf "year-cast-source-%d" index) (sprintf "SELECT CAST(%s AS YEAR)" source)
+                         |> Contract.comparingValues
+                   yield Contract.query (sprintf "year-cast-source-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                for index, sql in
                    [ "SELECT CAST('abc' AS DECIMAL(5,2))"
                      "SELECT CAST('1.239' AS DECIMAL(5,2))"

@@ -723,6 +723,8 @@ conversion diagnostics are still open. FLOAT, TIME, and DATETIME target
 precision ceilings now return MySQL's early 1426 diagnostic in both forms;
 audited YEAR casts now distinguish text zero from numeric zero, return NULL
 with MySQL's invalid/out-of-range warnings, and warn on trailing text;
+audited date/datetime/timestamp, TIME, and bare bit/hex sources retain their
+distinct year and numeric-origin behavior;
 audited DECIMAL precision/scale limits follow MySQL's validation order and
 source-expression labels, including the zero-precision default. Negative
 FLOAT, TIME, DATETIME, and DECIMAL target precisions now fail as syntax in

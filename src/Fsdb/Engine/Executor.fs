@@ -3221,18 +3221,18 @@ let private oversizedDecimalExponentMantissa (prefix: string) =
         | _ -> None
 
 let private castYearValue source =
+    let sourceText = toText source |> Option.defaultValue ""
     let warning code description text =
         Diagnostics.warning code (sprintf "%s YEAR value: '%s'" description text)
         Some VNull
-    let outOfRange () = warning 1292 "Truncated incorrect" (toText source |> Option.defaultValue "")
-    let finish zeroYear number =
+    let finish zeroYear number warningText =
         match normalizeMySqlYear zeroYear number with
         | Some year -> Some(VInt year)
-        | None -> outOfRange ()
+        | None -> warning 1292 "Truncated incorrect" warningText
     match source with
     | VNull -> Some VNull
     | VString _ | VEncodedString _ | VBytes _ ->
-        let text = toText source |> Option.defaultValue ""
+        let text = sourceText
         let matched = leadingIntegerPrefixRegex.Match text
         let prefix = matched.Value.Trim()
         if not matched.Success || prefix.StartsWith("-", System.StringComparison.Ordinal) then
@@ -3247,14 +3247,19 @@ let private castYearValue source =
                     if matched.Length <> text.Length then
                         Diagnostics.warning 1292 (sprintf "Truncated incorrect YEAR value: '%s'" text)
                     Some(VInt year)
-    | VInt number -> finish 0L (decimal number)
-    | VUInt number -> finish 0L (decimal number)
-    | VDecimal number -> finish 0L number
-    | VBit(_, number) -> finish 0L (decimal number)
-    | VBinaryLiteral bytes -> finish 0L (decimal (Value.binaryLiteralNumber bytes))
+    | VInt number -> finish 0L (decimal number) sourceText
+    | VUInt number -> finish 0L (decimal number) sourceText
+    | VDecimal number -> finish 0L number sourceText
+    | VBit(_, number) -> finish 0L (decimal number) sourceText
+    | VBinaryLiteral bytes ->
+        let number = Value.binaryLiteralNumber bytes
+        finish 0L (decimal number) (string number)
     | VDouble number when System.Double.IsFinite number && abs number <= float System.Decimal.MaxValue ->
-        finish 0L (decimal number)
-    | VDouble _ -> outOfRange ()
+        finish 0L (decimal number) sourceText
+    | VDouble _ -> warning 1292 "Truncated incorrect" sourceText
+    | VDate date -> finish 0L (decimal date.Year) (string date.Year)
+    | VDateTime dateTime
+    | VTimestamp dateTime -> finish 0L (decimal dateTime.Year) (string dateTime.Year)
     | _ -> None
 
 let private castIntegerText unsigned (text: string) =
@@ -6129,6 +6134,11 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | TChar _, (VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
                 // A numeric CHAR cast needs no charset conversion or storage warnings.
                 Ok(VString(toText v |> Option.defaultValue ""))
+            | TYear, VTime _ ->
+                let localYear =
+                    sqlTimeZoneFromUtc ctx.Store.ExecutionSettings.TimeZone System.DateTime.UtcNow
+                    |> _.Year
+                Ok(VInt(int64 localYear))
             | TYear, _ ->
                 match castYearValue source with
                 | Some result -> Ok result
