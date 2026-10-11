@@ -121,7 +121,7 @@ let private unicodeCategoryAliases =
     |> List.collect (fun (name, category) -> [ name, category; category.ToUpperInvariant(), category ])
     |> Map.ofList
 
-let private unicodeCategoryAliasAt (pattern: string) index =
+let private unicodePropertyAt (pattern: string) index =
     if index + 3 >= pattern.Length
        || (pattern[index + 1] <> 'p' && pattern[index + 1] <> 'P')
        || pattern[index + 2] <> '{' then
@@ -135,9 +135,13 @@ let private unicodeCategoryAliasAt (pattern: string) index =
                 if name.StartsWith("GC=", StringComparison.Ordinal) then name.Substring(3)
                 elif name.StartsWith("GENERAL_CATEGORY=", StringComparison.Ordinal) then name.Substring(17)
                 else name
-            let category = Map.tryFind categoryName unicodeCategoryAliases
-            category
-            |> Option.map (fun category -> closing + 1, "\\" + string pattern[index + 1] + "{" + category + "}")
+            let translated =
+                if name = "WHITE_SPACE" then
+                    Some(if pattern[index + 1] = 'p' then "\\s" else "\\S")
+                else
+                    Map.tryFind categoryName unicodeCategoryAliases
+                    |> Option.map (fun category -> "\\" + string pattern[index + 1] + "{" + category + "}")
+            translated |> Option.map (fun property -> closing + 1, property)
 
 let private mixedNegatedClassAt (pattern: string) start =
     let outerNegated = start + 1 < pattern.Length && pattern[start + 1] = '^'
@@ -153,13 +157,19 @@ let private mixedNegatedClassAt (pattern: string) start =
             ordinary.Append literal |> ignore
             index <- nextIndex
         elif pattern[index] = '\\' && index + 1 < pattern.Length then
-            match characterEscape pattern[index + 1] with
-            | Some target when target[1] = '^' -> alternatives.Add target
-            | Some target -> ordinary.Append(target, 1, target.Length - 2) |> ignore
-            | None when pattern[index + 1] = 'b' || pattern[index + 1] = 'B' ->
-                ordinary.Append pattern[index + 1] |> ignore
-            | None -> ordinary.Append(pattern, index, 2) |> ignore
-            index <- index + 2
+            match unicodePropertyAt pattern index with
+            | Some(nextIndex, property) ->
+                if pattern[index + 1] = 'P' then alternatives.Add("[" + property + "]")
+                else ordinary.Append property |> ignore
+                index <- nextIndex
+            | None ->
+                match characterEscape pattern[index + 1] with
+                | Some target when target[1] = '^' -> alternatives.Add target
+                | Some target -> ordinary.Append(target, 1, target.Length - 2) |> ignore
+                | None when pattern[index + 1] = 'b' || pattern[index + 1] = 'B' ->
+                    ordinary.Append pattern[index + 1] |> ignore
+                | None -> ordinary.Append(pattern, index, 2) |> ignore
+                index <- index + 2
         elif pattern[index] = ']' then
             closed <- true
             index <- index + 1
@@ -214,7 +224,7 @@ let private normalizePosixClasses (pattern: string) =
                 builder.Append 'E' |> ignore
                 index <- index + 2
             else
-                match unicodeCategoryAliasAt pattern index with
+                match unicodePropertyAt pattern index with
                 | Some(nextIndex, category) ->
                     builder.Append category |> ignore
                     index <- nextIndex

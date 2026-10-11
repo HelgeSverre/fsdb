@@ -85,8 +85,16 @@ and controls through their parent categories. Category names are
 case-insensitive in the audited forms. The compiler maps the Unicode general
 category names that have direct .NET equivalents to their short codes, preserving
 positive/negative escapes and bracket use. `just check` passes 3,386 tests.
-Script and binary Unicode properties, including `\p{Greek}` and
-`\p{White_Space}`, remain open.
+The binary `White_Space` property now uses .NET's Unicode whitespace class.
+Native probes checked NEL and nonbreaking space as positive examples, and
+zero-width space and file separator as negative examples. `\P{White_Space}`
+works both alone and within brackets. MySQL rejects `\p{gc=White_Space}`
+because the property is binary rather than a general category; the compiler
+does not translate that spelling. Mixed POSIX brackets also normalize
+recognized Unicode properties before building their one-character union;
+native probes cover a positive whitespace member, a negated whitespace
+member, and a Number category beside `[:^alpha:]`. Other ICU binary and
+script properties, including `\p{Greek}`, remain open.
 
 All fourteen standard POSIX class names now have translations. The translations
 are bounded approximations of ICU properties: for example, MySQL counts the

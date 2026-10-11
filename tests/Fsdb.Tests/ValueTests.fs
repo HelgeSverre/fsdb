@@ -3072,11 +3072,24 @@ let tests =
                                 "\\p{Symbol}", "+", 1L
                                 "\\p{Separator}", " ", 1L
                                 "\\p{Other}", "\n", 1L
-                                "\\P{General_Category=Number}", "A", 1L ] do
+                                "\\P{General_Category=Number}", "A", 1L
+                                "\\p{White_Space}", "\u0085", 1L
+                                "\\p{White_Space}", "\u00a0", 1L
+                                "\\p{White_Space}", "\u200b", 0L
+                                "\\p{White_Space}", "\u001c", 0L
+                                "\\P{White_Space}", "x", 1L
+                                "[\\P{White_Space}]", "x", 1L
+                                "[a[:^alpha:]\\p{White_Space}]", "x", 0L
+                                "[a[:^alpha:]\\p{White_Space}]", " ", 1L
+                                "[a[:^alpha:]\\p{Number}]", "Ⅳ", 1L
+                                "[a[:^alpha:]\\P{White_Space}]", "5", 1L ] do
                               Expect.equal
                                   (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
                                   (VInt expected)
                                   (sprintf "%s matches %A" pattern value)
+                          Expect.throws
+                              (fun () -> call "REGEXP_LIKE" [ VString " "; VString "\\p{gc=White_Space}"; VString "c" ] |> ignore)
+                              "White_Space is not a general category"
                       testCase "REGEXP negated POSIX classes include line terminators"
                       <| fun _ ->
                           for pattern, value, expected in
