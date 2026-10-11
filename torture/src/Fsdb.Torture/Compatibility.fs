@@ -1086,6 +1086,14 @@ module ContractCatalog =
                      |> Contract.comparingValues
                yield Contract.query "cast-character-width-warnings" "SHOW WARNINGS"
                      |> Contract.comparingValues
+               let oversizedCharCasts =
+                   "SELECT CAST('a' AS CHAR(67108865)), CAST('a' AS NCHAR(67108865)), CAST('a' AS CHAR(67108865) BINARY), CAST('a' AS CHAR(67108865) CHARACTER SET binary), CAST(NULL AS CHAR(67108865))"
+               yield Contract.query "cast-char-packet-values" oversizedCharCasts |> Contract.comparingValues
+               yield Contract.query "cast-char-packet-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "cast-char-packet-boundary" "SELECT CAST('a' AS CHAR(67108864))"
+                     |> Contract.comparingValues
+               yield Contract.query "cast-char-packet-boundary-warnings" "SHOW WARNINGS"
+                     |> Contract.comparingValues
                for index, target in
                    [ "VARCHAR(2)"; "VARBINARY(2)"; "TEXT"; "BLOB"; "INT"; "BIGINT";
                      "BIT(3)"; "TIMESTAMP(3)"; "NUMERIC(5,2)"; "FLOAT UNSIGNED";

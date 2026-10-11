@@ -2958,6 +2958,33 @@ let tests =
                       "modifier warnings follow source order"
               | _, result -> failtestf "unexpected binary attribute cast result: %A" result
 
+          testCase "oversized CHAR casts return NULL before evaluating the source"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT CAST('a' AS CHAR(67108865)), CAST('a' AS NCHAR(67108865)), "
+                  + "CAST('a' AS CHAR(67108865) BINARY), "
+                  + "CAST('a' AS CHAR(67108865) CHARACTER SET binary), CAST(NULL AS CHAR(67108865))"
+              let charWarning =
+                  "Result of cast_as_char() was larger than max_allowed_packet (67108864) - truncated"
+              let binaryWarning =
+                  "Result of cast_as_binary() was larger than max_allowed_packet (67108864) - truncated"
+              match handle session sql with
+              | session, ResultSet(_, [ [ None; None; None; None; None ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code))
+                      [ 3720; 1287; 1301; 1301; 1301; 1301; 1301 ]
+                      "syntax warnings precede cast-width warnings"
+                  Expect.equal
+                      (session.Diagnostics |> List.filter (fun condition -> condition.Code = 1301) |> List.map _.Message)
+                      [ charWarning; charWarning; charWarning; binaryWarning; charWarning ]
+                      "binary target alone selects the binary warning"
+              | _, result -> failtestf "expected oversized character casts to return NULL, got %A" result
+              match handle session "SELECT CAST('a' AS CHAR(67108864))" with
+              | session, ResultSet(_, [ [ Some "a" ] ]) ->
+                  Expect.isEmpty session.Diagnostics "packet-size boundary is accepted"
+              | _, result -> failtestf "expected the exact packet-size width to remain valid, got %A" result
+
           testCase "explicit BINARY cast widths truncate and pad bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

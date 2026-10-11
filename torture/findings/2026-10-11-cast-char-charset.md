@@ -76,3 +76,15 @@ modifiers through evaluation, metadata, SQL rendering, and persistence.
 `NCHAR BINARY`, two charset modifiers, and duplicate `BINARY` remain syntax
 errors, as in MySQL. The focused regression and differential contract cover
 these accepted and rejected forms.
+
+An explicit `CHAR(n)` target with `n` greater than the server's
+`max_allowed_packet` returns NULL and warning 1301 before evaluating its
+source, including NULL input. At the audited 67,108,864-byte packet limit,
+`CHAR(67108864)` succeeds while `CHAR(67108865)` returns NULL. This declared
+width rule is independent of the target charset. `NCHAR` and the deprecated
+`BINARY` attribute retain their syntax warnings before the runtime warning;
+an explicit binary charset says `cast_as_binary()` in warning 1301, while
+text targets say `cast_as_char()`. Fsdb now applies this guard to the shared
+charset cast path, so bare CHAR, national casts, modifier combinations, and
+typed CONVERT use the same rule. The focused regression and differential
+contract cover the boundary, warning text, and warning order.

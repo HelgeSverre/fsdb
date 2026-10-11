@@ -3087,6 +3087,13 @@ let private truncateBinaryCast width (bytes: byte[]) =
         (sprintf "Truncated incorrect BINARY(%d) value: '%s'" width (Charset.invalidBytePreview bytes 0))
     VBytes(Array.take width bytes)
 
+let private oversizedCastResult binary =
+    let name = if binary then "cast_as_binary" else "cast_as_char"
+    Diagnostics.warning
+        1301
+        (sprintf "Result of %s() was larger than max_allowed_packet (%d) - truncated" name Limits.maxAllowedPacket)
+    Ok VNull
+
 let private castIntegerText unsigned (text: string) =
     let matched = leadingIntegerPrefixRegex.Match text
     let prefix = matched.Value.Trim()
@@ -5793,6 +5800,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | Some error -> Error error
         | None -> eval e
     | BinaryCast e -> eval e
+    | CastCharset(_, Some length, charset) when length > Limits.maxAllowedPacket ->
+        oversizedCastResult (Charset.canonicalName charset = "binary")
     | CastCharset(e, length, charset) ->
         eval (FuncCall("CONVERT", [ e; Lit(VString charset) ]))
         |> Result.map (fun converted ->
@@ -5816,10 +5825,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         let charset = CharCastModifier.charset ctx.Store.ExecutionSettings.ConnectionCharset modifiers
         eval (CastCharset(e, length, charset))
     | CastAsBinary(_, Some length) when length > Limits.maxAllowedPacket ->
-        Diagnostics.warning
-            1301
-            (sprintf "Result of cast_as_binary() was larger than max_allowed_packet (%d) - truncated" Limits.maxAllowedPacket)
-        Ok VNull
+        oversizedCastResult true
     | CastAsBinary(e, length) ->
         eval e
         |> Result.map (fun source ->
@@ -5892,11 +5898,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Cast(_, TBit width) when width < 1 -> Error(3013, "Invalid size for CAST.")
     | Cast(_, TBit width) when width > 64 -> Error(1439, "Display width out of range for CAST (max = 64)")
     | Cast(_, (TBinary length | TVarBinary length)) when length > Limits.maxAllowedPacket ->
-        Diagnostics.warning
-            1301
-            (sprintf "Result of cast_as_binary() was larger than max_allowed_packet (%d) - truncated" Limits.maxAllowedPacket)
-
-        Ok VNull
+        oversizedCastResult true
     | Cast(e, ty) ->
         eval e
         // Casting an ENUM to a number reads its declaration ordinal, the same
