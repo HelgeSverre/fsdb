@@ -474,8 +474,11 @@ let scalarAtUtf16Offset (text: string) utf16Offset =
 
 let private invalidPattern (pattern: string) =
     let interval = Regex.Match(pattern, @"(?<!\\)\{(?<minimum>\d+),(?<maximum>\d+)\}")
+    let missingIntervalMinimum = Regex.IsMatch(pattern, @"(?<!\\)\{,\d+\}")
 
-    if interval.Success then
+    if missingIntervalMinimum then
+        Some(3692, "Incorrect description of a {min,max} interval.")
+    elif interval.Success then
         match
             Int32.TryParse interval.Groups.["minimum"].Value,
             Int32.TryParse interval.Groups.["maximum"].Value
@@ -488,13 +491,29 @@ let private invalidPattern (pattern: string) =
     else
         None
 
-let private parseError (error: RegexParseException) =
+let private parseError (pattern: string) (error: RegexParseException) =
     match error.Error.ToString() with
+    | "QuantifierAfterNothing" ->
+        let character = scalarAtUtf16Offset pattern error.Offset
+        InvalidPattern(3688, sprintf "Syntax error in regular expression on line 1, character %d." character)
     | "InsufficientClosingParentheses"
     | "InsufficientOpeningParentheses" -> InvalidPattern(3691, "Mismatched parenthesis in regular expression.")
     | "UnterminatedBracket" -> InvalidPattern(3696, "The regular expression contains an unclosed bracket expression.")
     | "ReversedCharacterRange" -> InvalidPattern(3697, "The regular expression contains an [x-y] character range where x comes after y.")
-    | "QuantifierOrCaptureGroupOutOfRange" -> InvalidPattern(3693, "The maximum is less than the minumum in a {min,max} interval.")
+    | "QuantifierOrCaptureGroupOutOfRange" ->
+        let largeCapture = Regex.Match(pattern, @"(?<!\\)\(\?<\d{10,}>")
+        if largeCapture.Success then
+            let character = scalarAtUtf16Offset pattern (largeCapture.Index + 4)
+            InvalidPattern(3688, sprintf "Syntax error in regular expression on line 1, character %d." character)
+        elif Regex.IsMatch(pattern, @"(?<!\\)\\[1-9]\d{9,}") then
+            InvalidPattern(3694, "Invalid back-reference in regular expression.")
+        elif Regex.IsMatch(pattern, @"(?<!\\)\{\d{10,}(?:,\d*)?\}") then
+            InvalidPattern(4007, "Decimal number in regular expression is too large.")
+        else InvalidPattern(3691, "Invalid regular expression.")
+    | "MalformedNamedReference" -> InvalidPattern(3887, "A capture group has an invalid name.")
+    | "InsufficientOrInvalidHexDigits" -> InvalidPattern(3689, "Unrecognized escape sequence in regular expression.")
+    | "InvalidUnicodePropertyEscape"
+    | "UnrecognizedUnicodeProperty" -> InvalidPattern(3685, "Illegal argument to a regular expression.")
     | _ -> InvalidPattern(3691, "Invalid regular expression.")
 
 let compile (collation: Collation.Collation) (matchType: string option) (pattern: string) : Result<Regex, RegexError> =
@@ -509,5 +528,5 @@ let compile (collation: Collation.Collation) (matchType: string option) (pattern
                 try
                     Ok(Regex(normalizePattern options posix, options, Limits.regexpMatchTimeout))
                 with
-                | :? RegexParseException as error -> Error(parseError error)
+                | :? RegexParseException as error -> Error(parseError posix error)
                 | :? ArgumentException -> Error(InvalidPattern(3691, "Invalid regular expression.")))

@@ -10142,8 +10142,25 @@ module ContractCatalog =
                    "SELECT REGEXP_LIKE('a‍b','a\\\\B‍b','c'),REGEXP_LIKE('a‍b','a\\\\b‍b','c'),REGEXP_LIKE('b','[\\\\b]','c'),REGEXP_LIKE('B','[\\\\B]','c'),REGEXP_LIKE('b','[\\\\W\\\\b]','c'),REGEXP_LIKE('a','[\\\\W\\\\b]','c')"
                    |> Contract.comparingValues
                Contract.query "quoted-intervals"
-                   "SELECT REGEXP_LIKE('{3,2}','\\\\Q{3,2}\\\\E','c'),REGEXP_LIKE('{3,2}','\\\\Q{3,2}','c'),REGEXP_LIKE('{','\\\\Q{\\\\E','c')"
+                   "SELECT REGEXP_LIKE('{3,2}','\\\\Q{3,2}\\\\E','c'),REGEXP_LIKE('{3,2}','\\\\Q{3,2}','c'),REGEXP_LIKE('{','\\\\Q{\\\\E','c'),REGEXP_LIKE('{,2}','\\\\Q{,2}\\\\E','c')"
                    |> Contract.comparingValues
+               for name, pattern, code in
+                   [ "leading-star", "*a", 3688
+                     "leading-plus", "+a", 3688
+                     "leading-question", "?a", 3688
+                     "branch-leading-star", "a|*b", 3688
+                     "supplementary-branch-leading-star", "😀|*b", 3688
+                     "missing-interval-minimum", "a{,2}", 3692
+                     "oversized-interval", "a{99999999999}", 4007
+                     "oversized-capture-name", "(?<99999999999>a)", 3688
+                     "oversized-back-reference", "\\99999999999", 3694
+                     "bad-named-reference", "\\k", 3887
+                     "short-hex-escape", "\\x", 3689
+                     "empty-property", "\\p{}", 3685
+                     "unknown-property", "\\p{NoSuch}", 3685 ] do
+                   let hex = Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes pattern)
+                   Contract.query name (sprintf "SELECT REGEXP_LIKE('a', CONVERT(0x%s USING utf8mb4), 'c')" hex)
+                   |> Contract.fails code "HY000"
                Contract.query "zerofill-and-text-operands"
                    "SELECT REGEXP_LIKE(n,'^000'),n LIKE '000%',REGEXP_LIKE(s,'^00'),s LIKE '00%' FROM regex_display"
                    |> Contract.comparingValues

@@ -2948,6 +2948,28 @@ let tests =
                           expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[a[:bogus:]]" ]
                           expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[x[:^alpha:][:bogus:]]" ]
                           expects 3691 "Mismatched parenthesis in regular expression." [ VString "abc"; VString ")" ]
+                          for pattern in [ "*a"; "+a"; "?a" ] do
+                              expects 3688 "Syntax error in regular expression on line 1, character 1."
+                                  [ VString "abc"; VString pattern ]
+                          expects 3688 "Syntax error in regular expression on line 1, character 3."
+                              [ VString "abc"; VString "a|*b" ]
+                          expects 3688 "Syntax error in regular expression on line 1, character 3."
+                              [ VString "abc"; VString "😀|*b" ]
+                          expects 3692 "Incorrect description of a {min,max} interval."
+                              [ VString "abc"; VString "a{,2}" ]
+                          expects 4007 "Decimal number in regular expression is too large."
+                              [ VString "abc"; VString "a{99999999999}" ]
+                          expects 3688 "Syntax error in regular expression on line 1, character 4."
+                              [ VString "abc"; VString "(?<99999999999>a)" ]
+                          expects 3694 "Invalid back-reference in regular expression."
+                              [ VString "abc"; VString "\\99999999999" ]
+                          expects 3887 "A capture group has an invalid name."
+                              [ VString "abc"; VString "\\k" ]
+                          expects 3689 "Unrecognized escape sequence in regular expression."
+                              [ VString "abc"; VString "\\x" ]
+                          for pattern in [ "\\p{}"; "\\p{NoSuch}" ] do
+                              expects 3685 "Illegal argument to a regular expression."
+                                  [ VString "abc"; VString pattern ]
 
                       testCase "REGEXP functions propagate every supplied optional NULL"
                       <| fun _ ->
@@ -3258,6 +3280,7 @@ let tests =
                                 "^\\Qa\\b\\E$", "a\\b", 1L
                                 "^\\Eabc$", "Eabc", 1L
                                 "^\\Q[a]\\E$", "[a]", 1L
+                                "^\\Q{,2}\\E$", "{,2}", 1L
                                 "^[\\Q]\\E]$", "]", 1L
                                 "^[\\Qa-b\\E]$", "-", 1L ] do
                               Expect.equal
