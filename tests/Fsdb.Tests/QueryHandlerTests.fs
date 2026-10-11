@@ -5917,6 +5917,39 @@ let tests =
               | ResultSet(_, [ [ Some "1201" ] ]) -> ()
               | other -> failtestf "expected the larger session limit, got %A" other
 
+          testCase "concurrent sessions retain their own scoped aggregate and CTE limits"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let first, _ = handle first "CREATE TABLE scoped_limits (v VARCHAR(20))"
+              let first, _ = handle first "INSERT INTO scoped_limits VALUES ('abcdef'),('ghijkl')"
+              let first, _ = handle first "SET SESSION group_concat_max_len=4, cte_max_recursion_depth=1"
+              let second, _ = handle (create 2 store) "SET SESSION group_concat_max_len=2048, cte_max_recursion_depth=5"
+              use barrier = new System.Threading.Barrier(2)
+
+              let checkSession expectedLength expectRecursionError initial =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      let mutable session = initial
+                      barrier.SignalAndWait() |> ignore
+
+                      for _ in 1 .. 20 do
+                          let next, concat = handle session "SELECT LENGTH(GROUP_CONCAT(v)) FROM scoped_limits"
+                          session <- next
+                          Expect.equal concat (ResultSet([ "LENGTH(GROUP_CONCAT(v))" ], [ [ Some expectedLength ] ])) "GROUP_CONCAT uses this session's limit"
+
+                          let next, recursive =
+                              handle session "WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n<3) SELECT COUNT(*) FROM s"
+                          session <- next
+
+                          match expectRecursionError, recursive with
+                          | true, Err(3636, _) -> ()
+                          | false, ResultSet(_, [ [ Some "3" ] ]) -> ()
+                          | _ -> failtestf "unexpected session-scoped CTE result: %A" recursive)
+
+              System.Threading.Tasks.Task.WaitAll
+                  [| checkSession "4" true first
+                     checkSession "13" false second |]
+
           testCase "sql_mode inside Laravel's real comma-joined connect-time SET turns off strict coercion"
           <| fun _ ->
               // The exact statement `strict => false` sends

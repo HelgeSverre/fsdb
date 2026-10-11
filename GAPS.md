@@ -823,6 +823,14 @@ text-to-number aggregate scan costs. Its repeatability check passes, but
 between-run variation and the absence of a pre-change baseline limit it to
 profiling guidance rather than a regression claim.
 
+The [current Release point-lookup allocation comparison](benchmarks/results/2026-10-11-current-point-lookup-allocation.md)
+measured about 35 KiB per pre-parsed executor call and 95–102 KiB per warmed
+text or reused prepared handler call. A sampled trace ranked execution-context
+and `AsyncLocal` map objects among the largest families. Moving two synchronous
+execution-limit scopes to thread-local storage reduced handler allocation by
+about 3.8–4.7 KiB per call on that fixture; a latency gain and the remaining
+fixed-cost gap are unproven.
+
 A [three-run indexed constant-bound snapshot](benchmarks/results/2026-10-10-constant-index-bounds.md)
 finds fsdb's fixed primary-key lookup around 220–248 µs versus MySQL's
 41–43 µs. `ROUND(PI())` and `BIT_COUNT(7)` lookups fall within the run-to-run

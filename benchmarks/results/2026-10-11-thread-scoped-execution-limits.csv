@@ -1,0 +1,16 @@
+case,iterations,elapsed_ms,allocated_bytes
+fixed-executor-1,1000,38.809,35047296
+fixed-handler-1,1000,168.854,90792264
+fixed-prepared-handler-1,1000,163.651,98955408
+fixed-executor-2,1000,28.673,34800232
+fixed-handler-2,1000,122.650,90360264
+fixed-prepared-handler-2,1000,105.735,98667176
+fixed-executor-3,1000,28.174,34800232
+fixed-handler-3,1000,116.874,90360264
+fixed-prepared-handler-3,1000,94.633,98325248
+fixed-executor-4,1000,23.957,34846048
+fixed-handler-4,1000,83.807,89484464
+fixed-prepared-handler-4,1000,78.925,97521560
+fixed-executor-5,1000,22.432,34848232
+fixed-handler-5,1000,73.876,88924256
+fixed-prepared-handler-5,1000,70.372,97081512

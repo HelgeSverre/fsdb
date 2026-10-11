@@ -770,8 +770,10 @@ type private CteBinding =
 
 /// Statement-local CTE bindings, keyed by normalized name.
 let private cteScope = System.Threading.AsyncLocal<Map<string, CteBinding>>()
-let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
-let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
+// Both settings are read inside the synchronous statement executor. Scoped
+// thread values avoid copying the async execution context for every query.
+let private cteRecursionDepth = new System.Threading.ThreadLocal<int64 option>()
+let private groupConcatMaxLen = new System.Threading.ThreadLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 let private viewMergeDepth = System.Threading.AsyncLocal<int>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
@@ -1856,10 +1858,10 @@ let private storedChecks (store: Store) (dbName: string) (tableName: string) : S
         |> List.ofSeq
 
 let withCteRecursionDepth (limit: int64) (body: unit -> 'a) : 'a =
-    DynamicScope.withValue cteRecursionDepth (Some limit) body
+    DynamicScope.withThreadValue cteRecursionDepth (Some limit) body
 
 let withGroupConcatMaxLen (limit: int) (body: unit -> 'a) : 'a =
-    DynamicScope.withValue groupConcatMaxLen (Some limit) body
+    DynamicScope.withThreadValue groupConcatMaxLen (Some limit) body
 
 let private currentCteScope () : Map<string, CteBinding> =
     DynamicScope.valueOrDefault Map.empty cteScope
