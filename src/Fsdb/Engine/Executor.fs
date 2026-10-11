@@ -314,6 +314,11 @@ type private FullTextScores =
     | OrderedScores of Map<RowId, float>
     | HashedScores of Dictionary<RowId, float>
 
+type private ReusableFullTextScores =
+    { Qualifier: string
+      MatchNode: Expr
+      Scores: Lazy<Result<(Expr * MatchMode * FullTextScores) list, int * string>> }
+
 type private FullTextSourcePlan =
     { Source: FullTextPhysicalSource
       Scores: (Expr * MatchMode * FullTextScores) list
@@ -9127,13 +9132,17 @@ and private tryFullTextDrivenJoinOrder
 
         let baseKey = owner.Qualifier.ToLowerInvariant()
         let onlyBasePredicate = sourcePredicates |> Map.forall (fun qualifier _ -> qualifier = baseKey)
+        let originalBaseRows =
+            FromItem.tryQualifier originalBase
+            |> Option.bind (fun qualifier ->
+                sources
+                |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)))
+            |> Option.map (fun source -> source.Table.RowsArray.Count)
+
         let preferFullText () =
             select.Limit.IsSome
-            || (match matchingRows (), FromItem.tryQualifier originalBase with
-                | Some matches, Some qualifier ->
-                    sources
-                    |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
-                    |> Option.exists (fun source -> matches < source.Table.RowsArray.Count)
+            || (match matchingRows (), originalBaseRows with
+                | Some matches, Some baseRows -> matches < baseRows
                 | _ -> false)
 
         if
@@ -18081,17 +18090,19 @@ and private runFullTextSelect
         | Ok ownedNodes ->
             // Costing an unbounded reversed join needs the posting count.
             // Reuse its score set when execution reads the same full corpus.
-            let reusableScores =
+            let reusableScores: ReusableFullTextScores option =
                 match ownedNodes, select.Where, select.Limit with
                 | [ owner, node ], Some predicate, None when predicate = node ->
-                    Some(owner.Qualifier.ToLowerInvariant(), node,
-                         lazy (fullTextScoresForTable owner.Database owner.Table None [ node ]))
+                    Some
+                        { Qualifier = owner.Qualifier
+                          MatchNode = node
+                          Scores = lazy (fullTextScoresForTable owner.Database owner.Table None [ node ]) }
                 | _ -> None
 
             let matchingRows () =
                 reusableScores
-                |> Option.bind (fun (_, _, scores) ->
-                    match scores.Value with
+                |> Option.bind (fun reusable ->
+                    match reusable.Scores.Value with
                     | Ok [ _, _, values ] -> Some(fullTextScoreCount values)
                     | _ -> None)
 
@@ -18140,10 +18151,10 @@ and private runFullTextSelect
                             |> Option.map (snd >> List.map fst >> Set.ofList)
 
                         (match reusableScores with
-                         | Some(qualifier, node, scores)
+                         | Some reusable
                              when candidateIds.IsNone
-                                  && source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
-                                  && nodes = [ node ] -> scores.Value
+                                  && source.Qualifier.Equals(reusable.Qualifier, System.StringComparison.OrdinalIgnoreCase)
+                                  && nodes = [ reusable.MatchNode ] -> reusable.Scores.Value
                          | _ -> fullTextScoresForTable source.Database source.Table candidateIds nodes)
                         |> Result.mapError (fun (code, message) -> Err(code, message))
                         |> Result.map (fun computed ->
