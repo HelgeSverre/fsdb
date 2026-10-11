@@ -1095,7 +1095,9 @@ implementation effort:
    use the GRS 1980 ellipsoid, while the [WGS 84 UTM zone family](torture/findings/2026-10-11-wgs84-utm-zones.md)
    covers all 120 northern and southern zone definitions and transforms.
    [NAD83 UTM zones 1N–23N](torture/findings/2026-10-11-nad83-utm-zones.md)
-   also preserve the NAD83-to-WGS84 datum shift.
+   also preserve the NAD83-to-WGS84 datum shift. The
+   [NAD27 seven-parameter oracle](torture/findings/2026-10-11-nad27-helmert-oracle.md)
+   is recorded for the next datum and projected-family extension.
    `ST_SwapXY` covers all supported geometry shapes. Line interpolation and
    point-at-distance use planar segment lengths or MySQL's Andoyer/Thomas
    geographic strategy. Geographic multipoint distance is also covered;
