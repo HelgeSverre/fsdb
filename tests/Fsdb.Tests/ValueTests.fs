@@ -3063,7 +3063,16 @@ let tests =
                                 "\\p{Decimal_Number}", "Ⅳ", 0L
                                 "\\p{decimal_number}", "5", 1L
                                 "\\P{Number}", "A", 1L
-                                "[\\p{Letter}0-9]", "α", 1L ] do
+                                "[\\p{Letter}0-9]", "α", 1L
+                                "\\p{General_Category=Uppercase_Letter}", "A", 1L
+                                "\\p{gc=Ll}", "α", 1L
+                                "\\p{Letter_Number}", "Ⅳ", 1L
+                                "\\p{Mark}", "\u0301", 1L
+                                "\\p{Punctuation}", "_", 1L
+                                "\\p{Symbol}", "+", 1L
+                                "\\p{Separator}", " ", 1L
+                                "\\p{Other}", "\n", 1L
+                                "\\P{General_Category=Number}", "A", 1L ] do
                               Expect.equal
                                   (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
                                   (VInt expected)

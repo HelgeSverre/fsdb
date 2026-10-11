@@ -76,14 +76,17 @@ operands and row-varying pattern/match-type evaluation, at
 The full Docker lane retains the same nine pre-existing identifier-case
 differences because that oracle uses `lower_case_table_names=0`.
 
-A later native MySQL 8.4.11 probe verified the ICU category aliases
-`\p{Letter}`, `\p{Number}`, and `\p{Decimal_Number}`. A Roman numeral `Ⅳ`
-matches Number but neither Letter nor Decimal_Number; `\P{Number}` matches
-`A`, and `[\p{Letter}0-9]` matches Greek `α`. Category names are
-case-insensitive in the audited form. The compiler maps these three names to
-.NET's `L`, `N`, and `Nd` categories, preserving positive/negative escapes
-and bracket use. `just check` passes 3,386 tests. Script and binary Unicode
-properties, including `\p{Greek}`, remain open.
+A later native MySQL 8.4.11 probe verified representative ICU
+general-category long names and `gc=`/`General_Category=` forms. A Roman numeral `Ⅳ` matches
+Number and Letter_Number but neither Letter nor Decimal_Number; `\P{Number}`
+matches `A`, and `[\p{Letter}0-9]` matches Greek `α`. Native probes also
+covered uppercase/lowercase letters, marks, punctuation, symbols, separators,
+and controls through their parent categories. Category names are
+case-insensitive in the audited forms. The compiler maps the Unicode general
+category names that have direct .NET equivalents to their short codes, preserving
+positive/negative escapes and bracket use. `just check` passes 3,386 tests.
+Script and binary Unicode properties, including `\p{Greek}` and
+`\p{White_Space}`, remain open.
 
 All fourteen standard POSIX class names now have translations. The translations
 are bounded approximations of ICU properties: for example, MySQL counts the

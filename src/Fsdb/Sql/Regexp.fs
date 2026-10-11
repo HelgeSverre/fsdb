@@ -105,6 +105,22 @@ let private quotedLiteralAt inClass (pattern: string) index =
     let escaped = if inClass then escaped.Replace("]", "\\]").Replace("-", "\\-") else escaped
     (if closing < 0 then contentEnd else contentEnd + 2), escaped
 
+let private unicodeCategoryAliases =
+    [ "OTHER", "C"; "CONTROL", "Cc"; "FORMAT", "Cf"; "UNASSIGNED", "Cn"
+      "PRIVATE_USE", "Co"; "SURROGATE", "Cs"
+      "LETTER", "L"; "LOWERCASE_LETTER", "Ll"; "MODIFIER_LETTER", "Lm"
+      "OTHER_LETTER", "Lo"; "TITLECASE_LETTER", "Lt"; "UPPERCASE_LETTER", "Lu"
+      "MARK", "M"; "SPACING_MARK", "Mc"; "ENCLOSING_MARK", "Me"; "NONSPACING_MARK", "Mn"
+      "NUMBER", "N"; "DECIMAL_NUMBER", "Nd"; "LETTER_NUMBER", "Nl"; "OTHER_NUMBER", "No"
+      "PUNCTUATION", "P"; "CONNECTOR_PUNCTUATION", "Pc"; "DASH_PUNCTUATION", "Pd"
+      "CLOSE_PUNCTUATION", "Pe"; "FINAL_PUNCTUATION", "Pf"; "INITIAL_PUNCTUATION", "Pi"
+      "OTHER_PUNCTUATION", "Po"; "OPEN_PUNCTUATION", "Ps"
+      "SYMBOL", "S"; "CURRENCY_SYMBOL", "Sc"; "MODIFIER_SYMBOL", "Sk"
+      "MATH_SYMBOL", "Sm"; "OTHER_SYMBOL", "So"
+      "SEPARATOR", "Z"; "LINE_SEPARATOR", "Zl"; "PARAGRAPH_SEPARATOR", "Zp"; "SPACE_SEPARATOR", "Zs" ]
+    |> List.collect (fun (name, category) -> [ name, category; category.ToUpperInvariant(), category ])
+    |> Map.ofList
+
 let private unicodeCategoryAliasAt (pattern: string) index =
     if index + 3 >= pattern.Length
        || (pattern[index + 1] <> 'p' && pattern[index + 1] <> 'P')
@@ -114,13 +130,12 @@ let private unicodeCategoryAliasAt (pattern: string) index =
         let closing = pattern.IndexOf('}', index + 3)
         if closing < 0 then None
         else
-            let name = pattern.Substring(index + 3, closing - index - 3)
-            let category =
-                match name.ToUpperInvariant() with
-                | "LETTER" -> Some "L"
-                | "NUMBER" -> Some "N"
-                | "DECIMAL_NUMBER" -> Some "Nd"
-                | _ -> None
+            let name = pattern.Substring(index + 3, closing - index - 3).ToUpperInvariant()
+            let categoryName =
+                if name.StartsWith("GC=", StringComparison.Ordinal) then name.Substring(3)
+                elif name.StartsWith("GENERAL_CATEGORY=", StringComparison.Ordinal) then name.Substring(17)
+                else name
+            let category = Map.tryFind categoryName unicodeCategoryAliases
             category
             |> Option.map (fun category -> closing + 1, "\\" + string pattern[index + 1] + "{" + category + "}")
 
