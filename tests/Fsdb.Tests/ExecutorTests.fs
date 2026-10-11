@@ -14640,6 +14640,27 @@ let tests =
                     | ResultSet(_, [ [ Some "4258"; Some "ETRS89" ]; [ Some "4269"; Some "NAD83" ] ]) -> ()
                     | result -> failtestf "expected MySQL geographic SRS catalog rows, got %A" result
 
+                testCase "GRS 1980 geographic transforms apply MySQL datum shifts"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ 4258, 4326, 40.0, -75.0, 0.0000001
+                          4269, 4326, 39.99999719341358, -74.99998565769141, 0.0000001
+                          4326, 4269, 40.0000028065836, -75.00001434230444, 0.0000001
+                          4258, 4269, 40.00000280565444, -75.00001434230445, 0.0000001 ]
+                    for source, target, latitude, longitude, tolerance in cases do
+                        let transformed =
+                            sprintf "ST_Transform(ST_GeomFromText('POINT(40 -75)',%d),%d)" source target
+                        let sql =
+                            sprintf "SELECT ABS(ST_X(%s)-%.14f)<%g,ABS(ST_Y(%s)-%.14f)<%g" transformed latitude tolerance transformed longitude tolerance
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL %d to %d transform, got %A" source target result
+                    let projected = "ST_Transform(ST_GeomFromText('POINT(40 -75)',4269),3857)"
+                    match runDefault store (sprintf "SELECT ABS(ST_X(%s)+8348960.212917021)<0.02,ABS(ST_Y(%s)-4865941.871657689)<0.02" projected projected) with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected NAD83 to Pseudo-Mercator transform, got %A" result
+
                 testCase "EPSG 3857 uses planar metric operations"
                 <| fun _ ->
                     let store = newStore ()

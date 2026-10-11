@@ -159,16 +159,55 @@ let private worldMercatorInverse (x, y) =
     let latitude = latitudeAt 8 (atan (sinh (y / earthRadius)))
     latitude * 180.0 / Math.PI, x * 180.0 / (earthRadius * Math.PI)
 
+let private cartesianFromGeographic inverseFlattening (latitude, longitude) =
+    let latitude = latitude * Math.PI / 180.0
+    let longitude = longitude * Math.PI / 180.0
+    let flattening = 1.0 / inverseFlattening
+    let eccentricitySquared = flattening * (2.0 - flattening)
+    let radius = earthRadius / sqrt (1.0 - eccentricitySquared * sin latitude ** 2.0)
+    radius * cos latitude * cos longitude,
+    radius * cos latitude * sin longitude,
+    radius * (1.0 - eccentricitySquared) * sin latitude
+
+let private geographicFromCartesian inverseFlattening (x, y, z) =
+    let flattening = 1.0 / inverseFlattening
+    let eccentricitySquared = flattening * (2.0 - flattening)
+    let horizontal = sqrt (x * x + y * y)
+    let rec latitudeAt iterations latitude =
+        if iterations = 0 then latitude
+        else
+            let radius = earthRadius / sqrt (1.0 - eccentricitySquared * sin latitude ** 2.0)
+            let next = atan2 (z + eccentricitySquared * radius * sin latitude) horizontal
+            latitudeAt (iterations - 1) next
+    let latitude = latitudeAt 8 (atan2 z (horizontal * (1.0 - eccentricitySquared)))
+    latitude * 180.0 / Math.PI, atan2 y x * 180.0 / Math.PI
+
+let private nad83ToWgs84 point =
+    // NAD83's registered TOWGS84 parameters translate geocentric metres by (1, 1, -1).
+    let x, y, z = cartesianFromGeographic 298.257222101 point
+    geographicFromCartesian 298.257223563 (x + 1.0, y + 1.0, z - 1.0)
+
+let private wgs84ToNad83 point =
+    let x, y, z = cartesianFromGeographic 298.257223563 point
+    geographicFromCartesian 298.257222101 (x - 1.0, y - 1.0, z + 1.0)
+
 let internal tryCoordinateTransform sourceSrid targetSrid =
     let compose first second point = second (first point)
-    match sourceSrid, targetSrid with
-    | 4326, 3857 -> Some pseudoMercatorForward
-    | 3857, 4326 -> Some pseudoMercatorInverse
-    | 4326, 3395 -> Some worldMercatorForward
-    | 3395, 4326 -> Some worldMercatorInverse
-    | 3857, 3395 -> Some(compose pseudoMercatorInverse worldMercatorForward)
-    | 3395, 3857 -> Some(compose worldMercatorInverse pseudoMercatorForward)
-    | _ -> None
+    let toWgs84 =
+        match sourceSrid with
+        | 4258 | 4326 -> Some id
+        | 4269 -> Some nad83ToWgs84
+        | 3857 -> Some pseudoMercatorInverse
+        | 3395 -> Some worldMercatorInverse
+        | _ -> None
+    let fromWgs84 =
+        match targetSrid with
+        | 4258 | 4326 -> Some id
+        | 4269 -> Some wgs84ToNad83
+        | 3857 -> Some pseudoMercatorForward
+        | 3395 -> Some worldMercatorForward
+        | _ -> None
+    Option.map2 compose toWgs84 fromWgs84
 
 let internal linearUnits =
     [ "British chain (Benoit 1895 A)", 20.1167824

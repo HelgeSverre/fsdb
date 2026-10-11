@@ -237,7 +237,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | geographic line/polygon distance and topology beyond point sets and line length, plus transformations and reference systems beyond EPSG 4326/3857/3395/4258/4269 | low |
+| Remaining spatial behavior | geographic line/polygon distance and topology beyond point sets and line length, plus reference systems beyond EPSG 4326/3857/3395/4258/4269 | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
@@ -1088,8 +1088,8 @@ implementation effort:
    geographic strategy. Geographic multipoint distance is also covered;
    geographic point-set topology is covered; [ETRS89 (4258) and NAD83 (4269)](torture/findings/2026-10-11-grs1980-geographic-systems.md)
    geographic constructors, catalog rows, and distance use their GRS 1980
-   ellipsoid. Line/polygon distance and topology, transformations for those
-   two SRSs, and other reference systems remain absent.
+   ellipsoid and transform through WGS84. Line/polygon distance and topology
+   and other reference systems remain absent.
 
 5. Extensible authentication providers. The built-in caching-SHA2, SHA-256,
    and native password exchanges are covered; external identity providers and
