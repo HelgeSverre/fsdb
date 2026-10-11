@@ -3421,6 +3421,25 @@ let tests =
               snapshotNow dir store
               verify (load dir)
 
+          testCase "binary CAST width survives WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let expression = CastAsBinary(Lit(VString "ab"), Some 3)
+              let column = { mkCol "value" (TVarBinary 8) with Default = Some(DExpression expression) }
+              match createTable store defaultDatabase "cast_binary_default" [ column ] [] [] None None with
+              | Ok() -> ()
+              | Error error -> failtestf "expected table creation, got %A" error
+              let verify (restored: Store) =
+                  match Fsdb.InformationSchema.findTable restored.Catalog defaultDatabase "cast_binary_default" with
+                  | Ok table ->
+                      Expect.equal table.Columns.Head.Default (Some(DExpression expression)) "binary cast survives recovery"
+                  | Error error -> failtestf "expected recovered table, got %A" error
+              verify (load dir)
+              snapshotNow dir store
+              verify (load dir)
+
           testCase "a functional default expression survives WAL recovery"
           <| fun _ ->
               let dir = tempDataDir ()

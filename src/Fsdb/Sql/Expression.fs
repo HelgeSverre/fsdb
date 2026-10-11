@@ -72,6 +72,7 @@ let children =
     | OrderBy(expression, _)
     | Cast(expression, _)
     | CastCharset(expression, _, _)
+    | CastAsBinary(expression, _)
     | BinaryCast expression
     | Collate(expression, _) -> [ expression ]
     | Like(value, pattern, _, _)
@@ -238,6 +239,7 @@ let mapChildren (mapper: Expr -> Expr) =
     | OrderBy(expression, direction) -> OrderBy(mapper expression, direction)
     | Cast(expression, columnType) -> Cast(mapper expression, columnType)
     | CastCharset(expression, length, charset) -> CastCharset(mapper expression, length, charset)
+    | CastAsBinary(expression, length) -> CastAsBinary(mapper expression, length)
     | BinaryCast expression -> BinaryCast(mapper expression)
     | Collate(expression, collation) -> Collate(mapper expression, collation)
     | QuantifiedComparison(value, operator, quantifier, select) ->
@@ -473,6 +475,7 @@ let statementExists predicate statement =
 let private knownLiteralCharset = function
     | IntroducedLiteral(_, charset, _) -> Some charset
     | CastCharset(_, _, charset) -> Some charset
+    | CastAsBinary _ -> Some "binary"
     | ConnectionLiteral(_, collation) -> Some(Fsdb.Collation.charsetOfCollation collation)
     | Lit(Fsdb.Value.VNull | Fsdb.Value.VBytes _ | Fsdb.Value.VBinaryLiteral _ | Fsdb.Value.VBit _)
     | BinaryCast _

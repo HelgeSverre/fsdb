@@ -1055,6 +1055,34 @@ module ContractCatalog =
                    yield Contract.preparedQuery (name + "-prepared") sql [||] |> Contract.comparingValues
                yield Contract.query "typed-convert-unknown-charset" "SELECT CONVERT(NULL, CHAR CHARACTER SET nosuchcharset)"
                      |> Contract.fails 1115 "42000"
+               yield
+                   Contract.query
+                       "cast-binary-width-values"
+                       "SELECT HEX(CAST('ab' AS BINARY)), HEX(CAST('ab' AS BINARY(1))), HEX(CAST('ab' AS BINARY(3))), HEX(CAST('ab' AS BINARY(0)))"
+                   |> Contract.comparingValues
+               yield Contract.query "cast-binary-width-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield
+                   Contract.query
+                       "convert-binary-width-values"
+                       "SELECT HEX(CONVERT('ab', BINARY)), HEX(CONVERT('ab', BINARY(1))), HEX(CONVERT('ab', BINARY(3)))"
+                   |> Contract.comparingValues
+               yield Contract.query "convert-binary-width-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "cast-binary-negative-width" "SELECT CAST('ab' AS BINARY(-1))"
+                     |> Contract.fails 1064 "42000"
+               let binaryWidthMetadata =
+                   "SELECT CAST('ab' AS BINARY(1)) AS short_binary, CAST('ab' AS BINARY(3)) AS long_binary, CAST('ab' AS BINARY) AS bare_binary"
+               yield Contract.query "cast-binary-width-metadata" binaryWidthMetadata
+               yield Contract.preparedQuery "cast-binary-width-prepared" binaryWidthMetadata [||]
+               yield
+                   Contract.query
+                       "cast-binary-width-raw-source"
+                       "SELECT HEX(CAST(0xE9 AS BINARY(2))), HEX(CAST(_latin1 0xE9 AS BINARY(2)))"
+                   |> Contract.comparingValues
+               yield
+                   Contract.preparedQuery
+                       "cast-binary-width-parameters"
+                       "SELECT CAST(? AS BINARY(1)) AS short_binary, CONVERT(?, BINARY(3)) AS long_binary, CAST(? AS BINARY) AS bare_binary"
+                       [| box "ab"; box "ab"; box "ab" |]
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

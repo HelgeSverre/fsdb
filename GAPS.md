@@ -698,7 +698,9 @@ execution, while preserving the caller's database afterward.
 
 The [audited typed `CONVERT(expr, type)` forms](torture/findings/2026-10-11-cast-char-charset.md)
 share `CAST` behavior for character targets, including charset and width, and
-for `SIGNED`. Explicit `BINARY(N)` cast widths remain open.
+for `SIGNED`. Bare and explicit-width `BINARY` casts now preserve byte width,
+padding, truncation warnings, and audited wire metadata; broader cast
+families and source expression shapes remain open.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common

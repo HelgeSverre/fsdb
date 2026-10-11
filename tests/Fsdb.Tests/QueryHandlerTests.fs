@@ -2850,6 +2850,40 @@ let tests =
               let _, error = handle session "SELECT CONVERT(NULL, CHAR CHARACTER SET nosuchcharset)"
               Expect.equal error (Err(1115, "Unknown character set: 'nosuchcharset'")) "target charset validates before NULL"
 
+          testCase "explicit BINARY cast widths truncate and pad bytes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT HEX(CAST('ab' AS BINARY)), HEX(CAST('ab' AS BINARY(1))), "
+                  + "HEX(CAST('ab' AS BINARY(3))), HEX(CONVERT('ab', BINARY(1))), "
+                  + "HEX(CAST('ab' AS BINARY(0)))"
+              let session, result = handle session sql
+              match result with
+              | ResultSet(_, [ [ Some a; Some b; Some c; Some d; Some e ] ]) ->
+                  Expect.equal [ a; b; c; d; e ] [ "6162"; "61"; "616200"; "61"; "" ] "binary cast bytes"
+              | other -> failtestf "unexpected binary cast result: %A" other
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun warning -> warning.Code, warning.Message))
+                  [ 1292, "Truncated incorrect BINARY(1) value: 'ab'"
+                    1292, "Truncated incorrect BINARY(1) value: 'ab'"
+                    1292, "Truncated incorrect BINARY(0) value: 'ab'" ]
+                  "binary truncation warnings"
+              let metadataSql =
+                  "SELECT CAST('ab' AS BINARY(1)), CAST('ab' AS BINARY(3)), CAST('ab' AS BINARY)"
+              match handle session metadataSql with
+              | session, ResultSet(_, _) ->
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map (fun column -> column.TypeId, column.ColumnLength))
+                      [ TypeVarString, 1u; TypeVarString, 3u; TypeVarString, 8u ]
+                      "binary cast wire metadata"
+              | _, other -> failtestf "unexpected binary metadata result: %A" other
+              match handle session "SELECT HEX(CAST(0xE9 AS BINARY(2))), HEX(CAST(_latin1 0xE9 AS BINARY(2)))" with
+              | _, ResultSet(_, [ [ Some "E900"; Some "E900" ] ]) -> ()
+              | _, other -> failtestf "expected raw source bytes with padding, got %A" other
+              match handle session "SELECT CAST('ab' AS BINARY(-1))" with
+              | _, Err(1064, _) -> ()
+              | _, other -> failtestf "expected a syntax error for negative binary width, got %A" other
+
           testCase "AES result metadata remains binary when LIMIT 0 returns no rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

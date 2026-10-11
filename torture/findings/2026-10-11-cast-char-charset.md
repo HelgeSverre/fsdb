@@ -38,6 +38,16 @@ same values as `CAST(expr AS CHAR ... CHARACTER SET ...)`; `SIGNED` likewise
 uses the existing numeric cast. Fsdb now parses both forms through the same
 target grammar and cast expression. Text and prepared differential checks
 cover character limits, charset identity, binary-byte limits through `CHAR(1)
-CHARACTER SET binary`, and unknown-charset rejection. Explicit `BINARY(N)`
-casts still need a separate width audit.
+CHARACTER SET binary`, and unknown-charset rejection.
+
+Explicit `CAST(expr AS BINARY(n))` and `CONVERT(expr, BINARY(n))` use a byte
+width: MySQL truncates `ab` to `61` at width one with warning 1292, pads it
+to `616200` at width three, and returns empty bytes with the same warning at
+width zero. A bare `BINARY` cast retains `6162`. Their wire type is
+`VAR_STRING` with the binary flag; explicit widths are byte lengths, while
+an unbounded `ab` literal advertises eight bytes under the audited UTF-8
+connection. Fsdb now retains the optional width in a dedicated cast node,
+including SQL rendering, prepared metadata, and persistence. The binary cast
+keeps raw bytes from hex and introduced-string sources before it applies the
+width; `_latin1 0xE9` at width two becomes `E900`, not a UTF-8 re-encoding.
 Other CAST charset contexts remain open.

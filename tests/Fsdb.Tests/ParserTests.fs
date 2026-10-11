@@ -116,6 +116,17 @@ let tests =
                   let castSql = sql.Replace("CONVERT(value, ", "CAST(value AS ")
                   Expect.equal (Fsdb.Parser.parseExpression sql) (Fsdb.Parser.parseExpression castSql) sql
 
+              for sql, width in
+                  [ "CAST(value AS BINARY)", None
+                    "CAST(value AS BINARY(0))", Some 0
+                    "CAST(value AS BINARY(3))", Some 3
+                    "CONVERT(value, BINARY(3))", Some 3 ] do
+                  match Fsdb.Parser.parseExpression sql with
+                  | Ok(CastAsBinary(Col "value", actualWidth) as expression) ->
+                      Expect.equal actualWidth width sql
+                      Expect.equal (Fsdb.Parser.parseExpression (SqlText.expression expression)) (Ok expression) "binary cast renders"
+                  | other -> failtestf "expected binary cast for %s, got %A" sql other
+
           testList
               "expression traversal"
               [ testCase "walks window arguments, ordering, and frame bounds in encounter order"

@@ -1652,6 +1652,11 @@ let private castTargetType: Parser<ColumnType * int option, unit> =
           // `CAST(x AS SIGNED)` likewise round-trips the full BIGINT range.
           attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% (TBigInt true, None)
           keyword "CHAR" >>. opt widthLen |>> (fun width -> TChar(defaultArg width 1), width)
+          (keyword "BINARY" >>. optWidthLen
+           |>> fun width ->
+               if width |> Option.exists (fun value -> value < 0) then
+                   raise (SemanticParseError "Invalid BINARY cast width")
+               TBinary(defaultArg width 1), width)
           columnType |>> (fun target -> target, None) ]
 
 /// `CAST(x AS CHAR CHARACTER SET cs)` retains the requested charset through
@@ -1669,7 +1674,10 @@ let private castConversion e (target, explicitLength) charset =
         | TChar _ -> CastCharset(e, explicitLength, cs)
         | _ when cs.Equals("binary", System.StringComparison.OrdinalIgnoreCase) -> BinaryCast cast
         | _ -> cast
-    | None -> cast
+    | None ->
+        match target with
+        | TBinary _ -> CastAsBinary(e, explicitLength)
+        | _ -> cast
 
 let private castExpr: Parser<Expr, unit> =
     attempt (

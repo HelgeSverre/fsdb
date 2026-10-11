@@ -534,6 +534,12 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
         | None -> w.WriteByte 0uy
         writeStr w charset
+    | CastAsBinary(e, length) ->
+        w.WriteByte 0x1Euy
+        encodeExpr w e
+        match length with
+        | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
+        | None -> w.WriteByte 0uy
     | BinaryCast e -> w.WriteByte 0x1Auy; encodeExpr w e
     | Collate(e, name) -> w.WriteByte 0x14uy; encodeExpr w e; writeStr w name
     | Star q -> w.WriteByte 0x15uy; writeOptStr w q
@@ -609,6 +615,10 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
         let source = nested ()
         let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
         CastCharset(source, length, readStr r)
+    | 0x1Euy ->
+        let source = nested ()
+        let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+        CastAsBinary(source, length)
     | 0x1Auy -> BinaryCast(nested ())
     | 0x1Buy -> IntroducedLiteral(decodeValue r, readStr r, ResolvedIntroducer)
     | 0x1Cuy -> ConnectionLiteral(decodeValue r, readStr r)

@@ -208,6 +208,8 @@ type Expr =
     /// `CAST(expr AS CHAR[(n)] CHARACTER SET charset)` retains both its
     /// target encoding and whether a character limit was written.
     | CastCharset of Expr * length: int option * charset: string
+    /// `CAST(expr AS BINARY[(n)])` retains whether a byte width was written.
+    | CastAsBinary of Expr * length: int option
     /// `expr COLLATE collation_name` — evaluates as its inner expression;
     /// the tag overrides the collation any *comparison* involving this
     /// expression resolves under (see `Executor.resolvedCollation`).
