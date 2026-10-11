@@ -96,6 +96,16 @@ native probes cover a positive whitespace member, a negated whitespace
 member, and a Number category beside `[:^alpha:]`. Other ICU binary and
 script properties, including `\p{Greek}`, remain open.
 
+A native MySQL 8.4.11 probe also confirmed that regex dot consumes one
+supplementary Unicode scalar. For `a😀b`, `REGEXP_SUBSTR` from position 2
+returns the complete emoji, `REGEXP_INSTR` with return-end reports position
+3, and replacing every dot yields `XXX`. Anchored `^.$` matches one emoji,
+and `^.{2}$` matches two. The shared compiler now makes an unescaped dot
+outside a bracket class prefer a valid UTF-16 surrogate pair before falling
+back to the ordinary .NET dot. The noncapturing atom retains quantifier and
+capture numbering and inherits the usual newline and `n` match-mode rules.
+Supplementary scalars in bracket classes and Unicode properties remain open.
+
 All fourteen standard POSIX class names now have translations. The translations
 are bounded approximations of ICU properties: for example, MySQL counts the
 Roman numeral `Ⅳ` as `upper` and `ⅳ` as `lower`, while .NET's `Lu`/`Ll`

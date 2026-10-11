@@ -274,7 +274,9 @@ let private normalizePosixClasses (pattern: string) =
     builder.ToString(), invalid
 
 let private normalizePattern (options: RegexOptions) (posix: string) : string =
-    if not (options.HasFlag RegexOptions.IgnoreCase) then posix
+    let ignoreCase = options.HasFlag RegexOptions.IgnoreCase
+
+    if not ignoreCase && posix.IndexOf('.') < 0 then posix
     else
         let builder = StringBuilder(posix.Length)
         let mutable escaped = false
@@ -295,8 +297,12 @@ let private normalizePattern (options: RegexOptions) (posix: string) : string =
                 | ']' ->
                     builder.Append character |> ignore
                     inClass <- false
-                | ('Σ' | 'σ' | 'ς') when inClass -> builder.Append "Σσς" |> ignore
-                | 'Σ' | 'σ' | 'ς' -> builder.Append "[Σσς]" |> ignore
+                | '.' when not inClass ->
+                    // ICU's dot consumes one Unicode scalar; .NET's consumes
+                    // one UTF-16 code unit unless a surrogate pair comes first.
+                    builder.Append @"(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|.)" |> ignore
+                | ('Σ' | 'σ' | 'ς') when ignoreCase && inClass -> builder.Append "Σσς" |> ignore
+                | ('Σ' | 'σ' | 'ς') when ignoreCase -> builder.Append "[Σσς]" |> ignore
                 | _ -> builder.Append character |> ignore
 
         builder.ToString()

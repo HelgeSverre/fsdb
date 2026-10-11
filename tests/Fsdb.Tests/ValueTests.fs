@@ -3008,6 +3008,14 @@ let tests =
                           Expect.equal (call "REGEXP_SUBSTR" [ VString "a😀b"; VString "."; VInt 3L ]) (VString "b") "SUBSTR accepts a scalar position"
                           Expect.equal (call "REGEXP_REPLACE" [ VString "a😀b"; VString "."; VString "X"; VInt 4L ]) (VString "a😀b") "REPLACE accepts one position past the final scalar"
 
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "a😀b"; VString "."; VInt 2L ]) (VString "😀") "dot consumes one supplementary scalar"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "a😀b"; VString "."; VInt 2L; VInt 1L; VInt 1L ]) (VInt 3L) "dot end is one scalar position"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "a😀b"; VString "."; VString "X" ]) (VString "XXX") "dot replaces each scalar once"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "😀"; VString "^.$"; VString "c" ]) (VInt 1L) "one emoji is one dot"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "😀😀"; VString "^.{2}$"; VString "c" ]) (VInt 1L) "dot quantifier counts scalars"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "\n"; VString "^.$"; VString "c" ]) (VInt 0L) "dot still excludes newline"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "\n"; VString "^.$"; VString "n" ]) (VInt 1L) "dotall still includes newline"
+
                           Expect.throwsC
                               (fun () -> call "REGEXP_INSTR" [ VString "a😀b"; VString "b"; VInt 4L ] |> ignore)
                               (function
