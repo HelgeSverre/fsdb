@@ -5766,6 +5766,14 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         eval (FuncCall("CONVERT", [ e; Lit(VString charset) ]))
         |> Result.map (fun converted ->
             match converted, length with
+            | VBytes bytes, Some limit when bytes.Length > limit ->
+                Diagnostics.warning
+                    1292
+                    (sprintf
+                        "Truncated incorrect BINARY(%d) value: '%s'"
+                        limit
+                        (Charset.invalidBytePreview bytes 0))
+                VBytes bytes.[0 .. limit - 1]
             | VEncodedString(source, bytes), Some limit ->
                 let offsets = Charset.characterByteOffsets source bytes
                 if offsets.Length - 1 > limit then
@@ -6755,9 +6763,21 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         |> Option.map (fun _ -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
         |> Option.orElse (Some metadata)
     | CastCharset(value, length, charset) ->
+        let binary = Charset.canonicalName charset = "binary"
         let characters = length |> Option.defaultWith (fun () -> characterBound value)
         withCollation (Cast(value, TChar characters)) (Collation.defaultNameForCharset charset)
-        |> Option.map (fun metadata -> { metadata with TypeId = TypeVarString })
+        |> Option.map (fun metadata ->
+            let columnLength =
+                if binary then
+                    match length, value with
+                    | Some width, _ -> uint32 width
+                    | None, Lit(VBinaryLiteral bytes | VBytes bytes) -> uint32 bytes.Length
+                    | _ -> metadata.ColumnLength
+                else metadata.ColumnLength
+            { metadata with
+                TypeId = TypeVarString
+                ColumnLength = columnLength
+                Flags = if binary then metadata.Flags ||| BinaryFlag else metadata.Flags })
     | BinaryCast inner -> withCollation inner "binary"
     | Collate(inner, collation) -> withCollation inner collation
     | Distinct inner

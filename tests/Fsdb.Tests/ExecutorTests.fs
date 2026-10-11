@@ -1168,6 +1168,26 @@ let tests =
                         [ 1292, "Truncated incorrect CHAR(1) value: 'éx'" ]
                         "explicit CHAR width warns on truncation"
 
+                testCase "CAST AS CHAR CHARACTER SET binary limits bytes"
+                <| fun _ ->
+                    let store = newStore ()
+                    let sql =
+                        "SELECT HEX(CAST(0xE9 AS CHAR CHARACTER SET binary)), HEX(CAST('é' AS CHAR CHARACTER SET binary)), CHARSET(CAST('é' AS CHAR CHARACTER SET binary)), COLLATION(CAST('é' AS CHAR CHARACTER SET binary))"
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "E9"; Some "C3A9"; Some "binary"; Some "binary" ] ]) -> ()
+                    | other -> failtestf "expected binary CAST bytes and identity, got %A" other
+
+                    let result, warnings =
+                        Fsdb.Diagnostics.capture (fun () ->
+                            runDefault store "SELECT HEX(CAST('éx' AS CHAR(1) CHARACTER SET binary))")
+                    match result with
+                    | ResultSet(_, [ [ Some "C3" ] ]) -> ()
+                    | other -> failtestf "expected first binary byte, got %A" other
+                    Expect.equal
+                        (warnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1292, "Truncated incorrect BINARY(1) value: '\\xC3\\xA9x'" ]
+                        "binary truncation reports the source bytes"
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

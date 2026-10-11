@@ -16,5 +16,13 @@ expressions the connection charset. A dedicated cast expression now retains
 the target charset and optional character limit across evaluation, text and
 prepared-result metadata, SQL rendering, and persistence. The focused
 regressions and `introduced-literal-encoding` differential contract cover
-the audited value, metadata, and warning cases. Other CAST charset contexts
-remain open.
+the audited value, metadata, and warning cases.
+
+The `binary` charset uses byte lengths. MySQL keeps raw `0xE9` as `E9`,
+encodes UTF-8 text `é` as `C3A9`, and truncates `CAST('éx' AS CHAR(1)
+CHARACTER SET binary)` to byte `C3`. That truncation emits warning 1292
+for `BINARY(1)` with the original source bytes in the message. Its result
+metadata is variable-string with the binary flag and audited widths of one,
+four, and one byte for those three forms. Fsdb now uses the same cast node
+for binary targets and follows these value, warning, and metadata cases.
+Other CAST charset contexts remain open.

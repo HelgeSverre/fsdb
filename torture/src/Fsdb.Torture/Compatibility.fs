@@ -1028,6 +1028,18 @@ module ContractCatalog =
                    |> Contract.comparingValues
                yield Contract.query "cast-char-charset-width-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "cast-char-charset-metadata" "SELECT CAST('Привет' AS CHAR CHARACTER SET cp1251) AS v, CAST('éx' AS CHAR(1) CHARACTER SET latin1) AS w"
+               yield
+                   Contract.query
+                       "cast-char-binary-values"
+                       "SELECT HEX(CAST(0xE9 AS CHAR CHARACTER SET binary)), HEX(CAST('é' AS CHAR CHARACTER SET binary)), CHARSET(CAST('é' AS CHAR CHARACTER SET binary)), COLLATION(CAST('é' AS CHAR CHARACTER SET binary))"
+                   |> Contract.comparingValues
+               yield Contract.query "cast-char-binary-values-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield
+                   Contract.query "cast-char-binary-width" "SELECT HEX(CAST('éx' AS CHAR(1) CHARACTER SET binary))"
+                   |> Contract.comparingValues
+               yield Contract.query "cast-char-binary-width-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield
+                   Contract.query "cast-char-binary-metadata" "SELECT CAST(0xE9 AS CHAR CHARACTER SET binary) AS raw, CAST('é' AS CHAR CHARACTER SET binary) AS text_value, CAST('éx' AS CHAR(1) CHARACTER SET binary) AS limited"
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

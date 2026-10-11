@@ -1665,10 +1665,10 @@ let private castExpr: Parser<Expr, unit> =
         let cast = Cast(e, target)
 
         match charset with
-        | Some cs when cs.ToLowerInvariant() = "binary" -> BinaryCast cast
         | Some cs ->
             match target with
             | TChar _ -> CastCharset(e, explicitLength, cs)
+            | _ when cs.Equals("binary", System.StringComparison.OrdinalIgnoreCase) -> BinaryCast cast
             | _ -> cast
         | _ -> cast
 

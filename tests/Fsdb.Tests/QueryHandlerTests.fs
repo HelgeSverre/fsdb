@@ -2858,6 +2858,26 @@ let tests =
                   | Error error -> failtestf "expected charset CAST to prepare, got %A" error
               | _, other -> failtestf "expected charset CAST result, got %A" other
 
+          testCase "binary charset CAST reports source-byte and explicit widths"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT CAST(0xE9 AS CHAR CHARACTER SET binary) AS raw, CAST('é' AS CHAR CHARACTER SET binary) AS text_value, CAST('éx' AS CHAR(1) CHARACTER SET binary) AS limited"
+              match handle session sql with
+              | session, ResultSet(_, _) ->
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeVarString; TypeVarString; TypeVarString ]
+                      "binary casts use variable-string metadata"
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.ColumnLength)
+                      [ 1u; 4u; 1u ]
+                      "raw bytes, text source, and explicit width remain distinct"
+                  Expect.isTrue
+                      (session.LastResultColumnMetadata |> List.forall (fun metadata -> metadata.Flags &&& BinaryFlag <> 0us))
+                      "all binary cast columns retain the binary flag"
+              | _, other -> failtestf "expected binary charset CAST result, got %A" other
+
           testCase "TIME functions infer MySQL fractional precision metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
