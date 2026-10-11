@@ -9603,6 +9603,56 @@ let tests =
                   handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" rightWithUnmatchedLeft)
               Expect.equal extraLeftLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "unused left rows are not scanned by the index probe"
 
+          testCase "slow log stops scan-shaped left joins at LIMIT"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              for statement in
+                  [ "CREATE TABLE slow_left_limit_left (id INT PRIMARY KEY)"
+                    "CREATE TABLE slow_left_limit_unmatched (id INT PRIMARY KEY)"
+                    "CREATE TABLE slow_left_limit_scan (id INT PRIMARY KEY, left_id INT)"
+                    "INSERT INTO slow_left_limit_left VALUES (1),(2),(3)"
+                    "INSERT INTO slow_left_limit_unmatched VALUES (0),(1),(2),(3)"
+                    "INSERT INTO slow_left_limit_scan VALUES (1,1),(2,1),(3,2),(4,4)"
+                    "SET GLOBAL log_output='TABLE'"
+                    "SET GLOBAL slow_query_log=ON"
+                    "SET SESSION long_query_time=0" ] do
+                  match run statement with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" statement code message
+                  | _ -> ()
+
+              let check query expectedRows description =
+                  match run query with
+                  | ResultSet(_, rows) -> Expect.equal rows expectedRows (description + " result")
+                  | other -> failtestf "%s returned %A" description other
+
+                  let logged =
+                      run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
+                  Expect.equal
+                      logged
+                      (ResultSet([ "rows_examined" ], [ [ Some "5" ] ]))
+                      (description + " examined candidates")
+
+              let limitOne =
+                  "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id LIMIT 1"
+              check limitOne [ [ Some "1"; Some "1" ] ] "LIMIT 1 stops after the first matched left row"
+
+              let limitTwo =
+                  "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id LIMIT 2"
+              check limitTwo [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ] ] "LIMIT 2 reads the same first left scan"
+
+              let offsetOne =
+                  "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id LIMIT 1 OFFSET 1"
+              check offsetOne [ [ Some "1"; Some "2" ] ] "OFFSET stays within the first left row"
+
+              let unmatchedFirst =
+                  "SELECT a.id,b.id FROM slow_left_limit_unmatched a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id LIMIT 1"
+              check unmatchedFirst [ [ Some "0"; None ] ] "an unmatched first left row still stops after its scan"
+
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

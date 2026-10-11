@@ -51,10 +51,13 @@ and right join, four for the unindexed inner join, five for the unindexed left
 join, and two for the unindexed right join on this fixture. Fsdb now matches
 the indexed cases and both unindexed inner/right cases. The hash-side size
 probe is excluded from the slow-log counter; only rows consumed by the chosen
-hash plan count. The unindexed left outer join remains divergent: fsdb
-materializes all matching and padded rows before the limit and logs seven
-examined rows rather than MySQL's five. Making that outer-join path stream
-left rows after building the right side is still open.
+hash plan count. The unindexed left outer join now matches: fsdb builds
+right-side hash buckets, then streams left rows until the limit is satisfied,
+logging five examined rows. Follow-up MySQL 8.4.11 probes also reported five
+for `LIMIT 2`, `LIMIT 1 OFFSET 1`, and `LIMIT 1` when the leading left row is
+unmatched; the regression covers all four shapes. A residual predicate
+`ON b.left_id=a.id AND b.id<2 LIMIT 1` reported two examined rows in MySQL;
+that pushed-down case needs separate planner work.
 
 A prepared `SELECT ? AS fsdb_slow_prepared_probe` executed with 43 produced a
 slow-log row for `SELECT 43 AS fsdb_slow_prepared_probe` with one row sent and

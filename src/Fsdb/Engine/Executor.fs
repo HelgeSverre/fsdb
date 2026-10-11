@@ -4201,16 +4201,11 @@ let private streamLimited
     | Some e -> Error e
     | None -> Ok(List.ofSeq acc)
 
-/// Builds one side eagerly and probes lazily so an inner join can stop as
-/// soon as a downstream LIMIT is satisfied. Outer joins still consume every
-/// pair because they must identify unmatched rows.
-let private hashPairs
+let private hashBuckets
     (collations: Collation.Collation list)
     (buildKeyOf: 'b -> Value[] option)
-    (probeKeyOf: 'p -> Value[] option)
     (build: (int * 'b) list)
-    (probe: (int * 'p) seq)
-    : (int * 'b * int * 'p) seq =
+    : Dictionary<Value[], ResizeArray<int * 'b>> =
     let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(SqlValueKeyComparer(collations, true))
 
     for buildIndex, buildItem in build do
@@ -4224,6 +4219,19 @@ let private hashPairs
                 bucket.Add(buildIndex, buildItem)
                 buckets.Add(key, bucket)
         | None -> ()
+
+    buckets
+
+/// Builds one side eagerly and probes lazily so LIMIT can stop consuming
+/// rows once it has enough join results.
+let private hashPairs
+    (collations: Collation.Collation list)
+    (buildKeyOf: 'b -> Value[] option)
+    (probeKeyOf: 'p -> Value[] option)
+    (build: (int * 'b) list)
+    (probe: (int * 'p) seq)
+    : (int * 'b * int * 'p) seq =
+    let buckets = hashBuckets collations buildKeyOf build
 
     seq {
         let mutable inspected = 0
@@ -9994,7 +10002,20 @@ and private applyPreparedJoin
                         | QueryPlanner.IndexProbe -> true
                         | QueryPlanner.HashJoin -> not hashCompatible.Value)
 
-        let hashEligible = preservedRightIndexProbe.IsNone && indexedJoinProbe.IsNone && hashCompatible.Value
+        let hashEligible = lazy (preservedRightIndexProbe.IsNone && indexedJoinProbe.IsNone && hashCompatible.Value)
+
+        let streamingLeftHashEligible =
+            match keyClasses with
+            | Some classes when
+                consumption = MayStopEarly
+                && (join.Kind = LeftJoin || join.Kind = NaturalLeftJoin)
+                && preservedRightIndexProbe.IsNone
+                && indexedJoinProbe.IsNone
+                && not equiKeys.IsEmpty
+                && storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
+                && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys ->
+                rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
+            | _ -> false
 
         let isConstantTrue =
             function
@@ -10158,7 +10179,54 @@ and private applyPreparedJoin
                 |> Result.map (List.map (fun (leftIndex, rightIndex, (_, combined)) -> leftIndex, rightIndex, combined))
                 |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
             | _ -> failwith "indexed join kind"
-        | _, None when hashEligible ->
+        | _, None when streamingLeftHashEligible ->
+            let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
+            let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+            let classes = keyClasses.Value
+            let rightIndexed = joinRows |> cacheExaminedRows |> Seq.indexed |> List.ofSeq
+            let buckets = hashBuckets keyCollations (equiKeyOf rightKeyIndices) rightIndexed
+
+            let holds combined condition =
+                match condition combined with
+                | Ok matches -> matches
+                | Error(code, message) -> raise (SqlError(code, message))
+
+            let rows =
+                seq {
+                    let mutable inspected = 0
+                    for left in rowsSoFar do
+                        let safeKey =
+                            List.forall2 (fun index isNumeric -> valueMatchesKeyClass isNumeric left.[index])
+                                (equiKeys |> List.map fst) classes
+                        let candidates =
+                            if safeKey then
+                                match equiKeyOf leftKeyIndices left with
+                                | Some key ->
+                                    match buckets.TryGetValue key with
+                                    | true, bucket -> bucket :> seq<int * Value[]>
+                                    | false, _ -> Seq.empty
+                                | None -> Seq.empty
+                            else rightIndexed :> seq<int * Value[]>
+
+                        let mutable matched = false
+                        for _, right in candidates do
+                            Limits.checkQueryCancellation inspected
+                            inspected <- inspected + 1
+                            let combined = Array.append left right
+                            let matches =
+                                if safeKey then holds combined residualHolds
+                                else
+                                    holds combined (fun row ->
+                                        evalExpr { ctxFor row with Clause = OnClause } effectiveOn
+                                        |> Result.map (truthy >> (=) (Some true)))
+                            if matches then
+                                matched <- true
+                                yield combined
+                        if not matched then yield Array.append left rightNullPadding
+                }
+
+            Ok(newSources, rows, coalesceNames)
+        | _, None when hashEligible.Value ->
             let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
             let rightCount = joinRows |> Seq.length
