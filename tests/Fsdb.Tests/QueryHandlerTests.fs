@@ -2836,6 +2836,20 @@ let tests =
                   let _, result = handle session sql
                   Expect.equal result expected sql
 
+          testCase "typed CONVERT shares CAST semantics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT HEX(CONVERT('abc', CHAR(1) CHARACTER SET latin1)), "
+                  + "CHARSET(CONVERT('abc', CHAR CHARACTER SET latin1)), "
+                  + "HEX(CONVERT('ab', CHAR(1) CHARACTER SET binary)), CONVERT('42', SIGNED)"
+              match handle session sql with
+              | _, ResultSet(_, [ [ Some a; Some b; Some c; Some d ] ]) ->
+                  Expect.equal [ a; b; c; d ] [ "61"; "latin1"; "61"; "42" ] "typed conversion values"
+              | _, result -> failtestf "unexpected typed conversion result: %A" result
+              let _, error = handle session "SELECT CONVERT(NULL, CHAR CHARACTER SET nosuchcharset)"
+              Expect.equal error (Err(1115, "Unknown character set: 'nosuchcharset'")) "target charset validates before NULL"
+
           testCase "AES result metadata remains binary when LIMIT 0 returns no rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

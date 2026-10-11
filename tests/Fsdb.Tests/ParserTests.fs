@@ -109,6 +109,12 @@ let tests =
                           "charset cast round-trips through SQL rendering"
                   | other -> failtestf "expected a charset cast for %s, got %A" sql other
 
+              for sql in
+                  [ "CONVERT(value, CHAR CHARACTER SET latin1)"
+                    "CONVERT(value, CHAR(2) CHARACTER SET latin1)"
+                    "CONVERT(value, CHAR(1) CHARACTER SET binary)" ] do
+                  let castSql = sql.Replace("CONVERT(value, ", "CAST(value AS ")
+                  Expect.equal (Fsdb.Parser.parseExpression sql) (Fsdb.Parser.parseExpression castSql) sql
 
           testList
               "expression traversal"

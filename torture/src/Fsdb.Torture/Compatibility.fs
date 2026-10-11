@@ -1048,6 +1048,13 @@ module ContractCatalog =
                    |> List.indexed do
                    yield Contract.query (sprintf "unknown-conversion-charset-%d" index) sql
                          |> Contract.fails 1115 "42000"
+               for name, sql in
+                   [ "typed-convert-char", "SELECT HEX(CONVERT('abc', CHAR(1) CHARACTER SET latin1)), CHARSET(CONVERT('abc', CHAR CHARACTER SET latin1))"
+                     "typed-convert-binary", "SELECT HEX(CONVERT('ab', CHAR(1) CHARACTER SET binary)), CONVERT('42', SIGNED)" ] do
+                   yield Contract.query name sql |> Contract.comparingValues
+                   yield Contract.preparedQuery (name + "-prepared") sql [||] |> Contract.comparingValues
+               yield Contract.query "typed-convert-unknown-charset" "SELECT CONVERT(NULL, CHAR CHARACTER SET nosuchcharset)"
+                     |> Contract.fails 1115 "42000"
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

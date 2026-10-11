@@ -31,4 +31,13 @@ before evaluating either `CAST` or `CONVERT ... USING`. The error occurs for
 NULL input and an unchosen `IF` branch too. Fsdb now validates the literal
 charset while parsing these forms; the focused regression and differential
 contract cover the early failure.
+
+MySQL also accepts `CONVERT(expr, type)` as a typed conversion. For the
+audited `CHAR` targets, an optional width and `CHARACTER SET` clause have the
+same values as `CAST(expr AS CHAR ... CHARACTER SET ...)`; `SIGNED` likewise
+uses the existing numeric cast. Fsdb now parses both forms through the same
+target grammar and cast expression. Text and prepared differential checks
+cover character limits, charset identity, binary-byte limits through `CHAR(1)
+CHARACTER SET binary`, and unknown-charset rejection. Explicit `BINARY(N)`
+casts still need a separate width audit.
 Other CAST charset contexts remain open.

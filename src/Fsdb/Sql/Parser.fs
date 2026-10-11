@@ -1659,24 +1659,34 @@ let private castTargetType: Parser<ColumnType * int option, unit> =
 let private castCharsetClause: Parser<string, unit> =
     (keyword "CHARACTER" >>. keyword "SET" >>. identifier) <|> (keyword "CHARSET" >>. identifier)
 
+let private castConversion e (target, explicitLength) charset =
+    let cast = Cast(e, target)
+    match charset with
+    | Some cs ->
+        if Charset.tryFind cs |> Option.isNone then
+            raise (SemanticParseError(sprintf "Unknown character set: '%s'" cs))
+        match target with
+        | TChar _ -> CastCharset(e, explicitLength, cs)
+        | _ when cs.Equals("binary", System.StringComparison.OrdinalIgnoreCase) -> BinaryCast cast
+        | _ -> cast
+    | None -> cast
+
 let private castExpr: Parser<Expr, unit> =
     attempt (
         functionKeyword "CAST" >>. expr .>> keyword "AS" .>>. castTargetType
         .>>. opt castCharsetClause
         .>> sym ")"
     )
-    |>> fun ((e, (target, explicitLength)), charset) ->
-        let cast = Cast(e, target)
+    |>> fun ((e, target), charset) -> castConversion e target charset
 
-        match charset with
-        | Some cs ->
-            if Charset.tryFind cs |> Option.isNone then
-                raise (SemanticParseError(sprintf "Unknown character set: '%s'" cs))
-            match target with
-            | TChar _ -> CastCharset(e, explicitLength, cs)
-            | _ when cs.Equals("binary", System.StringComparison.OrdinalIgnoreCase) -> BinaryCast cast
-            | _ -> cast
-        | _ -> cast
+/// The comma form of CONVERT uses the same target grammar and result as CAST.
+let private convertTypeExpr: Parser<Expr, unit> =
+    attempt (
+        functionKeyword "CONVERT" >>. expr .>> sym "," .>>. castTargetType
+        .>>. opt castCharsetClause
+        .>> sym ")"
+    )
+    |>> fun ((e, target), charset) -> castConversion e target charset
 
 let private existsExpr: Parser<Expr, unit> =
     attempt (keyword "EXISTS" >>. sym "(" >>. selectWithCtes .>> sym ")") |>> Exists
@@ -2150,6 +2160,7 @@ let private atom: Parser<Expr, unit> =
           parenthesizedExpr
           starAtom
           castExpr
+          convertTypeExpr
           existsExpr
           caseExpr
           intervalAtom
