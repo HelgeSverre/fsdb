@@ -4048,15 +4048,42 @@ let tests =
               | ResultSet(_, [ [ Some plan ] ]) -> Expect.stringContains plan "Zero rows (Zero limit)" "distinct UNION is eliminated at the result"
               | other -> failtestf "expected a zero-limit UNION TREE plan, got %A" other
 
+              let unionJson sql =
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ Some plan ] ]) ->
+                      let document = System.Text.Json.JsonDocument.Parse(plan)
+                      document.RootElement.GetProperty("query_block").GetProperty("union_result")
+                  | other -> failtestf "expected a JSON UNION plan, got %A" other
+
+              let distinctJson = unionJson "EXPLAIN FORMAT=JSON SELECT 1 UNION SELECT 2"
+              Expect.isTrue (distinctJson.GetProperty("using_temporary_table").GetBoolean()) "distinct UNION materializes"
+              Expect.equal (distinctJson.GetProperty("message").GetString()) "Zero limit" "JSON names the eliminated result"
+              Expect.equal (distinctJson.GetProperty("query_specifications").GetArrayLength()) 2 "both branches remain in JSON"
+              let firstBranch = distinctJson.GetProperty("query_specifications").EnumerateArray() |> Seq.head
+              Expect.equal (firstBranch.GetProperty("query_block").GetProperty("message").GetString()) "No tables used" "branch shape follows MySQL"
+
+              let tableJson = unionJson "EXPLAIN FORMAT=JSON SELECT id FROM select_limit_plan UNION SELECT id FROM select_limit_plan"
+              let tableBranch = tableJson.GetProperty("query_specifications").EnumerateArray() |> Seq.head
+              Expect.equal (tableBranch.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "select_limit_plan" "branch access details survive nesting"
+
               match handle session "EXPLAIN SELECT 1 UNION ALL SELECT 2" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows.Length 2 "UNION ALL has no materialized result row"
               | other -> failtestf "expected UNION ALL branch plans, got %A" other
+
+              let streamingJson = unionJson "EXPLAIN FORMAT=JSON SELECT 1 UNION ALL SELECT 2"
+              Expect.isFalse (streamingJson.GetProperty("using_temporary_table").GetBoolean()) "unordered UNION ALL streams"
+              let mutable message = Unchecked.defaultof<System.Text.Json.JsonElement>
+              Expect.isFalse (streamingJson.TryGetProperty("message", &message)) "streaming result has no zero-limit message"
 
               match handle session "EXPLAIN SELECT 2 AS n UNION ALL SELECT 1 ORDER BY n" |> snd with
               | ResultSet(_, [ _; _; result ]) ->
                   Expect.equal result.[1] (Some "UNION RESULT") "global ordering materializes UNION ALL"
                   Expect.equal result.[11] (Some "Zero limit") "ordered UNION ALL reports the zero limit"
               | other -> failtestf "expected an ordered UNION ALL result row, got %A" other
+
+              let orderedJson = unionJson "EXPLAIN FORMAT=JSON SELECT 2 AS n UNION ALL SELECT 1 ORDER BY n"
+              Expect.isTrue (orderedJson.GetProperty("using_temporary_table").GetBoolean()) "global ordering materializes JSON result"
+              Expect.equal (orderedJson.GetProperty("message").GetString()) "Zero limit" "ordered JSON result names the limit"
 
               match handle session "EXPLAIN FORMAT=TREE SELECT 1 UNION ALL SELECT 2" |> snd with
               | ResultSet(_, [ [ Some limit ]; [ Some append ]; _; _ ]) ->

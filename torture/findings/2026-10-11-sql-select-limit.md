@@ -38,5 +38,9 @@ and TREE reduces to the synthetic zero-row plan. An unordered `UNION ALL`
 has no traditional result row; TREE retains a limit over Append. A global
 `ORDER BY` materializes even `UNION ALL`, yielding the zero-limit result
 row and TREE's synthetic zero-row plan. Fsdb now follows those distinctions.
-UNION's JSON hierarchy and exact ANALYZE timing/cost
-presentation remain open.
+For plain UNION branches, JSON now nests each branch under
+`union_result.query_specifications`, reports `using_temporary_table`, and
+adds the zero-limit message only to a materialized result. The branch access
+description is retained. Complex derived/subquery branches still use the
+general JSON renderer until their nested hierarchy is audited; MySQL cost
+details and exact ANALYZE timing presentation also remain open.

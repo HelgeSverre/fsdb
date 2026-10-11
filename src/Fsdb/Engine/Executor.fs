@@ -20245,7 +20245,7 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
 
     ResultSet(columns, rows |> List.sortBy (fun r -> r.Id |> Option.defaultValue System.Int32.MaxValue) |> List.map renderRow)
 
-let private renderExplainJson (rows: ExplainRow list) : QueryResult =
+let private renderExplainJson (unionMaterialized: bool option) (rows: ExplainRow list) : QueryResult =
     let jsonArray values =
         let array = JsonArray()
         values |> Seq.iter (fun value -> array.Add(value: JsonNode))
@@ -20283,18 +20283,57 @@ let private renderExplainJson (rows: ExplainRow list) : QueryResult =
         item["table"] <- table
         item
 
+    let queryBlock (blockRows: ExplainRow list) =
+        let block = JsonObject()
+
+        blockRows
+        |> List.tryPick _.Id
+        |> Option.iter (fun id -> block["select_id"] <- JsonValue.Create(id))
+
+        match blockRows with
+        | [ row ] when row.Table.IsNone && row.Type.IsNone ->
+            let message = if row.Extra.IsEmpty then "No tables used" else String.concat "; " row.Extra
+            block["message"] <- JsonValue.Create(message)
+        | [ row ] ->
+            let item = tableNode row
+            block["table"] <- item["table"].DeepClone()
+        | rows ->
+            block["nested_loop"] <- rows |> List.map (tableNode >> fun node -> node :> JsonNode) |> jsonArray
+
+        block
+
     let sorted = rows |> List.sortBy (fun row -> row.Id |> Option.defaultValue System.Int32.MaxValue)
-    let queryBlock = JsonObject()
+    let queryBlock =
+        match unionMaterialized with
+        | None -> queryBlock sorted
+        | Some materialized
+            when sorted
+                 |> List.forall (fun row ->
+                     row.SelectType = "PRIMARY"
+                     || row.SelectType = "UNION"
+                     || row.SelectType = "UNION RESULT") ->
+            let unionResult = JsonObject()
+            unionResult["using_temporary_table"] <- JsonValue.Create(materialized)
 
-    sorted
-    |> List.tryPick _.Id
-    |> Option.iter (fun id -> queryBlock["select_id"] <- JsonValue.Create(id))
+            if sorted |> List.exists (fun row -> row.SelectType = "UNION RESULT" && row.Extra = [ "Zero limit" ]) then
+                unionResult["message"] <- JsonValue.Create("Zero limit")
 
-    match sorted with
-    | [ row ] ->
-        let item = tableNode row
-        queryBlock["table"] <- item["table"].DeepClone()
-    | rows -> queryBlock["nested_loop"] <- rows |> List.map (tableNode >> fun node -> node :> JsonNode) |> jsonArray
+            let specifications =
+                sorted
+                |> List.filter (fun row -> row.SelectType = "PRIMARY" || row.SelectType = "UNION")
+                |> List.groupBy _.Id
+                |> List.map (fun (_, branchRows) ->
+                    let specification = JsonObject()
+                    specification["dependent"] <- JsonValue.Create(false)
+                    specification["cacheable"] <- JsonValue.Create(true)
+                    specification["query_block"] <- queryBlock branchRows
+                    specification :> JsonNode)
+
+            unionResult["query_specifications"] <- jsonArray specifications
+            let block = JsonObject()
+            block["union_result"] <- unionResult
+            block
+        | Some _ -> queryBlock sorted
 
     let root = JsonObject()
     root["query_block"] <- queryBlock
@@ -20441,7 +20480,11 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
 
             match format with
             | ExplainTraditional -> renderExplainRows rows
-            | ExplainJson -> renderExplainJson rows
+            | ExplainJson ->
+                match stmt with
+                | Union(_, rest, orderBy, _, _) ->
+                    renderExplainJson (Some(unionMaterializesResult orderBy rest)) rows
+                | _ -> renderExplainJson None rows
             | ExplainTree ->
                 match stmt with
                 | Select select -> renderExplainTree select.Limit select.Offset false rows
