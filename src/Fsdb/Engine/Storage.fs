@@ -5205,8 +5205,9 @@ let tryEqualityIndex (table: Table) (columnName: string) : EqualityIndex option 
     tryEqualityIndexForTransform table columnName None
 
 let private exactProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
+    let column = table.Columns.[index]
     let integerColumn =
-        match table.Columns.[index].Type with
+        match column.Type with
         | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear -> true
         | _ -> false
 
@@ -5227,7 +5228,16 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         | VDecimal number -> integerColumn && System.Decimal.Truncate number = number
         | _ -> false
 
-    match Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value) with
+    let coerced =
+        match column.Type, value with
+        // In-range signed integers already have the exact stored representation.
+        // Avoid entering warning scopes when coercion cannot change the value.
+        | TInt false, VInt number when number >= int64 Int32.MinValue && number <= int64 Int32.MaxValue ->
+            Ok value
+        | TBigInt false, VInt _ -> Ok value
+        | _ -> Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) column value)
+
+    match coerced with
     | Ok coerced when coerced = Value.materialize value -> Some coerced
     | Ok coerced when exactIntegralDouble ->
         match coerced, value with

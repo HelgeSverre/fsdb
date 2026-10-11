@@ -850,7 +850,12 @@ plus a separate prepared-result profile, are the next measured targets.
 A [same-fixture reused prepared profile](benchmarks/results/2026-10-11-prepared-point-lookup.md)
 puts cached text and prepared handling near 50 and 47 µs per call, with about
 109 and 116 KiB allocated. The small latency difference is noisy; both paths
-need an allocation profile before a runtime change is justified.
+prompted an allocation profile before changing runtime code.
+An [allocation trace and exact-integer probe follow-up](benchmarks/results/2026-10-11-indexed-probe-fastpath.md)
+removed warning-suppressed coercion for already in-range signed `INT` and
+`BIGINT` equality probes. It saves about 3.4 KiB per call on the shared
+fixture; the separate-run latency comparison is inconclusive. The larger
+statement and execution allocation gap remains open.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes
