@@ -9620,7 +9620,7 @@ let tests =
                   handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" rightWithUnmatchedLeft)
               Expect.equal extraLeftLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "unused left rows are not scanned by the index probe"
 
-          testCase "negated range reads selective indexed rows"
+          testCase "negated range narrows indexed reads and writes"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               let run sql =
@@ -9653,6 +9653,16 @@ let tests =
               Expect.equal (run query) (ResultSet([ "payload" ], [ [ Some "10" ]; [ Some "20" ] ])) "negated range result"
               let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
               Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "negated range candidate count"
+
+              for mutation in
+                  [ "UPDATE negated_range_probe SET payload=99 WHERE NOT (id>2)"
+                    "DELETE FROM negated_range_probe WHERE NOT (id>2)" ] do
+                  Expect.equal (run mutation) (Affected 2UL) "negated range mutation count"
+                  let mutationLog = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" mutation)
+                  Expect.equal mutationLog (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "negated range mutation candidates"
+              Expect.equal (run "SELECT COUNT(*) FROM negated_range_probe")
+                  (ResultSet([ "COUNT(*)" ], [ [ Some "998" ] ]))
+                  "only selected rows were deleted"
 
           testCase "slow log counts left join candidates across ON and WHERE filters"
           <| fun _ ->

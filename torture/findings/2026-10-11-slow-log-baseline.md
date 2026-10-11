@@ -97,7 +97,11 @@ matching rows. With four rows, it chose an index scan and examined all four.
 Fsdb previously scanned all 1,000 rows in the larger case. The shared range
 classifier now exposes the equivalent bound to its costed index planner, so
 the larger query examines two rows while the original predicate still decides
-the result.
+the result. On that 1,000-row fixture,
+`UPDATE t SET payload=99 WHERE NOT (id>2)` and
+`DELETE FROM t WHERE NOT (id>2)` each affected and examined two
+rows in MySQL 8.4.11; the fsdb regression confirms the same counts and final
+row count for both mutations.
 
 On the indexed two-table left-join fixture, both `WHERE NOT (b.id=3)` and
 `WHERE b.id<>3` returned `(1,1)` and `(1,2)` while MySQL 8.4.11 examined five

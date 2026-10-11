@@ -12177,16 +12177,17 @@ and private normalizeIndexedInequality registry (table: Table) tref expression =
         | LiteralValue(VInt _ | VUInt _ | VBit _) -> true
         | _ -> false
 
+    let integerType = function
+        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+        | _ -> false
+
     let integerKey indexed =
         storedIndexedColumnFor registry tref indexed
         |> Option.exists (fun (name, transform) ->
             transform.IsNone
             && (table.Columns
                 |> List.exists (fun column ->
-                    equalsIgnoreCase column.Name name
-                    && (match column.Type with
-                        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
-                        | _ -> false))))
+                    equalsIgnoreCase column.Name name && integerType column.Type)))
 
     let ranges indexed literal =
         BinOp(Or, BinOp(Lt, indexed, literal), BinOp(Gt, indexed, literal))
