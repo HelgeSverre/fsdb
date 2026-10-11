@@ -6208,6 +6208,27 @@ let tests =
               gate.SetResult(())
               Expect.equal pending.Result (Ok(VInt 11L)) "the public database scope retains async execution-context flow"
 
+          testCase "public division-precision scope flows into a delayed task"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let expression = BinOp(Div, Lit(VInt 1L), Lit(VInt 3L))
+              let gate =
+                  System.Threading.Tasks.TaskCompletionSource<unit>(
+                      System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+              let pending =
+                  Fsdb.Executor.withDivisionPrecisionIncrement 10 (fun () ->
+                      System.Threading.Tasks.Task.Run(fun () ->
+                          gate.Task.Wait()
+                          Fsdb.Executor.evaluateExpression store Fsdb.Functions.builtins "test" expression))
+              gate.SetResult(())
+              match pending.Result with
+              | Ok value ->
+                  Expect.equal
+                      (Fsdb.Value.toText value)
+                      (Some "0.333333333333333333")
+                      "the scoped intermediate precision reaches the task"
+              | Error error -> failtestf "expected a scoped quotient, got %A" error
+
           testCase "sql_mode inside Laravel's real comma-joined connect-time SET turns off strict coercion"
           <| fun _ ->
               // The exact statement `strict => false` sends

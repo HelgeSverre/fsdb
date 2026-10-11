@@ -896,12 +896,18 @@ let internal currentUserVariables () =
     currentVariableContext () |> Option.map _.UserVariables
 
 let private divisionPrecisionOverride = System.Threading.AsyncLocal<int option>()
+let private synchronousDivisionPrecisionOverride = new System.Threading.ThreadLocal<int option>()
 
 let withDivisionPrecisionIncrement increment body =
-    DynamicScope.withValue divisionPrecisionOverride (Some increment) body
+    DynamicScope.withValue divisionPrecisionOverride (Some increment) (fun () ->
+        DynamicScope.withThreadValue synchronousDivisionPrecisionOverride (Some increment) body)
+
+let internal withSynchronousDivisionPrecisionIncrement increment body =
+    DynamicScope.withThreadValue synchronousDivisionPrecisionOverride (Some increment) body
 
 let private divisionPrecisionIncrement () =
-    divisionPrecisionOverride.Value
+    synchronousDivisionPrecisionOverride.Value
+    |> Option.orElse divisionPrecisionOverride.Value
     |> Option.orElseWith (fun () ->
         currentVariableContext ()
         |> Option.bind (fun variables ->

@@ -856,6 +856,12 @@ thread-local one. Warmed text and reused prepared handler allocation fell by
 about 1.3 and 1.7 KiB per call, with concurrent trigger sessions covered by
 a regression. Short-run latency remains inconclusive.
 
+The [synchronous division-precision scope comparison](benchmarks/results/2026-10-11-thread-scoped-division-precision.md)
+then retained the public task-flowing scope while moving prepared QueryHandler
+work to a thread-local scope. Reused prepared handler allocation fell by
+about 1.0 KiB per call on the fixed lookup fixture; short-run latency did
+not establish a change.
+
 A [three-run indexed constant-bound snapshot](benchmarks/results/2026-10-10-constant-index-bounds.md)
 finds fsdb's fixed primary-key lookup around 220–248 µs versus MySQL's
 41–43 µs. `ROUND(PI())` and `BIT_COUNT(7)` lookups fall within the run-to-run

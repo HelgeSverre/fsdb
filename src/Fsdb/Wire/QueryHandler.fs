@@ -5720,7 +5720,7 @@ let private preparedMetadataCore
             parameters, resultColumns
 
 let preparedMetadata session statement parameterCount =
-    Executor.withDivisionPrecisionIncrement (sessionDivisionPrecision session) (fun () ->
+    Executor.withSynchronousDivisionPrecisionIncrement (sessionDivisionPrecision session) (fun () ->
         preparedMetadataCore session statement parameterCount)
 
 type private TextPreparedSource =
@@ -7305,7 +7305,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                                 match bindPreparedPlaceholders PreparedMetadata.UserVariables current statement ast values with
                                 | Ok(updated, bound) ->
                                     let current = { current with TextStatements = Map.add name updated current.TextStatements }
-                                    Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
+                                    Executor.withSynchronousDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
                                         executeParsedWithFunctionDatabase updated.PreparationDatabase current bound)
                                 | Error(code, message) -> current, Err(code, message))))
                 | None ->
@@ -8517,7 +8517,7 @@ let private executePreparedWith save (session: Session) (stmt: PreparedStmt) (va
                                 | Error(code, message) -> session, Err(code, message)
                                 | Ok() ->
                                     let executed, result =
-                                        Executor.withDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
+                                        Executor.withSynchronousDivisionPrecisionIncrement updated.DivisionPrecisionIncrement (fun () ->
                                             withTriggerSessionExecution session (fun () ->
                                                 withStoredFunctionRegistry dispatch session (fun current ->
                                                     executeParsedWithFunctionDatabase updated.PreparationDatabase current statement)))
