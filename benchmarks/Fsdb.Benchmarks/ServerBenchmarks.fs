@@ -497,6 +497,14 @@ type ServerBenchmarks() =
         )
 
     [<Benchmark>]
+    [<BenchmarkCategory("Planner")>]
+    member this.NullRejectedLeftJoinIndexedOr() =
+        this.Query(
+            "SELECT u.id, o.id FROM users u LEFT JOIN orders o ON o.user_id = u.id "
+            + "WHERE o.id = 1 OR o.id = 2"
+        )
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
     member this.RightJoinUsersOrders() =
         this.Query(

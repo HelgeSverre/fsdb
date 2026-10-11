@@ -771,6 +771,11 @@ routines, events, and administrative probes.
 
 ## 15. Differential-testing and performance tails
 
+The [null-rejected OR join snapshot](benchmarks/results/2026-10-11-null-rejected-or-join.md)
+compares the indexed-union handoff with its prior revision on native servers.
+The focused fsdb query fell from about 4.63 ms to 0.18 ms at 1,000 users and
+5,000 orders; the same-run point-select control stayed near 0.17 ms.
+
 The [safe-update join snapshot](benchmarks/results/224915e6-safe-update-joins.md)
 checks the recent joined UPDATE work on native same-host servers. Rejected
 joined updates reached about 0.20 ms on fsdb and 0.05 ms on MySQL in the
