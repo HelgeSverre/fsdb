@@ -69,6 +69,12 @@ audited indexed case now becomes an inner join driven from `b`, then probes
 `a`; `SELECT *` keeps the written table-column order and `WHERE b.id IS NULL`
 still retains the outer join.
 
+The symmetric null-rejected `RIGHT JOIN ... WHERE a.id<2` already matches
+MySQL's observed counts: with an index on `b.left_id`, two result rows examine
+three candidates, or two with `LIMIT 1`; without that index, the full query
+examines five and `LIMIT 1` examines two. These cases are retained as
+regressions for the preserved-right probe and scan paths.
+
 A prepared `SELECT ? AS fsdb_slow_prepared_probe` executed with 43 produced a
 slow-log row for `SELECT 43 AS fsdb_slow_prepared_probe` with one row sent and
 one examined. The fsdb regression also covers its binary prepared execution
