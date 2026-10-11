@@ -202,30 +202,34 @@ let private worldMercatorInverse (x, y) =
     let latitude = latitudeAt 8 (atan (sinh (y / earthRadius)))
     latitude * 180.0 / Math.PI, wrapProjectedLongitude (x * 180.0 / (earthRadius * Math.PI))
 
-// Fourth-order Krüger series for WGS 84 / UTM zone 33N. The omitted terms are
-// below a micrometre inside the zone. Coefficients are from PROJ's tmerc series:
+// Fourth-order Krüger series for WGS 84/GRS 1980 Transverse Mercator. The
+// omitted terms are below a micrometre inside a UTM zone. Coefficients are from:
 // https://proj.org/en/stable/operations/projections/tmerc.html
-let private utmThirdFlattening =
-    let flattening = 1.0 / 298.257223563
-    flattening / (2.0 - flattening)
+type private UtmProjection =
+    { CentralMeridian: float
+      Eccentricity: float
+      Scale: float
+      ForwardCoefficients: float array
+      InverseCoefficients: float array }
 
-let private utmScale =
-    let n = utmThirdFlattening
-    0.9996 * earthRadius / (1.0 + n) * (1.0 + n * n / 4.0 + n ** 4.0 / 64.0)
+let private utmProjection centralMeridian inverseFlattening =
+    let flattening = 1.0 / inverseFlattening
+    let n = flattening / (2.0 - flattening)
+    { CentralMeridian = centralMeridian
+      Eccentricity = sqrt (flattening * (2.0 - flattening))
+      Scale = 0.9996 * earthRadius / (1.0 + n) * (1.0 + n * n / 4.0 + n ** 4.0 / 64.0)
+      ForwardCoefficients =
+        [| n / 2.0 - 2.0 * n ** 2.0 / 3.0 + 5.0 * n ** 3.0 / 16.0 + 41.0 * n ** 4.0 / 180.0
+           13.0 * n ** 2.0 / 48.0 - 3.0 * n ** 3.0 / 5.0 + 557.0 * n ** 4.0 / 1440.0
+           61.0 * n ** 3.0 / 240.0 - 103.0 * n ** 4.0 / 140.0
+           49561.0 * n ** 4.0 / 161280.0 |]
+      InverseCoefficients =
+        [| -n / 2.0 + 2.0 * n ** 2.0 / 3.0 - 37.0 * n ** 3.0 / 96.0 + n ** 4.0 / 360.0
+           -(n ** 2.0) / 48.0 - n ** 3.0 / 15.0 + 437.0 * n ** 4.0 / 1440.0
+           -17.0 * n ** 3.0 / 480.0 + 37.0 * n ** 4.0 / 840.0
+           -4397.0 * n ** 4.0 / 161280.0 |] }
 
-let private utmForwardCoefficients =
-    let n = utmThirdFlattening
-    [| n / 2.0 - 2.0 * n ** 2.0 / 3.0 + 5.0 * n ** 3.0 / 16.0 + 41.0 * n ** 4.0 / 180.0
-       13.0 * n ** 2.0 / 48.0 - 3.0 * n ** 3.0 / 5.0 + 557.0 * n ** 4.0 / 1440.0
-       61.0 * n ** 3.0 / 240.0 - 103.0 * n ** 4.0 / 140.0
-       49561.0 * n ** 4.0 / 161280.0 |]
-
-let private utmInverseCoefficients =
-    let n = utmThirdFlattening
-    [| -n / 2.0 + 2.0 * n ** 2.0 / 3.0 - 37.0 * n ** 3.0 / 96.0 + n ** 4.0 / 360.0
-       -(n ** 2.0) / 48.0 - n ** 3.0 / 15.0 + 437.0 * n ** 4.0 / 1440.0
-       -17.0 * n ** 3.0 / 480.0 + 37.0 * n ** 4.0 / 840.0
-       -4397.0 * n ** 4.0 / 161280.0 |]
+let private utm33North = utmProjection 15.0 298.257223563
 
 let private utmSeries coefficients (xi, eta) =
     coefficients
@@ -235,24 +239,26 @@ let private utmSeries coefficients (xi, eta) =
         coefficient * cos (harmonic * xi) * sinh (harmonic * eta))
     |> Array.fold (fun (xi, eta) (deltaXi, deltaEta) -> xi + deltaXi, eta + deltaEta) (xi, eta)
 
-let private utm33NorthForward (latitude, longitude) =
+let private utmForward projection (latitude, longitude) =
     let phi = latitude * Math.PI / 180.0
-    let lambda = Math.IEEERemainder(longitude - 15.0, 360.0) * Math.PI / 180.0
-    let conformal = atan (sinh (Math.Asinh(tan phi) - eccentricity * Math.Atanh(eccentricity * sin phi)))
+    let lambda = Math.IEEERemainder(longitude - projection.CentralMeridian, 360.0) * Math.PI / 180.0
+    let e = projection.Eccentricity
+    let conformal = atan (sinh (Math.Asinh(tan phi) - e * Math.Atanh(e * sin phi)))
     let xi = atan2 (tan conformal) (cos lambda)
     let eta = Math.Asinh(sin lambda / sqrt (tan conformal ** 2.0 + cos lambda ** 2.0))
-    let xi, eta = utmSeries utmForwardCoefficients (xi, eta)
-    500000.0 + utmScale * eta, utmScale * xi
+    let xi, eta = utmSeries projection.ForwardCoefficients (xi, eta)
+    500000.0 + projection.Scale * eta, projection.Scale * xi
 
-let private utm33NorthInverse (x, y) =
-    let xi, eta = utmSeries utmInverseCoefficients (y / utmScale, (x - 500000.0) / utmScale)
+let private utmInverse projection (x, y) =
+    let xi, eta = utmSeries projection.InverseCoefficients (y / projection.Scale, (x - 500000.0) / projection.Scale)
     let conformal = atan (sin xi / sqrt (sinh eta ** 2.0 + cos xi ** 2.0))
-    let longitude = atan2 (sinh eta) (cos xi) * 180.0 / Math.PI + 15.0
+    let longitude = atan2 (sinh eta) (cos xi) * 180.0 / Math.PI + projection.CentralMeridian
     let target = Math.Asinh(tan conformal)
     let rec recoverLatitude iterations latitude =
         if iterations = 0 then latitude
         else
-            let next = atan (sinh (target + eccentricity * Math.Atanh(eccentricity * sin latitude)))
+            let e = projection.Eccentricity
+            let next = atan (sinh (target + e * Math.Atanh(e * sin latitude)))
             recoverLatitude (iterations - 1) next
     let latitude = recoverLatitude 8 conformal * 180.0 / Math.PI
     latitude, wrapProjectedLongitude longitude
@@ -297,7 +303,7 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         | 4269 -> Some nad83ToWgs84
         | 3857 -> Some pseudoMercatorInverse
         | 3395 -> Some worldMercatorInverse
-        | 32633 -> Some utm33NorthInverse
+        | 32633 -> Some (utmInverse utm33North)
         | _ -> None
     let fromWgs84 =
         match targetSrid with
@@ -305,7 +311,7 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         | 4269 -> Some wgs84ToNad83
         | 3857 -> Some pseudoMercatorForward
         | 3395 -> Some worldMercatorForward
-        | 32633 -> Some utm33NorthForward
+        | 32633 -> Some (utmForward utm33North)
         | _ -> None
     Option.map2 compose toWgs84 fromWgs84
 
