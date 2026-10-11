@@ -9556,6 +9556,38 @@ let tests =
               Expect.equal scanned joined "scan join result"
               let _, scanLog = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" scanQuery)
               Expect.equal scanLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "scan-shaped join candidate count"
+              for source, examined in [ "slow_join_right", "6"; "slow_join_scan", "7" ] do
+                  let outerQuery =
+                      sprintf "SELECT a.id,b.id FROM slow_join_left a LEFT JOIN %s b ON b.left_id=a.id" source
+                  let session, outerRows = handle session outerQuery
+                  match outerRows with
+                  | ResultSet(_, rows) ->
+                      Expect.equal
+                          (rows |> List.sort)
+                          ([ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ]; [ Some "2"; Some "3" ]; [ Some "3"; None ] ] |> List.sort)
+                          "outer join preserves unmatched left row"
+                  | other -> failtestf "expected outer join rows, got %A" other
+                  let _, outerLog = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" outerQuery)
+                  Expect.equal outerLog (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) "outer join candidate count"
+                  let rightQuery =
+                      sprintf "SELECT a.id,b.id FROM slow_join_left a RIGHT JOIN %s b ON b.left_id=a.id" source
+                  let session, rightRows = handle session rightQuery
+                  match rightRows with
+                  | ResultSet(_, rows) ->
+                      Expect.equal
+                          (rows |> List.sort)
+                          ([ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ]; [ Some "2"; Some "3" ]; [ None; Some "4" ] ] |> List.sort)
+                          "right join preserves unmatched right row"
+                  | other -> failtestf "expected right join rows, got %A" other
+                  let _, rightLog = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" rightQuery)
+                  Expect.equal rightLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "right join candidate count"
+              let session, _ = handle session "INSERT INTO slow_join_left VALUES (5,50)"
+              let rightWithUnmatchedLeft =
+                  "SELECT a.id,b.id FROM slow_join_left a RIGHT JOIN slow_join_scan b ON b.left_id=a.id /* extra left */"
+              let session, _ = handle session rightWithUnmatchedLeft
+              let _, extraLeftLog =
+                  handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" rightWithUnmatchedLeft)
+              Expect.equal extraLeftLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "unused left rows are not scanned by the index probe"
 
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->

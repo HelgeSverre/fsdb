@@ -9964,6 +9964,13 @@ and private applyPreparedJoin
                 safeLeftFilter left && safeLeftFilter right
             | _ -> false
 
+        let preservedRightIndexProbe =
+            preservedRightProbe
+            |> Option.filter (fun probe ->
+                probe.Index.UsesWholeStoredValues
+                && probe.ProbeIndices.Length = equiKeys.Length
+                && (residualConjuncts |> List.forall safeLeftFilter))
+
         let hashCompatible =
             lazy
                 (match keyClasses with
@@ -9976,16 +9983,18 @@ and private applyPreparedJoin
                  | None -> false)
 
         let indexedJoinProbe =
-            candidateIndexedJoinProbe
-            |> Option.filter (fun probe ->
-                match consumption with
-                | MayStopEarly -> true
-                | ConsumesAllRows ->
-                    match chooseIndexedJoinPath store probe leftIndexed.Value.Length (leftIndexed.Value |> Seq.map snd) with
-                    | QueryPlanner.IndexProbe -> true
-                    | QueryPlanner.HashJoin -> not hashCompatible.Value)
+            if preservedRightIndexProbe.IsSome then None
+            else
+                candidateIndexedJoinProbe
+                |> Option.filter (fun probe ->
+                    match consumption with
+                    | MayStopEarly -> true
+                    | ConsumesAllRows ->
+                        match chooseIndexedJoinPath store probe leftIndexed.Value.Length (leftIndexed.Value |> Seq.map snd) with
+                        | QueryPlanner.IndexProbe -> true
+                        | QueryPlanner.HashJoin -> not hashCompatible.Value)
 
-        let hashEligible = indexedJoinProbe.IsNone && hashCompatible.Value
+        let hashEligible = preservedRightIndexProbe.IsNone && indexedJoinProbe.IsNone && hashCompatible.Value
 
         let isConstantTrue =
             function
@@ -9993,11 +10002,8 @@ and private applyPreparedJoin
             | BinOp(Eq, LiteralValue left, LiteralValue right) -> Value.equals left right = Some true
             | _ -> false
 
-        match preservedRightProbe, indexedJoinProbe with
-        | Some probe, _
-            when probe.Index.UsesWholeStoredValues
-                 && probe.ProbeIndices.Length = equiKeys.Length
-                 && residualConjuncts |> List.forall safeLeftFilter ->
+        match preservedRightIndexProbe, indexedJoinProbe with
+        | Some probe, _ ->
             let leftRowsFor (right: Value[]) =
                 let indexedRows =
                     probe.ProbeIndices
@@ -10010,6 +10016,7 @@ and private applyPreparedJoin
                 |> Option.defaultValue probe.Table.RowsArray.Indexed
                 |> Seq.map (fun (rowId, left) -> rowId, readLeft left)
                 |> Seq.mapi (fun index row -> Limits.checkQueryCancellation index; row)
+                |> trackExaminedRows
                 |> Seq.filter (fun (_, left) ->
                     let matches =
                         if usedIndex then residualHolds (Array.append left rightNullPadding)
@@ -10026,7 +10033,7 @@ and private applyPreparedJoin
             let rows =
                 seq {
                     let mutable inspected = 0
-                    for right in joinRows do
+                    for right in trackExaminedRows joinRows do
                         match leftRowsFor right with
                         | [] -> yield Array.append leftNullPadding right
                         | matches ->

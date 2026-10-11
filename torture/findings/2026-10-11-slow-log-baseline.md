@@ -37,6 +37,14 @@ The probe used `a(id PRIMARY KEY, v)` with IDs 1–3 and
 `b(id PRIMARY KEY, left_id)` with `left_id` values 1, 1, 2, and 4. It ran
 `SELECT a.id,b.id FROM a STRAIGHT_JOIN b ON b.left_id=a.id` under
 `long_query_time=0`, first with `KEY(left_id)` on `b`, then without it.
+For the same data, MySQL logged six examined rows for an indexed left outer
+join and seven for a scan-shaped left outer join; both returned four rows.
+Right outer joins logged seven in both layouts. Adding an unmatched fourth
+left row left the right-join count at seven, confirming that the preserved-
+right index probe counts matching left candidates rather than the whole left
+table. Fsdb now follows these observed counts. Its preserved-right strategy
+is selected before evaluating unused competing plans, so those planner reads
+cannot inflate the slow-log metric.
 
 A prepared `SELECT ? AS fsdb_slow_prepared_probe` executed with 43 produced a
 slow-log row for `SELECT 43 AS fsdb_slow_prepared_probe` with one row sent and
@@ -50,7 +58,7 @@ values.
 Fsdb now publishes table-backed slow-log rows from completed text and binary
 prepared statements. An execution scope counts source candidates before
 filtering for scalar reads, single-table scans, `INSERT … SELECT` source reads,
-single-table UPDATE/DELETE, and audited indexed and scan-shaped joins, rather
+single-table UPDATE/DELETE, and audited inner and outer indexed/scan joins, rather
 than guessing from result-row counts.
 `SET SESSION long_query_time=0`
 now counts itself, matching the oracle above. Other join shapes, full-text, and
