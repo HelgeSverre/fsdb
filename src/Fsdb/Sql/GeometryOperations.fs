@@ -373,6 +373,20 @@ let internal geographicLineLineDistance referenceSystem firstLines secondLines =
             let distance = segmentDistance first second
             Some(match minimum with None -> distance | Some current -> min current distance)) minimum) None
 
+let internal geographicLinePolygonDistance referenceSystem lines polygons =
+    let endpoints = lines |> List.collect id
+    let distances =
+        polygons
+        |> List.collect (fun rings ->
+            let endpointDistances =
+                endpoints
+                |> List.choose (fun point -> geographicPointPolygonDistance referenceSystem point [ rings ])
+            let boundaryDistance = geographicLineLineDistance referenceSystem lines rings
+            endpointDistances @ Option.toList boundaryDistance)
+    match distances with
+    | [] -> None
+    | _ -> Some(List.min distances)
+
 let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
     let length (points: (float * float) list) =
         points

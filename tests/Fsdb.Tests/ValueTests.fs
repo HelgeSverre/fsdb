@@ -979,7 +979,7 @@ let tests =
 
                     expectError 3033 (fun () -> call "ST_Distance" [ planar; geographic ])
                     Expect.equal (call "ST_Distance" [ geographicLine; geographicLine ]) (VDouble 0.0) "identical geographic lines have zero distance"
-                    expectError 1235 (fun () -> call "ST_Distance" [ geographicPolygon; geographicLine ])
+                    Expect.equal (call "ST_Distance" [ geographicPolygon; geographicLine ]) (VDouble 0.0) "a line on a geographic polygon has zero distance"
                     expectError 1235 (fun () -> call "ST_Envelope" [ geographic ])
                     expectError 1235 (fun () -> call "ST_IsValid" [ geographic ])
 
