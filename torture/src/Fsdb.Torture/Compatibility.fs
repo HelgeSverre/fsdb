@@ -3336,6 +3336,22 @@ module ContractCatalog =
                    "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4258),25832)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4258),25832)),3),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4258),25832)),3)"
                |> Contract.comparingValues
                Contract.query
+                   "nad83-utm-zone-catalog"
+                   "SELECT SRS_ID,SRS_NAME,DEFINITION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID BETWEEN 26901 AND 26923 ORDER BY SRS_ID"
+               |> Contract.comparingValues
+               Contract.query
+                   "nad83-utm10-from-nad83"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(49 -123)',4269),26910)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(49 -123)',4269),26910)),3),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(49 -123)',4269),26910)),3)"
+               |> Contract.comparingValues
+               Contract.query
+                   "nad83-utm10-from-wgs84"
+                   "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(49 -123)',4326),26910)),3),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(49 -123)',4326),26910)),3)"
+               |> Contract.comparingValues
+               Contract.query
+                   "nad83-utm10-to-wgs84"
+                   "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(499999.70608616463 5427455.393397634)',26910),4326)),8),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(499999.70608616463 5427455.393397634)',26910),4326)),8)"
+               |> Contract.comparingValues
+               Contract.query
                    "world-mercator-forward"
                    "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5)"
                |> Contract.comparingValues

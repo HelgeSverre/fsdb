@@ -26,9 +26,15 @@ type internal SpatialReferenceSystem =
       /// Projected coordinate-unit scale; absent for geographic and unitless SRID 0.
       LinearUnitInMetres: float option }
 
+type private UtmDatum =
+    | Wgs84
+    | Etrs89
+    | Nad83
+
 type private UtmZone =
     { Srid: int
       Name: string
+      Datum: UtmDatum
       GeographicDefinition: string
       CentralMeridian: int
       FalseNorthing: int
@@ -81,9 +87,10 @@ let private utmDefinition name geographicDefinition centralMeridian falseNorthin
       sprintf ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"%d\"]]" srid ]
     |> String.concat ""
 
-let private utmZone name geographicDefinition inverseFlattening baseSrid hemisphere falseNorthing zone =
+let private utmZone name datum geographicDefinition inverseFlattening baseSrid hemisphere falseNorthing zone =
     { Srid = baseSrid + zone
       Name = sprintf "%s / UTM zone %d%s" name zone hemisphere
+      Datum = datum
       GeographicDefinition = geographicDefinition
       CentralMeridian = zone * 6 - 183
       FalseNorthing = falseNorthing
@@ -92,12 +99,15 @@ let private utmZone name geographicDefinition inverseFlattening baseSrid hemisph
 let private wgs84UtmZones =
     [ for hemisphere, baseSrid, falseNorthing in [ "N", 32600, 0; "S", 32700, 10000000 ] do
         for zone in 1..60 do
-            utmZone "WGS 84" wgs84Definition 298.257223563 baseSrid hemisphere falseNorthing zone ]
+            utmZone "WGS 84" Wgs84 wgs84Definition 298.257223563 baseSrid hemisphere falseNorthing zone ]
 
 let private etrs89UtmZones =
-    [ for zone in 28..37 -> utmZone "ETRS89" etrs89Definition 298.257222101 25800 "N" 0 zone ]
+    [ for zone in 28..37 -> utmZone "ETRS89" Etrs89 etrs89Definition 298.257222101 25800 "N" 0 zone ]
 
-let private utmZones = wgs84UtmZones @ etrs89UtmZones
+let private nad83UtmZones =
+    [ for zone in 1..23 -> utmZone "NAD83" Nad83 nad83Definition 298.257222101 26900 "N" 0 zone ]
+
+let private utmZones = wgs84UtmZones @ etrs89UtmZones @ nad83UtmZones
 
 let private utmSystems =
     utmZones
@@ -266,7 +276,7 @@ let private utmProjections =
     utmZones
     |> List.map (fun zone ->
         zone.Srid,
-        utmProjection (float zone.CentralMeridian) zone.InverseFlattening (float zone.FalseNorthing))
+        (zone.Datum, utmProjection (float zone.CentralMeridian) zone.InverseFlattening (float zone.FalseNorthing)))
     |> Map.ofList
 
 let private tryUtmProjection srid = Map.tryFind srid utmProjections
@@ -343,14 +353,24 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         | 4269 -> Some nad83ToWgs84
         | 3857 -> Some pseudoMercatorInverse
         | 3395 -> Some worldMercatorInverse
-        | _ -> tryUtmProjection sourceSrid |> Option.map utmInverse
+        | _ ->
+            tryUtmProjection sourceSrid
+            |> Option.map (fun (datum, projection) ->
+                match datum with
+                | Nad83 -> compose (utmInverse projection) nad83ToWgs84
+                | Wgs84 | Etrs89 -> utmInverse projection)
     let fromWgs84 =
         match targetSrid with
         | 4258 | 4326 -> Some id
         | 4269 -> Some wgs84ToNad83
         | 3857 -> Some pseudoMercatorForward
         | 3395 -> Some worldMercatorForward
-        | _ -> tryUtmProjection targetSrid |> Option.map utmForward
+        | _ ->
+            tryUtmProjection targetSrid
+            |> Option.map (fun (datum, projection) ->
+                match datum with
+                | Nad83 -> compose wgs84ToNad83 (utmForward projection)
+                | Wgs84 | Etrs89 -> utmForward projection)
     Option.map2 compose toWgs84 fromWgs84
 
 let internal linearUnits =
