@@ -91,6 +91,14 @@ evaluating the original `WHERE` condition for the result. In contrast,
 rejecting a null-padded right row, so that form is not included in this
 indexed join conversion.
 
+For a single table with 1,000 primary-key rows, MySQL 8.4.11 chose a range
+access for `SELECT payload FROM t WHERE NOT (id>2)` and examined only the two
+matching rows. With four rows, it chose an index scan and examined all four.
+Fsdb previously scanned all 1,000 rows in the larger case. The shared range
+classifier now exposes the equivalent bound to its costed index planner, so
+the larger query examines two rows while the original predicate still decides
+the result.
+
 The symmetric null-rejected `RIGHT JOIN ... WHERE a.id<2` already matches
 MySQL's observed counts: with an index on `b.left_id`, two result rows examine
 three candidates, or two with `LIMIT 1`; without that index, the full query

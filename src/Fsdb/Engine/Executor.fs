@@ -11659,6 +11659,15 @@ and private runUnmergedSelectStmt
                 DynamicScope.withValue lockingReadRows rows (fun () ->
                     runUnlockedSelectStmt current registry dbName select outer))
 
+/// SQL comparison negation preserves NULL, so its inverse range is safe for
+/// index planning while the original predicate remains the row-level filter.
+and private normalizeNegatedRangeComparison = function
+    | Not(BinOp(Lt, left, right)) -> BinOp(Gte, left, right)
+    | Not(BinOp(Lte, left, right)) -> BinOp(Gt, left, right)
+    | Not(BinOp(Gt, left, right)) -> BinOp(Lte, left, right)
+    | Not(BinOp(Gte, left, right)) -> BinOp(Lt, left, right)
+    | expression -> expression
+
 /// A WHERE condition that rejects the nullable side makes a left join an
 /// inner join. For a selective indexed right source, begin there and probe
 /// the original left table. Expand unqualified stars in their written order
@@ -11669,23 +11678,6 @@ and private reorderNullRejectedLeftJoin
     (dbName: string)
     (select: SelectStmt)
     : SelectStmt * Value[] list option =
-    // Use the equivalent range only to choose indexed candidates; retain the
-    // original WHERE expression for row evaluation and diagnostics.
-    let indexedPredicate = function
-        | Not(BinOp((Lt | Lte | Gt | Gte as comparison), left, right)) as predicate ->
-            let inverted =
-                match comparison with
-                | Lt -> Gte
-                | Lte -> Gt
-                | Gt -> Lte
-                | Gte -> Lt
-                | _ -> comparison
-            match left, right with
-            | QualifiedCol _, LiteralValue _
-            | LiteralValue _, QualifiedCol _ -> BinOp(inverted, left, right)
-            | _ -> predicate
-        | predicate -> predicate
-
     let rec rejectsNull (qualifier: string) =
         function
         | BinOp(And, left, right) -> rejectsNull qualifier left || rejectsNull qualifier right
@@ -11717,7 +11709,7 @@ and private reorderNullRejectedLeftJoin
                 | Ok(Some _) ->
                     select.Where
                     |> optionalConjuncts
-                    |> List.map indexedPredicate
+                    |> List.map normalizeNegatedRangeComparison
                     |> List.tryFind (rejectsNull rightQualifier)
                     |> Option.bind (fun predicate ->
                         tryPhysicalTableRef store dbName rightRef
@@ -12356,6 +12348,7 @@ and private tryComparisonRangePredicate columnName boundValue expression =
     | _ -> None
 
 and private rangePredicatesFor columnName boundValue expression : RangeLookupBounds<_, _> list =
+    let expression = normalizeNegatedRangeComparison expression
     match expression with
     | Between(indexed, lower, upper) ->
         match columnName indexed, boundValue lower, boundValue upper with

@@ -9620,6 +9620,40 @@ let tests =
                   handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" rightWithUnmatchedLeft)
               Expect.equal extraLeftLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "unused left rows are not scanned by the index probe"
 
+          testCase "negated range reads selective indexed rows"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              Expect.equal (run "CREATE TABLE negated_range_probe (id INT PRIMARY KEY, payload INT)") (Affected 0UL) "table created"
+              let values =
+                  [ 1 .. 1000 ]
+                  |> List.map (fun id -> sprintf "(%d,%d)" id (id * 10))
+                  |> String.concat ","
+              match run ("INSERT INTO negated_range_probe VALUES " + values) with
+              | Affected 1000UL -> ()
+              | other -> failtestf "unexpected insertion result: %A" other
+              for statement in
+                  [ "SET GLOBAL log_output='TABLE'"
+                    "SET GLOBAL slow_query_log=ON"
+                    "SET SESSION long_query_time=0" ] do
+                  match run statement with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" statement code message
+                  | _ -> ()
+
+              let positiveQuery = "SELECT payload FROM negated_range_probe WHERE id<=2"
+              Expect.equal (run positiveQuery) (ResultSet([ "payload" ], [ [ Some "10" ]; [ Some "20" ] ])) "positive range result"
+              let positiveLog = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" positiveQuery)
+              Expect.equal positiveLog (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "positive range candidate count"
+
+              let query = "SELECT payload FROM negated_range_probe WHERE NOT (id>2)"
+              Expect.equal (run query) (ResultSet([ "payload" ], [ [ Some "10" ]; [ Some "20" ] ])) "negated range result"
+              let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
+              Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "negated range candidate count"
+
           testCase "slow log counts left join candidates across ON and WHERE filters"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
