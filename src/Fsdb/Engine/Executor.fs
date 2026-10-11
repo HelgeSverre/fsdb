@@ -780,7 +780,8 @@ let private variableContext = System.Threading.AsyncLocal<VariableContext option
 // QueryHandler completes expression execution before this scope returns.
 let private synchronousVariableContext = new System.Threading.ThreadLocal<VariableContext option>()
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
-let private triggerSessionExecutor = System.Threading.AsyncLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
+// Trigger statements execute synchronously inside the owning QueryHandler call.
+let private triggerSessionExecutor = new System.Threading.ThreadLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
 let private foundRowsOutputSlice = System.Threading.AsyncLocal<(int option * int option) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private joinHintDiagnostics = System.Threading.AsyncLocal<OptimizerHintResolution.ExecutionDiagnostics>()
@@ -875,7 +876,7 @@ let replaceRoutineVariables variables =
     routineVariables.Value |> Option.iter (fun current -> current.Value <- variables)
 
 let internal withTriggerSessionExecutor executor body =
-    DynamicScope.withValue triggerSessionExecutor (Some executor) body
+    DynamicScope.withThreadValue triggerSessionExecutor (Some executor) body
 
 let private informationSchemaStatisticsExpiry () =
     currentVariableContext ()

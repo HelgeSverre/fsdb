@@ -6156,6 +6156,41 @@ let tests =
 
               System.Threading.Tasks.Task.WaitAll [| check "11" first; check "22" second |]
 
+          testCase "concurrent trigger statements retain their owning session"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable setup = create 1 store
+
+              for sql in
+                  [ "CREATE TABLE trigger_first(id INT PRIMARY KEY)"
+                    "CREATE TABLE trigger_second(id INT PRIMARY KEY)"
+                    "CREATE TRIGGER trigger_first_bi BEFORE INSERT ON trigger_first FOR EACH ROW SET @seen=NEW.id"
+                    "CREATE TRIGGER trigger_second_bi BEFORE INSERT ON trigger_second FOR EACH ROW SET @seen=NEW.id" ] do
+                  let next, result = handle setup sql
+                  setup <- next
+                  TestSupport.Sql.expectOk result "set up concurrent trigger"
+
+              let second = create 2 store
+              use barrier = new System.Threading.Barrier(2)
+
+              let check table start initial =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      let mutable session = initial
+                      barrier.SignalAndWait() |> ignore
+
+                      for offset in 0 .. 19 do
+                          let id = start + offset
+                          let next, inserted = handle session (sprintf "INSERT INTO %s VALUES(%d)" table id)
+                          session <- next
+                          TestSupport.Sql.expectOk inserted "triggered insert"
+                          let next, seen = handle session "SELECT @seen"
+                          session <- next
+                          Expect.equal seen (ResultSet([ "@seen" ], [ [ Some(string id) ] ])) "trigger updates its caller")
+
+              System.Threading.Tasks.Task.WaitAll
+                  [| check "trigger_first" 100 setup
+                     check "trigger_second" 200 second |]
+
           testCase "public function-database scope flows into a delayed task"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
