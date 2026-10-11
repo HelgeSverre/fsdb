@@ -27,5 +27,6 @@ minimum. Quoted
 and the `regexp-posix-classes` differential contract cover the cases.
 
 The same probe found that MySQL accepts possessive `a++`, while .NET rejects
-it as nested quantifiers. Possessive grammar and other unprobed error-code
-distinctions remain open.
+it as nested quantifiers. The audited possessive forms are now covered
+separately in [REGEXP possessive quantifiers](2026-10-11-regexp-possessive-quantifiers.md).
+Other unprobed error-code distinctions remain open.

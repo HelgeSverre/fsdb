@@ -3292,6 +3292,43 @@ let tests =
                               (VString ".\r\n")
                               "quoted dot leaves CRLF available to the line-break escape"
 
+                      testCase "REGEXP possessive quantifiers keep their consumed text"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "a++a", "aa", 0L
+                                "a+a", "aa", 1L
+                                "a*+a", "aa", 0L
+                                "a*a", "aa", 1L
+                                "a?+a", "a", 0L
+                                "a?a", "a", 1L
+                                "a{1,3}+a", "aaa", 0L
+                                "a{1,3}a", "aaa", 1L
+                                "[ab]++b", "ab", 0L
+                                "[ab]+b", "ab", 1L
+                                "(ab)++ab", "abab", 0L
+                                "(ab)+ab", "abab", 1L
+                                "\\d++3", "123", 0L
+                                "\\d+3", "123", 1L
+                                "a*+", "aaa", 1L
+                                "a\\++", "a+", 1L
+                                "a++b++", "aabb", 1L
+                                ".++a", "aa", 0L
+                                "\\p{L}++a", "aa", 0L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+
+                      testCase "REGEXP rejects repeated possessive modifiers"
+                      <| fun _ ->
+                          for pattern in [ "a+++"; "a+?+"; "a{1,2}++" ] do
+                              Expect.throwsC
+                                  (fun () -> call "REGEXP_LIKE" [ VString "aa"; VString pattern; VString "c" ] |> ignore)
+                                  (fun e ->
+                                      match e with
+                                      | Fsdb.Functions.SqlError(3688, _) -> ()
+                                      | other -> failtestf "expected 3688 for %s, got %A" pattern other)
+
                       testCase "REGEXP word shorthand includes join controls"
                       <| fun _ ->
                           for pattern, value, expected in

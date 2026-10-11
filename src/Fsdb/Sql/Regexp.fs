@@ -472,6 +472,128 @@ let scalarAtUtf16Offset (text: string) utf16Offset =
 
     count
 
+let private isEscapedAt (pattern: string) index =
+    let mutable previous = index - 1
+    while previous >= 0 && pattern[previous] = '\\' do
+        previous <- previous - 1
+    (index - previous - 1) % 2 = 1
+
+let private tryQuantifierStart (pattern: string) =
+    let last = pattern.Length - 1
+    if last < 0 || isEscapedAt pattern last then None
+    else
+        match pattern[last] with
+        | '*' | '+' | '?' -> Some last
+        | '}' ->
+            let opening = pattern.LastIndexOf('{', last - 1)
+            if opening >= 0
+               && not (isEscapedAt pattern opening)
+               && Regex.IsMatch(pattern.Substring(opening + 1, last - opening - 1), @"^\d+(?:,\d*)?$") then
+                Some opening
+            else None
+        | _ -> None
+
+let private tryAtomStart (pattern: string) endIndex =
+    let groups = System.Collections.Generic.Stack<int>()
+    let mutable classStart = None
+    let mutable lastAtom = None
+    let mutable index = 0
+
+    while index < endIndex do
+        match pattern[index] with
+        | '\\' when index + 1 < endIndex ->
+            let start = index
+            if index + 2 < endIndex
+               && (pattern[index + 1] = 'p' || pattern[index + 1] = 'P')
+               && pattern[index + 2] = '{' then
+                let closing = pattern.IndexOf('}', index + 3)
+                index <- if closing >= 0 && closing < endIndex then closing + 1 else index + 2
+            else index <- index + 2
+            if classStart.IsNone then lastAtom <- Some start
+        | '[' when classStart.IsNone ->
+            classStart <- Some index
+            lastAtom <- None
+            index <- index + 1
+        | ']' when classStart.IsSome ->
+            lastAtom <- classStart
+            classStart <- None
+            index <- index + 1
+        | _ when classStart.IsSome -> index <- index + 1
+        | '(' ->
+            groups.Push index
+            lastAtom <- None
+            index <- index + 1
+        | ')' ->
+            if groups.Count > 0 then lastAtom <- Some(groups.Pop())
+            index <- index + 1
+        | '|' | '^' | '$' ->
+            lastAtom <- None
+            index <- index + 1
+        | '*' | '+' | '?' -> index <- index + 1
+        | character ->
+            lastAtom <-
+                if Char.IsLowSurrogate character
+                   && index > 0
+                   && Char.IsHighSurrogate pattern[index - 1] then Some(index - 1)
+                else Some index
+            index <- index + 1
+
+    if classStart.IsSome then None else lastAtom
+
+let private normalizePossessiveQuantifiers (pattern: string) : Result<string, RegexError> =
+    let output = StringBuilder(pattern.Length)
+    let mutable index = 0
+    let mutable inClass = false
+    let mutable afterPossessive = false
+    let mutable error = None
+
+    while index < pattern.Length && error.IsNone do
+        let character = pattern[index]
+        if afterPossessive
+           && not inClass
+           && (character = '+' || character = '*' || character = '?' || character = '{') then
+            let position = scalarAtUtf16Offset pattern (index + 1)
+            error <- Some(InvalidPattern(3688, sprintf "Syntax error in regular expression on line 1, character %d." position))
+        elif character = '\\' && index + 1 < pattern.Length then
+            output.Append(pattern, index, 2) |> ignore
+            index <- index + 2
+            afterPossessive <- false
+        else
+            if character = '[' then inClass <- true
+            elif character = ']' then inClass <- false
+
+            if character = '+'
+               && not inClass
+               && output.Length > 0
+               && (output[output.Length - 1] = '*'
+                   || output[output.Length - 1] = '+'
+                   || output[output.Length - 1] = '?'
+                   || output[output.Length - 1] = '}') then
+                let preceding = output.ToString()
+                match tryQuantifierStart preceding with
+                | Some quantifierStart ->
+                    let beforeQuantifier = preceding.Substring(0, quantifierStart)
+                    if tryQuantifierStart beforeQuantifier |> Option.isSome then
+                        let position = scalarAtUtf16Offset pattern (index + 1)
+                        error <- Some(InvalidPattern(3688, sprintf "Syntax error in regular expression on line 1, character %d." position))
+                    else
+                        match tryAtomStart preceding quantifierStart with
+                        | Some atomStart ->
+                            let quantified = preceding.Substring(atomStart)
+                            output.Length <- atomStart
+                            output.Append("(?>").Append(quantified).Append(')') |> ignore
+                            afterPossessive <- true
+                        | None -> output.Append character |> ignore
+                | None -> output.Append character |> ignore
+            else output.Append character |> ignore
+
+            if character <> '+' || inClass then afterPossessive <- false
+            index <- index + 1
+
+    match error with
+    | Some error -> Error error
+    | None -> Ok(output.ToString())
+
 let private invalidPattern (pattern: string) =
     let interval = Regex.Match(pattern, @"(?<!\\)\{(?<minimum>\d+),(?<maximum>\d+)\}")
     let missingIntervalMinimum = Regex.IsMatch(pattern, @"(?<!\\)\{,\d+\}")
@@ -525,8 +647,10 @@ let compile (collation: Collation.Collation) (matchType: string option) (pattern
         else
             optionsFor collation matchType
             |> Result.bind (fun options ->
-                try
-                    Ok(Regex(normalizePattern options posix, options, Limits.regexpMatchTimeout))
-                with
-                | :? RegexParseException as error -> Error(parseError posix error)
-                | :? ArgumentException -> Error(InvalidPattern(3691, "Invalid regular expression.")))
+                normalizePossessiveQuantifiers (normalizePattern options posix)
+                |> Result.bind (fun normalized ->
+                    try
+                        Ok(Regex(normalized, options, Limits.regexpMatchTimeout))
+                    with
+                    | :? RegexParseException as error -> Error(parseError posix error)
+                    | :? ArgumentException -> Error(InvalidPattern(3691, "Invalid regular expression."))))

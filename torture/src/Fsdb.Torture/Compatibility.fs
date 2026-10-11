@@ -10144,6 +10144,16 @@ module ContractCatalog =
                Contract.query "quoted-intervals"
                    "SELECT REGEXP_LIKE('{3,2}','\\\\Q{3,2}\\\\E','c'),REGEXP_LIKE('{3,2}','\\\\Q{3,2}','c'),REGEXP_LIKE('{','\\\\Q{\\\\E','c'),REGEXP_LIKE('{,2}','\\\\Q{,2}\\\\E','c')"
                    |> Contract.comparingValues
+               Contract.query "possessive-quantifiers"
+                   "SELECT REGEXP_LIKE('aa','a++a','c'),REGEXP_LIKE('aa','a+a','c'),REGEXP_LIKE('aa','a*+a','c'),REGEXP_LIKE('aaa','a{1,3}+a','c'),REGEXP_LIKE('ab','[ab]++b','c'),REGEXP_LIKE('abab','(ab)++ab','c'),REGEXP_LIKE('aabb','a++b++','c'),REGEXP_LIKE('aa','.++a','c')"
+                   |> Contract.comparingValues
+               for name, pattern in
+                   [ "repeated-possessive-plus", "a+++"
+                     "lazy-possessive-plus", "a+?+"
+                     "repeated-possessive-interval", "a{1,2}++" ] do
+                   let hex = Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes pattern)
+                   Contract.query name (sprintf "SELECT REGEXP_LIKE('aa', CONVERT(0x%s USING utf8mb4), 'c')" hex)
+                   |> Contract.fails 3688 "HY000"
                for name, pattern, code in
                    [ "leading-star", "*a", 3688
                      "leading-plus", "+a", 3688
