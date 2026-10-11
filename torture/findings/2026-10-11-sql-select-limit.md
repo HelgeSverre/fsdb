@@ -58,6 +58,15 @@ owning query block's `select_list_subqueries` array with `dependent: true` and
 `cacheable: false`. Both retain the child `query_block.select_id` and access
 description. A separate native probe confirmed the same placement for a
 single SELECT without UNION. Fsdb now nests these audited projection cases
-under their owning SELECT or UNION branch, including a scalar in a later branch. Other expression
-positions, nested scalar blocks, mixed derived/scalar plans, and broader
-optimizer placement still use the general renderer.
+under their owning SELECT or UNION branch, including a scalar in a later branch.
+
+Further native clause probes showed that a correlated scalar in a single-table
+`WHERE` predicate appears in the table's `attached_subqueries` array. Fsdb now
+uses that placement for audited dependent scalar predicates. MySQL can instead
+fold an uncorrelated `WHERE` scalar into `optimized_away_subqueries`, and can
+eliminate `EXISTS` and `IN` subquery blocks through semijoin planning, so those
+cases remain outside this renderer path. A `HAVING` scalar appears under
+`grouping_operation.having_subqueries`, while an `ORDER BY` scalar appears
+under `ordering_operation.order_by_subqueries` or its
+`optimized_away_subqueries`. Those clause wrappers, nested scalar blocks,
+mixed derived/scalar plans, and broader optimizer placement remain open.

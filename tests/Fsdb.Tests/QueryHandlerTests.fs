@@ -4145,7 +4145,7 @@ let tests =
                   Expect.stringContains access "select_limit_plan" "TREE keeps the access path"
               | other -> failtestf "expected a limit above the access path, got %A" other
 
-          testCase "EXPLAIN JSON nests scalar projections in a single SELECT"
+          testCase "EXPLAIN JSON nests scalar subqueries by clause in a single SELECT"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store
@@ -4173,6 +4173,12 @@ let tests =
               Expect.isTrue (selected.GetProperty("dependent").GetBoolean()) "correlated scalar depends on the parent row"
               Expect.isFalse (selected.GetProperty("cacheable").GetBoolean()) "correlated scalar is not cacheable"
               Expect.equal (selected.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "child access stays nested"
+
+              let filtered =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a WHERE a.id=(SELECT b.id FROM scalar_plan b WHERE b.id=a.id)"
+              let attached = filtered.GetProperty("table").GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+              Expect.isTrue (attached.GetProperty("dependent").GetBoolean()) "the WHERE scalar depends on the scanned row"
+              Expect.equal (attached.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "the WHERE child stays attached to its table"
 
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
