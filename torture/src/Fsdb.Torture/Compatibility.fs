@@ -1180,11 +1180,17 @@ module ContractCatalog =
                      "'839:00:00'"; "'12:99:56'"; "8390000";
                      "'12:34:56 '"; "' 12:34:56'"; "' 839:00:00 '"; "' x'"; "'abc '";
                      "'12:34:56 x'"; "'12:34:56  x'"; "'12:34:56   x'";
-                     "'12:34 :56'"; "'12: 34:56'"; "'12 :34:56'"; "'12  :34:56'" ] |> List.indexed do
+                     "'12:34 :56'"; "'12: 34:56'"; "'12 :34:56'"; "'12  :34:56'";
+                     "b'0'"; "b'1'"; "b'1100001'"; "b'110001'"; "0x01" ] |> List.indexed do
                    yield Contract.query (sprintf "time-cast-value-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)
                          |> Contract.comparingValues
                    yield Contract.query (sprintf "time-cast-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               yield Contract.execute "create-time-cast-sources" "CREATE TABLE time_cast_sources(id INT PRIMARY KEY,b BIT(8),x VARBINARY(2))"
+               yield Contract.execute "insert-time-cast-sources" "INSERT INTO time_cast_sources VALUES (1,b'1',0x01),(2,b'110001',0x3132)"
+               yield Contract.query "time-cast-column-values" "SELECT CAST(b AS TIME),CAST(x AS TIME) FROM time_cast_sources ORDER BY id"
+                     |> Contract.comparingValues
+               yield Contract.query "time-cast-column-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, sql in
                    [ "SELECT CAST('abc' AS DECIMAL(5,2))"
                      "SELECT CAST('1.239' AS DECIMAL(5,2))"

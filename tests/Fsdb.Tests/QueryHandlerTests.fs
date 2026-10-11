@@ -3254,7 +3254,12 @@ let tests =
                     "'12:34 :56'", Some "12:34:00", [ 1292, "Truncated incorrect time value: '12:34 :56'"; 4096, "Delimiter ' ' in position 5 in datetime value '12:34 :56' at row 1 is superfluous and is deprecated. Please remove." ]
                     "'12: 34:56'", Some "00:00:12", [ 1292, "Truncated incorrect time value: '12: 34:56'" ]
                     "'12 :34:56'", Some "12:34:56", []
-                    "'12  :34:56'", Some "12:34:56", [ 4096, "Delimiter ' ' in position 2 in datetime value '12  :34:56' at row 1 is superfluous and is deprecated. Please remove." ] ] do
+                    "'12  :34:56'", Some "12:34:56", [ 4096, "Delimiter ' ' in position 2 in datetime value '12  :34:56' at row 1 is superfluous and is deprecated. Please remove." ]
+                    "b'0'", None, [ 1292, "Truncated incorrect time value: '\\x00'" ]
+                    "b'1'", None, [ 1292, "Truncated incorrect time value: '\\x01'" ]
+                    "b'1100001'", None, [ 1292, "Truncated incorrect time value: 'a'" ]
+                    "b'110001'", Some "00:00:01", []
+                    "0x01", None, [ 1292, "Truncated incorrect time value: '\\x01'" ] ] do
                   let sql = sprintf "SELECT CAST(%s AS TIME)" source
                   match handle session sql with
                   | session, ResultSet(_, [ [ actual ] ]) ->
@@ -3264,6 +3269,17 @@ let tests =
                           warnings
                           sql
                   | _, result -> failtestf "expected TIME CAST result for %s, got %A" sql result
+              let session, _ = handle session "CREATE TABLE time_cast_sources(id INT PRIMARY KEY,b BIT(8),x VARBINARY(2))"
+              let session, _ = handle session "INSERT INTO time_cast_sources VALUES (1,b'1',0x01),(2,b'110001',0x3132)"
+              match handle session "SELECT CAST(b AS TIME),CAST(x AS TIME) FROM time_cast_sources ORDER BY id" with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ None; None ]; [ Some "00:00:01"; Some "00:00:12" ] ] "binary column TIME casts"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect time value: '\\x01'"
+                        1292, "Truncated incorrect time value: '\\x01'" ]
+                      "binary column TIME warnings"
+              | _, result -> failtestf "expected binary-column TIME CAST results, got %A" result
 
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->

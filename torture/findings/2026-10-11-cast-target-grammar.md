@@ -162,3 +162,13 @@ accepted, with 4096 for two or more spaces; a space after the first colon
 instead leaves a numeric prefix. Fsdb now matches these nineteen value and
 warning cases. Other delimiters, source types, and the wider TIME conversion
 grammar remain open.
+
+TIME casts of bit and hex literals treat their bytes as text, rather than
+their numeric literal value. Thus `b'1'` and `0x01` return NULL with warning
+1292 containing `\x01`, while a byte spelling ASCII `1` casts to one second.
+The same behavior holds for audited stored BIT and VARBINARY columns. Fsdb
+previously returned zero without a warning for invalid bit literals; the
+focused regression and differential contract now cover both literal and
+column sources. A separate oracle probe found that TIME warnings stop at a
+NUL in a text literal but escape a NUL produced by `CONCAT`; that source
+distinction and other binary-producing expressions remain open.

@@ -3110,15 +3110,20 @@ let private numericCastSourceText = function
     | _ -> None
 
 let private numericCastDiagnosticText source (text: string) =
-    let preview =
+    let binarySource =
         match source with
-        | VBytes bytes ->
+        | VBytes bytes | VBinaryLiteral bytes -> Some bytes
+        | VBit(width, value) -> Some(Value.bitBytes width value)
+        | _ -> None
+    let preview =
+        match binarySource with
+        | Some bytes ->
             bytes
             |> Array.map (fun value ->
                 if value >= 0x20uy && value <= 0x7Euy then string (char value)
                 else sprintf "\\x%02X" value)
             |> String.concat ""
-        | _ ->
+        | None ->
             let text =
                 match text.IndexOf('\000') with
                 | -1 -> text
@@ -6145,14 +6150,15 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 match castYearValue source with
                 | Some result -> Ok result
                 | None -> coerce castMode source |> Result.mapError Storage.toMySqlError
-            | TTime fsp, (VString _ | VBytes _ | VEncodedString _ | VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
+            | TTime fsp, (VString _ | VBytes _ | VEncodedString _ | VBinaryLiteral _ | VBit _ | VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
                 let raw = Value.toText source |> Option.defaultValue ""
+                let warningText = numericCastDiagnosticText source raw
                 let isNumeric =
                     match source with
                     | VInt _ | VUInt _ | VDecimal _ | VDouble _ -> true
                     | _ -> false
                 let warn () =
-                    Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" raw)
+                    Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" warningText)
                 let warnSuperfluousSpace parsed prefixEnd =
                     let position =
                         if raw.StartsWith(" ") then Some 0
