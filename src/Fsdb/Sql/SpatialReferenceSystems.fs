@@ -29,8 +29,10 @@ type internal SpatialReferenceSystem =
 type private UtmZone =
     { Srid: int
       Name: string
+      GeographicDefinition: string
       CentralMeridian: int
-      FalseNorthing: int }
+      FalseNorthing: int
+      InverseFlattening: float }
 
 let private wgs84Definition =
     "GEOGCS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]"
@@ -79,24 +81,32 @@ let private utmDefinition name geographicDefinition centralMeridian falseNorthin
       sprintf ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"%d\"]]" srid ]
     |> String.concat ""
 
-let private etrs89Utm33NorthDefinition = utmDefinition "ETRS89 / UTM zone 33N" etrs89Definition 15 0 25833
+let private utmZone name geographicDefinition inverseFlattening baseSrid hemisphere falseNorthing zone =
+    { Srid = baseSrid + zone
+      Name = sprintf "%s / UTM zone %d%s" name zone hemisphere
+      GeographicDefinition = geographicDefinition
+      CentralMeridian = zone * 6 - 183
+      FalseNorthing = falseNorthing
+      InverseFlattening = inverseFlattening }
 
 let private wgs84UtmZones =
     [ for hemisphere, baseSrid, falseNorthing in [ "N", 32600, 0; "S", 32700, 10000000 ] do
         for zone in 1..60 do
-            { Srid = baseSrid + zone
-              Name = sprintf "WGS 84 / UTM zone %d%s" zone hemisphere
-              CentralMeridian = zone * 6 - 183
-              FalseNorthing = falseNorthing } ]
+            utmZone "WGS 84" wgs84Definition 298.257223563 baseSrid hemisphere falseNorthing zone ]
 
-let private wgs84UtmSystems =
-    wgs84UtmZones
+let private etrs89UtmZones =
+    [ for zone in 28..37 -> utmZone "ETRS89" etrs89Definition 298.257222101 25800 "N" 0 zone ]
+
+let private utmZones = wgs84UtmZones @ etrs89UtmZones
+
+let private utmSystems =
+    utmZones
     |> List.map (fun zone ->
         { Name = zone.Name
           Srid = zone.Srid
           Organization = Some "EPSG"
           OrganizationCoordinateSystemId = Some zone.Srid
-          Definition = utmDefinition zone.Name wgs84Definition zone.CentralMeridian zone.FalseNorthing zone.Srid
+          Definition = utmDefinition zone.Name zone.GeographicDefinition zone.CentralMeridian zone.FalseNorthing zone.Srid
           Description = None
           AxisOrder = LongitudeLatitude
           SemiMajorAxis = None
@@ -173,17 +183,8 @@ let internal all =
         AxisOrder = LongitudeLatitude
         SemiMajorAxis = None
         InverseFlattening = None
-        LinearUnitInMetres = Some 1.0 }
-      { Name = "ETRS89 / UTM zone 33N"
-        Srid = 25833
-        Organization = Some "EPSG"
-        OrganizationCoordinateSystemId = Some 25833
-        Definition = etrs89Utm33NorthDefinition
-        Description = None
-        AxisOrder = LongitudeLatitude
-        SemiMajorAxis = None
-        InverseFlattening = None
-        LinearUnitInMetres = Some 1.0 } ] @ wgs84UtmSystems
+        LinearUnitInMetres = Some 1.0 } ]
+    @ utmSystems
 
 let internal tryFind srid = all |> List.tryFind (fun referenceSystem -> referenceSystem.Srid = srid)
 
@@ -261,19 +262,14 @@ let private utmProjection centralMeridian inverseFlattening falseNorthing =
            -17.0 * n ** 3.0 / 480.0 + 37.0 * n ** 4.0 / 840.0
            -4397.0 * n ** 4.0 / 161280.0 |] }
 
-let private etrs89Utm33North = utmProjection 15.0 298.257222101 0.0
-
-let private wgs84UtmProjections =
-    wgs84UtmZones
+let private utmProjections =
+    utmZones
     |> List.map (fun zone ->
         zone.Srid,
-        utmProjection (float zone.CentralMeridian) 298.257223563 (float zone.FalseNorthing))
+        utmProjection (float zone.CentralMeridian) zone.InverseFlattening (float zone.FalseNorthing))
     |> Map.ofList
 
-let private tryUtmProjection srid =
-    match srid with
-    | 25833 -> Some etrs89Utm33North
-    | _ -> Map.tryFind srid wgs84UtmProjections
+let private tryUtmProjection srid = Map.tryFind srid utmProjections
 
 let private utmSeries coefficients (xi, eta) =
     coefficients

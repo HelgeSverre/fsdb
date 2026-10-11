@@ -15119,6 +15119,28 @@ let tests =
                         | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
                         | result -> failtestf "expected MySQL inverse UTM SRID %d coordinates, got %A" srid result
 
+                testCase "ETRS89 UTM zones 28N through 37N follow MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    match runDefault store "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID BETWEEN 25828 AND 25837" with
+                    | ResultSet(_, [ [ Some "10" ] ]) -> ()
+                    | result -> failtestf "expected ten ETRS89 UTM catalog rows, got %A" result
+                    let cases =
+                        [ 25828, 40.0, -15.0, 500000.0, 4427757.21862449
+                          25832, 59.9139, 10.7522, 597979.9028839062, 6643118.991370019
+                          25837, 40.0, 39.0, 500000.0, 4427757.21862449 ]
+                    for srid, latitude, longitude, easting, northing in cases do
+                        let transformed = sprintf "ST_Transform(ST_GeomFromText('POINT(%g %g)',4258),%d)" latitude longitude srid
+                        let sql = sprintf "SELECT ABS(ST_X(%s)-%.12f)<0.001,ABS(ST_Y(%s)-%.12f)<0.001" transformed easting transformed northing
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL ETRS89 UTM SRID %d coordinates, got %A" srid result
+                        let reverse = sprintf "ST_Transform(ST_GeomFromText('POINT(%.12f %.12f)',%d),4258)" easting northing srid
+                        let reverseSql = sprintf "SELECT ABS(ST_X(%s)-%.10f)<0.00000001,ABS(ST_Y(%s)-%.10f)<0.00000001" reverse latitude reverse longitude
+                        match runDefault store reverseSql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL inverse ETRS89 UTM SRID %d coordinates, got %A" srid result
+
                 testCase "projected transforms wrap geographic longitude"
                 <| fun _ ->
                     let store = newStore ()

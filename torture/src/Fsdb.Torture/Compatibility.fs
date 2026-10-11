@@ -3328,6 +3328,14 @@ module ContractCatalog =
                    "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(261881.59852399188 6243182.3545178175)',32734),4326)),8),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(261881.59852399188 6243182.3545178175)',32734),4326)),8)"
                |> Contract.comparingValues
                Contract.query
+                   "etrs89-utm-zone-catalog"
+                   "SELECT SRS_ID,SRS_NAME,DEFINITION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID BETWEEN 25828 AND 25837 ORDER BY SRS_ID"
+               |> Contract.comparingValues
+               Contract.query
+                   "etrs89-utm32-north-forward"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4258),25832)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4258),25832)),3),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4258),25832)),3)"
+               |> Contract.comparingValues
+               Contract.query
                    "world-mercator-forward"
                    "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5)"
                |> Contract.comparingValues
