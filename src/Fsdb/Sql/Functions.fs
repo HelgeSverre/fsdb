@@ -6390,6 +6390,32 @@ let private geometryPredicateFn functionName predicate =
         | GPoint _ | GMultiPoint _ -> true
         | _ -> false
 
+    let pointLineShapes first second =
+        let point = function GPoint(x, y) -> Some(x, y) | _ -> None
+        let lines = function
+            | GLineString members -> Some [ members ]
+            | GMultiLineString members when not members.IsEmpty -> Some members
+            | _ -> None
+        match point first, lines second with
+        | Some memberPoint, Some linework -> Some(false, memberPoint, linework)
+        | _ ->
+            match lines first, point second with
+            | Some linework, Some memberPoint -> Some(true, memberPoint, linework)
+            | _ -> None
+
+    let pointLinePredicate referenceSystem lineFirst point lines =
+        let position = geographicPointLinePosition referenceSystem point lines
+        let intersects = position <> GeographicPointLinePosition.Outside
+        let contained = position = GeographicPointLinePosition.Interior
+        match functionName with
+        | "ST_INTERSECTS" -> intersects
+        | "ST_DISJOINT" -> not intersects
+        | "ST_CONTAINS" -> lineFirst && contained
+        | "ST_WITHIN" -> not lineFirst && contained
+        | "ST_TOUCHES" -> position = GeographicPointLinePosition.Boundary
+        | "ST_EQUALS" -> false
+        | _ -> invalidArg (nameof functionName) "unsupported geographic topology predicate"
+
     let pointPolygonShapes first second =
         let points = function
             | GPoint(x, y) -> Some [ (x, y) ]
@@ -6440,8 +6466,12 @@ let private geometryPredicateFn functionName predicate =
                 | Some(polygonFirst, points, polygons) ->
                     Some(pointPolygonPredicate referenceSystem polygonFirst points polygons)
                 | None ->
-                    requirePlanar functionName first |> ignore
-                    predicate first second
+                    match pointLineShapes first.Shape second.Shape with
+                    | Some(lineFirst, point, lines) ->
+                        Some(pointLinePredicate referenceSystem lineFirst point lines)
+                    | None ->
+                        requirePlanar functionName first |> ignore
+                        predicate first second
             else predicate first second
 
         result

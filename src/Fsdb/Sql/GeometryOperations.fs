@@ -286,6 +286,45 @@ let internal geographicPointLineDistance referenceSystem point lines =
         let distance = geographicPointSegmentDistance referenceSystem point start endpoint
         Some(match minimum with None -> distance | Some current -> min current distance)) None
 
+[<RequireQualifiedAccess>]
+type internal GeographicPointLinePosition =
+    | Outside
+    | Interior
+    | Boundary
+
+let internal geographicPointLinePosition referenceSystem point lines =
+    let flattening = 1.0 / referenceSystem.InverseFlattening.Value
+    let azimuthAligned start endpoint query =
+        let segmentAzimuth = geographicSegmentAzimuth flattening start endpoint
+        let queryAzimuth = geographicSegmentAzimuth flattening start query
+        let difference = queryAzimuth - segmentAzimuth
+        let difference =
+            if difference > Math.PI then difference - 2.0 * Math.PI
+            elif difference <= -Math.PI then difference + 2.0 * Math.PI
+            else difference
+        // Boost's geographic side strategy compares azimuths at machine precision.
+        let machineEpsilon = Math.BitIncrement(1.0) - 1.0
+        abs difference <= machineEpsilon
+    let onSegment start endpoint =
+        point <> start && point <> endpoint
+        && azimuthAligned start endpoint point
+        && azimuthAligned endpoint start point
+    let onInterior =
+        lines
+        |> List.exists (List.pairwise >> List.exists (fun (start, endpoint) -> onSegment start endpoint))
+    if onInterior then GeographicPointLinePosition.Interior
+    elif lines |> List.exists (List.contains point) then
+        let endpointCount =
+            lines
+            |> List.sumBy (function
+                | [] -> 0
+                | line ->
+                    (if List.head line = point then 1 else 0)
+                    + (if List.last line = point then 1 else 0))
+        if endpointCount % 2 = 0 then GeographicPointLinePosition.Interior
+        else GeographicPointLinePosition.Boundary
+    else GeographicPointLinePosition.Outside
+
 let private geographicUnitVector (latitude, longitude) =
     let latitude, longitude = radians latitude, radians longitude
     cos latitude * cos longitude, cos latitude * sin longitude, sin latitude

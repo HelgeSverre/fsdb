@@ -14705,6 +14705,46 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1"; Some "0"; Some "0" ] ]) -> ()
                     | result -> failtestf "expected MySQL reverse geographic multipoint-polygon topology, got %A" result
 
+                testCase "geographic point-line topology distinguishes endpoints from interior"
+                <| fun _ ->
+                    let store = newStore ()
+                    let straight = "LINESTRING(0 0,0 2)"
+                    let joined = "MULTILINESTRING((0 0,0 1),(0 1,0 2))"
+                    let curved = "LINESTRING(50 0,50 10)"
+                    let cases =
+                        [ "POINT(0 1)", straight, [ 1; 1; 1; 0; 0; 0 ]
+                          "POINT(0 0)", straight, [ 1; 0; 0; 0; 1; 0 ]
+                          "POINT(1 1)", straight, [ 0; 0; 0; 1; 0; 0 ]
+                          "POINT(0.0000000001 1)", straight, [ 0; 0; 0; 1; 0; 0 ]
+                          "POINT(0 1)", joined, [ 1; 1; 1; 0; 0; 0 ]
+                          "POINT(0 0)", joined, [ 1; 0; 0; 0; 1; 0 ]
+                          "POINT(50.10782543788009 4.999987481758379)", curved, [ 0; 0; 0; 1; 0; 0 ]
+                          "POINT(0 180)", "LINESTRING(0 170,0 -170)", [ 1; 1; 1; 0; 0; 0 ]
+                          "POINT(0 100)", "LINESTRING(-20 100,20 100)", [ 1; 1; 1; 0; 0; 0 ]
+                          "POINT(10 5)", "LINESTRING(10 0,10 10)", [ 0; 0; 0; 1; 0; 0 ]
+                          "POINT(0 0)", "LINESTRING(0 0,0 2,1 2,0 0)", [ 1; 1; 1; 0; 0; 0 ] ]
+                    for pointText, lineText, expected in cases do
+                        let point = sprintf "ST_GeomFromText('%s',4326)" pointText
+                        let line = sprintf "ST_GeomFromText('%s',4326)" lineText
+                        let sql =
+                            [ sprintf "ST_Intersects(%s,%s)" point line
+                              sprintf "ST_Contains(%s,%s)" line point
+                              sprintf "ST_Within(%s,%s)" point line
+                              sprintf "ST_Disjoint(%s,%s)" point line
+                              sprintf "ST_Touches(%s,%s)" point line
+                              sprintf "ST_Equals(%s,%s)" point line ]
+                            |> String.concat ","
+                            |> sprintf "SELECT %s"
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = (expected |> List.map (string >> Some)) -> ()
+                        | result -> failtestf "expected MySQL geographic point-line topology for %s and %s, got %A" pointText lineText result
+                    let endpoint = "ST_GeomFromText('POINT(0 0)',4326)"
+                    let line = sprintf "ST_GeomFromText('%s',4326)" straight
+                    let sql = sprintf "SELECT ST_Intersects(%s,%s),ST_Disjoint(%s,%s),ST_Contains(%s,%s),ST_Within(%s,%s),ST_Touches(%s,%s),ST_Equals(%s,%s)" line endpoint line endpoint endpoint line line endpoint line endpoint line endpoint
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "0"; Some "0"; Some "1"; Some "0" ] ]) -> ()
+                    | result -> failtestf "expected MySQL reverse geographic point-line topology, got %A" result
+
                 testCase "geographic point-to-line distance follows geodesic segments"
                 <| fun _ ->
                     let store = newStore ()
