@@ -32,5 +32,11 @@ a `Limit` node in TREE (or `Limit/Offset` when an offset is present), while
 traditional and JSON plans keep the underlying table access. An explicit
 `LIMIT` overrides the session value. MySQL still validates missing tables
 under a zero limit. Fsdb now matches these SELECT plan distinctions and
-keeps the table validation. UNION's zero-limit result node and exact
-ANALYZE timing/cost presentation remain outside this focused change.
+keeps the table validation. A distinct UNION under zero limit keeps its
+traditional branch rows plus a `UNION RESULT` row with `Extra = Zero limit`,
+and TREE reduces to the synthetic zero-row plan. An unordered `UNION ALL`
+has no traditional result row; TREE retains a limit over Append. A global
+`ORDER BY` materializes even `UNION ALL`, yielding the zero-limit result
+row and TREE's synthetic zero-row plan. Fsdb now follows those distinctions.
+UNION's JSON hierarchy and exact ANALYZE timing/cost
+presentation remain open.

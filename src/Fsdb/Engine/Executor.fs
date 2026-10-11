@@ -20319,7 +20319,7 @@ let private renderExplainAnalyze (rows: ExplainRow list) (elapsedMilliseconds: f
 
     ResultSet([ "EXPLAIN" ], (root :: planRows) |> List.map (fun line -> [ Some line ]))
 
-let private renderExplainTree (limit: Expr option) (offset: Expr option) (rows: ExplainRow list) : QueryResult =
+let private renderExplainTree (limit: Expr option) (offset: Expr option) (append: bool) (rows: ExplainRow list) : QueryResult =
     let lines =
         rows
         |> List.sortBy (fun row -> row.Id |> Option.defaultValue System.Int32.MaxValue)
@@ -20329,6 +20329,12 @@ let private renderExplainTree (limit: Expr option) (offset: Expr option) (rows: 
             let estimate = row.Rows |> Option.map string |> Option.defaultValue "unknown"
             let details = if row.Extra.IsEmpty then "" else sprintf " (%s)" (String.concat "; " row.Extra)
             sprintf "-> %s on %s  (rows=%s)%s" access source estimate details)
+
+    let lines =
+        if append then
+            "-> Append" :: (lines |> List.map (fun line -> "    " + line))
+        else
+            lines
 
     let lines =
         match limit with
@@ -20361,6 +20367,14 @@ let private renderExplainZeroLimit format : QueryResult =
     | ExplainTree -> ResultSet([ "EXPLAIN" ], [ [ Some "-> Zero rows (Zero limit)  (cost=0..0 rows=0)" ] ])
     | ExplainAnalyze ->
         ResultSet([ "EXPLAIN" ], [ [ Some "-> Zero rows (Zero limit)  (actual rows=0 loops=1)" ] ])
+
+let private unionMaterializesResult (orderBy: OrderKey list) (rest: (SetOp * SelectStmt) list) =
+    not orderBy.IsEmpty
+    || (rest
+        |> List.exists (fun (operation, _) ->
+            match operation with
+            | OpUnion true -> false
+            | _ -> true))
 
 let private checksumTables (store: Store) (dbName: string) (tables: string list) (quick: bool) : QueryResult =
     let checksum tableName =
@@ -20430,9 +20444,13 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             | ExplainJson -> renderExplainJson rows
             | ExplainTree ->
                 match stmt with
-                | Select select -> renderExplainTree select.Limit select.Offset rows
-                | Union(_, _, _, limit, offset) -> renderExplainTree limit offset rows
-                | _ -> renderExplainTree None None rows
+                | Select select -> renderExplainTree select.Limit select.Offset false rows
+                | Union(_, rest, orderBy, Some limit, _)
+                    when unionMaterializesResult orderBy rest && rowCount limit = 0 ->
+                    renderExplainZeroLimit ExplainTree
+                | Union(_, rest, orderBy, limit, offset) ->
+                    renderExplainTree limit offset (not (unionMaterializesResult orderBy rest)) rows
+                | _ -> renderExplainTree None None false rows
             | ExplainAnalyze when analyzedStatements = 1 -> renderExplainAnalyze rows analyzedMilliseconds analyzedRows
             | ExplainAnalyze -> Err(1235, "EXPLAIN ANALYZE currently supports one SELECT")
         | Error e -> e
@@ -20491,8 +20509,11 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             | Ok() -> renderExplainZeroLimit format
         else
             finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc id selectType select))
-    | Union(first, rest, _, _, _) ->
+    | Union(first, rest, orderBy, limit, _) ->
         let id1 = nextId ()
+        let materializesResult = unionMaterializesResult orderBy rest
+        let zeroResult =
+            materializesResult && (limit |> Option.exists (fun expression -> rowCount expression = 0))
 
         finish (
             checkSelect first
@@ -20504,9 +20525,17 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                     let sid = nextId ()
                     explainSelectBlock store registry dbName nextId acc sid "UNION" s |> Result.map (fun () -> sid)))
             |> Result.map (fun restIds ->
-                if not restIds.IsEmpty then
+                if materializesResult && not restIds.IsEmpty then
                     let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
-                    acc.Add { Id = None; SelectType = "UNION RESULT"; Table = Some label; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
+                    acc.Add
+                        { Id = if zeroResult then Some(nextId ()) else None
+                          SelectType = "UNION RESULT"
+                          Table = if zeroResult then None else Some label
+                          Type = None
+                          Key = None
+                          Ref = None
+                          Rows = None
+                          Extra = if zeroResult then [ "Zero limit" ] else [] })
         )
     | Update u when not u.Ctes.IsEmpty ->
         let expressions =

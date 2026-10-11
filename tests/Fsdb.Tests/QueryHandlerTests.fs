@@ -4035,6 +4035,35 @@ let tests =
               | ResultSet(_, [ [ Some plan ] ]) -> Expect.stringContains plan "Zero rows (Zero limit)" "TREE names the limit"
               | other -> failtestf "expected zero-limit TREE plan, got %A" other
 
+              match handle session "EXPLAIN SELECT id FROM select_limit_plan UNION SELECT id FROM select_limit_plan" |> snd with
+              | ResultSet(_, [ first; second; result ]) ->
+                  Expect.equal first.[1] (Some "PRIMARY") "the first branch is retained"
+                  Expect.equal second.[1] (Some "UNION") "the second branch is retained"
+                  Expect.equal result.[1] (Some "UNION RESULT") "distinct UNION materializes a result"
+                  Expect.equal result.[2] None "zero-limit result has no table"
+                  Expect.equal result.[11] (Some "Zero limit") "the result row names the zero limit"
+              | other -> failtestf "expected a zero-limit UNION result row, got %A" other
+
+              match handle session "EXPLAIN FORMAT=TREE SELECT 1 UNION SELECT 2" |> snd with
+              | ResultSet(_, [ [ Some plan ] ]) -> Expect.stringContains plan "Zero rows (Zero limit)" "distinct UNION is eliminated at the result"
+              | other -> failtestf "expected a zero-limit UNION TREE plan, got %A" other
+
+              match handle session "EXPLAIN SELECT 1 UNION ALL SELECT 2" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows.Length 2 "UNION ALL has no materialized result row"
+              | other -> failtestf "expected UNION ALL branch plans, got %A" other
+
+              match handle session "EXPLAIN SELECT 2 AS n UNION ALL SELECT 1 ORDER BY n" |> snd with
+              | ResultSet(_, [ _; _; result ]) ->
+                  Expect.equal result.[1] (Some "UNION RESULT") "global ordering materializes UNION ALL"
+                  Expect.equal result.[11] (Some "Zero limit") "ordered UNION ALL reports the zero limit"
+              | other -> failtestf "expected an ordered UNION ALL result row, got %A" other
+
+              match handle session "EXPLAIN FORMAT=TREE SELECT 1 UNION ALL SELECT 2" |> snd with
+              | ResultSet(_, [ [ Some limit ]; [ Some append ]; _; _ ]) ->
+                  Expect.stringContains limit "Limit: 0 row(s)" "UNION ALL retains the limit node"
+                  Expect.stringContains append "Append" "UNION ALL combines branches without materialization"
+              | other -> failtestf "expected limited UNION ALL TREE plan, got %A" other
+
               match handle session "EXPLAIN SELECT id FROM select_limit_plan LIMIT 1" |> snd with
               | ResultSet(_, [ row ]) -> Expect.equal row.[2] (Some "select_limit_plan") "explicit LIMIT overrides session zero"
               | other -> failtestf "expected normal explicit-limit plan, got %A" other
