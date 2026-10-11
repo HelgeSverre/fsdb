@@ -14745,6 +14745,50 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "0"; Some "0"; Some "0"; Some "1"; Some "0" ] ]) -> ()
                     | result -> failtestf "expected MySQL reverse geographic point-line topology, got %A" result
 
+                testCase "geographic point-set crossing and overlap predicates respect dimension"
+                <| fun _ ->
+                    let store = newStore ()
+                    let line = "ST_GeomFromText('LINESTRING(0 0,0 2)',4326)"
+                    let polygon = "ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0))',4326)"
+                    let cases =
+                        [ "MULTIPOINT((0 1),(2 2))", line, [ Some "1"; Some "1"; None; None; Some "0"; Some "0" ]
+                          "MULTIPOINT((0 0),(2 2))", line, [ Some "0"; Some "1"; None; None; Some "0"; Some "1" ]
+                          "MULTIPOINT((0 1),(0 0))", line, [ Some "0"; Some "1"; None; None; Some "1"; Some "0" ]
+                          "POINT(0 1)", line, [ Some "0"; Some "1"; None; None; Some "1"; Some "0" ]
+                          "MULTIPOINT((1 1),(4 4))", polygon, [ Some "1"; Some "1"; None; None; Some "0"; Some "0" ]
+                          "MULTIPOINT((0 1),(4 4))", polygon, [ Some "0"; Some "1"; None; None; Some "0"; Some "1" ]
+                          "POINT(1 1)", polygon, [ Some "0"; Some "1"; None; None; Some "1"; Some "0" ] ]
+                    for pointsText, other, expected in cases do
+                        let points = sprintf "ST_GeomFromText('%s',4326)" pointsText
+                        let sql = sprintf "SELECT ST_Crosses(%s,%s),ST_Intersects(%s,%s),ST_Crosses(%s,%s),ST_Overlaps(%s,%s),ST_Contains(%s,%s),ST_Touches(%s,%s)" points other points other other points points other other points points other
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = expected -> ()
+                        | result -> failtestf "expected MySQL geographic point-set topology for %s, got %A" pointsText result
+                    let line = "ST_GeomFromText('LINESTRING(-1 1,4 1)',4326)"
+                    let sql = sprintf "SELECT ST_Crosses(%s,%s),ST_Overlaps(%s,%s),ST_Crosses(%s,%s)" polygon line line polygon polygon polygon
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ None; None; None ] ]) -> ()
+                    | result -> failtestf "expected MySQL geographic dimensional NULLs, got %A" result
+
+                testCase "planar crossing and overlap predicates follow MySQL dimensions"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "POINT(0 1)", "LINESTRING(0 0,0 2)", [ Some "0"; None; None; None ]
+                          "MULTIPOINT((0 1),(2 2))", "LINESTRING(0 0,0 2)", [ Some "1"; None; None; None ]
+                          "LINESTRING(0 0,0 2)", "LINESTRING(-1 1,1 1)", [ Some "1"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(0 0,0 2)", "LINESTRING(0 1,0 3)", [ Some "0"; Some "0"; Some "1"; Some "1" ]
+                          "LINESTRING(-1 1,4 1)", "POLYGON((0 0,0 3,3 3,3 0,0 0))", [ Some "1"; None; None; None ]
+                          "POLYGON((0 0,0 4,4 4,4 0,0 0))", "POLYGON((2 2,2 6,6 6,6 2,2 2))", [ None; None; Some "1"; Some "1" ]
+                          "MULTIPOINT((0 0),(1 1))", "MULTIPOINT((1 1),(2 2))", [ None; None; Some "1"; Some "1" ] ]
+                    for firstText, secondText, expected in cases do
+                        let first = sprintf "ST_GeomFromText('%s')" firstText
+                        let second = sprintf "ST_GeomFromText('%s')" secondText
+                        let sql = sprintf "SELECT ST_Crosses(%s,%s),ST_Crosses(%s,%s),ST_Overlaps(%s,%s),ST_Overlaps(%s,%s)" first second second first first second second first
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = expected -> ()
+                        | result -> failtestf "expected MySQL planar topology for %s and %s, got %A" firstText secondText result
+
                 testCase "geographic line intersections follow geodesic segments"
                 <| fun _ ->
                     let store = newStore ()

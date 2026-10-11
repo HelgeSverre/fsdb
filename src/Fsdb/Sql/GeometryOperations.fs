@@ -562,6 +562,19 @@ let private toNts (geometry: Geometry) =
     value.SRID <- geometry.Srid
     value
 
+let internal geometryCrossesPlanar first second =
+    let first, second = toNts first, toNts second
+    if first.IsEmpty || second.IsEmpty then None
+    else
+        match int first.Dimension, int second.Dimension with
+        | 0, 1 | 0, 2 | 1, 1 | 1, 2 -> Some(first.Crosses second)
+        | _ -> None
+
+let internal geometryOverlapsPlanar first second =
+    let first, second = toNts first, toNts second
+    if first.IsEmpty || second.IsEmpty || first.Dimension <> second.Dimension then None
+    else Some(first.Overlaps second)
+
 let private fromNts srid (geometry: NetTopologySuite.Geometries.Geometry) =
     if geometry.IsEmpty then
         Ok { Srid = srid; Shape = GEmpty }

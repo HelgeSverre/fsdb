@@ -3045,6 +3045,14 @@ module ContractCatalog =
                    "SELECT ST_Intersects(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326), ST_GeomFromText('POLYGON((1 1,1 2,2 2,2 1,1 1))',4326)), ST_Disjoint(ST_GeomFromText('POLYGON((0 0,0 5,5 5,5 0,0 0),(1 1,4 1,4 4,1 4,1 1))',4326), ST_GeomFromText('POLYGON((2 2,2 3,3 3,3 2,2 2))',4326))"
                |> Contract.comparingValues
                Contract.query
+                   "geographic-point-set-crosses"
+                   "SELECT ST_Crosses(ST_GeomFromText('MULTIPOINT((0 1),(2 2))',4326), ST_GeomFromText('LINESTRING(0 0,0 2)',4326)), ST_Crosses(ST_GeomFromText('LINESTRING(0 0,0 2)',4326), ST_GeomFromText('MULTIPOINT((0 1),(2 2))',4326)), ST_Overlaps(ST_GeomFromText('MULTIPOINT((0 1),(2 2))',4326), ST_GeomFromText('LINESTRING(0 0,0 2)',4326)), ST_Crosses(ST_GeomFromText('MULTIPOINT((1 1),(4 4))',4326), ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0))',4326))"
+               |> Contract.comparingValues
+               Contract.query
+                   "planar-crosses-overlaps"
+                   "SELECT ST_Crosses(ST_GeomFromText('LINESTRING(0 0,0 2)'), ST_GeomFromText('LINESTRING(-1 1,1 1)')), ST_Overlaps(ST_GeomFromText('LINESTRING(0 0,0 2)'), ST_GeomFromText('LINESTRING(0 1,0 3)')), ST_Crosses(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))'), ST_GeomFromText('POLYGON((2 2,2 6,6 6,6 2,2 2))')), ST_Overlaps(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))'), ST_GeomFromText('POLYGON((2 2,2 6,6 6,6 2,2 2))'))"
+               |> Contract.comparingValues
+               Contract.query
                    "geographic-line-near-miss"
                    "SELECT ROUND(ST_Distance(ST_GeomFromText('LINESTRING(50 0,50 10)',4326), ST_GeomFromText('LINESTRING(50.10784 5,51 5)',4326)), 2)"
                |> Contract.comparingValues

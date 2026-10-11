@@ -233,11 +233,12 @@ or locking retain the general SELECT pipeline.
 - OGC geometry construction, serialization, inspection, coordinate swapping,
   line interpolation, and member access,
   including typed text/binary constructors, line endpoints and indexing,
-  polygon rings, multi-geometry members, and closure checks.
+  polygon rings, multi-geometry members, closure checks, and planar
+  `ST_Crosses`/`ST_Overlaps` with MySQL's dimension-dependent NULL results.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | near-tangent geographic crossings, line/line, line/polygon, and polygon/polygon topology beyond intersects/disjoint, and reference systems beyond EPSG 4326/3857/3395/4258/4269 | low |
+| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; near-tangent crossings, non-point geographic `ST_Crosses`/`ST_Overlaps` and other topology beyond intersects/disjoint, and reference systems beyond EPSG 4326/3857/3395/4258/4269 remain | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones

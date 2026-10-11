@@ -6784,7 +6784,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY" | "ST_ISVALID" | "ST_ISCLOSED" | "ST_NUMPOINTS"
           | "ST_NUMINTERIORRING" | "ST_NUMINTERIORRINGS" | "ST_NUMGEOMETRIES"), _ ->
             simple TypeLongLong
-        | ("ST_CONTAINS" | "ST_WITHIN" | "ST_INTERSECTS" | "ST_DISJOINT" | "ST_TOUCHES" | "ST_EQUALS" | "MBRCONTAINS" | "MBRWITHIN"
+        | ("ST_CONTAINS" | "ST_WITHIN" | "ST_INTERSECTS" | "ST_DISJOINT" | "ST_TOUCHES" | "ST_EQUALS" | "ST_CROSSES" | "ST_OVERLAPS" | "MBRCONTAINS" | "MBRWITHIN"
           | "MBRINTERSECTS"), _ -> simple TypeLongLong
         | ("ST_X" | "ST_Y" | "X" | "Y" | "ST_DISTANCE" | "ST_DISTANCE_SPHERE" | "ST_LENGTH"), _ -> simple TypeDouble
         | ("JSON_QUOTE" | "JSON_PRETTY"), _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }

@@ -6390,6 +6390,12 @@ let private geometryPredicateFn functionName predicate =
         | GPoint _ | GMultiPoint _ -> true
         | _ -> false
 
+    let dimension = function
+        | GPoint _ | GMultiPoint _ -> Some 0
+        | GLineString _ | GMultiLineString _ -> Some 1
+        | GPolygon _ | GMultiPolygon _ -> Some 2
+        | _ -> None
+
     let linework = function
         | GLineString members -> Some [ members ]
         | GMultiLineString members when not members.IsEmpty -> Some members
@@ -6400,26 +6406,35 @@ let private geometryPredicateFn functionName predicate =
         | GMultiPolygon members when not members.IsEmpty -> Some members
         | _ -> None
 
+    let pointMembers = function
+        | GPoint(x, y) -> Some [ (x, y) ]
+        | GMultiPoint members when not members.IsEmpty -> Some members
+        | _ -> None
+
     let pointLineShapes first second =
-        let point = function GPoint(x, y) -> Some(x, y) | _ -> None
-        match point first, linework second with
-        | Some memberPoint, Some linework -> Some(false, memberPoint, linework)
+        match pointMembers first, linework second with
+        | Some members, Some lines -> Some(false, members, lines)
         | _ ->
-            match linework first, point second with
-            | Some linework, Some memberPoint -> Some(true, memberPoint, linework)
+            match linework first, pointMembers second with
+            | Some lines, Some members -> Some(true, members, lines)
             | _ -> None
 
-    let pointLinePredicate referenceSystem lineFirst point lines =
-        let position = geographicPointLinePosition referenceSystem point lines
-        let intersects = position <> GeographicPointLinePosition.Outside
-        let contained = position = GeographicPointLinePosition.Interior
+    let pointLinePredicate referenceSystem lineFirst points lines =
+        let positions = points |> List.map (fun point -> geographicPointLinePosition referenceSystem point lines)
+        let hasOutside = positions |> List.contains GeographicPointLinePosition.Outside
+        let hasInterior = positions |> List.contains GeographicPointLinePosition.Interior
+        let hasBoundary = positions |> List.contains GeographicPointLinePosition.Boundary
+        let intersects = hasInterior || hasBoundary
+        let contained = not hasOutside && hasInterior
         match functionName with
-        | "ST_INTERSECTS" -> intersects
-        | "ST_DISJOINT" -> not intersects
-        | "ST_CONTAINS" -> lineFirst && contained
-        | "ST_WITHIN" -> not lineFirst && contained
-        | "ST_TOUCHES" -> position = GeographicPointLinePosition.Boundary
-        | "ST_EQUALS" -> false
+        | "ST_INTERSECTS" -> Some intersects
+        | "ST_DISJOINT" -> Some(not intersects)
+        | "ST_CONTAINS" -> Some(lineFirst && contained)
+        | "ST_WITHIN" -> Some(not lineFirst && contained)
+        | "ST_TOUCHES" -> Some(hasBoundary && not hasInterior)
+        | "ST_EQUALS" -> Some false
+        | "ST_CROSSES" -> if lineFirst then None else Some(hasInterior && hasOutside)
+        | "ST_OVERLAPS" -> None
         | _ -> invalidArg (nameof functionName) "unsupported geographic topology predicate"
 
     let lineOrPolygonIntersects referenceSystem first second =
@@ -6434,14 +6449,10 @@ let private geometryPredicateFn functionName predicate =
         | _ -> None
 
     let pointPolygonShapes first second =
-        let points = function
-            | GPoint(x, y) -> Some [ (x, y) ]
-            | GMultiPoint members when not members.IsEmpty -> Some members
-            | _ -> None
-        match points first, polygons second with
+        match pointMembers first, polygons second with
         | Some members, Some areas -> Some(false, members, areas)
         | _ ->
-            match polygons first, points second with
+            match polygons first, pointMembers second with
             | Some areas, Some members -> Some(true, members, areas)
             | _ -> None
 
@@ -6457,12 +6468,14 @@ let private geometryPredicateFn functionName predicate =
         let intersects = hasInterior || hasBoundary
         let contained = not hasOutside && hasInterior
         match functionName with
-        | "ST_INTERSECTS" -> intersects
-        | "ST_DISJOINT" -> not intersects
-        | "ST_CONTAINS" -> polygonFirst && contained
-        | "ST_WITHIN" -> not polygonFirst && contained
-        | "ST_TOUCHES" -> hasBoundary && not hasInterior
-        | "ST_EQUALS" -> false
+        | "ST_INTERSECTS" -> Some intersects
+        | "ST_DISJOINT" -> Some(not intersects)
+        | "ST_CONTAINS" -> Some(polygonFirst && contained)
+        | "ST_WITHIN" -> Some(not polygonFirst && contained)
+        | "ST_TOUCHES" -> Some(hasBoundary && not hasInterior)
+        | "ST_EQUALS" -> Some false
+        | "ST_CROSSES" -> if polygonFirst then None else Some(hasInterior && hasOutside)
+        | "ST_OVERLAPS" -> None
         | _ -> invalidArg (nameof functionName) "unsupported geographic topology predicate"
 
     function
@@ -6475,24 +6488,35 @@ let private geometryPredicateFn functionName predicate =
         let referenceSystem = spatialReferenceSystem functionName first.Srid
         let result =
             if referenceSystem.SemiMajorAxis.IsSome && not (pointSet first.Shape && pointSet second.Shape) then
-                match pointPolygonShapes first.Shape second.Shape with
-                | Some(polygonFirst, points, polygons) ->
-                    Some(pointPolygonPredicate referenceSystem polygonFirst points polygons)
-                | None ->
-                    match pointLineShapes first.Shape second.Shape with
-                    | Some(lineFirst, point, lines) ->
-                        Some(pointLinePredicate referenceSystem lineFirst point lines)
+                let undefinedDimensions =
+                    match functionName, dimension first.Shape, dimension second.Shape with
+                    | "ST_CROSSES", Some firstDimension, Some secondDimension ->
+                        match firstDimension, secondDimension with
+                        | 0, 1 | 0, 2 | 1, 1 | 1, 2 -> false
+                        | _ -> true
+                    | "ST_OVERLAPS", Some firstDimension, Some secondDimension ->
+                        firstDimension <> secondDimension
+                    | _ -> false
+                if undefinedDimensions then None
+                else
+                    match pointPolygonShapes first.Shape second.Shape with
+                    | Some(polygonFirst, points, polygons) ->
+                        pointPolygonPredicate referenceSystem polygonFirst points polygons
                     | None ->
-                        let intersects =
-                            match functionName with
-                            | "ST_INTERSECTS" | "ST_DISJOINT" ->
-                                lineOrPolygonIntersects referenceSystem first.Shape second.Shape
-                            | _ -> None
-                        match intersects with
-                        | Some value -> Some(if functionName = "ST_INTERSECTS" then value else not value)
+                        match pointLineShapes first.Shape second.Shape with
+                        | Some(lineFirst, points, lines) ->
+                            pointLinePredicate referenceSystem lineFirst points lines
                         | None ->
-                            requirePlanar functionName first |> ignore
-                            predicate first second
+                            let intersects =
+                                match functionName with
+                                | "ST_INTERSECTS" | "ST_DISJOINT" ->
+                                    lineOrPolygonIntersects referenceSystem first.Shape second.Shape
+                                | _ -> None
+                            match intersects with
+                            | Some value -> Some(if functionName = "ST_INTERSECTS" then value else not value)
+                            | None ->
+                                requirePlanar functionName first |> ignore
+                                predicate first second
             else predicate first second
 
         result
@@ -6619,6 +6643,8 @@ let private registerSpatialBuiltins registry =
         "ST_DISJOINT"
         (geometryPredicateFn "ST_DISJOINT" (fun first second -> geometryIntersectsPlanar first second |> Option.map not))
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
+    |> registerScalar "ST_CROSSES" (geometryPredicateFn "ST_CROSSES" GeometryOperations.geometryCrossesPlanar)
+    |> registerScalar "ST_OVERLAPS" (geometryPredicateFn "ST_OVERLAPS" GeometryOperations.geometryOverlapsPlanar)
     |> registerScalarResult "ST_BUFFER" binaryResult geometryBufferFn
     |> registerScalarResult
         "ST_BUFFER_STRATEGY"
