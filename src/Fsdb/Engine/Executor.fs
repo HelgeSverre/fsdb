@@ -11669,6 +11669,23 @@ and private reorderNullRejectedLeftJoin
     (dbName: string)
     (select: SelectStmt)
     : SelectStmt * Value[] list option =
+    // Use the equivalent range only to choose indexed candidates; retain the
+    // original WHERE expression for row evaluation and diagnostics.
+    let indexedPredicate = function
+        | Not(BinOp((Lt | Lte | Gt | Gte as comparison), left, right)) as predicate ->
+            let inverted =
+                match comparison with
+                | Lt -> Gte
+                | Lte -> Gt
+                | Gt -> Lte
+                | Gte -> Lt
+                | _ -> comparison
+            match left, right with
+            | QualifiedCol _, LiteralValue _
+            | LiteralValue _, QualifiedCol _ -> BinOp(inverted, left, right)
+            | _ -> predicate
+        | predicate -> predicate
+
     let rec rejectsNull (qualifier: string) =
         function
         | BinOp(And, left, right) -> rejectsNull qualifier left || rejectsNull qualifier right
@@ -11700,6 +11717,7 @@ and private reorderNullRejectedLeftJoin
                 | Ok(Some _) ->
                     select.Where
                     |> optionalConjuncts
+                    |> List.map indexedPredicate
                     |> List.tryFind (rejectsNull rightQualifier)
                     |> Option.bind (fun predicate ->
                         tryPhysicalTableRef store dbName rightRef

@@ -81,6 +81,16 @@ predicates have the same MySQL 8.4.11 counts: four examined rows without a
 limit and two with `LIMIT 1`. Both are strict on a null-padded `b.id`, and
 fsdb now selects their indexed candidates for the same join conversion.
 
+MySQL 8.4.11 also folds strict negated range comparisons before choosing the
+join order. On the same fixture, `WHERE NOT (b.id>2)` returns `(1,1)` and
+`(1,2)` with four rows examined; `WHERE NOT (b.id<3)` returns `(2,3)` with
+three examined. Fsdb formerly examined seven for both. It now uses the
+equivalent inclusive range to select indexed right-side candidates while
+evaluating the original `WHERE` condition for the result. In contrast,
+`WHERE (b.id=1 OR b.id=2) IS TRUE` examined seven rows in MySQL, despite
+rejecting a null-padded right row, so that form is not included in this
+indexed join conversion.
+
 The symmetric null-rejected `RIGHT JOIN ... WHERE a.id<2` already matches
 MySQL's observed counts: with an index on `b.left_id`, two result rows examine
 three candidates, or two with `LIMIT 1`; without that index, the full query
