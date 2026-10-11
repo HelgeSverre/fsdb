@@ -952,6 +952,19 @@ module ContractCatalog =
                      "convert-invalid-utf32", "CONVERT(0x00110000 USING utf32)" ] do
                    yield Contract.query name (sprintf "SELECT HEX(%s)" expression) |> Contract.comparingValues
                    yield Contract.query (name + "-warnings") "SHOW WARNINGS" |> Contract.comparingValues
+               for charset, hex in
+                   [ "sjis", "82"
+                     "cp932", "82"
+                     "big5", "81"
+                     "gbk", "81"
+                     "gb2312", "A1"
+                     "gb18030", "81"
+                     "euckr", "A1"
+                     "ujis", "8F" ] do
+                   let name = "convert-incomplete-" + charset
+                   yield Contract.query name (sprintf "SELECT HEX(CONVERT(0x%s USING %s))" hex charset)
+                         |> Contract.comparingValues
+                   yield Contract.query (name + "-warnings") "SHOW WARNINGS" |> Contract.comparingValues
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

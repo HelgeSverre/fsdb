@@ -1033,6 +1033,29 @@ let tests =
                     | ResultSet(_, [ [ Some "D800"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected UCS-2 code unit bytes to survive, got %A" other
 
+                testCase "CONVERT rejects incomplete legacy multibyte sequences with warnings"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for charset, hex in
+                        [ "sjis", "82"
+                          "cp932", "82"
+                          "big5", "81"
+                          "gbk", "81"
+                          "gb2312", "A1"
+                          "gb18030", "81"
+                          "euckr", "A1"
+                          "ujis", "8F" ] do
+                        let sql = sprintf "SELECT HEX(CONVERT(0x%s USING %s))" hex charset
+                        let result, warnings = Fsdb.Diagnostics.capture (fun () -> runDefault store sql)
+                        match result with
+                        | ResultSet(_, [ [ None ] ]) -> ()
+                        | other -> failtestf "expected NULL for %s, got %A" sql other
+                        Expect.equal
+                            (warnings |> List.map (fun warning -> warning.Code, warning.Message))
+                            [ 1300, sprintf "Invalid %s character string: '%s'" charset hex ]
+                            (sprintf "%s warning" charset)
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

@@ -21,5 +21,13 @@ Invalid ASCII bytes remain available with their original byte values and
 warning 1300. UCS-2 retains an isolated surrogate code unit and emits only
 its deprecation warning. Fsdb now follows these audited outcomes; focused
 regressions pin invalid UTF-8, ASCII, and UCS-2 behavior, while the
-differential contract checks the broader value-and-warning matrix. Other
-legacy codecs and invalid-input contexts remain open.
+differential contract checks the broader value-and-warning matrix.
+
+The next oracle matrix covered an incomplete lead byte in each supported
+multibyte legacy family: SJIS, CP932, Big5, GBK, GB2312, GB18030, EUC-KR,
+and UJIS. MySQL returned NULL and one warning 1300 naming the charset and
+the invalid lead byte. Fsdb now reuses its existing binary-literal byte
+validator at conversion time and matches those value-and-warning outcomes.
+Some single-byte codecs differ: CP1251 preserves byte `98` with warning 1300,
+while TIS-620 preserves byte `80` without a warning. The broader single-byte
+invalid-byte matrix and other conversion contexts remain open.
