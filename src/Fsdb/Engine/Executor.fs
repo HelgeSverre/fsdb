@@ -6005,8 +6005,12 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | result -> result)
                 |> Result.mapError Storage.toMySqlError
             | (TDouble _ | TFloat _), _ ->
+                let truncatedText =
+                    match source with
+                    | VString text -> truncatedNumericCastInput text
+                    | _ -> false
                 match source with
-                | VString text when truncatedNumericCastInput text ->
+                | VString text when truncatedText ->
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
                 | _ -> ()
                 coerce castMode v
@@ -6015,7 +6019,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | VDouble value when System.Double.IsInfinity value ->
                         match ty, source with
                         | TDouble _, VString text ->
-                            Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
+                            if not truncatedText then
+                                Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
                             Ok(VDouble(if value < 0.0 then -System.Double.MaxValue else System.Double.MaxValue))
                         | _ -> Error(1690, sprintf "DOUBLE value is out of range in '%s'" (SqlText.expression expr))
                     | result -> Ok result)

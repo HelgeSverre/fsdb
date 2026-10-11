@@ -65,7 +65,9 @@ DOUBLE and FLOAT CAST text conversion now follows the same audited numeric-prefi
 warning rule. MySQL returns zero with warning 1292 for `abc` and `nan`, and the
 parsed prefix with that warning for `12x`. For a string beyond DOUBLE's range,
 such as `1e309`, it returns signed `Double.MaxValue` with warning 1292. A
-single-precision `FLOAT` overflow such as `1e39` instead raises error 1690,
+value such as `1e309x` is both truncated and overflowing, but still produces
+only one warning 1292. A single-precision `FLOAT` overflow such as `1e39`
+instead raises error 1690,
 SQLSTATE 22003. Fsdb previously omitted the text warnings and did not apply
 these distinct overflow outcomes. Focused tests and differential contract
 steps cover the values and diagnostics. Other source types and numeric

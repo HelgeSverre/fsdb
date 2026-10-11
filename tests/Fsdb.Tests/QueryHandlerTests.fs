@@ -2958,6 +2958,8 @@ let tests =
                     "SELECT CAST('12x' AS DOUBLE)", "12", "12x"
                     "SELECT CAST('1e309' AS DOUBLE)", "1.7976931348623157e308", "1e309"
                     "SELECT CAST('-1e309' AS DOUBLE)", "-1.7976931348623157e308", "-1e309"
+                    "SELECT CAST('1e309x' AS DOUBLE)", "1.7976931348623157e308", "1e309x"
+                    "SELECT CAST('-1e309x' AS DOUBLE)", "-1.7976931348623157e308", "-1e309x"
                     "SELECT CAST('nan' AS DOUBLE)", "0", "nan" ] do
                   match handle session sql with
                   | session, ResultSet(_, [ [ Some actual ] ]) ->
