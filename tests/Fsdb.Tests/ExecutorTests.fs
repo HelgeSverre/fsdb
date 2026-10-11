@@ -15079,6 +15079,23 @@ let tests =
                     | ResultSet(_, [ [ Some "WGS 84 / UTM zone 33N" ] ]) -> ()
                     | result -> failtestf "expected UTM zone 33N catalog row, got %A" result
 
+                testCase "ETRS89 UTM zone 33N uses the GRS 1980 ellipsoid"
+                <| fun _ ->
+                    let store = newStore ()
+                    let forward = "ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4258),25833)"
+                    let forwardSql = sprintf "SELECT ABS(ST_X(%s)-262560.4821812616)<0.001,ABS(ST_Y(%s)-6649443.583972801)<0.001" forward forward
+                    match runDefault store forwardSql with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL ETRS89 UTM 33N forward coordinates, got %A" result
+                    let reverse = "ST_Transform(ST_GeomFromText('POINT(262560.48218418856 6649443.584095765)',25833),4326)"
+                    let reverseSql = sprintf "SELECT ABS(ST_X(%s)-59.91390000110276)<0.00000001,ABS(ST_Y(%s)-10.752199999911273)<0.00000001" reverse reverse
+                    match runDefault store reverseSql with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL ETRS89 UTM 33N inverse coordinates, got %A" result
+                    match runDefault store "SELECT SRS_NAME FROM INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=25833" with
+                    | ResultSet(_, [ [ Some "ETRS89 / UTM zone 33N" ] ]) -> ()
+                    | result -> failtestf "expected ETRS89 UTM 33N catalog row, got %A" result
+
                 testCase "projected transforms wrap geographic longitude"
                 <| fun _ ->
                     let store = newStore ()

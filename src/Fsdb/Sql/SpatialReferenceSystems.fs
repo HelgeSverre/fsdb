@@ -61,17 +61,20 @@ let private worldMercatorDefinition =
       ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"3395\"]]" ]
     |> String.concat ""
 
-let private utm33NorthDefinition =
-    [ "PROJCS[\"WGS 84 / UTM zone 33N\","
-      wgs84Definition
+let private utmNorthDefinition name geographicDefinition centralMeridian srid =
+    [ sprintf "PROJCS[\"%s\"," name
+      geographicDefinition
       ",PROJECTION[\"Transverse Mercator\",AUTHORITY[\"EPSG\",\"9807\"]]"
       ",PARAMETER[\"Latitude of natural origin\",0,AUTHORITY[\"EPSG\",\"8801\"]]"
-      ",PARAMETER[\"Longitude of natural origin\",15,AUTHORITY[\"EPSG\",\"8802\"]]"
+      sprintf ",PARAMETER[\"Longitude of natural origin\",%d,AUTHORITY[\"EPSG\",\"8802\"]]" centralMeridian
       ",PARAMETER[\"Scale factor at natural origin\",0.9996,AUTHORITY[\"EPSG\",\"8805\"]]"
       ",PARAMETER[\"False easting\",500000,AUTHORITY[\"EPSG\",\"8806\"]]"
       ",PARAMETER[\"False northing\",0,AUTHORITY[\"EPSG\",\"8807\"]]"
-      ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"32633\"]]" ]
+      sprintf ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"%d\"]]" srid ]
     |> String.concat ""
+
+let private utm33NorthDefinition = utmNorthDefinition "WGS 84 / UTM zone 33N" wgs84Definition 15 32633
+let private etrs89Utm33NorthDefinition = utmNorthDefinition "ETRS89 / UTM zone 33N" etrs89Definition 15 25833
 
 let internal all =
     [ { Name = ""
@@ -153,6 +156,16 @@ let internal all =
         AxisOrder = LongitudeLatitude
         SemiMajorAxis = None
         InverseFlattening = None
+        LinearUnitInMetres = Some 1.0 }
+      { Name = "ETRS89 / UTM zone 33N"
+        Srid = 25833
+        Organization = Some "EPSG"
+        OrganizationCoordinateSystemId = Some 25833
+        Definition = etrs89Utm33NorthDefinition
+        Description = None
+        AxisOrder = LongitudeLatitude
+        SemiMajorAxis = None
+        InverseFlattening = None
         LinearUnitInMetres = Some 1.0 } ]
 
 let internal tryFind srid = all |> List.tryFind (fun referenceSystem -> referenceSystem.Srid = srid)
@@ -230,6 +243,7 @@ let private utmProjection centralMeridian inverseFlattening =
            -4397.0 * n ** 4.0 / 161280.0 |] }
 
 let private utm33North = utmProjection 15.0 298.257223563
+let private etrs89Utm33North = utmProjection 15.0 298.257222101
 
 let private utmSeries coefficients (xi, eta) =
     coefficients
@@ -304,6 +318,7 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         | 3857 -> Some pseudoMercatorInverse
         | 3395 -> Some worldMercatorInverse
         | 32633 -> Some (utmInverse utm33North)
+        | 25833 -> Some (utmInverse etrs89Utm33North)
         | _ -> None
     let fromWgs84 =
         match targetSrid with
@@ -312,6 +327,7 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         | 3857 -> Some pseudoMercatorForward
         | 3395 -> Some worldMercatorForward
         | 32633 -> Some (utmForward utm33North)
+        | 25833 -> Some (utmForward etrs89Utm33North)
         | _ -> None
     Option.map2 compose toWgs84 fromWgs84
 
