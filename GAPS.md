@@ -243,7 +243,9 @@ or locking retain the general SELECT pipeline.
 [`CHAR()`](torture/findings/2026-10-12-char-byte-assembly.md) now assembles
 integer arguments as binary bytes instead of Unicode characters, including
 audited 32-bit wrap, half rounding, NULL skipping, and downstream high-byte
-TIME warnings; string-argument diagnostics and `CHAR(... USING charset)`
+TIME warnings. Audited text arguments use an integer prefix, preserve
+argument-order warnings, and clamp signed/unsigned overflow; byte-string
+high-byte diagnostics, `CHAR(... USING charset)`, and unusual source domains
 remain open.
 
 | Missing family | Functions | Impact |

@@ -13,5 +13,14 @@ The focused regression covers values and a downstream TIME warning; the
 MySQL differential contract compares byte assembly, direct returned values,
 and escaped high-byte diagnostics through binary `CONCAT`.
 
-String-to-integer argument warnings, `CHAR(... USING charset)`, and the
-remaining large or unusual numeric source domains are outside this audit.
+MySQL parses text arguments as integer prefixes, distinct from numeric
+arguments: `CHAR('1.5')` contributes `01` and warning 1292, while numeric
+`CHAR(1.5)` contributes `02` without a warning. Invalid text contributes
+`00` with warning 1292; trailing text warns, but surrounding spaces do not.
+Warnings follow argument order. Audited positive text overflow clamps to
+unsigned 64-bit maximum, negative overflow to signed 64-bit minimum, each
+with one warning before 32-bit byte assembly. Fsdb now matches those values
+and conditions in focused and differential tests.
+
+Byte-string high-byte diagnostics, `CHAR(... USING charset)`, and the
+remaining unusual numeric source domains are outside this audit.

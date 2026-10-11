@@ -3309,6 +3309,34 @@ let tests =
                       "binary CHAR result retains its byte in TIME diagnostics"
               | _, result -> failtestf "expected CHAR byte TIME CAST result, got %A" result
 
+          testCase "CHAR text arguments use integer prefixes and ordered warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT HEX(CHAR('49x')),HEX(CHAR('abc')),HEX(CHAR('')),HEX(CHAR(' 49')),HEX(CHAR('49 ')),HEX(CHAR('1.5')),HEX(CHAR('1e2')),HEX(CHAR('-1')),HEX(CHAR(_binary'49x')),HEX(CHAR(0x343978))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "31"; Some "00"; Some "00"; Some "31"; Some "31"; Some "01"; Some "01"; Some "FFFFFFFF"; Some "31"; Some "343978" ] "CHAR integer prefixes"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect INTEGER value: '49x'"
+                        1292, "Truncated incorrect INTEGER value: 'abc'"
+                        1292, "Truncated incorrect INTEGER value: ''"
+                        1292, "Truncated incorrect INTEGER value: '1.5'"
+                        1292, "Truncated incorrect INTEGER value: '1e2'"
+                        1292, "Truncated incorrect INTEGER value: '49x'" ]
+                      "CHAR warning order"
+              | _, result -> failtestf "expected CHAR text-argument results, got %A" result
+              let sql = "SELECT HEX(CHAR('4294967296')),HEX(CHAR('18446744073709551616')),HEX(CHAR('-9223372036854775809'))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "00"; Some "FFFFFFFF"; Some "00" ] "CHAR text overflow clamps before byte assembly"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect INTEGER value: '18446744073709551616'"
+                        1292, "Truncated incorrect INTEGER value: '-9223372036854775809'" ]
+                      "CHAR text overflow warnings"
+              | _, result -> failtestf "expected CHAR text-overflow results, got %A" result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

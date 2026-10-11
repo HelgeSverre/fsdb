@@ -1206,6 +1206,14 @@ module ContractCatalog =
                yield Contract.query "char-byte-assembly-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "char-byte-direct" "SELECT CHAR(0),CHAR(128),CHAR(256),CHAR(4660)"
                    |> Contract.comparingValues
+               yield Contract.query "char-text-integer-prefixes"
+                   "SELECT HEX(CHAR('49x')),HEX(CHAR('abc')),HEX(CHAR('')),HEX(CHAR(' 49')),HEX(CHAR('49 ')),HEX(CHAR('1.5')),HEX(CHAR('1e2')),HEX(CHAR('-1')),HEX(CHAR(_binary'49x')),HEX(CHAR(0x343978))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-text-integer-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-text-overflow-values"
+                   "SELECT HEX(CHAR('4294967296')),HEX(CHAR('18446744073709551616')),HEX(CHAR('-9223372036854775809'))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-text-overflow-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, source in
                    [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
                    yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)
