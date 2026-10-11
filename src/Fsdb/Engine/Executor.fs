@@ -9842,6 +9842,31 @@ and private applyResolvedJoin
     (leftOperand: FromItem option)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    // A predicate local to the nullable side of a left join may narrow its
+    // source before matching, while the original ON condition still decides
+    // which combined rows qualify. Keep this to physical tables: derived and
+    // dependent sources have their own evaluation boundaries.
+    let sourcePredicates =
+        match join.Kind, join.Table with
+        | (LeftJoin | NaturalLeftJoin), FromTable tableRef when consumption = MayStopEarly ->
+            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            if Map.containsKey (qualifier.ToLowerInvariant()) sourceOverrides then sourcePredicates
+            else
+                let local, _ = splitJoinWhere [ qualifier ] (Some join.On)
+                match Map.tryFind (qualifier.ToLowerInvariant()) local with
+                | Some predicate ->
+                    match tryPhysicalTableRef store dbName tableRef with
+                    | Ok(Some table) when
+                        tryPhysicalReadCandidatesInTable store registry table tableRef (Some predicate)
+                        |> Option.isSome ->
+                        sourcePredicates
+                        |> Map.change (qualifier.ToLowerInvariant()) (function
+                            | Some existing -> Some(BinOp(And, existing, predicate))
+                            | None -> Some predicate)
+                    | _ -> sourcePredicates
+                | _ -> sourcePredicates
+        | _ -> sourcePredicates
+
     prepareJoinSource store registry dbName scope sourceOverrides sourcePredicates join.Table
     |> Result.bind (applyPreparedJoin store registry dbName scope leftPhysicalTable consumption (sourcesSoFar, rowsSoFar) leftOperand join)
 

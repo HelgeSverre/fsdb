@@ -9653,6 +9653,13 @@ let tests =
                   "SELECT a.id,b.id FROM slow_left_limit_unmatched a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id LIMIT 1"
               check unmatchedFirst [ [ Some "0"; None ] ] "an unmatched first left row still stops after its scan"
 
+              let narrowedRight =
+                  "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id AND b.id<2 LIMIT 1"
+              let narrowedResult = run narrowedRight
+              Expect.equal narrowedResult (ResultSet([ "id"; "id" ], [ [ Some "1"; Some "1" ] ])) "right-side ON filter result"
+              let narrowedLog = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" narrowedRight)
+              Expect.equal narrowedLog (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "right-side ON filter narrows the scan"
+
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
