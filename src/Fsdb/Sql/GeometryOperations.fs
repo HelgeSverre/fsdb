@@ -300,28 +300,52 @@ let private geographicRingContains referenceSystem point ring =
                 atan2 numerator denominator))
     abs winding > Math.PI
 
-let internal geographicPointPolygonDistance referenceSystem point polygons =
+[<RequireQualifiedAccess>]
+type internal GeographicPointPolygonPosition =
+    | Outside of float option
+    | Interior
+    | ExteriorBoundary
+    | HoleBoundary
+
+let internal geographicPointPolygonPosition referenceSystem point polygons =
     let pointLineDistance ring = geographicPointLineDistance referenceSystem point [ ring ]
-    let polygonDistance rings =
+    let polygonPosition rings =
         match rings with
-        | [] -> None
+        | [] -> GeographicPointPolygonPosition.Outside None
         | exterior :: holes ->
+            let exteriorDistance = pointLineDistance exterior
+            let holeDistances = holes |> List.choose pointLineDistance
             let boundaryDistance =
-                rings
-                |> List.choose pointLineDistance
+                (Option.toList exteriorDistance) @ holeDistances
                 |> function
                     | [] -> None
                     | distances -> Some(List.min distances)
-            match boundaryDistance with
-            | Some distance when distance < 0.00001 -> Some 0.0
-            | Some distance when geographicRingContains referenceSystem point exterior
-                                 && not (holes |> List.exists (geographicRingContains referenceSystem point)) -> Some 0.0
-            | other -> other
-    polygons
-    |> List.choose polygonDistance
-    |> function
-        | [] -> None
-        | distances -> Some(List.min distances)
+            match exteriorDistance with
+            | Some distance when distance < 0.00001 -> GeographicPointPolygonPosition.ExteriorBoundary
+            | _ when holeDistances |> List.exists (fun distance -> distance < 0.00001) ->
+                GeographicPointPolygonPosition.HoleBoundary
+            | _ when geographicRingContains referenceSystem point exterior
+                     && not (holes |> List.exists (geographicRingContains referenceSystem point)) ->
+                GeographicPointPolygonPosition.Interior
+            | _ -> GeographicPointPolygonPosition.Outside boundaryDistance
+    let positions = polygons |> List.map polygonPosition
+    if positions |> List.contains GeographicPointPolygonPosition.Interior then
+        GeographicPointPolygonPosition.Interior
+    elif positions |> List.contains GeographicPointPolygonPosition.HoleBoundary then
+        GeographicPointPolygonPosition.HoleBoundary
+    elif positions |> List.contains GeographicPointPolygonPosition.ExteriorBoundary then
+        GeographicPointPolygonPosition.ExteriorBoundary
+    else
+        positions
+        |> List.choose (function GeographicPointPolygonPosition.Outside distance -> distance | _ -> None)
+        |> function
+            | [] -> GeographicPointPolygonPosition.Outside None
+            | distances -> GeographicPointPolygonPosition.Outside(Some(List.min distances))
+
+let internal geographicPointPolygonDistance referenceSystem point polygons =
+    match geographicPointPolygonPosition referenceSystem point polygons with
+    | GeographicPointPolygonPosition.Outside distance -> distance
+    | _ -> Some 0.0
 
 let private geographicArcsIntersect (firstStart: float * float) firstEnd secondStart secondEnd =
     let magnitude (x, y, z) = sqrt (x * x + y * y + z * z)

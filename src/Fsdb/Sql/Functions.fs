@@ -6390,6 +6390,33 @@ let private geometryPredicateFn functionName predicate =
         | GPoint _ | GMultiPoint _ -> true
         | _ -> false
 
+    let pointPolygon = function
+        | GPoint(x, y), GPolygon rings -> Some(false, (x, y), [ rings ])
+        | GPoint(x, y), GMultiPolygon polygons -> Some(false, (x, y), polygons)
+        | GPolygon rings, GPoint(x, y) -> Some(true, (x, y), [ rings ])
+        | GMultiPolygon polygons, GPoint(x, y) -> Some(true, (x, y), polygons)
+        | _ -> None
+
+    let pointPolygonPredicate referenceSystem polygonFirst point polygons =
+        let position = geographicPointPolygonPosition referenceSystem point polygons
+        let intersects =
+            match position with
+            | GeographicPointPolygonPosition.Outside _ -> false
+            | _ -> true
+        let contained =
+            match position with
+            | GeographicPointPolygonPosition.Interior
+            | GeographicPointPolygonPosition.HoleBoundary -> true
+            | _ -> false
+        match functionName with
+        | "ST_INTERSECTS" -> intersects
+        | "ST_DISJOINT" -> not intersects
+        | "ST_CONTAINS" -> polygonFirst && contained
+        | "ST_WITHIN" -> not polygonFirst && contained
+        | "ST_TOUCHES" -> position = GeographicPointPolygonPosition.ExteriorBoundary
+        | "ST_EQUALS" -> false
+        | _ -> invalidArg (nameof functionName) "unsupported geographic topology predicate"
+
     function
     | [ VNull; _ ]
     | [ _; VNull ] -> VNull
@@ -6398,10 +6425,17 @@ let private geometryPredicateFn functionName predicate =
             requireSameSrid functionName (geometryArgument functionName firstValue) (geometryArgument functionName secondValue)
 
         let referenceSystem = spatialReferenceSystem functionName first.Srid
-        if referenceSystem.SemiMajorAxis.IsSome && not (pointSet first.Shape && pointSet second.Shape) then
-            requirePlanar functionName first |> ignore
+        let result =
+            if referenceSystem.SemiMajorAxis.IsSome && not (pointSet first.Shape && pointSet second.Shape) then
+                match pointPolygon (first.Shape, second.Shape) with
+                | Some(polygonFirst, point, polygons) ->
+                    Some(pointPolygonPredicate referenceSystem polygonFirst point polygons)
+                | None ->
+                    requirePlanar functionName first |> ignore
+                    predicate first second
+            else predicate first second
 
-        predicate first second
+        result
         |> Option.map (fun value -> VInt(if value then 1L else 0L))
         |> Option.defaultValue VNull
     | _ -> nativeParameterCountError (functionName.ToLowerInvariant())

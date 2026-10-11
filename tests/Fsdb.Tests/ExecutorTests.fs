@@ -14625,6 +14625,54 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "0"; None ] ]) -> ()
                     | result -> failtestf "expected MySQL point-set topology, got %A" result
 
+                testCase "geographic point-polygon topology distinguishes rings and holes"
+                <| fun _ ->
+                    let store = newStore ()
+                    let polygon = "ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0),(1 1,1 2,2 2,2 1,1 1))',4326)"
+                    let cases =
+                        [ "POINT(0.5 0.5)", [ 1; 1; 1; 0; 0; 0 ]
+                          "POINT(4 4)", [ 0; 0; 0; 1; 0; 0 ]
+                          "POINT(0 1)", [ 1; 0; 0; 0; 1; 0 ]
+                          "POINT(1.5 1.5)", [ 0; 0; 0; 1; 0; 0 ]
+                          "POINT(1 1.5)", [ 1; 1; 1; 0; 0; 0 ] ]
+                    for pointText, expected in cases do
+                        let point = sprintf "ST_GeomFromText('%s',4326)" pointText
+                        let sql =
+                            [ sprintf "ST_Intersects(%s,%s)" point polygon
+                              sprintf "ST_Contains(%s,%s)" polygon point
+                              sprintf "ST_Within(%s,%s)" point polygon
+                              sprintf "ST_Disjoint(%s,%s)" point polygon
+                              sprintf "ST_Touches(%s,%s)" point polygon
+                              sprintf "ST_Equals(%s,%s)" point polygon ]
+                            |> String.concat ","
+                            |> sprintf "SELECT %s"
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = (expected |> List.map (string >> Some)) -> ()
+                        | result -> failtestf "expected MySQL geographic point-polygon topology for %s, got %A" pointText result
+                    let curved = "ST_GeomFromText('POLYGON((50 0,50 10,52 10,52 0,50 0))',4326)"
+                    let apparentInside = "ST_GeomFromText('POINT(50.05 5)',4326)"
+                    let antimeridian = "ST_GeomFromText('POLYGON((10 170,10 -170,20 -170,20 170,10 170))',4326)"
+                    let acrossMeridian = "ST_GeomFromText('POINT(15 180)',4326)"
+                    let sql = sprintf "SELECT ST_Intersects(%s,%s),ST_Contains(%s,%s)" apparentInside curved antimeridian acrossMeridian
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL geographic curved-edge topology, got %A" result
+                    let outerBoundary = "ST_GeomFromText('POINT(0 1)',4326)"
+                    let sql =
+                        sprintf
+                            "SELECT ST_Intersects(%s,%s),ST_Disjoint(%s,%s),ST_Contains(%s,%s),ST_Within(%s,%s),ST_Touches(%s,%s),ST_Equals(%s,%s)"
+                            polygon outerBoundary polygon outerBoundary outerBoundary polygon polygon outerBoundary polygon outerBoundary polygon outerBoundary
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "0"; Some "0"; Some "1"; Some "0" ] ]) -> ()
+                    | result -> failtestf "expected MySQL reverse geographic point-polygon topology, got %A" result
+                    let multipolygon = "ST_GeomFromText('MULTIPOLYGON(((0 0,0 2,2 2,2 0,0 0)),((20 20,20 22,22 22,22 20,20 20)))',4326)"
+                    let insideSecond = "ST_GeomFromText('POINT(21 21)',4326)"
+                    let outside = "ST_GeomFromText('POINT(10 10)',4326)"
+                    let sql = sprintf "SELECT ST_Contains(%s,%s),ST_Touches(%s,%s),ST_Disjoint(%s,%s)" multipolygon insideSecond multipolygon outerBoundary multipolygon outside
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL geographic multipolygon topology, got %A" result
+
                 testCase "geographic point-to-line distance follows geodesic segments"
                 <| fun _ ->
                     let store = newStore ()

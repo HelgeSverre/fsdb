@@ -2,7 +2,8 @@
 
 Status: implemented for geographic `POINT` and `MULTIPOINT` pairs in
 `ST_INTERSECTS`, `ST_DISJOINT`, `ST_CONTAINS`, `ST_WITHIN`, `ST_EQUALS`, and
-`ST_TOUCHES`. Topology involving geographic lines and polygons remains open.
+`ST_TOUCHES`. Point/polygon topology is also covered; topology involving
+geographic lines or polygon pairs remains open.
 
 On MySQL 8.4.11, EPSG 4326 `POINT(1 0)` intersects and is within
 `MULTIPOINT((0 0),(1 0))`; the multipoint contains that point. A missing
