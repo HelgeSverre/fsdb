@@ -6452,6 +6452,18 @@ let private geometryPredicateFn functionName predicate =
             Some(geographicPolygonPolygonDistance referenceSystem firstAreas secondAreas = Some 0.0)
         | _ -> None
 
+    let remainingGeographicPredicate referenceSystem first second =
+        let intersects =
+            match functionName with
+            | "ST_INTERSECTS" | "ST_DISJOINT" ->
+                lineOrPolygonIntersects referenceSystem first.Shape second.Shape
+            | _ -> None
+        match intersects with
+        | Some value -> Some(if functionName = "ST_INTERSECTS" then value else not value)
+        | None ->
+            requirePlanar functionName first |> ignore
+            predicate first second
+
     let pointPolygonShapes first second =
         match pointMembers first, polygons second with
         | Some members, Some areas -> Some(false, members, areas)
@@ -6530,11 +6542,8 @@ let private geometryPredicateFn functionName predicate =
                                 | "ST_WITHIN" -> Some topology.SecondContainsFirst
                                 | _ -> Some(topology.FirstContainsSecond && topology.SecondContainsFirst)
                             | _ ->
-                                match linePolygonShapes first.Shape second.Shape with
-                                | Some(polygonFirst, lines, areas) when
-                                    functionName = "ST_CROSSES" || functionName = "ST_TOUCHES"
-                                    || functionName = "ST_CONTAINS" || functionName = "ST_WITHIN"
-                                    || functionName = "ST_EQUALS" ->
+                                match functionName, linePolygonShapes first.Shape second.Shape with
+                                | ("ST_CROSSES" | "ST_TOUCHES" | "ST_CONTAINS" | "ST_WITHIN" | "ST_EQUALS"), Some(polygonFirst, lines, areas) ->
                                     let topology = geographicLinePolygonTopology referenceSystem lines areas
                                     match functionName with
                                     | "ST_CROSSES" -> Some topology.Crosses
@@ -6543,11 +6552,8 @@ let private geometryPredicateFn functionName predicate =
                                     | "ST_WITHIN" -> Some(not polygonFirst && topology.LineWithinPolygon)
                                     | _ -> Some false
                                 | _ ->
-                                    match polygons first.Shape, polygons second.Shape with
-                                    | Some firstAreas, Some secondAreas when
-                                        functionName = "ST_TOUCHES" || functionName = "ST_OVERLAPS"
-                                        || functionName = "ST_CONTAINS" || functionName = "ST_WITHIN"
-                                        || functionName = "ST_EQUALS" ->
+                                    match functionName, polygons first.Shape, polygons second.Shape with
+                                    | ("ST_TOUCHES" | "ST_OVERLAPS" | "ST_CONTAINS" | "ST_WITHIN" | "ST_EQUALS"), Some firstAreas, Some secondAreas ->
                                         let topology = geographicPolygonPolygonTopology referenceSystem firstAreas secondAreas
                                         match functionName with
                                         | "ST_TOUCHES" -> Some topology.Touches
@@ -6555,17 +6561,7 @@ let private geometryPredicateFn functionName predicate =
                                         | "ST_CONTAINS" -> Some topology.FirstContainsSecond
                                         | "ST_WITHIN" -> Some topology.SecondContainsFirst
                                         | _ -> Some(topology.FirstContainsSecond && topology.SecondContainsFirst)
-                                    | _ ->
-                                        let intersects =
-                                            match functionName with
-                                            | "ST_INTERSECTS" | "ST_DISJOINT" ->
-                                                lineOrPolygonIntersects referenceSystem first.Shape second.Shape
-                                            | _ -> None
-                                        match intersects with
-                                        | Some value -> Some(if functionName = "ST_INTERSECTS" then value else not value)
-                                        | None ->
-                                            requirePlanar functionName first |> ignore
-                                            predicate first second
+                                    | _ -> remainingGeographicPredicate referenceSystem first second
             else predicate first second
 
         result
