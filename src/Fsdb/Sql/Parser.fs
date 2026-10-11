@@ -47,6 +47,9 @@ let private allowsBackslashEscape (options: ParserOptions) delimiter =
 let trySemanticError (detail: string) =
     match detail.Trim() with
     | message when message.StartsWith("Unknown character set: '", StringComparison.Ordinal) -> Some(1115, message)
+    | message when message.StartsWith("Too-big precision ", StringComparison.Ordinal)
+                   && message.Contains(" specified for 'CAST'. Maximum is ", StringComparison.Ordinal) ->
+        Some(1426, message)
     | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
     | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
     | message when
@@ -1648,6 +1651,10 @@ type private CastTarget =
     | TypedCast of ColumnType * int option
     | AliasedCharCast of CharCastAlias * int option
 
+let private validateCastPrecision maximum precision =
+    if precision > maximum then
+        raise (SemanticParseError(sprintf "Too-big precision %d specified for 'CAST'. Maximum is %d." precision maximum))
+
 let private castTargetType: Parser<CastTarget, unit> =
     choice
         [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% TypedCast(TBigInt false, None)
@@ -1673,16 +1680,19 @@ let private castTargetType: Parser<CastTarget, unit> =
           >>= (fun size ->
               match size with
               | Some(_, Some _) -> fail "FLOAT CAST target does not accept a scale"
-              | Some(precision, None) when precision > 53 -> fail "FLOAT precision must be between 0 and 53"
-              | Some(precision, None) when precision > 24 -> preturn (TypedCast(TDouble false, None))
-              | _ -> preturn (TypedCast(TFloat false, None)))
+              | Some(precision, None) ->
+                  validateCastPrecision 53 precision
+                  preturn (TypedCast((if precision > 24 then TDouble false else TFloat false), None))
+              | None -> preturn (TypedCast(TFloat false, None)))
           (keyword "DOUBLE" >>. optional (keyword "PRECISION")) >>% TypedCast(TDouble false, None)
           keyword "REAL"
           >>= (fun _ ->
               preturn (TypedCast((if (activeOptions ()).RealAsFloat then TFloat false else TDouble false), None)))
-          keyword "DATETIME" >>. optFsp |>> (fun fsp -> TypedCast(TDateTime fsp, None))
+          keyword "DATETIME" >>. optFsp
+          |>> (fun fsp -> validateCastPrecision 6 fsp; TypedCast(TDateTime fsp, None))
           keyword "DATE" >>% TypedCast(TDate, None)
-          keyword "TIME" >>. optFsp |>> (fun fsp -> TypedCast(TTime fsp, None))
+          keyword "TIME" >>. optFsp
+          |>> (fun fsp -> validateCastPrecision 6 fsp; TypedCast(TTime fsp, None))
           keyword "YEAR" >>% TypedCast(TYear, None)
           keyword "JSON" >>% TypedCast(TJson, None) ]
 

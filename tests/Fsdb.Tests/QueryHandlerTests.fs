@@ -2882,6 +2882,23 @@ let tests =
               | _, ResultSet(_, [ [ Some "ab" ] ]) -> ()
               | _, result -> failtestf "expected CHARACTER cast to work, got %A" result
 
+          testCase "CAST target precision fails before expression evaluation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for target, precision, maximum in
+                  [ "FLOAT(54)", 54, 53
+                    "TIME(7)", 7, 6
+                    "DATETIME(7)", 7, 6 ] do
+                  for sql in
+                      [ sprintf "SELECT CAST('1' AS %s)" target
+                        sprintf "SELECT CONVERT('1', %s)" target
+                        sprintf "SELECT IF(0, CAST('1' AS %s), 1)" target ] do
+                      let expected =
+                          sprintf "Too-big precision %d specified for 'CAST'. Maximum is %d." precision maximum
+                      match handle session sql with
+                      | _, Err(1426, message) -> Expect.equal message expected sql
+                      | _, result -> failtestf "expected early precision error for %s, got %A" sql result
+
           testCase "national ASCII and UNICODE casts retain syntax warnings and charset bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

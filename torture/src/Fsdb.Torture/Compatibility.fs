@@ -1095,6 +1095,13 @@ module ContractCatalog =
                          |> Contract.fails 1064 "42000"
                    yield Contract.query (sprintf "invalid-convert-target-%d" index) (sprintf "SELECT CONVERT('1', %s)" target)
                          |> Contract.fails 1064 "42000"
+               for index, target in [ "FLOAT(54)"; "TIME(7)"; "DATETIME(7)" ] |> List.indexed do
+                   yield Contract.query (sprintf "cast-target-precision-%d" index) (sprintf "SELECT CAST('1' AS %s)" target)
+                         |> Contract.fails 1426 "42000"
+                   yield Contract.query (sprintf "convert-target-precision-%d" index) (sprintf "SELECT CONVERT('1', %s)" target)
+                         |> Contract.fails 1426 "42000"
+                   yield Contract.query (sprintf "unchosen-cast-target-precision-%d" index) (sprintf "SELECT IF(0, CAST('1' AS %s), 1)" target)
+                         |> Contract.fails 1426 "42000"
                yield
                    Contract.query
                        "cast-national-spellings"

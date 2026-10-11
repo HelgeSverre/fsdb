@@ -710,7 +710,9 @@ conflicting modifiers still fail with MySQL's syntax code.
 The [audited CAST target grammar](torture/findings/2026-10-11-cast-target-grammar.md)
 now rejects column-only type spellings for both CAST and typed CONVERT, while
 `CHARACTER(n)` retains its width; remaining source expression shapes and
-conversion diagnostics are still open.
+conversion diagnostics are still open. FLOAT, TIME, and DATETIME target
+precision ceilings now return MySQL's early 1426 diagnostic in both forms;
+decimal precision and scale labels remain unaudited.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common

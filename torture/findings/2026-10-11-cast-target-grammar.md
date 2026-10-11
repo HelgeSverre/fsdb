@@ -20,3 +20,11 @@ Fsdb now retains bare `CHAR`/`CHARACTER` widths in the character-cast node
 and evaluates them using the current connection charset. The focused test
 first failed on the accepted `VARCHAR` spelling, and the differential
 contract covers the audited rejections and character-width value and warning.
+
+Target precision is a separate diagnostic boundary. MySQL rejects `FLOAT(54)`
+with error 1426 naming a maximum of 53; `TIME(7)` and `DATETIME(7)` use the
+same code with a maximum of 6. The message names `CAST` even in typed
+`CONVERT`, and the error is raised before an unchosen `IF` branch can skip
+the expression. Fsdb now checks these target precisions during parsing and
+retains the exact audited messages. Decimal precision and scale diagnostics
+have source-dependent labels and remain for a separate audit.
