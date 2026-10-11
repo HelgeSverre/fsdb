@@ -6037,12 +6037,9 @@ let private geometryDistanceFn: Scalar =
             | Some _, _, _ ->
                 match geographicPoints firstShape, geographicPoints secondShape with
                 | Some firstPoints, Some secondPoints ->
-                    firstPoints
-                    |> Seq.collect (fun firstPoint ->
-                        secondPoints
-                        |> Seq.map (geographicPointDistance referenceSystem firstPoint))
-                    |> Seq.min
-                    |> fun metres -> VDouble(metres / factor)
+                    minimumPointSetDistance (geographicPointDistance referenceSystem) firstPoints secondPoints
+                    |> Option.map (fun metres -> VDouble(metres / factor))
+                    |> Option.defaultValue VNull
                 | _ -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_DISTANCE for non-point geographic geometries'"))
 
     function

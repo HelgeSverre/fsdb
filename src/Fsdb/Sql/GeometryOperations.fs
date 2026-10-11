@@ -53,7 +53,7 @@ let private sphericalPointDistance radius (firstLatitude, firstLongitude) (secon
 
     radius * 2.0 * asin (sqrt (min 1.0 centralHaversine))
 
-let internal sphericalPointSetDistance radius firstPoints secondPoints =
+let internal minimumPointSetDistance pointDistance firstPoints secondPoints =
     let nearer current candidate =
         match current with
         | None -> Some candidate
@@ -62,7 +62,10 @@ let internal sphericalPointSetDistance radius firstPoints secondPoints =
     firstPoints
     |> List.fold (fun minimum first ->
         secondPoints
-        |> List.fold (fun minimum second -> sphericalPointDistance radius first second |> nearer minimum) minimum) None
+        |> List.fold (fun minimum second -> pointDistance first second |> nearer minimum) minimum) None
+
+let internal sphericalPointSetDistance radius firstPoints secondPoints =
+    minimumPointSetDistance (sphericalPointDistance radius) firstPoints secondPoints
 
 /// MySQL delegates geographic point distance to Boost.Geometry's first-order
 /// Andoyer strategy; more exact geodesic formulae produce observably different
