@@ -9085,6 +9085,7 @@ and private tryFullTextDrivenJoinOrder
     (sources: FullTextPhysicalSource list)
     (ownedNodes: (FullTextPhysicalSource * Expr) list)
     (select: SelectStmt)
+    (matchingRows: unit -> int option)
     : (SelectStmt * string) option =
     let projectionsAreScalar =
         select.Projections
@@ -9094,7 +9095,6 @@ and private tryFullTextDrivenJoinOrder
 
     let shapeAllowsReordering =
         not select.StraightJoin
-        && select.Limit.IsSome
         && not select.CalculateFoundRows
         && select.OrderBy.IsEmpty
         && select.GroupBy.IsEmpty
@@ -9127,10 +9127,19 @@ and private tryFullTextDrivenJoinOrder
 
         let baseKey = owner.Qualifier.ToLowerInvariant()
         let onlyBasePredicate = sourcePredicates |> Map.forall (fun qualifier _ -> qualifier = baseKey)
+        let preferFullText () =
+            select.Limit.IsSome
+            || (match matchingRows (), FromItem.tryQualifier originalBase with
+                | Some matches, Some qualifier ->
+                    sources
+                    |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                    |> Option.exists (fun source -> matches < source.Table.RowsArray.Count)
+                | _ -> false)
 
         if
             onlyBasePredicate
             && innerJoinChainPreservesLeftOrder store sources join.Table reordered.Joins
+            && preferFullText ()
         then
             Some(reordered, owner.Qualifier)
         else
@@ -17705,6 +17714,11 @@ and private fullTextScoreIds (scores: FullTextScores) : RowId seq =
     | OrderedScores scores -> Map.keys scores
     | HashedScores scores -> scores.Keys
 
+and private fullTextScoreCount (scores: FullTextScores) =
+    match scores with
+    | OrderedScores scores -> scores.Count
+    | HashedScores scores -> scores.Count
+
 and private tryFullTextScore rowId =
     function
     | OrderedScores scores -> Map.tryFind rowId scores
@@ -18065,8 +18079,24 @@ and private runFullTextSelect
         match matchNodes |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node)) with
         | Error error -> error, [], []
         | Ok ownedNodes ->
+            // Costing an unbounded reversed join needs the posting count.
+            // Reuse its score set when execution reads the same full corpus.
+            let reusableScores =
+                match ownedNodes, select.Where, select.Limit with
+                | [ owner, node ], Some predicate, None when predicate = node ->
+                    Some(owner.Qualifier.ToLowerInvariant(), node,
+                         lazy (fullTextScoresForTable owner.Database owner.Table None [ node ]))
+                | _ -> None
+
+            let matchingRows () =
+                reusableScores
+                |> Option.bind (fun (_, _, scores) ->
+                    match scores.Value with
+                    | Ok [ _, _, values ] -> Some(fullTextScoreCount values)
+                    | _ -> None)
+
             let select, baseQualifier =
-                tryFullTextDrivenJoinOrder store registry sources ownedNodes select
+                tryFullTextDrivenJoinOrder store registry sources ownedNodes select matchingRows
                 |> Option.defaultValue (select, originalQualifier)
 
             let inferredBounds = fullTextJoinBounds sources select
@@ -18109,7 +18139,12 @@ and private runFullTextSelect
                             physicalCandidates
                             |> Option.map (snd >> List.map fst >> Set.ofList)
 
-                        fullTextScoresForTable source.Database source.Table candidateIds nodes
+                        (match reusableScores with
+                         | Some(qualifier, node, scores)
+                             when candidateIds.IsNone
+                                  && source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+                                  && nodes = [ node ] -> scores.Value
+                         | _ -> fullTextScoresForTable source.Database source.Table candidateIds nodes)
                         |> Result.mapError (fun (code, message) -> Err(code, message))
                         |> Result.map (fun computed ->
                             let synthetic = fullTextSyntheticColumns matchNodes computed

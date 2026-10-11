@@ -9674,6 +9674,7 @@ let tests =
                     query "JOIN" "alpha" "", "6", [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ]
                     query "JOIN" "alpha" " LIMIT 1", "2", [ [ Some "1" ] ]
                     query "LEFT JOIN" "alpha" "", "6", [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ]
+                    "SELECT d.id FROM slow_fulltext_join_owners o JOIN slow_fulltext_join_docs d ON o.id=d.owner_id WHERE MATCH(d.body) AGAINST('alpha' IN BOOLEAN MODE)", "6", [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ]
                     "SELECT d.id FROM slow_fulltext_join_owners o JOIN slow_fulltext_join_docs d ON o.id=d.owner_id WHERE MATCH(d.body) AGAINST('alpha' IN BOOLEAN MODE) LIMIT 1", "2", [ [ Some "1" ] ] ] do
                   let session, result = handle session sql
                   Expect.equal result (ResultSet([ "id" ], rows)) "full-text join results"
