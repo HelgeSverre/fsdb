@@ -268,20 +268,68 @@ let internal geographicPointLineDistance referenceSystem point lines =
         let distance = geographicPointSegmentDistance referenceSystem point start endpoint
         Some(match minimum with None -> distance | Some current -> min current distance)) None
 
+let private geographicUnitVector (latitude, longitude) =
+    let latitude, longitude = radians latitude, radians longitude
+    cos latitude * cos longitude, cos latitude * sin longitude, sin latitude
+
+let private dot3 (ax, ay, az) (bx, by, bz) = ax * bx + ay * by + az * bz
+
+let private cross3 (ax, ay, az) (bx, by, bz) =
+    ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+
+let private sampleGeographicSegment referenceSystem start endpoint =
+    let length = geographicPointDistance referenceSystem start endpoint
+    let steps = max 1 (min 256 (int (ceil (length / 25000.0))))
+    Array.init (steps + 1) (fun index ->
+        if index = 0 then start
+        elif index = steps then endpoint
+        else geographicPointAlong referenceSystem start endpoint (length * float index / float steps))
+
+let private geographicRingContains referenceSystem point ring =
+    let query = geographicUnitVector point
+    let winding =
+        ring
+        |> List.pairwise
+        |> List.sumBy (fun (start, endpoint) ->
+            sampleGeographicSegment referenceSystem start endpoint
+            |> Array.pairwise
+            |> Array.sumBy (fun (first, second) ->
+                let first, second = geographicUnitVector first, geographicUnitVector second
+                let numerator = dot3 query (cross3 first second)
+                let denominator = dot3 first second - dot3 query first * dot3 query second
+                atan2 numerator denominator))
+    abs winding > Math.PI
+
+let internal geographicPointPolygonDistance referenceSystem point polygons =
+    let pointLineDistance ring = geographicPointLineDistance referenceSystem point [ ring ]
+    let polygonDistance rings =
+        match rings with
+        | [] -> None
+        | exterior :: holes ->
+            let boundaryDistance =
+                rings
+                |> List.choose pointLineDistance
+                |> function
+                    | [] -> None
+                    | distances -> Some(List.min distances)
+            match boundaryDistance with
+            | Some distance when distance < 0.00001 -> Some 0.0
+            | Some distance when geographicRingContains referenceSystem point exterior
+                                 && not (holes |> List.exists (geographicRingContains referenceSystem point)) -> Some 0.0
+            | other -> other
+    polygons
+    |> List.choose polygonDistance
+    |> function
+        | [] -> None
+        | distances -> Some(List.min distances)
+
 let private geographicArcsIntersect (firstStart: float * float) firstEnd secondStart secondEnd =
-    let unitVector (latitude, longitude) =
-        let latitude, longitude = radians latitude, radians longitude
-        cos latitude * cos longitude, cos latitude * sin longitude, sin latitude
-    let cross (firstX, firstY, firstZ) (secondX, secondY, secondZ) =
-        firstY * secondZ - firstZ * secondY,
-        firstZ * secondX - firstX * secondZ,
-        firstX * secondY - firstY * secondX
-    let dot (firstX, firstY, firstZ) (secondX, secondY, secondZ) =
-        firstX * secondX + firstY * secondY + firstZ * secondZ
+    let cross = cross3
+    let dot = dot3
     let magnitude (x, y, z) = sqrt (x * x + y * y + z * z)
     let angle first second = atan2 (magnitude (cross first second)) (dot first second)
-    let firstStart, firstEnd = unitVector firstStart, unitVector firstEnd
-    let secondStart, secondEnd = unitVector secondStart, unitVector secondEnd
+    let firstStart, firstEnd = geographicUnitVector firstStart, geographicUnitVector firstEnd
+    let secondStart, secondEnd = geographicUnitVector secondStart, geographicUnitVector secondEnd
     let intersection = cross (cross firstStart firstEnd) (cross secondStart secondEnd)
     let size = magnitude intersection
 
@@ -295,18 +343,8 @@ let private geographicArcsIntersect (firstStart: float * float) firstEnd secondS
         crosses candidate || crosses (-x / size, -y / size, -z / size)
 
 let internal geographicLineLineDistance referenceSystem firstLines secondLines =
-    let pointDistance = geographicPointDistance referenceSystem
-    let sampleSpacingMetres = 25000.0
-    let maxSampledArcs = 256
     let sample (start, endpoint) =
-        let length = pointDistance start endpoint
-        let steps = max 1 (min maxSampledArcs (int (ceil (length / sampleSpacingMetres))))
-        let points =
-            Array.init (steps + 1) (fun index ->
-                if index = 0 then start
-                elif index = steps then endpoint
-                else geographicPointAlong referenceSystem start endpoint (length * float index / float steps))
-        start, endpoint, Array.pairwise points
+        start, endpoint, sampleGeographicSegment referenceSystem start endpoint |> Array.pairwise
     let firstSegments = firstLines |> List.collect List.pairwise |> List.map sample
     let secondSegments = secondLines |> List.collect List.pairwise |> List.map sample
 

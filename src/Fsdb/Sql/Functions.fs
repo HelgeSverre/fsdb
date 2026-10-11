@@ -6013,6 +6013,11 @@ let private geometryDistanceFn: Scalar =
         | GMultiLineString lines when not lines.IsEmpty -> Some lines
         | _ -> None
 
+    let geographicPolygons = function
+        | GPolygon rings -> Some [ rings ]
+        | GMultiPolygon polygons when not polygons.IsEmpty -> Some polygons
+        | _ -> None
+
     let pointLineDistance referenceSystem points lines =
         points
         |> List.fold (fun minimum point ->
@@ -6020,6 +6025,13 @@ let private geometryDistanceFn: Scalar =
             | Some distance, None -> Some distance
             | Some distance, Some current -> Some(min current distance)
             | None, _ -> minimum) None
+
+    let pointPolygonDistance referenceSystem points polygons =
+        points
+        |> List.choose (fun point -> geographicPointPolygonDistance referenceSystem point polygons)
+        |> function
+            | [] -> None
+            | distances -> Some(List.min distances)
 
     let distance firstValue secondValue unit =
         let first = geometryArgument "ST_DISTANCE" firstValue
@@ -6054,12 +6066,15 @@ let private geometryDistanceFn: Scalar =
             | Some _, _, _ ->
                 let metres =
                     match geographicPoints firstShape, geographicPoints secondShape,
-                          geographicLines firstShape, geographicLines secondShape with
-                    | Some firstPoints, Some secondPoints, _, _ ->
+                          geographicLines firstShape, geographicLines secondShape,
+                          geographicPolygons firstShape, geographicPolygons secondShape with
+                    | Some firstPoints, Some secondPoints, _, _, _, _ ->
                         minimumPointSetDistance (geographicPointDistance referenceSystem) firstPoints secondPoints
-                    | Some points, _, _, Some lines
-                    | _, Some points, Some lines, _ -> pointLineDistance referenceSystem points lines
-                    | _, _, Some firstLines, Some secondLines ->
+                    | Some points, _, _, Some lines, _, _
+                    | _, Some points, Some lines, _, _, _ -> pointLineDistance referenceSystem points lines
+                    | Some points, _, _, _, _, Some polygons
+                    | _, Some points, _, _, Some polygons, _ -> pointPolygonDistance referenceSystem points polygons
+                    | _, _, Some firstLines, Some secondLines, _, _ ->
                         geographicLineLineDistance referenceSystem firstLines secondLines
                     | _ -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_DISTANCE for non-point geographic geometries'"))
                 metres |> Option.map (fun metres -> VDouble(metres / factor)) |> Option.defaultValue VNull

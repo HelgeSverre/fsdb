@@ -14675,6 +14675,32 @@ let tests =
                         | ResultSet(_, [ [ Some "1" ] ]) -> ()
                         | result -> failtestf "expected MySQL line-to-line distance for %s and %s, got %A" first second result
 
+                testCase "geographic point-to-polygon distance respects curved boundaries and holes"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "POINT(1 1)", "POLYGON((0 0,0 2,2 2,2 0,0 0))", 0.0
+                          "POINT(3 1)", "POLYGON((0 0,0 2,2 2,2 0,0 0))", 110541.29675467355
+                          "POINT(1 1)", "POLYGON((0 0,0 3,3 3,3 0,0 0),(1 1,1 2,2 2,2 1,1 1))", 0.0
+                          "POINT(1.5 1.5)", "POLYGON((0 0,0 3,3 3,3 0,0 0),(1 1,1 2,2 2,2 1,1 1))", 55282.54423362244
+                          "POINT(50.05 5)", "POLYGON((50 0,50 10,52 10,52 0,50 0))", 6432.016521477691
+                          "POINT(50.2 5)", "POLYGON((50 0,50 10,52 10,52 0,50 0))", 0.0
+                          "POINT(15 180)", "POLYGON((10 170,10 -170,20 -170,20 170,10 170))", 0.0
+                          "POINT(85 0)", "POLYGON((80 -120,80 0,80 120,80 -120))", 0.0
+                          "MULTIPOINT((10 10),(1 1))", "MULTIPOLYGON(((0 0,0 2,2 2,2 0,0 0)),((20 20,20 22,22 22,22 20,20 20)))", 0.0 ]
+                    for point, polygon, expected in cases do
+                        for first, second in [ point, polygon; polygon, point ] do
+                            let expression = sprintf "ST_Distance(ST_GeomFromText('%s',4326),ST_GeomFromText('%s',4326))" first second
+                            let sql = sprintf "SELECT ABS(%s-%.14f)<0.01" expression expected
+                            match runDefault store sql with
+                            | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                            | result -> failtestf "expected MySQL point-polygon distance for %s and %s, got %A" first second result
+                    let hole = "ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0),(1 1,1 2,2 2,2 1,1 1))',4326)"
+                    let point = "ST_GeomFromText('POINT(1.5 1.5)',4326)"
+                    match runDefault store (sprintf "SELECT ABS(ST_Distance(%s,%s,'kilometre')-55.28254423362244)<0.00001" point hole) with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL geographic polygon unit conversion, got %A" result
+
                 testCase "ETRS89 and NAD83 retain their geographic definitions"
                 <| fun _ ->
                     let store = newStore ()
