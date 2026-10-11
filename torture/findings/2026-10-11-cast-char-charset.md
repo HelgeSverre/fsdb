@@ -50,4 +50,8 @@ connection. Fsdb now retains the optional width in a dedicated cast node,
 including SQL rendering, prepared metadata, and persistence. The binary cast
 keeps raw bytes from hex and introduced-string sources before it applies the
 width; `_latin1 0xE9` at width two becomes `E900`, not a UTF-8 re-encoding.
-Other CAST charset contexts remain open.
+
+MySQL accepts `CHARSET` as the spelling of a `CHAR` target clause, but rejects
+`CHARACTER SET` after `SIGNED` or `BINARY` with syntax error 1064, even when
+the named charset is unknown. Fsdb now applies that target restriction before
+charset-name validation. Other CAST conversion contexts remain open.

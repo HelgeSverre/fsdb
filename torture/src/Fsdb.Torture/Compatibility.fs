@@ -1055,6 +1055,16 @@ module ContractCatalog =
                    yield Contract.preparedQuery (name + "-prepared") sql [||] |> Contract.comparingValues
                yield Contract.query "typed-convert-unknown-charset" "SELECT CONVERT(NULL, CHAR CHARACTER SET nosuchcharset)"
                      |> Contract.fails 1115 "42000"
+               for index, sql in
+                   [ "SELECT CAST('x' AS SIGNED CHARACTER SET binary)"
+                     "SELECT CAST('x' AS BINARY CHARACTER SET binary)"
+                     "SELECT CONVERT('x', SIGNED CHARACTER SET binary)"
+                     "SELECT CAST('x' AS SIGNED CHARACTER SET nosuchcharset)" ]
+                   |> List.indexed do
+                   yield Contract.query (sprintf "invalid-nonchar-charset-%d" index) sql
+                         |> Contract.fails 1064 "42000"
+               yield Contract.query "cast-charset-spelling" "SELECT CHARSET(CAST('x' AS CHAR CHARSET latin1))"
+                     |> Contract.comparingValues
                yield
                    Contract.query
                        "cast-binary-width-values"

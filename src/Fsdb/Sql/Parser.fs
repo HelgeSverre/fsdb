@@ -1665,19 +1665,14 @@ let private castCharsetClause: Parser<string, unit> =
     (keyword "CHARACTER" >>. keyword "SET" >>. identifier) <|> (keyword "CHARSET" >>. identifier)
 
 let private castConversion e (target, explicitLength) charset =
-    let cast = Cast(e, target)
-    match charset with
-    | Some cs ->
+    match target, charset with
+    | TChar _, Some cs ->
         if Charset.tryFind cs |> Option.isNone then
             raise (SemanticParseError(sprintf "Unknown character set: '%s'" cs))
-        match target with
-        | TChar _ -> CastCharset(e, explicitLength, cs)
-        | _ when cs.Equals("binary", System.StringComparison.OrdinalIgnoreCase) -> BinaryCast cast
-        | _ -> cast
-    | None ->
-        match target with
-        | TBinary _ -> CastAsBinary(e, explicitLength)
-        | _ -> cast
+        CastCharset(e, explicitLength, cs)
+    | _, Some _ -> raise (SemanticParseError "CHARACTER SET requires a CHAR cast target")
+    | TBinary _, None -> CastAsBinary(e, explicitLength)
+    | _, None -> Cast(e, target)
 
 let private castExpr: Parser<Expr, unit> =
     attempt (

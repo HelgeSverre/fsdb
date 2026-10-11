@@ -2850,6 +2850,21 @@ let tests =
               let _, error = handle session "SELECT CONVERT(NULL, CHAR CHARACTER SET nosuchcharset)"
               Expect.equal error (Err(1115, "Unknown character set: 'nosuchcharset'")) "target charset validates before NULL"
 
+          testCase "charset clauses belong only to CHAR cast targets"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in
+                  [ "SELECT CAST('x' AS SIGNED CHARACTER SET binary)"
+                    "SELECT CAST('x' AS BINARY CHARACTER SET binary)"
+                    "SELECT CONVERT('x', SIGNED CHARACTER SET binary)"
+                    "SELECT CAST('x' AS SIGNED CHARACTER SET nosuchcharset)" ] do
+                  match handle session sql with
+                  | _, Err(1064, _) -> ()
+                  | _, result -> failtestf "expected MySQL syntax error for %s, got %A" sql result
+              match handle session "SELECT CHARSET(CAST('x' AS CHAR CHARSET latin1))" with
+              | _, ResultSet(_, [ [ Some "latin1" ] ]) -> ()
+              | _, result -> failtestf "expected CHARSET spelling to remain valid, got %A" result
+
           testCase "explicit BINARY cast widths truncate and pad bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
