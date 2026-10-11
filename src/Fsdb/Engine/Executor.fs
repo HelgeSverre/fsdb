@@ -3107,7 +3107,7 @@ let private numericCastSourceText = function
     | (VEncodedString _ | VBytes _) as value -> toText value
     | _ -> None
 
-let private numericCastDiagnosticText source text =
+let private numericCastDiagnosticText source (text: string) =
     match source with
     | VBytes bytes ->
         bytes
@@ -3115,7 +3115,10 @@ let private numericCastDiagnosticText source text =
             if value >= 0x20uy && value <= 0x7Euy then string (char value)
             else sprintf "\\x%02X" value)
         |> String.concat ""
-    | _ -> text
+    | _ ->
+        match text.IndexOf('\000') with
+        | -1 -> text
+        | index -> text.Substring(0, index)
 
 let private numericCastBinaryColumnType ctx expr =
     tryColumnDefForExpr ctx expr

@@ -107,3 +107,6 @@ Audited computed binary results from `CONCAT`, `CONCAT_WS`, `SUBSTRING`, and
 binary CAST, including warning 1366 for an entirely invalid value. The
 classification uses the binary value's origin rather than a function-name
 exception; other expression producers remain to be audited.
+Text-string numeric CAST warning previews stop at the first NUL byte, as in
+MySQL, while binary-source warnings keep the escaped `\x00` representation.
+The result still uses the numeric prefix preceding the NUL.
