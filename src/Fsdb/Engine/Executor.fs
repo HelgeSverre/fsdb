@@ -9108,9 +9108,8 @@ and private tryFullTextDrivenJoinOrder
         && selectJoinExpressions select |> List.forall (hasUnqualifiedReference >> not)
 
     match select.From, select.Joins, ownedNodes with
-    | Some(FromTable _ as originalBase), [ join ], [ owner, (MatchAgainst(_, _, mode) as matchNode) ]
+    | Some(FromTable _ as originalBase), [ join ], [ owner, (MatchAgainst _ as matchNode) ]
         when shapeAllowsReordering
-             && mode <> BooleanMode
              && join.Kind = InnerJoin
              && join.Using.IsEmpty
              && (match join.Table with FromTable _ -> true | _ -> false)

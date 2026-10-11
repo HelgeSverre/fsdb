@@ -41,6 +41,13 @@ three matching postings and three owner probes produced six examined rows.
 `LIMIT 1` produced two, and a missing term produced zero. Fsdb now counts
 the consumed full-text base candidates once even when join planning rereads
 the source; the indexed owner probes already contributed their own counts.
+The same counts hold for the ordinary two-table inner and left joins when
+the full-text table is written first. With the owner table written first,
+MySQL still starts from the three posting matches and examines six rows;
+fsdb currently examines seven by scanning four owners and three matching
+documents. Under `LIMIT 1`, MySQL examines two. Fsdb now applies its
+full-text-first indexed-probe rule to this Boolean shape and also examines
+two. The unbounded reversed join remains a cost-planning gap.
 
 An `INSERT … SELECT` that read three source rows and inserted two reported
 `rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives

@@ -9662,15 +9662,19 @@ let tests =
               let session, _ = handle session "CREATE TABLE slow_fulltext_join_owners (id INT PRIMARY KEY, label INT)"
               let session, _ = handle session "INSERT INTO slow_fulltext_join_docs VALUES (1,1,'alpha beta'),(2,2,'alpha gamma'),(3,3,'delta epsilon'),(4,4,'alpha delta')"
               let session, _ = handle session "INSERT INTO slow_fulltext_join_owners VALUES (1,11),(2,22),(3,33),(4,44)"
-              let query term suffix =
+              let query join term suffix =
                   sprintf
-                      "SELECT d.id FROM slow_fulltext_join_docs d STRAIGHT_JOIN slow_fulltext_join_owners o ON o.id=d.owner_id WHERE MATCH(d.body) AGAINST('%s' IN BOOLEAN MODE)%s"
-                      term suffix
+                      "SELECT d.id FROM slow_fulltext_join_docs d %s slow_fulltext_join_owners o ON o.id=d.owner_id WHERE MATCH(d.body) AGAINST('%s' IN BOOLEAN MODE)%s"
+                      join term suffix
 
               for sql, examined, rows in
-                  [ query "alpha" "", "6", [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ]
-                    query "alpha" " LIMIT 1", "2", [ [ Some "1" ] ]
-                    query "missing" "", "0", [] ] do
+                  [ query "STRAIGHT_JOIN" "alpha" "", "6", [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ]
+                    query "STRAIGHT_JOIN" "alpha" " LIMIT 1", "2", [ [ Some "1" ] ]
+                    query "STRAIGHT_JOIN" "missing" "", "0", []
+                    query "JOIN" "alpha" "", "6", [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ]
+                    query "JOIN" "alpha" " LIMIT 1", "2", [ [ Some "1" ] ]
+                    query "LEFT JOIN" "alpha" "", "6", [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ]
+                    "SELECT d.id FROM slow_fulltext_join_owners o JOIN slow_fulltext_join_docs d ON o.id=d.owner_id WHERE MATCH(d.body) AGAINST('alpha' IN BOOLEAN MODE) LIMIT 1", "2", [ [ Some "1" ] ] ] do
                   let session, result = handle session sql
                   Expect.equal result (ResultSet([ "id" ], rows)) "full-text join results"
                   let escaped = sql.Replace("'", "''")
