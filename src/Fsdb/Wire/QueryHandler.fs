@@ -27,7 +27,8 @@ let private binaryResultProtocol = System.Threading.AsyncLocal<bool>()
 let private suppressGeneralQueryLog = System.Threading.AsyncLocal<bool>()
 
 let private storedProgramProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
-let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
+// Stored functions execute on the statement's thread and may nest other statements.
+let private storedFunctionSession = new System.Threading.ThreadLocal<Session option>()
 let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
 let private creatingTable = System.Threading.AsyncLocal<string option>()
 let private maxPointsInGeometryOverride = System.Threading.AsyncLocal<int option>()
@@ -3450,7 +3451,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
         let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
             try
-                DynamicScope.withValue storedFunctionSession (Some session) (fun () ->
+                DynamicScope.withThreadValue storedFunctionSession (Some session) (fun () ->
                     Executor.withCommittedFullTextStore session.Store (fun () ->
                         let strictConversion = store.ExecutionSettings.SqlMode.Strict && isDataChangeStatement stmt && not (ignoresDataChangeErrors stmt)
                         Diagnostics.withStrictNumericConversion strictConversion (fun () ->
@@ -7127,7 +7128,7 @@ let rec private invokeStoredFunction
 
     let outcome =
         DynamicScope.withValue storedFunctionCalls (Some(key :: calls)) (fun () ->
-            DynamicScope.withValue storedFunctionSession (Some executionSession) (fun () ->
+            DynamicScope.withThreadValue storedFunctionSession (Some executionSession) (fun () ->
                 Storage.withExecutionSettings executionStore capturedSettings run))
 
     // User variables belong to the invoking session even when the function fails.
