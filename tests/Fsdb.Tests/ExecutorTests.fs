@@ -15158,6 +15158,11 @@ let tests =
                     match runDefault store reverseSql with
                     | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected MySQL NAD83 UTM zone 10N inverse datum behavior, got %A" result
+                    let sameDatum = "ST_Transform(ST_GeomFromText('POINT(500000 5427455.781076529)',26910),26911)"
+                    let sameDatumSql = sprintf "SELECT ABS(ST_X(%s)-61256.889148296556)<0.000001,ABS(ST_Y(%s)-5444823.042875067)<0.000001" sameDatum sameDatum
+                    match runDefault store sameDatumSql with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL NAD83 projected-to-projected coordinates, got %A" result
 
                 testCase "projected transforms wrap geographic longitude"
                 <| fun _ ->

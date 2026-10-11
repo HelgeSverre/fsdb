@@ -3352,6 +3352,10 @@ module ContractCatalog =
                    "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(499999.70608616463 5427455.393397634)',26910),4326)),8),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(499999.70608616463 5427455.393397634)',26910),4326)),8)"
                |> Contract.comparingValues
                Contract.query
+                   "nad83-utm-projected-to-projected"
+                   "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(500000 5427455.781076529)',26910),26911)),6),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(500000 5427455.781076529)',26910),26911)),6)"
+               |> Contract.comparingValues
+               Contract.query
                    "world-mercator-forward"
                    "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5)"
                |> Contract.comparingValues

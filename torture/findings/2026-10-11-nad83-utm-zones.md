@@ -11,6 +11,8 @@ when a projected coordinate crosses the WGS 84 datum boundary. At 49°N,
 `POINT(500000.0000000093 5427455.781076529)`, while WGS 84 to the same
 SRS yields `POINT(499999.70608616463 5427455.393397634)`. The regression
 checks both paths and the WGS 84 inverse. The differential contract compares
-all 23 exact definitions and these forward and reverse results.
+all 23 exact definitions and these forward and reverse results. A separate
+contract confirms that a zone 10N-to-11N transform agrees to six projected
+decimal places despite passing through the shared WGS 84 transform path.
 
 Other NAD83 projected systems and most of MySQL's SRS catalog remain open.
