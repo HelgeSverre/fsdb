@@ -20251,7 +20251,12 @@ type private ExplainUnionJsonShape =
       AllowDerived: bool
       AllowProjectionSubqueries: bool }
 
-let private renderExplainJson (unionShape: ExplainUnionJsonShape option) (rows: ExplainRow list) : QueryResult =
+type private ExplainJsonShape =
+    | FlatJson
+    | SelectJson of allowProjectionSubqueries: bool
+    | UnionJson of ExplainUnionJsonShape
+
+let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) : QueryResult =
     let jsonArray values =
         let array = JsonArray()
         values |> Seq.iter (fun value -> array.Add(value: JsonNode))
@@ -20350,8 +20355,7 @@ let private renderExplainJson (unionShape: ExplainUnionJsonShape option) (rows: 
                 block["optimized_away_subqueries"] <- independent |> List.map subqueryNode |> jsonArray
 
             if not dependent.IsEmpty then
-                let table = block["table"] :?> JsonObject
-                table["select_list_subqueries"] <- dependent |> List.map subqueryNode |> jsonArray
+                block["select_list_subqueries"] <- dependent |> List.map subqueryNode |> jsonArray
 
         block
 
@@ -20407,18 +20411,28 @@ let private renderExplainJson (unionShape: ExplainUnionJsonShape option) (rows: 
         && (derivedBlocks |> Map.keys |> Set.ofSeq) = referencedDerivedIds
         && (subqueryBlocks.IsEmpty
             || (shape.AllowProjectionSubqueries
-                && derivedBlocks.IsEmpty
-                && (branches
-                    |> List.forall (fun (id, rows) ->
-                        let dependent = branchSubqueries id |> List.exists fst
-                        not dependent || (rows.Length = 1 && rows.Head.Table.IsSome)))))
+                && derivedBlocks.IsEmpty))
+
+    let plainSelectShape allowed =
+        match branches, subqueryBlocks with
+        | [ (branchId, _) ], _ :: _ when allowed ->
+            derivedBlocks.IsEmpty
+            && (subqueryBlocks |> List.forall (fun (id, _) -> id > branchId))
+            && (sorted
+                |> List.forall (fun row ->
+                    row.SelectType = "PRIMARY"
+                    || row.SelectType = "SUBQUERY"
+                    || row.SelectType = "DEPENDENT SUBQUERY"))
+        | _ -> false
 
     let rootBlock =
-        match unionShape with
-        | None -> queryBlock Map.empty [] sorted
-        | Some shape when plainBranchShape shape ->
+        match shape with
+        | SelectJson allowed when not subqueryBlocks.IsEmpty && plainSelectShape allowed ->
+            let branchId, branchRows = List.head branches
+            queryBlock Map.empty (branchSubqueries branchId) branchRows
+        | UnionJson unionShape when plainBranchShape unionShape ->
             let unionResult = JsonObject()
-            unionResult["using_temporary_table"] <- JsonValue.Create(shape.Materialized)
+            unionResult["using_temporary_table"] <- JsonValue.Create(unionShape.Materialized)
 
             if sorted |> List.exists (fun row -> row.SelectType = "UNION RESULT" && row.Extra = [ "Zero limit" ]) then
                 unionResult["message"] <- JsonValue.Create("Zero limit")
@@ -20437,7 +20451,7 @@ let private renderExplainJson (unionShape: ExplainUnionJsonShape option) (rows: 
             let block = JsonObject()
             block["union_result"] <- unionResult
             block
-        | Some _ -> queryBlock Map.empty [] sorted
+        | _ -> queryBlock Map.empty [] sorted
 
     let root = JsonObject()
     root["query_block"] <- rootBlock
@@ -20621,7 +20635,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 match stmt with
                 | Union(first, rest, orderBy, _, _) ->
                     renderExplainJson
-                        (Some
+                        (UnionJson
                             { Materialized = unionMaterializesResult orderBy rest
                               BranchCount = rest.Length + 1
                               AllowDerived =
@@ -20631,7 +20645,8 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                                 selectSupportsJsonProjectionSubqueries first
                                 && (rest |> List.forall (fun (_, select) -> selectSupportsJsonProjectionSubqueries select)) })
                         rows
-                | _ -> renderExplainJson None rows
+                | Select select -> renderExplainJson (SelectJson(selectSupportsJsonProjectionSubqueries select)) rows
+                | _ -> renderExplainJson FlatJson rows
             | ExplainTree ->
                 match stmt with
                 | Select select -> renderExplainTree select.Limit select.Offset false rows

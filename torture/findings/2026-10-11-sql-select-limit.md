@@ -44,7 +44,7 @@ adds the zero-limit message only to a materialized result. The branch access
 description is retained. An audited derived SELECT with its own explicit
 LIMIT now nests under its owning branch's `materialized_from_subquery`
 object, retaining the child's select ID and access description. Mergeable
-and lateral derived sources, derived set operations, and expression
+and lateral derived sources, derived set operations, and other expression
 subqueries still use the general JSON renderer until their ownership and
 dependence are audited. MySQL cost details and exact ANALYZE timing
 presentation also remain open.
@@ -54,9 +54,10 @@ limit to inspect scalar projection subqueries inside UNION branches. MySQL
 places an uncorrelated scalar subquery under its owning branch's
 `optimized_away_subqueries` array with `dependent: false` and
 `cacheable: true`. A correlated projection subquery appears under the
-owning table's `select_list_subqueries` array with `dependent: true` and
+owning query block's `select_list_subqueries` array with `dependent: true` and
 `cacheable: false`. Both retain the child `query_block.select_id` and access
-description. Fsdb now nests these audited projection cases under their
-owning UNION branch, including a scalar in a later branch. Other expression
+description. A separate native probe confirmed the same placement for a
+single SELECT without UNION. Fsdb now nests these audited projection cases
+under their owning SELECT or UNION branch, including a scalar in a later branch. Other expression
 positions, nested scalar blocks, mixed derived/scalar plans, and broader
 optimizer placement still use the general renderer.

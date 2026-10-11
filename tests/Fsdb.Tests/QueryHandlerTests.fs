@@ -4100,8 +4100,7 @@ let tests =
                   unionJson
                       "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM select_limit_plan b WHERE b.id=a.id) AS x FROM select_limit_plan a UNION SELECT 1"
               let correlatedBranch = correlatedJson.GetProperty("query_specifications").EnumerateArray() |> Seq.head
-              let parentTable = correlatedBranch.GetProperty("query_block").GetProperty("table")
-              let selected = parentTable.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              let selected = correlatedBranch.GetProperty("query_block").GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
               Expect.isTrue (selected.GetProperty("dependent").GetBoolean()) "correlated projection depends on the parent row"
               Expect.isFalse (selected.GetProperty("cacheable").GetBoolean()) "correlated projection is not cacheable"
               Expect.equal (selected.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "child access stays nested"
@@ -4145,6 +4144,35 @@ let tests =
                   Expect.stringContains limit "Limit: 1 row(s)" "TREE shows the implicit limit"
                   Expect.stringContains access "select_limit_plan" "TREE keeps the access path"
               | other -> failtestf "expected a limit above the access path, got %A" other
+
+          testCase "EXPLAIN JSON nests scalar projections in a single SELECT"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE scalar_plan (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO scalar_plan VALUES (1),(2)"
+
+              let plan sql =
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ Some json ] ]) ->
+                      let document = System.Text.Json.JsonDocument.Parse(json)
+                      document.RootElement.GetProperty("query_block")
+                  | other -> failtestf "expected scalar JSON plan, got %A" other
+
+              let independent =
+                  plan "EXPLAIN FORMAT=JSON SELECT (SELECT id FROM scalar_plan WHERE id=1 LIMIT 1) AS x"
+              Expect.equal (independent.GetProperty("message").GetString()) "No tables used" "outer SELECT has no source"
+              let optimized = independent.GetProperty("optimized_away_subqueries").EnumerateArray() |> Seq.head
+              Expect.isFalse (optimized.GetProperty("dependent").GetBoolean()) "uncorrelated scalar is independent"
+              Expect.equal (optimized.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "child select ID is retained"
+
+              let correlated =
+                  plan "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a"
+              Expect.equal (correlated.GetProperty("table").GetProperty("table_name").GetString()) "a" "outer access is retained"
+              let selected = correlated.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              Expect.isTrue (selected.GetProperty("dependent").GetBoolean()) "correlated scalar depends on the parent row"
+              Expect.isFalse (selected.GetProperty("cacheable").GetBoolean()) "correlated scalar is not cacheable"
+              Expect.equal (selected.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "child access stays nested"
 
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
