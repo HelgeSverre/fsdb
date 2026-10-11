@@ -13613,6 +13613,11 @@ and private tryCorrelatedSourceLookup
             | [] -> None
             | candidates -> Some(List.minBy (snd >> List.length) candidates)
 
+    let materializedLookup () =
+        [ tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
+          tryMaterializedCorrelatedRangeLookup store registry dbName source whereExpr outer ]
+        |> fewestRows
+
     match source with
     | FromTable table ->
         [ tryCorrelatedEqualityLookup store dbName table whereExpr outer
@@ -13622,19 +13627,15 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
-        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
-        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedRangeLookup store registry dbName source whereExpr outer)
+        |> Option.orElseWith materializedLookup
     | FromSubquery _ ->
         [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
           tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
         |> fewestRows
         |> Option.orElseWith (fun () -> tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
-        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
-        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedRangeLookup store registry dbName source whereExpr outer)
-    | _ ->
-        tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
-        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedRangeLookup store registry dbName source whereExpr outer)
+        |> Option.orElseWith materializedLookup
+    | _ -> materializedLookup ()
 
 and private tryCorrelatedCountEqualityPredicate source context =
     let boundValue expression =

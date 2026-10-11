@@ -719,6 +719,41 @@ let tests =
                       "MySQL 8.4 range counts"
               | other -> failtestf "expected correlated range counts, got %A" other
 
+          testCase "materialized correlated probes choose the narrower access path"
+          <| fun _ ->
+              let mutable touches = 0
+
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_bound (min_b INT)" |> ignore
+              runDefault store "CREATE TABLE inner_values (a INT, b INT, active INT)" |> ignore
+              runDefault store "INSERT INTO outer_bound VALUES (99)" |> ignore
+
+              [ 0 .. 99 ]
+              |> List.map (fun b -> sprintf "(1, %d, 1)" b)
+              |> String.concat ", "
+              |> fun values -> runDefault store ("INSERT INTO inner_values VALUES " + values)
+              |> ignore
+
+              for prefix, source in
+                  [ "", "(SELECT a, b, MAX(active) AS active FROM inner_values GROUP BY a, b) d"
+                    "WITH grouped AS (SELECT a, b, MAX(active) AS active FROM inner_values GROUP BY a, b) ", "grouped d" ] do
+                  touches <- 0
+
+                  let sql =
+                      prefix + "SELECT EXISTS (SELECT 1 FROM " + source
+                      + " WHERE TOUCH(d.active) = 1 AND d.a = 1 AND d.b >= o.min_b) FROM outer_bound o"
+
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected the matching row, got %A" other
+
+                  Expect.isLessThan touches 10 "the numeric bound is narrower than the equality key"
+
           testCase "scalar subquery returning more than one row is MySQL error 1242"
           <| fun _ ->
               let store = newStore ()
