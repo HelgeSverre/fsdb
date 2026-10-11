@@ -574,6 +574,34 @@ let internal geographicLinePolygonDistance referenceSystem lines polygons =
     | [] -> None
     | _ -> Some(List.min distances)
 
+type internal GeographicLinePolygonTopology =
+    { Crosses: bool
+      Touches: bool
+      LineWithinPolygon: bool }
+
+let internal geographicLinePolygonTopology referenceSystem lines polygons =
+    let positions =
+        lines
+        |> List.collect (fun line ->
+            line
+            |> List.pairwise
+            |> List.collect (fun (start, endpoint) ->
+                sampleGeographicSegment referenceSystem start endpoint |> Array.toList))
+        |> List.map (fun point -> geographicPointPolygonPosition referenceSystem point polygons)
+    let hasInterior =
+        positions
+        |> List.exists (function
+            | GeographicPointPolygonPosition.Interior
+            | GeographicPointPolygonPosition.HoleBoundary -> true
+            | _ -> false)
+    let hasOutside =
+        positions
+        |> List.exists (function GeographicPointPolygonPosition.Outside _ -> true | _ -> false)
+    let intersects = geographicLinePolygonDistance referenceSystem lines polygons = Some 0.0
+    { Crosses = hasInterior && hasOutside
+      Touches = intersects && not hasInterior
+      LineWithinPolygon = hasInterior && not hasOutside }
+
 let internal geographicPolygonPolygonDistance referenceSystem firstPolygons secondPolygons =
     let firstRings = firstPolygons |> List.collect id
     let secondRings = secondPolygons |> List.collect id

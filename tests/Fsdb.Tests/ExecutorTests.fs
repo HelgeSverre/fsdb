@@ -14878,6 +14878,28 @@ let tests =
                         | ResultSet(_, [ row ]) when row = ([ intersects; disjoint; intersects; disjoint ] |> List.map Some) -> ()
                         | result -> failtestf "expected MySQL geographic line-polygon intersections for %s and %s, got %A" lineText polygonText result
 
+                testCase "geographic line-polygon topology distinguishes crossing and boundaries"
+                <| fun _ ->
+                    let store = newStore ()
+                    let exterior = "POLYGON((0 0,0 3,3 3,3 0,0 0))"
+                    let hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(0.5 0.5,3.5 0.5,3.5 3.5,0.5 3.5,0.5 0.5))"
+                    let cases =
+                        [ "LINESTRING(-1 1,4 1)", exterior, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(1 1,2 2)", exterior, [ Some "0"; Some "0"; Some "1"; Some "1" ]
+                          "LINESTRING(4 1,5 1)", exterior, [ Some "0"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 1,0 1)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(0 1,0 2)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(1 1,0 1)", exterior, [ Some "0"; Some "0"; Some "1"; Some "1" ]
+                          "LINESTRING(0.5 1,0.5 3)", hole, [ Some "0"; Some "0"; Some "1"; Some "1" ]
+                          "LINESTRING(0.25 2,0.75 2)", hole, [ Some "1"; Some "0"; Some "0"; Some "0" ] ]
+                    for lineText, polygonText, expected in cases do
+                        let line = sprintf "ST_GeomFromText('%s',4326)" lineText
+                        let polygon = sprintf "ST_GeomFromText('%s',4326)" polygonText
+                        let sql = sprintf "SELECT ST_Crosses(%s,%s),ST_Touches(%s,%s),ST_Within(%s,%s),ST_Contains(%s,%s)" line polygon line polygon line polygon polygon line
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = expected -> ()
+                        | result -> failtestf "expected MySQL geographic line-polygon topology for %s and %s, got %A" lineText polygonText result
+
                 testCase "geographic polygon intersections distinguish overlap and holes"
                 <| fun _ ->
                     let store = newStore ()
