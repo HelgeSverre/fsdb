@@ -3054,6 +3054,20 @@ let tests =
                                   (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
                                   (VInt expected)
                                   (sprintf "%s matches %A" pattern value)
+                      testCase "REGEXP Unicode category aliases match MySQL"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "\\p{Letter}", "α", 1L
+                                "\\p{Letter}", "Ⅳ", 0L
+                                "\\p{Number}", "Ⅳ", 1L
+                                "\\p{Decimal_Number}", "Ⅳ", 0L
+                                "\\p{decimal_number}", "5", 1L
+                                "\\P{Number}", "A", 1L
+                                "[\\p{Letter}0-9]", "α", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
                       testCase "REGEXP negated POSIX classes include line terminators"
                       <| fun _ ->
                           for pattern, value, expected in

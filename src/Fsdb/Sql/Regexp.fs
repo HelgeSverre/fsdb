@@ -105,6 +105,25 @@ let private quotedLiteralAt inClass (pattern: string) index =
     let escaped = if inClass then escaped.Replace("]", "\\]").Replace("-", "\\-") else escaped
     (if closing < 0 then contentEnd else contentEnd + 2), escaped
 
+let private unicodeCategoryAliasAt (pattern: string) index =
+    if index + 3 >= pattern.Length
+       || (pattern[index + 1] <> 'p' && pattern[index + 1] <> 'P')
+       || pattern[index + 2] <> '{' then
+        None
+    else
+        let closing = pattern.IndexOf('}', index + 3)
+        if closing < 0 then None
+        else
+            let name = pattern.Substring(index + 3, closing - index - 3)
+            let category =
+                match name.ToUpperInvariant() with
+                | "LETTER" -> Some "L"
+                | "NUMBER" -> Some "N"
+                | "DECIMAL_NUMBER" -> Some "Nd"
+                | _ -> None
+            category
+            |> Option.map (fun category -> closing + 1, "\\" + string pattern[index + 1] + "{" + category + "}")
+
 let private mixedNegatedClassAt (pattern: string) start =
     let outerNegated = start + 1 < pattern.Length && pattern[start + 1] = '^'
     let ordinary = StringBuilder()
@@ -179,24 +198,29 @@ let private normalizePosixClasses (pattern: string) =
             elif index + 1 < pattern.Length && pattern[index + 1] = 'E' then
                 builder.Append 'E' |> ignore
                 index <- index + 2
-            elif inClass && index + 1 < pattern.Length && (pattern[index + 1] = 'b' || pattern[index + 1] = 'B') then
-                builder.Append pattern[index + 1] |> ignore
-                index <- index + 2
-            elif not inClass && index + 1 < pattern.Length && pattern[index + 1] = 'R' then
-                builder.Append("(?:\\r\\n|" + verticalClass + ")") |> ignore
-                index <- index + 2
             else
-                match if index + 1 < pattern.Length then characterEscape pattern[index + 1] else None with
-                | Some target when not inClass ->
-                    builder.Append target |> ignore
+                match unicodeCategoryAliasAt pattern index with
+                | Some(nextIndex, category) ->
+                    builder.Append category |> ignore
+                    index <- nextIndex
+                | None when inClass && index + 1 < pattern.Length && (pattern[index + 1] = 'b' || pattern[index + 1] = 'B') ->
+                    builder.Append pattern[index + 1] |> ignore
                     index <- index + 2
-                | Some target when target[1] <> '^' ->
-                    builder.Append(target, 1, target.Length - 2) |> ignore
+                | None when not inClass && index + 1 < pattern.Length && pattern[index + 1] = 'R' ->
+                    builder.Append("(?:\\r\\n|" + verticalClass + ")") |> ignore
                     index <- index + 2
-                | _ ->
-                    builder.Append '\\' |> ignore
-                    escaped <- true
-                    index <- index + 1
+                | None ->
+                    match if index + 1 < pattern.Length then characterEscape pattern[index + 1] else None with
+                    | Some target when not inClass ->
+                        builder.Append target |> ignore
+                        index <- index + 2
+                    | Some target when target[1] <> '^' ->
+                        builder.Append(target, 1, target.Length - 2) |> ignore
+                        index <- index + 2
+                    | _ ->
+                        builder.Append '\\' |> ignore
+                        escaped <- true
+                        index <- index + 1
         else
             match posixClassAt inClass pattern index with
             | Some(source, target) ->
