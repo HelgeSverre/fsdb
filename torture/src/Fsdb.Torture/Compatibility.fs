@@ -1174,6 +1174,11 @@ module ContractCatalog =
                          |> Contract.comparingValues
                    yield Contract.query (sprintf "decimal-cast-large-finite-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               for index, text in [ "1e80"; "1e81"; "-12.34e80x"; "1e309"; "1e309x"; "0e100"; "0001.20e81"; "+001e81" ] |> List.indexed do
+                   yield Contract.query (sprintf "decimal-cast-large-exponent-%d" index) (sprintf "SELECT CAST('%s' AS DECIMAL(10,2))" text)
+                         |> Contract.comparingValues
+                   yield Contract.query (sprintf "decimal-cast-large-exponent-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                for index, text in [ "abc"; "12x"; "1e309"; "-1e309"; "1e309x"; "-1e309x"; "nan" ] |> List.indexed do
                    yield Contract.query (sprintf "double-cast-value-%d" index) (sprintf "SELECT CAST('%s' AS DOUBLE)" text)
                          |> Contract.comparingValues

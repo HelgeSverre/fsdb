@@ -61,9 +61,13 @@ coercion return a DECIMAL wider than the CAST target. The focused regression
 and differential contract now cover these audited values and diagnostics.
 Finite DECIMAL text that exceeds .NET's `decimal` range but remains within the
 audited MySQL conversion range, such as `1e29`, now clamps to a smaller target
-with warning 1264; partial text also retains its 1292 warning. Larger values
-such as `1e81` have additional MySQL conversion warnings that remain open,
-along with general DECIMAL values beyond .NET's `decimal` precision.
+with warning 1264; partial text also retains its 1292 warning. MySQL's
+81-digit expansion boundary is now covered for bounded targets: `1e80` has
+only the range warning, while `1e81` and `1e309` first warn about the mantissa
+and original text, then about the target range. The mantissa warning removes
+leading zeroes and a leading plus sign. A zero mantissa remains zero
+without warnings. General DECIMAL values beyond .NET's `decimal` precision,
+including wide targets, remain open.
 
 DOUBLE and FLOAT CAST text conversion now follows the same audited numeric-prefix
 warning rule. MySQL returns zero with warning 1292 for `abc` and `nan`, and the

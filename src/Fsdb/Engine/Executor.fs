@@ -3106,6 +3106,26 @@ let private truncatedNumericCastInput text =
     let prefix = leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue ""
     prefix = "" || not (text.Trim().Equals(prefix, System.StringComparison.Ordinal))
 
+let private oversizedDecimalExponentMantissa (prefix: string) =
+    let exponentIndex = prefix.IndexOfAny([| 'e'; 'E' |])
+    if exponentIndex < 0 then None
+    else
+        let mantissa = prefix.Substring(0, exponentIndex).Trim()
+        let unsigned = mantissa.TrimStart([| '+'; '-' |])
+        let digits = unsigned.Replace(".", "")
+        let integerDigits =
+            match unsigned.IndexOf('.') with
+            | -1 -> unsigned.Length
+            | index -> index
+        let leadingZeros = digits |> Seq.takeWhile ((=) '0') |> Seq.length
+        match System.Int64.TryParse(prefix.Substring(exponentIndex + 1)) with
+        | true, exponent when leadingZeros < digits.Length && exponent > 81L - int64 integerDigits + int64 leadingZeros ->
+            let whole = unsigned.Substring(0, integerDigits).TrimStart([| '0' |])
+            let whole = if whole = "" && integerDigits > 0 then "0" else whole
+            let sign = if mantissa.StartsWith("-", System.StringComparison.Ordinal) then "-" else ""
+            Some(sign + whole + unsigned.Substring(integerDigits))
+        | _ -> None
+
 let private castIntegerText unsigned (text: string) =
     let matched = leadingIntegerPrefixRegex.Match text
     let prefix = matched.Value.Trim()
@@ -5989,9 +6009,16 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     Diagnostics.warning 1292 (sprintf "Incorrect datetime value: '%s'" (Value.toText v |> Option.defaultValue "NULL"))
                     Ok VNull
             | TDecimal(precision, scale, _), _ ->
-                match source with
-                | VString text when truncatedNumericCastInput text ->
+                let warnTruncated text =
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" text)
+                match source, v with
+                | VString text, VString prefix ->
+                    match oversizedDecimalExponentMantissa prefix with
+                    | Some mantissa ->
+                        warnTruncated mantissa
+                        warnTruncated text
+                    | None when truncatedNumericCastInput text -> warnTruncated text
+                    | None -> ()
                 | _ -> ()
                 let warnOutOfRange () =
                     let label = ctx.ProjectionLabel |> Option.defaultValue (SqlText.expression expr)
@@ -6006,7 +6033,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | true, _ -> None
                         | false, _ ->
                             match System.Double.TryParse(prefix, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
-                            | true, number when System.Double.IsFinite number && abs number > float limit ->
+                            | true, number when not (System.Double.IsNaN number) && abs number > float limit ->
                                 Some(if number < 0.0 then -limit else limit)
                             | _ -> None
                     | _ -> None

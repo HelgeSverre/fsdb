@@ -2985,6 +2985,38 @@ let tests =
                       Expect.equal (session.Diagnostics |> List.last |> fun condition -> condition.Code) 1264 sql
                   | _, result -> failtestf "expected bounded DECIMAL result for %s, got %A" sql result
 
+          testCase "DECIMAL casts preserve high-exponent conversion warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for source, expected, mantissa in
+                  [ "1e81", "99999999.99", "1"
+                    "-12.34e80x", "-99999999.99", "-12.34"
+                    "1e309", "99999999.99", "1"
+                    "1e309x", "99999999.99", "1"
+                    "0001.20e81", "99999999.99", "1.20"
+                    "+001e81", "99999999.99", "1" ] do
+                  let sql = sprintf "SELECT CAST('%s' AS DECIMAL(10,2))" source
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ 1292, sprintf "Truncated incorrect DECIMAL value: '%s'" mantissa
+                            1292, sprintf "Truncated incorrect DECIMAL value: '%s'" source
+                            1264, sprintf "Out of range value for column 'CAST('%s' AS DECIMAL(10,2))' at row 1" source ]
+                          sql
+                  | _, result -> failtestf "expected high-exponent DECIMAL result for %s, got %A" sql result
+              for source in [ "1e80"; "12e79" ] do
+                  let sql = sprintf "SELECT CAST('%s' AS DECIMAL(10,2))" source
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some "99999999.99" ] ]) ->
+                      Expect.equal (session.Diagnostics |> List.map (fun condition -> condition.Code)) [ 1264 ] sql
+                  | _, result -> failtestf "expected single range warning for %s, got %A" sql result
+              match handle session "SELECT CAST('0e100' AS DECIMAL(10,2))" with
+              | session, ResultSet(_, [ [ Some "0.00" ] ]) ->
+                  Expect.isEmpty session.Diagnostics "zero mantissa has no conversion warning"
+              | _, result -> failtestf "expected zero DECIMAL result, got %A" result
+
           testCase "FLOAT casts distinguish invalid text from range overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
