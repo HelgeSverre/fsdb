@@ -1108,6 +1108,26 @@ let tests =
                           1300, "Invalid cp1251 character string: '98'" ]
                         "only the three invalid source conversions warn"
 
+                testCase "CONVERT retains encoded source bytes for binary conversion"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for charset, hex, utf8 in
+                        [ "sjis", "82A0", "E38182"
+                          "gbk", "C4E3", "E4BDA0"
+                          "big5", "A440", "E4B880"
+                          "utf16", "0041", "41"
+                          "utf32", "00000041", "41" ] do
+                        let sql =
+                            sprintf
+                                "SELECT HEX(CONVERT(CONVERT(0x%s USING %s) USING binary)), HEX(CONVERT(CONVERT(0x%s USING %s) USING utf8mb4))"
+                                hex charset hex charset
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some binary; Some transcoded ] ]) ->
+                            Expect.equal binary hex (sprintf "%s binary bytes" charset)
+                            Expect.equal transcoded utf8 (sprintf "%s UTF-8 bytes" charset)
+                        | other -> failtestf "expected encoded source bytes for %s, got %A" sql other
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

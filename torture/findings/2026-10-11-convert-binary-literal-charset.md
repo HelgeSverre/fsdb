@@ -40,6 +40,12 @@ A follow-up used the result as the source of another conversion. MySQL changes
 invalid CP1251 byte `98` to `?` when transcoding to UTF-8, but retains `98`
 when converting to binary or back to CP1251. TIS-620 control byte `80`
 becomes UTF-8 `C280` and Latin1 `E9` stays `E9` in binary. Fsdb now
-distinguishes text transcodes from
-binary byte preservation for these encoded sources. Other conversion contexts
-remain open.
+distinguishes text transcodes from binary byte preservation for these encoded
+sources.
+
+Valid encoded source values also retain their bytes. MySQL keeps SJIS `82A0`,
+GBK `C4E3`, Big5 `A440`, UTF-16 `0041`, and UTF-32 `00000041` when a second
+`CONVERT ... USING binary` is applied, while a second UTF-8 conversion emits
+their transcoded bytes. Fsdb now retains the validated source encoding instead
+of immediately discarding it into a plain Unicode string. Other conversion
+contexts remain open.

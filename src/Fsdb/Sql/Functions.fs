@@ -2145,7 +2145,7 @@ let private convertFn: Scalar =
                 | Some offset ->
                     Diagnostics.warning 1300 (Charset.invalidCharacterMessage charset bytes offset)
                     VNull
-                | None -> VString(Charset.decodeBytes charset bytes)
+                | None -> VEncodedString(charset, bytes)
         | _ -> VNull
     | [ v; VString charset ] ->
         match Charset.canonicalName charset with

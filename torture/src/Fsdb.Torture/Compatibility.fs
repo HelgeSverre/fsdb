@@ -991,6 +991,21 @@ module ContractCatalog =
                yield
                    Contract.query "convert-single-byte-source-transcode-warnings" "SHOW WARNINGS"
                    |> Contract.comparingValues
+               for charset, hex in
+                   [ "sjis", "82A0"
+                     "gbk", "C4E3"
+                     "big5", "A440"
+                     "utf16", "0041"
+                     "utf32", "00000041" ] do
+                   let name = "convert-encoded-source-" + charset
+                   yield
+                       Contract.query
+                           name
+                           (sprintf
+                               "SELECT HEX(CONVERT(CONVERT(0x%s USING %s) USING binary)), HEX(CONVERT(CONVERT(0x%s USING %s) USING utf8mb4))"
+                               hex charset hex charset)
+                       |> Contract.comparingValues
+                   yield Contract.query (name + "-warnings") "SHOW WARNINGS" |> Contract.comparingValues
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do
