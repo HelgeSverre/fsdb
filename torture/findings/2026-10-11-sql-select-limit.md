@@ -92,8 +92,20 @@ the inner grouping operation when an outer ORDER BY is present, and that an
 independent ORDER BY scalar moves to the inner grouping operation's
 `optimized_away_subqueries`, with no filesort in either wrapper. Fsdb now
 matches both audited cases. Other independent DISTINCT/ordering and
-HAVING/ORDER BY shapes, nested scalar blocks, mixed derived/scalar plans, and
-broader optimizer placement remain open.
+HAVING/ORDER BY shapes, nested scalar blocks, broader mixed derived/scalar
+plans, and optimizer placement remain open.
+
+A native 8.4.11 probe combined a scalar projection with a materialized
+`FROM (SELECT id FROM t LIMIT 2) d` source. For a correlated projection,
+MySQL gives the branch ID 1, scalar ID 2, and derived ID 3; the JSON block
+names the source `d`, nests ID 3 under `materialized_from_subquery`, and
+keeps ID 2 in the branch's `select_list_subqueries`. Repeating the shape in
+both sides of `UNION ALL` gives IDs 1/2/3 and 4/5/6 under separate
+`query_specifications`. An independent scalar in the same materialized-source
+shape also remains in `select_list_subqueries`, with `dependent: false` and
+`cacheable: true`, rather than moving to `optimized_away_subqueries`. Fsdb's
+focused regression now covers these audited combinations. Joined, mergeable,
+lateral, and nested derived/scalar combinations remain unverified.
 
 A further native DISTINCT probe used both a primary-key projection and a
 duplicate-prone non-key value ordered by an independent scalar. MySQL puts

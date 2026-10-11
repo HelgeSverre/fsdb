@@ -4162,7 +4162,46 @@ let tests =
 
           testList
               "EXPLAIN JSON scalar subqueries"
-              [ testCase "single-clause placement"
+              [ testCase "materialized derived sources retain scalar projection plans"
+                <| fun _ ->
+                    let plan = scalarExplainPlan ()
+                    let statement =
+                        "SELECT d.id, (SELECT b.id FROM scalar_plan b WHERE b.id=d.id) AS x "
+                        + "FROM (SELECT id FROM scalar_plan LIMIT 2) d"
+                    let checkBranch expectedId expectedScalarId expectedDerivedId (block: System.Text.Json.JsonElement) =
+                        Expect.equal (block.GetProperty("select_id").GetInt32()) expectedId "branch ID"
+                        let source = block.GetProperty("table")
+                        Expect.equal (source.GetProperty("table_name").GetString()) "d" "derived source alias"
+                        let derived = source.GetProperty("materialized_from_subquery").GetProperty("query_block")
+                        Expect.equal (derived.GetProperty("select_id").GetInt32()) expectedDerivedId "derived block ID"
+                        Expect.equal (derived.GetProperty("table").GetProperty("table_name").GetString()) "scalar_plan" "derived access"
+                        let scalar = block.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+                        Expect.isTrue (scalar.GetProperty("dependent").GetBoolean()) "scalar depends on the derived row"
+                        let child = scalar.GetProperty("query_block")
+                        Expect.equal (child.GetProperty("select_id").GetInt32()) expectedScalarId "scalar block ID"
+                        Expect.equal (child.GetProperty("table").GetProperty("table_name").GetString()) "b" "scalar access"
+
+                    checkBranch 1 2 3 (plan ("EXPLAIN FORMAT=JSON " + statement))
+
+                    let independent =
+                        plan
+                            ("EXPLAIN FORMAT=JSON SELECT d.id, "
+                             + "(SELECT b.id FROM scalar_plan b WHERE b.id=1 LIMIT 1) AS x "
+                             + "FROM (SELECT id FROM scalar_plan LIMIT 2) d")
+                    let independentChild = independent.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+                    Expect.isFalse (independentChild.GetProperty("dependent").GetBoolean()) "independent scalar retains its flag"
+                    Expect.isTrue (independentChild.GetProperty("cacheable").GetBoolean()) "independent scalar is cacheable"
+                    Expect.equal (independentChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "independent scalar precedes derived block"
+
+                    let union = plan ("EXPLAIN FORMAT=JSON " + statement + " UNION ALL " + statement)
+                    let result = union.GetProperty("union_result")
+                    Expect.isFalse (result.GetProperty("using_temporary_table").GetBoolean()) "UNION ALL streams"
+                    let branches = result.GetProperty("query_specifications").EnumerateArray() |> Seq.toArray
+                    Expect.equal branches.Length 2 "both UNION branches remain nested"
+                    checkBranch 1 2 3 (branches.[0].GetProperty("query_block"))
+                    checkBranch 4 5 6 (branches.[1].GetProperty("query_block"))
+
+                testCase "single-clause placement"
                 <| fun _ ->
                     let plan = scalarExplainPlan ()
                     let independent =

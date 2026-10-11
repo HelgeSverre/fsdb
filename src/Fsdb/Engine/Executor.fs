@@ -19909,6 +19909,11 @@ let rec private explainJoinBlock
     (consumption: JoinConsumption)
     : Result<unit, QueryResult> =
     let tableCount = (from |> Option.toList |> List.length) + joins.Length
+    // MySQL numbers expression subqueries before materialized FROM sources.
+    let expressionSubqueries =
+        subqueryExprs
+        |> List.collect collectSubqueries
+        |> List.map (fun subquery -> nextId (), subquery)
 
     let sourcePredicates =
         from
@@ -20134,10 +20139,8 @@ let rec private explainJoinBlock
                   Rows = None
                   Extra = [ "No tables used" ] })
     |> Result.bind (fun () ->
-        subqueryExprs
-        |> List.collect collectSubqueries
-        |> traverse (fun sub ->
-            let sid = nextId ()
+        expressionSubqueries
+        |> traverse (fun (sid, sub) ->
             let stype = if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
             explainSelectBlock store registry dbName nextId acc sid stype sub)
         |> Result.map ignore)
@@ -20278,7 +20281,7 @@ type private ExplainNestedSubqueries =
     | NoNestedSubqueries
     | NestedSubqueries of (ExplainSubqueryPlacement * (bool * ExplainRow list) list) list
 
-let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) : QueryResult =
+let private renderExplainJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (rows: ExplainRow list) : QueryResult =
     let jsonArray values =
         let array = JsonArray()
         values |> Seq.iter (fun value -> array.Add(value: JsonNode))
@@ -20359,6 +20362,9 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                 materialized["cacheable"] <- JsonValue.Create(true)
                 materialized["query_block"] <- queryBlock derivedBlocks NoNestedSubqueries derivedRows
                 let table = item["table"] :?> JsonObject
+                row.Id
+                |> Option.bind (fun id -> Map.tryFind id derivedAliases)
+                |> Option.iter (fun alias -> table["table_name"] <- JsonValue.Create(alias))
                 table["materialized_from_subquery"] <- materialized)
 
             item
@@ -20381,12 +20387,19 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
             match clause with
             | ExplainProjection ->
                 let dependent, independent = subqueries |> List.partition fst
+                let materializedSource =
+                    blockRows
+                    |> List.exists (fun row -> row.Table |> Option.bind derivedTableId |> Option.isSome)
+                // MySQL retains independent projections beside a materialized
+                // source instead of moving them to optimized-away subqueries.
+                let selected = if materializedSource then subqueries else dependent
+                let optimized = if materializedSource then [] else independent
 
-                if not independent.IsEmpty then
-                    target["optimized_away_subqueries"] <- independent |> List.map subqueryNode |> jsonArray
+                if not optimized.IsEmpty then
+                    target["optimized_away_subqueries"] <- optimized |> List.map subqueryNode |> jsonArray
 
-                if not dependent.IsEmpty then
-                    target["select_list_subqueries"] <- dependent |> List.map subqueryNode |> jsonArray
+                if not selected.IsEmpty then
+                    target["select_list_subqueries"] <- selected |> List.map subqueryNode |> jsonArray
             | ExplainHaving -> target["having_subqueries"] <- subqueries |> List.map subqueryNode |> jsonArray
             | ExplainOrderBy ->
                 let dependent, independent = subqueries |> List.partition fst
@@ -20542,17 +20555,17 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
         && (shape.AllowDerived || derivedBlocks.IsEmpty)
         && (derivedBlocks |> Map.keys |> Set.ofSeq) = referencedDerivedIds
         && (subqueryBlocks.IsEmpty
-            || (shape.AllowProjectionSubqueries
-                && derivedBlocks.IsEmpty))
+            || shape.AllowProjectionSubqueries)
 
     let plainSelectShape (placement: ExplainSubqueryPlacement option) =
         match branches, subqueryBlocks with
         | [ (branchId, branchRows) ], _ :: _ when placement.IsSome ->
-            derivedBlocks.IsEmpty
+            (derivedBlocks |> Map.keys |> Set.ofSeq) = referencedDerivedIds
             && (subqueryBlocks |> List.forall (fun (id, _) -> id > branchId))
             && (sorted
                 |> List.forall (fun row ->
                     row.SelectType = "PRIMARY"
+                    || row.SelectType = "DERIVED"
                     || row.SelectType = "SUBQUERY"
                     || row.SelectType = "DEPENDENT SUBQUERY"))
             && (match placement with
@@ -20562,9 +20575,10 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                 | Some { Clause = ExplainOrderBy; Operations = [ OrderingOperation; DistinctOperation ] }
                 | Some { Clause = ExplainHaving; Operations = [ GroupingOperation ] }
                 | Some { Clause = ExplainHaving; Operations = [ OrderingOperation; GroupingOperation ] } ->
-                    branchRows.Length = 1 && branchRows.Head.Table.IsSome
+                    derivedBlocks.IsEmpty && branchRows.Length = 1 && branchRows.Head.Table.IsSome
                 | Some _ ->
-                    branchRows.Length = 1
+                    derivedBlocks.IsEmpty
+                    && branchRows.Length = 1
                     && branchRows.Head.Table.IsSome
                     && (subqueryBlocks
                         |> List.forall (fun (_, rows) -> rows.Head.SelectType = "DEPENDENT SUBQUERY"))
@@ -20587,7 +20601,7 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
         match shape with
         | SelectJson(Some placement) when plainSelectShape (Some placement) ->
             let branchId, branchRows = List.head branches
-            queryBlock Map.empty (NestedSubqueries [ placement, branchSubqueries branchId ]) branchRows
+            queryBlock derivedBlocks (NestedSubqueries [ placement, branchSubqueries branchId ]) branchRows
         | MixedSelectJson placements when plainMixedSelectShape placements ->
             let branchId, branchRows = List.head branches
             let assigned, _ =
@@ -20719,7 +20733,15 @@ let private simpleJsonSubquery (subquery: SelectStmt) =
     && (selectSubqueryExprs subquery |> List.forall (collectSubqueries >> List.isEmpty))
 
 let private simpleJsonSubqueryParent (select: SelectStmt) =
-    (match select.From with None | Some(FromTable _) -> true | _ -> false)
+    (match select.From with
+     | None
+     | Some(FromTable _) -> true
+     | Some(FromSubquery(PlainSelect nested, _)) ->
+         nested.Limit.IsSome
+         && nested.Joins.IsEmpty
+         && (match nested.From with None | Some(FromTable _) -> true | _ -> false)
+         && (selectSubqueryExprs nested |> List.forall (collectSubqueries >> List.isEmpty))
+     | _ -> false)
     && select.Joins.IsEmpty
 
 let private onlyScalarSubqueries expression =
@@ -20920,6 +20942,21 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         match result with
         | Ok() ->
             let rows = List.ofSeq acc
+            let branchAliases (selects: SelectStmt list) =
+                let ids =
+                    rows
+                    |> List.filter (fun row -> row.SelectType = "PRIMARY" || row.SelectType = "UNION")
+                    |> List.choose _.Id
+                    |> List.distinct
+
+                if ids.Length <> selects.Length then Map.empty
+                else
+                    List.zip ids selects
+                    |> List.choose (fun (id, select) ->
+                        match select.From with
+                        | Some(FromSubquery(_, alias)) -> Some(id, alias)
+                        | _ -> None)
+                    |> Map.ofList
 
             match format with
             | ExplainTraditional -> renderExplainRows rows
@@ -20936,14 +20973,14 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                               AllowProjectionSubqueries =
                                 selectSupportsJsonProjectionSubqueries first
                                 && (rest |> List.forall (fun (_, select) -> selectSupportsJsonProjectionSubqueries select)) })
-                        rows
+                        (branchAliases (first :: (rest |> List.map snd))) rows
                 | Select select ->
                     let shape =
                         match selectJsonMixedPlacements select with
                         | Some placements -> MixedSelectJson placements
                         | None -> SelectJson(selectJsonSubqueryPlacement select)
-                    renderExplainJson shape rows
-                | _ -> renderExplainJson FlatJson rows
+                    renderExplainJson shape (branchAliases [ select ]) rows
+                | _ -> renderExplainJson FlatJson Map.empty rows
             | ExplainTree ->
                 match stmt with
                 | Select select -> renderExplainTree select.Limit select.Offset false rows
