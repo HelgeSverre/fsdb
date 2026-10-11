@@ -6079,6 +6079,8 @@ let private geometryDistanceFn: Scalar =
                     | _, _, Some lines, _, _, Some polygons
                     | _, _, _, Some lines, Some polygons, _ ->
                         geographicLinePolygonDistance referenceSystem lines polygons
+                    | _, _, _, _, Some firstPolygons, Some secondPolygons ->
+                        geographicPolygonPolygonDistance referenceSystem firstPolygons secondPolygons
                     | _ -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_DISTANCE for non-point geographic geometries'"))
                 metres |> Option.map (fun metres -> VDouble(metres / factor)) |> Option.defaultValue VNull
 

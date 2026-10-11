@@ -1,8 +1,7 @@
 # Geographic point-to-polygon distance
 
 Status: implemented for `POINT`/`MULTIPOINT` against `POLYGON`/`MULTIPOLYGON`
-in supported geographic SRSs, in either argument order. Polygon-to-polygon
-distance remains open.
+in supported geographic SRSs, in either argument order.
 
 MySQL 8.4.11 measures distance to the polygon boundary when a point is outside
 the exterior or inside a hole, and returns zero for points in the filled area

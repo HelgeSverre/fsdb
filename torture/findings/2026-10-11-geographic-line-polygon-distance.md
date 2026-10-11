@@ -2,7 +2,7 @@
 
 Status: implemented for `LINESTRING`/`MULTILINESTRING` against
 `POLYGON`/`MULTIPOLYGON` in supported geographic SRSs, in either argument
-order. Polygon-to-polygon distance remains open.
+order.
 
 MySQL 8.4.11 returns zero for a line crossing a ring or lying in the filled
 polygon. A line entirely inside a hole is disjoint and measures to the hole

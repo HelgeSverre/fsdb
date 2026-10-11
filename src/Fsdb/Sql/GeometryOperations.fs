@@ -387,6 +387,16 @@ let internal geographicLinePolygonDistance referenceSystem lines polygons =
     | [] -> None
     | _ -> Some(List.min distances)
 
+let internal geographicPolygonPolygonDistance referenceSystem firstPolygons secondPolygons =
+    let firstRings = firstPolygons |> List.collect id
+    let secondRings = secondPolygons |> List.collect id
+    match geographicLinePolygonDistance referenceSystem firstRings secondPolygons,
+          geographicLinePolygonDistance referenceSystem secondRings firstPolygons with
+    | Some first, Some second -> Some(min first second)
+    | Some distance, None
+    | None, Some distance -> Some distance
+    | None, None -> None
+
 let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
     let length (points: (float * float) list) =
         points
