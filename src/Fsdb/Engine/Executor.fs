@@ -18242,6 +18242,9 @@ and private runFullTextSelect
                 match resolveBase with
                 | Error error -> error, [], []
                 | Ok(baseColumns, baseRows) ->
+                    let baseRows =
+                        if select.Joins.IsEmpty then trackExaminedRows baseRows
+                        else baseRows
                     let filteredBase =
                         match Map.tryFind baseKey sourcePredicates with
                         | None -> Ok baseRows

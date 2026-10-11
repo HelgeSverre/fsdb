@@ -9620,6 +9620,24 @@ let tests =
                   ))
                   "slow table records observed statement metrics"
 
+          testCase "slow log counts full-text candidates consumed by a SELECT"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET GLOBAL log_output='TABLE'"
+              let session, _ = handle session "SET GLOBAL slow_query_log=ON"
+              let session, _ = handle session "SET SESSION long_query_time=0"
+              let session, _ = handle session "CREATE TABLE slow_fulltext_probe (id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body))"
+              let session, _ = handle session "INSERT INTO slow_fulltext_probe VALUES (1,'alpha beta'),(2,'alpha gamma'),(3,'delta epsilon'),(4,'alpha delta')"
+
+              for query, examined in
+                  [ "SELECT id FROM slow_fulltext_probe WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE)", "3"
+                    "SELECT id FROM slow_fulltext_probe WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE) LIMIT 1", "1"
+                    "SELECT id FROM slow_fulltext_probe WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE) AND id>1", "3"
+                    "SELECT id FROM slow_fulltext_probe WHERE MATCH(body) AGAINST('missing' IN BOOLEAN MODE)", "0" ] do
+                  let session, _ = handle session query
+                  let _, logged = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" (query.Replace("'", "''")))
+                  Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) (sprintf "full-text examined rows: %s" query)
+
           testCase "slow log counts indexed and scan join candidates"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
