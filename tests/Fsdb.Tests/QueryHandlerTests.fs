@@ -4345,6 +4345,43 @@ let tests =
               Expect.equal (tripleWhere.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "three-clause WHERE owns child 3"
               Expect.equal (tripleOrder.GetProperty("query_block").GetProperty("select_id").GetInt32()) 4 "three-clause ORDER BY owns child 4"
 
+              let groupedProjectionHavingOrder =
+                  plan "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a GROUP BY a.id HAVING a.id=(SELECT c.id FROM scalar_plan c WHERE c.id=a.id) ORDER BY (SELECT d.id FROM scalar_plan d WHERE d.id=a.id)"
+              let groupedOuterOrder = groupedProjectionHavingOrder.GetProperty("ordering_operation")
+              let groupedInnerOperation = groupedOuterOrder.GetProperty("grouping_operation")
+              Expect.isTrue (groupedOuterOrder.GetProperty("using_filesort").GetBoolean()) "dependent grouped order filesorts"
+              Expect.isFalse (groupedInnerOperation.GetProperty("using_filesort").GetBoolean()) "indexed grouping avoids filesort"
+              let groupedProjectionChild = groupedInnerOperation.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              let groupedHavingChild = groupedInnerOperation.GetProperty("having_subqueries").EnumerateArray() |> Seq.head
+              let groupedOrderChild = groupedOuterOrder.GetProperty("order_by_subqueries").EnumerateArray() |> Seq.head
+              Expect.equal (groupedProjectionChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "grouped projection owns child 2"
+              Expect.equal (groupedHavingChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "grouped HAVING owns child 3"
+              Expect.equal (groupedOrderChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 4 "grouped ORDER BY owns child 4"
+
+              let groupedWhereHavingOrder =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a WHERE a.id=(SELECT b.id FROM scalar_plan b WHERE b.id=a.id) GROUP BY a.id HAVING a.id=(SELECT c.id FROM scalar_plan c WHERE c.id=a.id) ORDER BY (SELECT d.id FROM scalar_plan d WHERE d.id=a.id)"
+              let groupedWhereOuter = groupedWhereHavingOrder.GetProperty("ordering_operation")
+              let groupedWhereInner = groupedWhereOuter.GetProperty("grouping_operation")
+              let groupedWhereChild = groupedWhereInner.GetProperty("table").GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+              let groupedWhereHavingChild = groupedWhereInner.GetProperty("having_subqueries").EnumerateArray() |> Seq.head
+              let groupedWhereOrderChild = groupedWhereOuter.GetProperty("order_by_subqueries").EnumerateArray() |> Seq.head
+              Expect.equal (groupedWhereChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "grouped WHERE owns child 2"
+              Expect.equal (groupedWhereHavingChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "grouped HAVING owns child 3"
+              Expect.equal (groupedWhereOrderChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 4 "grouped ORDER BY owns child 4"
+
+              let groupedFourClauses =
+                  plan "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a WHERE a.id=(SELECT c.id FROM scalar_plan c WHERE c.id=a.id) GROUP BY a.id HAVING a.id=(SELECT d.id FROM scalar_plan d WHERE d.id=a.id) ORDER BY (SELECT e.id FROM scalar_plan e WHERE e.id=a.id)"
+              let fourOuter = groupedFourClauses.GetProperty("ordering_operation")
+              let fourInner = fourOuter.GetProperty("grouping_operation")
+              let fourProjection = fourInner.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              let fourWhere = fourInner.GetProperty("table").GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+              let fourHaving = fourInner.GetProperty("having_subqueries").EnumerateArray() |> Seq.head
+              let fourOrder = fourOuter.GetProperty("order_by_subqueries").EnumerateArray() |> Seq.head
+              Expect.equal (fourProjection.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "four-clause projection owns child 2"
+              Expect.equal (fourWhere.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "four-clause WHERE owns child 3"
+              Expect.equal (fourHaving.GetProperty("query_block").GetProperty("select_id").GetInt32()) 4 "four-clause HAVING owns child 4"
+              Expect.equal (fourOrder.GetProperty("query_block").GetProperty("select_id").GetInt32()) 5 "four-clause ORDER BY owns child 5"
+
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
               let unsafeMessage =

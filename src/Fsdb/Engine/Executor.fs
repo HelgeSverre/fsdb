@@ -20828,6 +20828,10 @@ let private selectJsonMixedPlacements (select: SelectStmt) =
         | [ ExplainWhere; ExplainOrderBy ]
         | [ ExplainProjection; ExplainWhere; ExplainOrderBy ] ->
             select.GroupBy.IsEmpty && select.Having.IsNone
+        | [ ExplainProjection; ExplainHaving; ExplainOrderBy ]
+        | [ ExplainWhere; ExplainHaving; ExplainOrderBy ]
+        | [ ExplainProjection; ExplainWhere; ExplainHaving; ExplainOrderBy ] ->
+            not select.GroupBy.IsEmpty
         | _ -> false
 
     if not (simpleJsonSubqueryParent select)

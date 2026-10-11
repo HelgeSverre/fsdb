@@ -117,6 +117,10 @@ together under `ordering_operation`, while a dependent WHERE scalar stays on
 the table inside that operation. The three-clause projection/WHERE/ORDER BY
 case assigns child select IDs 2, 3, and 4 in that order, and the scalar order
 key filesorts. Fsdb now renders the audited projection-plus-order,
-WHERE-plus-order, and three-clause forms with those owners and IDs. Grouped
-multi-clause ordering, DISTINCT combinations, and other optimizer placements
-remain open.
+WHERE-plus-order, and three-clause forms with those owners and IDs. Further
+indexed-group probes put projected and HAVING scalars under the inner grouping
+operation, WHERE scalars on its table, and ORDER BY scalars under the outer
+ordering operation. Audited projection/HAVING/ORDER BY,
+WHERE/HAVING/ORDER BY, and four-clause projection/WHERE/HAVING/ORDER BY plans
+now retain the native child IDs and filesort split. Other grouped ordering,
+DISTINCT combinations, and optimizer placements remain open.
