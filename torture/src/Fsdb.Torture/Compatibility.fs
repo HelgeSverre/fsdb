@@ -1094,6 +1094,18 @@ module ContractCatalog =
                      |> Contract.comparingValues
                yield Contract.query "cast-char-packet-boundary-warnings" "SHOW WARNINGS"
                      |> Contract.comparingValues
+               let zeroCharCasts =
+                   "SELECT HEX(CAST('abc' AS CHAR(0))), HEX(CAST('abc' AS NCHAR(0))), HEX(CAST('abc' AS CHAR(0) CHARACTER SET binary)), HEX(CONVERT('abc', CHAR(0))), CAST(NULL AS CHAR(0))"
+               yield Contract.query "cast-char-zero-values" zeroCharCasts |> Contract.comparingValues
+               yield Contract.query "cast-char-zero-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               for index, sql in
+                   [ "SELECT CAST('abc' AS CHAR(-1))"
+                     "SELECT CAST('abc' AS NCHAR(-1))"
+                     "SELECT CAST('abc' AS CHAR(-1) CHARACTER SET binary)"
+                     "SELECT CONVERT('abc', CHAR(-1))" ]
+                   |> List.indexed do
+                   yield Contract.query (sprintf "invalid-char-width-%d" index) sql
+                         |> Contract.fails 1064 "42000"
                for index, target in
                    [ "VARCHAR(2)"; "VARBINARY(2)"; "TEXT"; "BLOB"; "INT"; "BIGINT";
                      "BIT(3)"; "TIMESTAMP(3)"; "NUMERIC(5,2)"; "FLOAT UNSIGNED";

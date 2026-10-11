@@ -1674,6 +1674,13 @@ let private validateCastPrecision maximum precision =
     if precision > maximum then
         raise (SemanticParseError(sprintf "Too-big precision %d specified for 'CAST'. Maximum is %d." precision maximum))
 
+let private castCharWidth: Parser<int option, unit> =
+    opt widthLen
+    |>> (fun width ->
+        if width |> Option.exists (fun value -> value < 0) then
+            raise (SemanticParseError "Invalid CHAR cast width")
+        width)
+
 let private castTargetType: Parser<CastTarget, unit> =
     choice
         [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% TypedCast(TBigInt false, None)
@@ -1681,10 +1688,10 @@ let private castTargetType: Parser<CastTarget, unit> =
           // `CAST(-1 AS UNSIGNED)` is 18446744073709551615, and
           // `CAST(x AS SIGNED)` likewise round-trips the full BIGINT range.
           attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% TypedCast(TBigInt true, None)
-          keyword "NCHAR" >>. opt widthLen |>> (fun width -> AliasedCharCast(NationalChar, width))
+          keyword "NCHAR" >>. castCharWidth |>> (fun width -> AliasedCharCast(NationalChar, width))
           attempt (keyword "NATIONAL" >>. (keyword "CHARACTER" <|> keyword "CHAR"))
-          >>. opt widthLen |>> (fun width -> AliasedCharCast(NationalChar, width))
-          (keyword "CHAR" <|> keyword "CHARACTER") >>. opt widthLen
+          >>. castCharWidth |>> (fun width -> AliasedCharCast(NationalChar, width))
+          (keyword "CHAR" <|> keyword "CHARACTER") >>. castCharWidth
           |>> (fun width -> TypedCast(TChar(defaultArg width 1), width))
           (keyword "BINARY" >>. optWidthLen
            |>> fun width ->

@@ -710,6 +710,8 @@ conflicting modifiers still fail with MySQL's syntax code.
 Oversized explicit [CHAR cast widths](torture/findings/2026-10-11-cast-char-charset.md)
 now return NULL with MySQL's packet-limit warning before source evaluation,
 including national, binary-attribute, and binary-charset targets.
+Zero-width CHAR/NCHAR casts retain MySQL's empty result and truncation warning;
+negative widths now fail as syntax instead of reaching evaluation.
 The [audited CAST target grammar](torture/findings/2026-10-11-cast-target-grammar.md)
 now rejects column-only type spellings for both CAST and typed CONVERT, while
 `CHARACTER(n)` retains its width; remaining source expression shapes and

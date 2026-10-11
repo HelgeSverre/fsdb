@@ -2985,6 +2985,36 @@ let tests =
                   Expect.isEmpty session.Diagnostics "packet-size boundary is accepted"
               | _, result -> failtestf "expected the exact packet-size width to remain valid, got %A" result
 
+          testCase "zero CHAR widths truncate and negative widths are syntax errors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT HEX(CAST('abc' AS CHAR(0))), HEX(CAST('abc' AS NCHAR(0))), "
+                  + "HEX(CAST('abc' AS CHAR(0) CHARACTER SET binary)), "
+                  + "HEX(CONVERT('abc', CHAR(0))), CAST(NULL AS CHAR(0))"
+              match handle session sql with
+              | session, ResultSet(_, [ [ Some ""; Some ""; Some ""; Some ""; None ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map _.Code)
+                      [ 3720; 1292; 1292; 1292; 1292 ]
+                      "national syntax precedes four truncations"
+                  Expect.equal
+                      (session.Diagnostics |> List.filter (fun condition -> condition.Code = 1292) |> List.map _.Message)
+                      [ "Truncated incorrect CHAR(0) value: 'abc'"
+                        "Truncated incorrect CHAR(0) value: 'abc'"
+                        "Truncated incorrect BINARY(0) value: 'abc'"
+                        "Truncated incorrect CHAR(0) value: 'abc'" ]
+                      "zero-width diagnostics retain target type"
+              | _, result -> failtestf "unexpected zero-width character casts: %A" result
+              for sql in
+                  [ "SELECT CAST('abc' AS CHAR(-1))"
+                    "SELECT CAST('abc' AS NCHAR(-1))"
+                    "SELECT CAST('abc' AS CHAR(-1) CHARACTER SET binary)"
+                    "SELECT CONVERT('abc', CHAR(-1))" ] do
+                  match handle session sql with
+                  | _, Err(1064, _) -> ()
+                  | _, result -> failtestf "expected syntax error for %s, got %A" sql result
+
           testCase "explicit BINARY cast widths truncate and pad bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

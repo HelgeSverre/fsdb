@@ -88,3 +88,13 @@ text targets say `cast_as_char()`. Fsdb now applies this guard to the shared
 charset cast path, so bare CHAR, national casts, modifier combinations, and
 typed CONVERT use the same rule. The focused regression and differential
 contract cover the boundary, warning text, and warning order.
+
+A zero-width `CHAR(0)` target is valid: nonempty input becomes an empty
+string with warning 1292; NULL stays NULL without a truncation warning.
+`NCHAR(0)` keeps its preceding national-charset warning, and an explicit
+binary charset names `BINARY(0)` in the truncation diagnostic. Negative
+`CHAR` and `NCHAR` widths are syntax errors 1064, including typed `CONVERT`.
+Fsdb already handled zero-width slicing, but negative widths reached the
+evaluator and produced an internal error. The cast-target parser now rejects
+them before evaluation. The focused regression and differential contract
+cover values, warning order, and the invalid spellings.
