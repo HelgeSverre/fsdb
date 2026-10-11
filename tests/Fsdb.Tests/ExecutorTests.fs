@@ -14673,6 +14673,38 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected MySQL geographic multipolygon topology, got %A" result
 
+                testCase "geographic multipoint-polygon topology combines member positions"
+                <| fun _ ->
+                    let store = newStore ()
+                    let polygon = "ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0),(1 1,1 2,2 2,2 1,1 1))',4326)"
+                    let cases =
+                        [ "MULTIPOINT((0.5 0.5),(2.5 2.5))", [ 1; 1; 1; 0; 0; 0 ]
+                          "MULTIPOINT((0.5 0.5),(0 1))", [ 1; 1; 1; 0; 0; 0 ]
+                          "MULTIPOINT((0 1),(0 2))", [ 1; 0; 0; 0; 1; 0 ]
+                          "MULTIPOINT((0 1),(4 4))", [ 1; 0; 0; 0; 1; 0 ]
+                          "MULTIPOINT((0.5 0.5),(4 4))", [ 1; 0; 0; 0; 0; 0 ]
+                          "MULTIPOINT((4 4),(5 5))", [ 0; 0; 0; 1; 0; 0 ]
+                          "MULTIPOINT((1 1.5),(0.5 0.5))", [ 1; 1; 1; 0; 0; 0 ] ]
+                    for pointsText, expected in cases do
+                        let points = sprintf "ST_GeomFromText('%s',4326)" pointsText
+                        let sql =
+                            [ sprintf "ST_Intersects(%s,%s)" points polygon
+                              sprintf "ST_Contains(%s,%s)" polygon points
+                              sprintf "ST_Within(%s,%s)" points polygon
+                              sprintf "ST_Disjoint(%s,%s)" points polygon
+                              sprintf "ST_Touches(%s,%s)" points polygon
+                              sprintf "ST_Equals(%s,%s)" points polygon ]
+                            |> String.concat ","
+                            |> sprintf "SELECT %s"
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = (expected |> List.map (string >> Some)) -> ()
+                        | result -> failtestf "expected MySQL geographic multipoint-polygon topology for %s, got %A" pointsText result
+                    let boundaryAndOutside = "ST_GeomFromText('MULTIPOINT((0 1),(4 4))',4326)"
+                    let sql = sprintf "SELECT ST_Intersects(%s,%s),ST_Touches(%s,%s),ST_Contains(%s,%s),ST_Within(%s,%s)" polygon boundaryAndOutside polygon boundaryAndOutside boundaryAndOutside polygon polygon boundaryAndOutside
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "0"; Some "0" ] ]) -> ()
+                    | result -> failtestf "expected MySQL reverse geographic multipoint-polygon topology, got %A" result
+
                 testCase "geographic point-to-line distance follows geodesic segments"
                 <| fun _ ->
                     let store = newStore ()

@@ -1,6 +1,6 @@
 # Geographic point/polygon topology
 
-Status: implemented for geographic `POINT` against `POLYGON` and
+Status: implemented for geographic `POINT`/`MULTIPOINT` against `POLYGON` and
 `MULTIPOLYGON`, in either argument order, for `ST_INTERSECTS`, `ST_DISJOINT`,
 `ST_CONTAINS`, `ST_WITHIN`, `ST_TOUCHES`, and `ST_EQUALS`.
 
@@ -10,7 +10,11 @@ as touching but not contained. An audited point on a hole ring is contained
 and does not touch. Fsdb classifies exterior and hole boundaries separately,
 using the same geographic ring sampling as its distance calculation. Cases
 also cover curved edges, antimeridian crossings, multipolygons, and reversed
-argument order. Near-boundary sampling remains a precision limitation.
+argument order. For `MULTIPOINT`, any interior or exterior-boundary member
+intersects, containment requires every member to be covered and at least one
+interior member, and touching requires an exterior-boundary member with no
+interior member. An outside member does not prevent touching. Near-boundary
+sampling remains a precision limitation.
 
 Oracle example:
 

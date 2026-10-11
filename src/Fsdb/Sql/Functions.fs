@@ -6390,30 +6390,39 @@ let private geometryPredicateFn functionName predicate =
         | GPoint _ | GMultiPoint _ -> true
         | _ -> false
 
-    let pointPolygon = function
-        | GPoint(x, y), GPolygon rings -> Some(false, (x, y), [ rings ])
-        | GPoint(x, y), GMultiPolygon polygons -> Some(false, (x, y), polygons)
-        | GPolygon rings, GPoint(x, y) -> Some(true, (x, y), [ rings ])
-        | GMultiPolygon polygons, GPoint(x, y) -> Some(true, (x, y), polygons)
-        | _ -> None
+    let pointPolygonShapes first second =
+        let points = function
+            | GPoint(x, y) -> Some [ (x, y) ]
+            | GMultiPoint members when not members.IsEmpty -> Some members
+            | _ -> None
+        let polygons = function
+            | GPolygon rings -> Some [ rings ]
+            | GMultiPolygon members when not members.IsEmpty -> Some members
+            | _ -> None
+        match points first, polygons second with
+        | Some members, Some areas -> Some(false, members, areas)
+        | _ ->
+            match polygons first, points second with
+            | Some areas, Some members -> Some(true, members, areas)
+            | _ -> None
 
-    let pointPolygonPredicate referenceSystem polygonFirst point polygons =
-        let position = geographicPointPolygonPosition referenceSystem point polygons
-        let intersects =
-            match position with
-            | GeographicPointPolygonPosition.Outside _ -> false
-            | _ -> true
-        let contained =
-            match position with
+    let pointPolygonPredicate referenceSystem polygonFirst points polygons =
+        let positions = points |> List.map (fun point -> geographicPointPolygonPosition referenceSystem point polygons)
+        let isInterior = function
             | GeographicPointPolygonPosition.Interior
             | GeographicPointPolygonPosition.HoleBoundary -> true
             | _ -> false
+        let hasOutside = positions |> List.exists (function GeographicPointPolygonPosition.Outside _ -> true | _ -> false)
+        let hasInterior = positions |> List.exists isInterior
+        let hasBoundary = positions |> List.exists ((=) GeographicPointPolygonPosition.ExteriorBoundary)
+        let intersects = hasInterior || hasBoundary
+        let contained = not hasOutside && hasInterior
         match functionName with
         | "ST_INTERSECTS" -> intersects
         | "ST_DISJOINT" -> not intersects
         | "ST_CONTAINS" -> polygonFirst && contained
         | "ST_WITHIN" -> not polygonFirst && contained
-        | "ST_TOUCHES" -> position = GeographicPointPolygonPosition.ExteriorBoundary
+        | "ST_TOUCHES" -> hasBoundary && not hasInterior
         | "ST_EQUALS" -> false
         | _ -> invalidArg (nameof functionName) "unsupported geographic topology predicate"
 
@@ -6427,9 +6436,9 @@ let private geometryPredicateFn functionName predicate =
         let referenceSystem = spatialReferenceSystem functionName first.Srid
         let result =
             if referenceSystem.SemiMajorAxis.IsSome && not (pointSet first.Shape && pointSet second.Shape) then
-                match pointPolygon (first.Shape, second.Shape) with
-                | Some(polygonFirst, point, polygons) ->
-                    Some(pointPolygonPredicate referenceSystem polygonFirst point polygons)
+                match pointPolygonShapes first.Shape second.Shape with
+                | Some(polygonFirst, points, polygons) ->
+                    Some(pointPolygonPredicate referenceSystem polygonFirst points polygons)
                 | None ->
                     requirePlanar functionName first |> ignore
                     predicate first second
