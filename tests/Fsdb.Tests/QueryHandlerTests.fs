@@ -3242,7 +3242,12 @@ let tests =
                     "'12:34'", Some "12:34:00", []
                     "'839:00:00'", Some "838:59:59", [ 1292, "Truncated incorrect time value: '839:00:00'" ]
                     "'12:99:56'", None, [ 1292, "Truncated incorrect time value: '12:99:56'" ]
-                    "8390000", None, [ 1292, "Truncated incorrect time value: '8390000'" ] ] do
+                    "8390000", None, [ 1292, "Truncated incorrect time value: '8390000'" ]
+                    "'12:34:56 '", Some "12:34:56", [ 4096, "Delimiter ' ' in position 8 in datetime value '12:34:56 ' at row 1 is superfluous and is deprecated. Please remove." ]
+                    "' 12:34:56'", Some "12:34:56", [ 4096, "Delimiter ' ' in position 0 in datetime value ' 12:34:56' at row 1 is superfluous and is deprecated. Please remove." ]
+                    "' 839:00:00 '", Some "838:59:59", [ 1292, "Truncated incorrect time value: ' 839:00:00 '"; 4096, "Delimiter ' ' in position 0 in datetime value ' 839:00:00 ' at row 1 is superfluous and is deprecated. Please remove." ]
+                    "' x'", None, [ 1292, "Truncated incorrect time value: ' x'"; 4096, "Delimiter ' ' in position 0 in datetime value ' x' at row 1 is superfluous and is deprecated. Please remove." ]
+                    "'abc '", None, [ 1292, "Truncated incorrect time value: 'abc '" ] ] do
                   let sql = sprintf "SELECT CAST(%s AS TIME)" source
                   match handle session sql with
                   | session, ResultSet(_, [ [ actual ] ]) ->

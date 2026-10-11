@@ -153,6 +153,7 @@ TIME casts have a separate audited value boundary. MySQL returns NULL and
 warning 1292 for invalid text (`'abc'`) or numeric overflow (`8390000`).
 It accepts `HH:MM` as a clock time, keeps a valid prefix before trailing
 text with warning 1292, and clamps overflowing text such as `'839:00:00'`
-to `838:59:59` with warning 1292. Fsdb now matches these seven value and
-warning cases. Whitespace-delimiter warning 4096, other source types, and
-the wider TIME conversion grammar remain open.
+to `838:59:59` with warning 1292. Leading or trailing spaces produce MySQL's
+warning 4096 on the audited inputs, after warning 1292 when both apply.
+Fsdb now matches these twelve value and warning cases. Internal delimiters,
+other source types, and the wider TIME conversion grammar remain open.

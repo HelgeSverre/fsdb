@@ -6153,6 +6153,19 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | _ -> false
                 let warn () =
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" raw)
+                let warnSuperfluousSpace parsed truncated =
+                    let position =
+                        if raw.StartsWith(" ") then Some 0
+                        elif not truncated && raw.EndsWith(" ") then
+                            match parsed with
+                            | ParsedTime _ -> Some(raw.TrimEnd().Length)
+                            | _ -> None
+                        else None
+                    position
+                    |> Option.iter (fun index ->
+                        Diagnostics.warning 4096
+                            (sprintf "Delimiter ' ' in position %d in datetime value '%s' at row %d is superfluous and is deprecated. Please remove."
+                                index raw (Diagnostics.currentRowNumber ())))
                 let parsed, truncated =
                     match parseTimeInput raw with
                     | ParsedTime _ as result -> result, false
@@ -6165,20 +6178,23 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         let prefix = pattern.Match input
                         if prefix.Success then parseTimeInput prefix.Value, true
                         else NotATime, false
-                match parsed with
-                | ParsedTime ticks ->
-                    let adjusted =
-                        if castMode.TruncateFractional then truncateTicksToFsp fsp ticks
-                        else roundTimeTicksToFsp fsp ticks
-                    if timeMagnitude ticks > uint64 maxTimeTicks || timeMagnitude adjusted > uint64 maxTimeTicks then
+                let result =
+                    match parsed with
+                    | ParsedTime ticks ->
+                        let adjusted =
+                            if castMode.TruncateFractional then truncateTicksToFsp fsp ticks
+                            else roundTimeTicksToFsp fsp ticks
+                        if timeMagnitude ticks > uint64 maxTimeTicks || timeMagnitude adjusted > uint64 maxTimeTicks then
+                            warn ()
+                            if isNumeric then VNull else VTime(timeValueOrClamp adjusted)
+                        else
+                            if truncated then warn ()
+                            VTime(timeValueOrClamp adjusted)
+                    | NotATime | TimeComponentsOutOfRange ->
                         warn ()
-                        if isNumeric then Ok VNull else Ok(VTime(timeValueOrClamp adjusted))
-                    else
-                        if truncated then warn ()
-                        Ok(VTime(timeValueOrClamp adjusted))
-                | NotATime | TimeComponentsOutOfRange ->
-                    warn ()
-                    Ok VNull
+                        VNull
+                warnSuperfluousSpace parsed truncated
+                Ok result
             | (TDate | TDateTime _), _ ->
                 let source =
                     match v with
