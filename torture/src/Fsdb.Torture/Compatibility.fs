@@ -1102,6 +1102,14 @@ module ContractCatalog =
                          |> Contract.fails 1426 "42000"
                    yield Contract.query (sprintf "unchosen-cast-target-precision-%d" index) (sprintf "SELECT IF(0, CAST('1' AS %s), 1)" target)
                          |> Contract.fails 1426 "42000"
+               yield Contract.query "decimal-cast-precision" "SELECT CAST(1+2 AS DECIMAL(66,0))"
+                     |> Contract.fails 1426 "42000"
+               yield Contract.query "decimal-convert-scale" "SELECT CONVERT(NULL, DECIMAL(65,31))"
+                     |> Contract.fails 1425 "42000"
+               yield Contract.query "decimal-unchosen-scale-over-precision" "SELECT IF(0, CAST('1' AS DECIMAL(5,6)), 1)"
+                     |> Contract.fails 1427 "42000"
+               yield Contract.query "decimal-zero-precision" "SELECT CAST('1' AS DECIMAL(0))"
+                     |> Contract.comparingValues
                yield
                    Contract.query
                        "cast-national-spellings"

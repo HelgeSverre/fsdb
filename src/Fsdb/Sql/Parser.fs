@@ -48,8 +48,14 @@ let trySemanticError (detail: string) =
     match detail.Trim() with
     | message when message.StartsWith("Unknown character set: '", StringComparison.Ordinal) -> Some(1115, message)
     | message when message.StartsWith("Too-big precision ", StringComparison.Ordinal)
-                   && message.Contains(" specified for 'CAST'. Maximum is ", StringComparison.Ordinal) ->
+                   && message.Contains(" specified for '", StringComparison.Ordinal)
+                   && message.Contains(". Maximum is ", StringComparison.Ordinal) ->
         Some(1426, message)
+    | message when message.StartsWith("Too big scale ", StringComparison.Ordinal)
+                   && message.Contains(" specified for column '", StringComparison.Ordinal) ->
+        Some(1425, message)
+    | "For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '')." as message ->
+        Some(1427, message)
     | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
     | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
     | message when
@@ -207,6 +213,19 @@ let private currentState = new System.Threading.ThreadLocal<ParserState option>(
 let private parserState () =
     currentState.Value
     |> Option.defaultWith (fun () -> invalidOp "parser state is unavailable outside a parse")
+
+let private precedingBoundaryIndex (offsets: (int * int) array) position =
+    let mutable low = 0
+    let mutable high = offsets.Length - 1
+    while low <= high do
+        let middle = low + (high - low) / 2
+        let boundary, _ = offsets.[middle]
+        if boundary <= position then low <- middle + 1 else high <- middle - 1
+    high
+
+let private sourcePosition (state: ParserState) position =
+    let index = precedingBoundaryIndex state.SourceOffsets position
+    position + (if index < 0 then 0 else snd state.SourceOffsets.[index])
 
 let private activeOptions () =
     currentState.Value |> Option.map _.Options |> Option.defaultValue defaultOptions
@@ -1706,7 +1725,16 @@ let private castCharModifier: Parser<CharCastModifier, unit> =
           keyword "UNICODE" >>% CastLegacyAlias UnicodeChar
           keyword "BINARY" >>% CastBinaryAttribute ]
 
-let private castConversion e target modifiers =
+let private castSourceExpression: Parser<Expr * int * int, unit> =
+    pipe3 getPosition expr getPosition (fun first expression finish ->
+        expression, int first.Index, int finish.Index)
+
+let private castConversion e first finish target modifiers =
+    let sourceText () =
+        let state = parserState ()
+        let start = sourcePosition state first
+        let last = sourcePosition state finish
+        state.SourceText.Substring(start, last - start).Trim()
     let validateCharset = function
         | CastCharsetName cs when Charset.tryFind cs |> Option.isNone ->
             raise (SemanticParseError(sprintf "Unknown character set: '%s'" cs))
@@ -1728,26 +1756,36 @@ let private castConversion e target modifiers =
         CastCharTarget(e, explicitLength, modifiers)
     | AliasedCharCast(alias, explicitLength), [] -> CastCharAlias(e, explicitLength, alias)
     | TypedCast(TBinary _, explicitLength), [] -> CastAsBinary(e, explicitLength)
+    | TypedCast(TDecimal(precision, scale, unsigned), _), [] ->
+        if precision < 0 || scale < 0 then
+            raise (SemanticParseError "Invalid DECIMAL cast precision or scale")
+        elif precision > 65 then
+            raise (SemanticParseError(sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision (sourceText ())))
+        elif precision < scale then
+            raise (SemanticParseError "For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '').")
+        elif scale > 30 then
+            raise (SemanticParseError(sprintf "Too big scale %d specified for column '%s'. Maximum is 30." scale (sourceText ())))
+        Cast(e, TDecimal((if precision = 0 then 10 else precision), scale, unsigned))
     | TypedCast(columnType, _), [] -> Cast(e, columnType)
     | _ -> invalid ()
 
 let private castExpr: Parser<Expr, unit> =
     attempt (
-        functionKeyword "CAST" >>. expr .>> keyword "AS" .>>. castTargetType
+        functionKeyword "CAST" >>. castSourceExpression .>> keyword "AS" .>>. castTargetType
         .>>. many castCharModifier
         .>> sym ")"
     )
-    |>> fun ((e, target), charset) -> castConversion e target charset
+    |>> fun (((e, first, finish), target), charset) -> castConversion e first finish target charset
 
 /// The comma form of CONVERT uses the same target grammar and result as CAST.
 let private convertTypeExpr: Parser<Expr, unit> =
     // Commit after the comma: a malformed typed target is syntax, not a
     // user-defined CONVERT function call. The USING form has no comma.
-    attempt (functionKeyword "CONVERT" >>. expr .>> sym ",")
+    attempt (functionKeyword "CONVERT" >>. castSourceExpression .>> sym ",")
     .>>. castTargetType
     .>>. many castCharModifier
     .>> sym ")"
-    |>> fun ((e, target), charset) -> castConversion e target charset
+    |>> fun (((e, first, finish), target), charset) -> castConversion e first finish target charset
 
 let private existsExpr: Parser<Expr, unit> =
     attempt (keyword "EXISTS" >>. sym "(" >>. selectWithCtes .>> sym ")") |>> Exists
@@ -3811,19 +3849,6 @@ let private projectionAlias: Parser<string option, unit> =
     let explicitName = ((backtickIdent <|> attempt explicitBareName) .>> ws) <|> stringName
     let implicitName = identifier <|> stringName
     (attempt (keyword "AS" >>. explicitName) |>> Some) <|> (attempt implicitName |>> Some) <|> preturn None
-
-let private precedingBoundaryIndex (offsets: (int * int) array) position =
-    let mutable low = 0
-    let mutable high = offsets.Length - 1
-    while low <= high do
-        let middle = low + (high - low) / 2
-        let boundary, _ = offsets.[middle]
-        if boundary <= position then low <- middle + 1 else high <- middle - 1
-    high
-
-let private sourcePosition (state: ParserState) position =
-    let index = precedingBoundaryIndex state.SourceOffsets position
-    position + (if index < 0 then 0 else snd state.SourceOffsets.[index])
 
 /// Interior comments belong to expression names; trailing trivia does not.
 let private projectionSourceBounds (state: ParserState) first finish =

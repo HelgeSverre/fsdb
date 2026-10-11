@@ -2899,6 +2899,30 @@ let tests =
                       | _, Err(1426, message) -> Expect.equal message expected sql
                       | _, result -> failtestf "expected early precision error for %s, got %A" sql result
 
+          testCase "decimal cast target limits retain source diagnostics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, code, message in
+                  [ "SELECT CAST(1+2 AS DECIMAL(66,0))", 1426,
+                    "Too-big precision 66 specified for '1+2'. Maximum is 65."
+                    "SELECT CAST((1 + 2) AS DECIMAL(66,0))", 1426,
+                    "Too-big precision 66 specified for '(1 + 2)'. Maximum is 65."
+                    "SELECT CAST('1' AS DECIMAL(66,0))", 1426,
+                    "Too-big precision 66 specified for ''1''. Maximum is 65."
+                    "SELECT CONVERT(NULL, DECIMAL(65,31))", 1425,
+                    "Too big scale 31 specified for column 'NULL'. Maximum is 30."
+                    "SELECT IF(0, CAST('1' AS DECIMAL(5,6)), 1)", 1427,
+                    "For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '')." ] do
+                  match handle session sql with
+                  | _, Err(actualCode, actualMessage) ->
+                      Expect.equal (actualCode, actualMessage) (code, message) sql
+                      Expect.equal (Fsdb.SqlState.forCode actualCode) "42000" (sql + " SQLSTATE")
+                  | _, result -> failtestf "expected decimal target diagnostic for %s, got %A" sql result
+              match handle session "SELECT CAST('1' AS DECIMAL(0))" with
+              | session, ResultSet(_, [ [ Some "1" ] ]) ->
+                  Expect.equal session.LastResultColumnMetadata.Head.ColumnLength 11u "zero precision uses DECIMAL(10,0)"
+              | _, result -> failtestf "expected DECIMAL(0) to use default precision, got %A" result
+
           testCase "national ASCII and UNICODE casts retain syntax warnings and charset bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

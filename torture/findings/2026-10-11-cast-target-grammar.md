@@ -26,5 +26,18 @@ with error 1426 naming a maximum of 53; `TIME(7)` and `DATETIME(7)` use the
 same code with a maximum of 6. The message names `CAST` even in typed
 `CONVERT`, and the error is raised before an unchosen `IF` branch can skip
 the expression. Fsdb now checks these target precisions during parsing and
-retains the exact audited messages. Decimal precision and scale diagnostics
-have source-dependent labels and remain for a separate audit.
+retains the exact audited messages.
+
+Decimal CAST targets follow a different validation order. MySQL first rejects
+precision above 65 with 1426, then a scale larger than the declared precision
+with 1427, then scale above 30 with 1425. Precision and scale errors name the
+source expression as written; the 1427 message uses an empty column name.
+Column declarations have a different order: `DECIMAL(10,10000)` on a column
+reports scale error 1425 for that column.
+The same order applies to typed `CONVERT` and to an unchosen expression branch.
+`DECIMAL(0)` is accepted and takes the default precision of 10. Fsdb now
+captures the operand's source text during parsing for these diagnostics and
+normalizes zero precision after validation. The focused regression checks
+exact codes and messages. The differential contract also exposed that Fsdb's
+1425 and 1427 errors carried generic SQLSTATE `HY000`; both now use MySQL's
+`42000`. Other conversion shapes remain open.
