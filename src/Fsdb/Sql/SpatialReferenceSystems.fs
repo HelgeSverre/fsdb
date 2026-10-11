@@ -30,6 +30,7 @@ type private UtmDatum =
     | Wgs84
     | Etrs89
     | Nad83
+    | Nad27
 
 type private UtmZone =
     { Srid: int
@@ -38,6 +39,7 @@ type private UtmZone =
       GeographicDefinition: string
       CentralMeridian: int
       FalseNorthing: int
+      SemiMajorAxis: float
       InverseFlattening: float }
 
 let private wgs84Definition =
@@ -90,27 +92,31 @@ let private utmDefinition name geographicDefinition centralMeridian falseNorthin
       sprintf ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"%d\"]]" srid ]
     |> String.concat ""
 
-let private utmZone name datum geographicDefinition inverseFlattening baseSrid hemisphere falseNorthing zone =
+let private utmZone name datum geographicDefinition semiMajorAxis inverseFlattening baseSrid hemisphere falseNorthing zone =
     { Srid = baseSrid + zone
       Name = sprintf "%s / UTM zone %d%s" name zone hemisphere
       Datum = datum
       GeographicDefinition = geographicDefinition
       CentralMeridian = zone * 6 - 183
       FalseNorthing = falseNorthing
+      SemiMajorAxis = semiMajorAxis
       InverseFlattening = inverseFlattening }
 
 let private wgs84UtmZones =
     [ for hemisphere, baseSrid, falseNorthing in [ "N", 32600, 0; "S", 32700, 10000000 ] do
         for zone in 1..60 do
-            utmZone "WGS 84" Wgs84 wgs84Definition 298.257223563 baseSrid hemisphere falseNorthing zone ]
+            utmZone "WGS 84" Wgs84 wgs84Definition 6378137.0 298.257223563 baseSrid hemisphere falseNorthing zone ]
 
 let private etrs89UtmZones =
-    [ for zone in 28..37 -> utmZone "ETRS89" Etrs89 etrs89Definition 298.257222101 25800 "N" 0 zone ]
+    [ for zone in 28..37 -> utmZone "ETRS89" Etrs89 etrs89Definition 6378137.0 298.257222101 25800 "N" 0 zone ]
 
 let private nad83UtmZones =
-    [ for zone in 1..23 -> utmZone "NAD83" Nad83 nad83Definition 298.257222101 26900 "N" 0 zone ]
+    [ for zone in 1..23 -> utmZone "NAD83" Nad83 nad83Definition 6378137.0 298.257222101 26900 "N" 0 zone ]
 
-let private utmZones = wgs84UtmZones @ etrs89UtmZones @ nad83UtmZones
+let private nad27UtmZones =
+    [ for zone in 1..22 -> utmZone "NAD27" Nad27 nad27Definition 6378206.4 294.9786982138982 26700 "N" 0 zone ]
+
+let private utmZones = wgs84UtmZones @ etrs89UtmZones @ nad83UtmZones @ nad27UtmZones
 
 let private utmSystems =
     utmZones
@@ -267,13 +273,13 @@ type private UtmProjection =
       ForwardCoefficients: float array
       InverseCoefficients: float array }
 
-let private utmProjection centralMeridian inverseFlattening falseNorthing =
+let private utmProjection centralMeridian semiMajorAxis inverseFlattening falseNorthing =
     let flattening = 1.0 / inverseFlattening
     let n = flattening / (2.0 - flattening)
     { CentralMeridian = centralMeridian
       FalseNorthing = falseNorthing
       Eccentricity = sqrt (flattening * (2.0 - flattening))
-      Scale = 0.9996 * earthRadius / (1.0 + n) * (1.0 + n * n / 4.0 + n ** 4.0 / 64.0)
+      Scale = 0.9996 * semiMajorAxis / (1.0 + n) * (1.0 + n * n / 4.0 + n ** 4.0 / 64.0)
       ForwardCoefficients =
         [| n / 2.0 - 2.0 * n ** 2.0 / 3.0 + 5.0 * n ** 3.0 / 16.0 + 41.0 * n ** 4.0 / 180.0
            13.0 * n ** 2.0 / 48.0 - 3.0 * n ** 3.0 / 5.0 + 557.0 * n ** 4.0 / 1440.0
@@ -289,7 +295,7 @@ let private utmProjections =
     utmZones
     |> List.map (fun zone ->
         zone.Srid,
-        (zone.Datum, utmProjection (float zone.CentralMeridian) zone.InverseFlattening (float zone.FalseNorthing)))
+        (zone.Datum, utmProjection (float zone.CentralMeridian) zone.SemiMajorAxis zone.InverseFlattening (float zone.FalseNorthing)))
     |> Map.ofList
 
 let private tryUtmProjection srid = Map.tryFind srid utmProjections
@@ -394,34 +400,41 @@ let private wgs84ToNad27 point =
     geographicFromCartesian clarke1866SemiMajorAxis nad27InverseFlattening (unrotate 4 initial)
 
 let internal tryCoordinateTransform sourceSrid targetSrid =
-    let compose first second point = second (first point)
-    let toWgs84 =
+    let source =
         match sourceSrid with
-        | 4258 | 4326 -> Some id
-        | 4269 -> Some nad83ToWgs84
-        | 4267 -> Some nad27ToWgs84
-        | 3857 -> Some pseudoMercatorInverse
-        | 3395 -> Some worldMercatorInverse
+        | 4326 -> Some (Wgs84, id)
+        | 4258 -> Some (Etrs89, id)
+        | 4269 -> Some (Nad83, id)
+        | 4267 -> Some (Nad27, id)
+        | 3857 -> Some (Wgs84, pseudoMercatorInverse)
+        | 3395 -> Some (Wgs84, worldMercatorInverse)
         | _ ->
             tryUtmProjection sourceSrid
-            |> Option.map (fun (datum, projection) ->
-                match datum with
-                | Nad83 -> compose (utmInverse projection) nad83ToWgs84
-                | Wgs84 | Etrs89 -> utmInverse projection)
-    let fromWgs84 =
+            |> Option.map (fun (datum, projection) -> datum, utmInverse projection)
+    let target =
         match targetSrid with
-        | 4258 | 4326 -> Some id
-        | 4269 -> Some wgs84ToNad83
-        | 4267 -> Some wgs84ToNad27
-        | 3857 -> Some pseudoMercatorForward
-        | 3395 -> Some worldMercatorForward
+        | 4326 -> Some (Wgs84, id)
+        | 4258 -> Some (Etrs89, id)
+        | 4269 -> Some (Nad83, id)
+        | 4267 -> Some (Nad27, id)
+        | 3857 -> Some (Wgs84, pseudoMercatorForward)
+        | 3395 -> Some (Wgs84, worldMercatorForward)
         | _ ->
             tryUtmProjection targetSrid
-            |> Option.map (fun (datum, projection) ->
-                match datum with
-                | Nad83 -> compose wgs84ToNad83 (utmForward projection)
-                | Wgs84 | Etrs89 -> utmForward projection)
-    Option.map2 compose toWgs84 fromWgs84
+            |> Option.map (fun (datum, projection) -> datum, utmForward projection)
+    let toWgs84 = function
+        | Wgs84 | Etrs89 -> id
+        | Nad83 -> nad83ToWgs84
+        | Nad27 -> nad27ToWgs84
+    let fromWgs84 = function
+        | Wgs84 | Etrs89 -> id
+        | Nad83 -> wgs84ToNad83
+        | Nad27 -> wgs84ToNad27
+    Option.map2 (fun (sourceDatum, unproject) (targetDatum, project) ->
+        if sourceDatum = targetDatum then
+            fun point -> point |> unproject |> project
+        else
+            fun point -> point |> unproject |> toWgs84 sourceDatum |> fromWgs84 targetDatum |> project) source target
 
 let internal linearUnits =
     [ "British chain (Benoit 1895 A)", 20.1167824

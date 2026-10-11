@@ -15187,6 +15187,33 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected MySQL WGS84 to NAD27 transform, got %A" result
 
+                testCase "NAD27 UTM zones use Clarke 1866 projection and datum shift"
+                <| fun _ ->
+                    let store = newStore ()
+                    match runDefault store "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID BETWEEN 26701 AND 26722" with
+                    | ResultSet(_, [ [ Some "22" ] ]) -> ()
+                    | result -> failtestf "expected 22 NAD27 UTM catalog rows, got %A" result
+                    let cases =
+                        [ 26701, 0.0, -177.0, 500000.0, 0.0
+                          26710, 49.0, -123.0, 500000.0, 5427236.770806939
+                          26722, 40.0, -51.0, 500000.0, 4427547.180373441 ]
+                    for srid, latitude, longitude, easting, northing in cases do
+                        let point = sprintf "ST_Transform(ST_GeomFromText('POINT(%g %g)',4267),%d)" latitude longitude srid
+                        let sql = sprintf "SELECT ABS(ST_X(%s)-%.12f)<0.001,ABS(ST_Y(%s)-%.12f)<0.001" point easting point northing
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL NAD27 UTM SRID %d coordinates, got %A" srid result
+                    let shifted = "ST_Transform(ST_GeomFromText('POINT(49 -123)',4326),26710)"
+                    let shiftedSql = sprintf "SELECT ABS(ST_X(%s)-500143.85815078736)<0.001,ABS(ST_Y(%s)-5427239.241439159)<0.001" shifted shifted
+                    match runDefault store shiftedSql with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL WGS84 to NAD27 UTM zone 10N coordinates, got %A" result
+                    let reverse = "ST_Transform(ST_GeomFromText('POINT(500000 5427236.770806939)',26710),4326)"
+                    let reverseSql = sprintf "SELECT ABS(ST_X(%s)-48.99997775027899)<0.00000001,ABS(ST_Y(%s)+123.00196683602647)<0.00000001" reverse reverse
+                    match runDefault store reverseSql with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL NAD27 UTM zone 10N to WGS84 coordinates, got %A" result
+
                 testCase "projected transforms wrap geographic longitude"
                 <| fun _ ->
                     let store = newStore ()
