@@ -46,5 +46,11 @@ outside unsigned or signed 64-bit bounds clamp to `FFFFFFFF` or `00` with
 warning 1292. Focused and differential cases cover those boundaries and
 ordinary DATE, TIME, and DATETIME numeric arguments.
 
-JSON argument diagnostics and floating overflow warnings that depend on
-whether the source is a literal or a stored column remain outside this audit.
+Stored DOUBLE overflow also has a source-dependent warning: a `1e30`
+literal yields `FFFFFFFF` quietly, while `CHAR(amount)` over a DOUBLE column
+with that value yields the same bytes and warning 1292. A negative stored
+overflow yields `00` and the same warning kind. Focused and differential
+tests cover both sources and warning order.
+
+JSON argument diagnostics and overflow behavior for other expression origins
+remain outside this audit.

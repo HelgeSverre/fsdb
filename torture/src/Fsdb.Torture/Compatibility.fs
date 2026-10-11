@@ -1243,6 +1243,14 @@ module ContractCatalog =
                yield Contract.query "char-temporal-arguments"
                    "SELECT HEX(CHAR(CAST('2024-01-02' AS DATE))),HEX(CHAR(CAST('12:34:56' AS TIME))),HEX(CHAR(CAST('2024-01-02 03:04:05' AS DATETIME)))"
                    |> Contract.comparingValues
+               yield Contract.execute "char-stored-double-create" "CREATE TABLE char_stored_double(id INT PRIMARY KEY,amount DOUBLE)"
+               yield Contract.execute "char-stored-double-insert"
+                   "INSERT INTO char_stored_double VALUES (1,1e30),(2,-1e30),(3,4294967296e0),(4,18446744073709551616e0)"
+               yield Contract.query "char-stored-double-values" "SELECT id,HEX(CHAR(amount)) FROM char_stored_double ORDER BY id"
+                   |> Contract.comparingValues
+               yield Contract.query "char-stored-double-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-large-double-literal" "SELECT HEX(CHAR(1e30))" |> Contract.comparingValues
+               yield Contract.query "char-large-double-literal-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, source in
                    [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
                    yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)

@@ -7645,8 +7645,21 @@ and private validateConcatEncoding ctx name descriptor expressions values =
     | _ -> Ok ()
 
 and private prepareScalarArguments ctx name expressions values =
+    let charBuiltin =
+        (name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
+         || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
+        && Functions.isUnmodifiedBuiltinScalar name ctx.Registry
+
     List.zip expressions values
     |> List.mapi (fun index (expression, value) ->
+        if charBuiltin then
+            match value, tryColumnDefForExpr ctx expression with
+            | VDouble number, Some column
+                when (match column.Type with TDouble _ | TFloat _ -> true | _ -> false)
+                     && (number >= 18446744073709551616.0 || number <= -9223372036854775808.0) ->
+                Diagnostics.numericConversion "INTEGER" (Value.toText value |> Option.defaultValue "")
+            | _ -> ()
+
         let value =
             if Functions.isTextArgument name index ctx.Registry then
                 displayValueForText ctx expression value

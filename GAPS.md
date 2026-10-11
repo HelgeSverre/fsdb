@@ -249,8 +249,9 @@ charset)` now interprets those bytes in the selected charset, retaining its
 coercibility and audited invalid-byte diagnostics. Binary-string integer
 warnings now escape high bytes and NUL, while decoded text warnings stop at
 NUL. Audited 64-bit BIT, large floating and DECIMAL, and temporal arguments
-now preserve their MySQL byte values; JSON argument diagnostics and source-
-dependent floating overflow warnings remain open.
+now preserve their MySQL byte values. Stored DOUBLE overflow emits the audited
+integer warning while a direct large literal stays quiet; JSON argument
+diagnostics and other expression-origin overflow cases remain open.
 
 | Missing family | Functions | Impact |
 |---|---|---|

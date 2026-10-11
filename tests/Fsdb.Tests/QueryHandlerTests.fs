@@ -3413,6 +3413,27 @@ let tests =
                   Expect.isEmpty session.Diagnostics "valid temporal sources have no warnings"
               | _, result -> failtestf "expected CHAR temporal result, got %A" result
 
+          testCase "CHAR warns for stored DOUBLE overflow but not a large literal"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE char_stored_double (id INT PRIMARY KEY, amount DOUBLE)"
+              let session, _ = handle session "INSERT INTO char_stored_double VALUES (1,1e30),(2,-1e30),(3,4294967296e0),(4,18446744073709551616e0)"
+              match handle session "SELECT id,HEX(CHAR(amount)) FROM char_stored_double ORDER BY id" with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "1"; Some "FFFFFFFF" ]; [ Some "2"; Some "00" ]; [ Some "3"; Some "00" ]; [ Some "4"; Some "FFFFFFFF" ] ] "stored DOUBLE bytes"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect INTEGER value: '1e30'"
+                        1292, "Truncated incorrect INTEGER value: '-1e30'"
+                        1292, "Truncated incorrect INTEGER value: '1.8446744073709552e19'" ]
+                      "stored overflow warnings"
+              | _, result -> failtestf "expected stored CHAR DOUBLE result, got %A" result
+              match handle session "SELECT HEX(CHAR(1e30))" with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "FFFFFFFF" ] "literal overflow bytes"
+                  Expect.isEmpty session.Diagnostics "literal overflow has no warning"
+              | _, result -> failtestf "expected literal CHAR DOUBLE result, got %A" result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
