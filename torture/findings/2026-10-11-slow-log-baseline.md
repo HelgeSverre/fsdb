@@ -46,6 +46,16 @@ table. Fsdb now follows these observed counts. Its preserved-right strategy
 is selected before evaluating unused competing plans, so those planner reads
 cannot inflate the slow-log metric.
 
+With `LIMIT 1`, MySQL logs two examined rows for each indexed inner, left,
+and right join, four for the unindexed inner join, five for the unindexed left
+join, and two for the unindexed right join on this fixture. Fsdb now matches
+the indexed cases and both unindexed inner/right cases. The hash-side size
+probe is excluded from the slow-log counter; only rows consumed by the chosen
+hash plan count. The unindexed left outer join remains divergent: fsdb
+materializes all matching and padded rows before the limit and logs seven
+examined rows rather than MySQL's five. Making that outer-join path stream
+left rows after building the right side is still open.
+
 A prepared `SELECT ? AS fsdb_slow_prepared_probe` executed with 43 produced a
 slow-log row for `SELECT 43 AS fsdb_slow_prepared_probe` with one row sent and
 one examined. The fsdb regression also covers its binary prepared execution

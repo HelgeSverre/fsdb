@@ -10161,9 +10161,10 @@ and private applyPreparedJoin
         | _, None when hashEligible ->
             let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-            let joinRows = cacheExaminedRows joinRows
             let rightCount = joinRows |> Seq.length
             let buildOnLeft = leftIndexed.Value.Length <= rightCount
+            // The sizing read chooses a plan; only that plan's consumption is examined.
+            let joinRows = cacheExaminedRows joinRows
 
             match join.Kind, residualConjuncts with
             | (InnerJoin | StraightJoin | CrossJoin | NaturalJoin), [] ->

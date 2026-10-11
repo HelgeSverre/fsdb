@@ -9581,6 +9581,20 @@ let tests =
                   | other -> failtestf "expected right join rows, got %A" other
                   let _, rightLog = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" rightQuery)
                   Expect.equal rightLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "right join candidate count"
+              for source, joinKind, examined in
+                  [ "slow_join_right", "STRAIGHT_JOIN", "2"
+                    "slow_join_right", "LEFT JOIN", "2"
+                    "slow_join_right", "RIGHT JOIN", "2"
+                    "slow_join_scan", "STRAIGHT_JOIN", "4"
+                    "slow_join_scan", "RIGHT JOIN", "2" ] do
+                  let query =
+                      sprintf "SELECT a.id,b.id FROM slow_join_left a %s %s b ON b.left_id=a.id LIMIT 1" joinKind source
+                  let session, limited = handle session query
+                  match limited with
+                  | ResultSet(_, [ _ ]) -> ()
+                  | other -> failtestf "expected one joined row, got %A" other
+                  let _, limitedLog = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
+                  Expect.equal limitedLog (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) "LIMIT stops join candidate reads"
               let session, _ = handle session "INSERT INTO slow_join_left VALUES (5,50)"
               let rightWithUnmatchedLeft =
                   "SELECT a.id,b.id FROM slow_join_left a RIGHT JOIN slow_join_scan b ON b.left_id=a.id /* extra left */"
