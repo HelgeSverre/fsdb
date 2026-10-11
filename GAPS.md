@@ -237,7 +237,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | near-tangent geographic crossings, line/line topology beyond intersects/disjoint and line/polygon topology, and reference systems beyond EPSG 4326/3857/3395/4258/4269 | low |
+| Remaining spatial behavior | near-tangent geographic crossings, line/line and line/polygon topology beyond intersects/disjoint, polygon/polygon topology, and reference systems beyond EPSG 4326/3857/3395/4258/4269 | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones

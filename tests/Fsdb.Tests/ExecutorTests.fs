@@ -14761,6 +14761,29 @@ let tests =
                         | ResultSet(_, [ row ]) when row = expected -> ()
                         | result -> failtestf "expected MySQL geographic line intersections for %s and %s, got %A" firstText secondText result
 
+                testCase "geographic line-polygon intersections include containment and boundaries"
+                <| fun _ ->
+                    let store = newStore ()
+                    let polygon = "POLYGON((0 0,0 3,3 3,3 0,0 0))"
+                    let hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(0.5 0.5,3.5 0.5,3.5 3.5,0.5 3.5,0.5 0.5))"
+                    let cases =
+                        [ "LINESTRING(-1 1,4 1)", polygon, "1", "0"
+                          "LINESTRING(-2 4,-1 4)", polygon, "0", "1"
+                          "LINESTRING(-1 1,0 1)", polygon, "1", "0"
+                          "LINESTRING(1 1,2 2)", polygon, "1", "0"
+                          "LINESTRING(0 0,0 3)", polygon, "1", "0"
+                          "LINESTRING(1 1,2 2)", hole, "0", "1"
+                          "MULTILINESTRING((-2 4,-1 4),(1 1,2 2))", polygon, "1", "0"
+                          "LINESTRING(6 6,7 7)", "MULTIPOLYGON(((0 0,0 3,3 3,3 0,0 0)),((5 5,5 8,8 8,8 5,5 5)))", "1", "0" ]
+                    for lineText, polygonText, intersects, disjoint in cases do
+                        let line = sprintf "ST_GeomFromText('%s',4326)" lineText
+                        let area = sprintf "ST_GeomFromText('%s',4326)" polygonText
+                        let sql =
+                            sprintf "SELECT ST_Intersects(%s,%s),ST_Disjoint(%s,%s),ST_Intersects(%s,%s),ST_Disjoint(%s,%s)" line area line area area line area line
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = ([ intersects; disjoint; intersects; disjoint ] |> List.map Some) -> ()
+                        | result -> failtestf "expected MySQL geographic line-polygon intersections for %s and %s, got %A" lineText polygonText result
+
                 testCase "geographic point-to-line distance follows geodesic segments"
                 <| fun _ ->
                     let store = newStore ()

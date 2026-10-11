@@ -6395,6 +6395,11 @@ let private geometryPredicateFn functionName predicate =
         | GMultiLineString members when not members.IsEmpty -> Some members
         | _ -> None
 
+    let polygons = function
+        | GPolygon rings -> Some [ rings ]
+        | GMultiPolygon members when not members.IsEmpty -> Some members
+        | _ -> None
+
     let pointLineShapes first second =
         let point = function GPoint(x, y) -> Some(x, y) | _ -> None
         match point first, linework second with
@@ -6422,14 +6427,18 @@ let private geometryPredicateFn functionName predicate =
         | Some firstLines, Some secondLines -> Some(firstLines, secondLines)
         | _ -> None
 
+    let linePolygonShapes first second =
+        match linework first, polygons second with
+        | Some lines, Some areas -> Some(lines, areas)
+        | _ ->
+            match polygons first, linework second with
+            | Some areas, Some lines -> Some(lines, areas)
+            | _ -> None
+
     let pointPolygonShapes first second =
         let points = function
             | GPoint(x, y) -> Some [ (x, y) ]
             | GMultiPoint members when not members.IsEmpty -> Some members
-            | _ -> None
-        let polygons = function
-            | GPolygon rings -> Some [ rings ]
-            | GMultiPolygon members when not members.IsEmpty -> Some members
             | _ -> None
         match points first, polygons second with
         | Some members, Some areas -> Some(false, members, areas)
@@ -6476,9 +6485,12 @@ let private geometryPredicateFn functionName predicate =
                     | Some(lineFirst, point, lines) ->
                         Some(pointLinePredicate referenceSystem lineFirst point lines)
                     | None ->
-                        match functionName, lineShapes first.Shape second.Shape with
-                        | ("ST_INTERSECTS" | "ST_DISJOINT"), Some(firstLines, secondLines) ->
+                        match functionName, lineShapes first.Shape second.Shape, linePolygonShapes first.Shape second.Shape with
+                        | ("ST_INTERSECTS" | "ST_DISJOINT"), Some(firstLines, secondLines), _ ->
                             let intersects = geographicLineLineDistance referenceSystem firstLines secondLines = Some 0.0
+                            Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
+                        | ("ST_INTERSECTS" | "ST_DISJOINT"), _, Some(lines, areas) ->
+                            let intersects = geographicLinePolygonDistance referenceSystem lines areas = Some 0.0
                             Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
                         | _ ->
                             requirePlanar functionName first |> ignore
