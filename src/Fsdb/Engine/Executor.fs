@@ -18088,7 +18088,7 @@ and private runFullTextSelect
         match matchNodes |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node)) with
         | Error error -> error, [], []
         | Ok ownedNodes ->
-            let countArgumentUsesPostingCount (source: FullTextPhysicalSource) =
+            let countArgumentCanUsePostingCount (source: FullTextPhysicalSource) =
                 let nonNullColumn name =
                     source.Table.Columns
                     |> List.exists (fun column ->
@@ -18108,7 +18108,7 @@ and private runFullTextSelect
                 | Some(FromTable _), [ { Expression = FuncCall(name, [ argument ]) } ], Some predicate, [ owner, node ]
                     when equalsIgnoreCase name "COUNT"
                          && Functions.isUnmodifiedBuiltinAggregate name registry
-                         && countArgumentUsesPostingCount owner argument
+                         && countArgumentCanUsePostingCount owner argument
                          && predicate = node
                          && select.Joins.IsEmpty
                          && select.GroupBy.IsEmpty
@@ -18443,7 +18443,7 @@ and private runFullTextSelect
                                     dbName
                                     (resolvedSources |> List.collect snd)
                                     (qualifierRanges resolvedSources)
-                                    (if indexOnlyCount.IsSome then Seq.empty else rows)
+                                    rows
                                     ArbitraryGroupRows
                                     rewritten
                                     outer
