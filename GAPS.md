@@ -844,9 +844,9 @@ performance gap.
 A [current project-backed stage profile](benchmarks/results/2026-10-11-point-lookup-pipeline.md)
 puts the fixed text-handler lookup near 50 µs and 109 KiB per call on its
 same-process fixture; separate parser and pre-parsed executor actions take
-about 26 and 13 µs. These stages are not additive, but they narrow the next
-investigation toward parser/executor setup and a separate prepared-result
-profile rather than another unmeasured session shortcut.
+about 26 and 13 µs. The warmed text handler reuses a cached AST, so its
+per-call cost excludes standalone parsing. Statement handling and execution,
+plus a separate prepared-result profile, are the next measured targets.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes

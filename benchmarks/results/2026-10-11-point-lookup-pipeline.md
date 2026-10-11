@@ -29,10 +29,12 @@ The independent `EmbeddedApiPerf` harness also passed its typed-result,
 changing-parameter, NULL, missing-row, and preparation-database checks. Two
 short runs put reused prepared `QueryValues` at about 76–80 µs and 126 KiB
 per call on its separate 1,000-row, three-column fixture. It cannot be
-subtracted from the stage timings above. The current evidence points to
-parsing and general execution as substantial fixed costs for text lookups;
-the prepared typed-result path needs its own narrower stage profile before
-another optimization.
+subtracted from the stage timings above. The parser action measures an
+uncached standalone parse. The warmed text handler uses QueryHandler's
+parsed-statement cache, so parser time is not a component of each repeated
+handler call. General execution and statement handling remain the relevant
+fixed-cost targets; the prepared typed-result path needs its own narrower
+stage profile before another optimization.
 
 ## Discarded parser shortcut
 
