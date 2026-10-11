@@ -76,8 +76,13 @@ GROUP BY followed by ORDER BY, native MySQL nests `grouping_operation` inside
 an ORDER BY scalar belongs to the outer ordering operation. Fsdb now composes
 those two wrappers for the audited dependent cases and reports a filesort for
 the scalar order key even when its traditional plan row omits that flag.
+For `SELECT DISTINCT` of one dependent scalar ordered by its output alias or
+ordinal position,
+MySQL places `ordering_operation` outside `duplicates_removal`. The latter
+uses a temporary table and filesort, while the outer ordering reports no
+additional filesort. Fsdb now follows that audited ownership and flag split.
 Independent ORDER BY scalars can appear under the operation's
 `optimized_away_subqueries`, while independent HAVING scalars can have an
-optimized-away child block. DISTINCT with ordering, subqueries in more than
-one clause, nested scalar blocks, mixed derived/scalar plans, and broader
-optimizer placement remain open.
+optimized-away child block. Other DISTINCT/ordering combinations, subqueries
+in more than one clause, nested scalar blocks, mixed derived/scalar plans,
+and broader optimizer placement remain open.

@@ -20422,8 +20422,12 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                         // A dependent scalar order key filesorts even when the
                         // traditional parent row omits that flag after grouping.
                         let filesort =
-                            (operationKind = OrderingOperation && (hasFilesort || clause = ExplainOrderBy))
-                            || (operations.Length = 1 && hasFilesort)
+                            match operations, operationKind with
+                            | [ OrderingOperation; DistinctOperation ], DistinctOperation -> hasFilesort
+                            | [ OrderingOperation; DistinctOperation ], OrderingOperation -> false
+                            | _ ->
+                                (operationKind = OrderingOperation && (hasFilesort || clause = ExplainOrderBy))
+                                || (operations.Length = 1 && hasFilesort)
 
                         operation["using_filesort"] <- JsonValue.Create(filesort)
 
@@ -20707,6 +20711,16 @@ let private selectJsonSubqueryPlacement (select: SelectStmt) =
                 | ExplainProjection, [ OrderingOperation ]
                 | ExplainProjection, [ DistinctOperation ]
                 | ExplainProjection, [ OrderingOperation; GroupingOperation ] -> tableSource && dependent
+                | ExplainProjection, [ OrderingOperation; DistinctOperation ] ->
+                    let ordersByProjectedValue =
+                        match select.Projections, select.OrderBy with
+                        | [ projection ], [ (Col name, _) ] ->
+                            projection.Alias
+                            |> Option.exists (fun alias -> System.String.Equals(alias, name, System.StringComparison.OrdinalIgnoreCase))
+                        | [ _ ], [ (Lit(VInt 1L), _) ] -> true
+                        | _ -> false
+
+                    tableSource && dependent && ordersByProjectedValue
                 | ExplainWhere, [] -> tableSource && dependent
                 | ExplainHaving, [ GroupingOperation ]
                 | ExplainHaving, [ OrderingOperation; GroupingOperation ] -> tableSource && dependent

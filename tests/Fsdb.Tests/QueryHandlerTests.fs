@@ -4218,6 +4218,21 @@ let tests =
               Expect.isTrue (deduplicated.GetProperty("using_temporary_table").GetBoolean()) "DISTINCT materializes its result"
               Expect.equal (deduplicated.GetProperty("select_list_subqueries").GetArrayLength()) 1 "projected scalar stays under duplicate removal"
 
+              let distinctOrdered =
+                  plan "EXPLAIN FORMAT=JSON SELECT DISTINCT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a ORDER BY x DESC"
+              let distinctOrdering = distinctOrdered.GetProperty("ordering_operation")
+              let orderedDeduplication = distinctOrdering.GetProperty("duplicates_removal")
+              Expect.isFalse (distinctOrdering.GetProperty("using_filesort").GetBoolean()) "ordering reuses the distinct sort"
+              Expect.isTrue (orderedDeduplication.GetProperty("using_filesort").GetBoolean()) "duplicate removal performs the sort"
+              Expect.isTrue (orderedDeduplication.GetProperty("using_temporary_table").GetBoolean()) "ordered distinct materializes"
+              Expect.equal (orderedDeduplication.GetProperty("select_list_subqueries").GetArrayLength()) 1 "projected scalar stays with duplicate removal"
+
+              let ordinalOrdered =
+                  plan "EXPLAIN FORMAT=JSON SELECT DISTINCT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a ORDER BY 1 DESC"
+              let ordinalOrdering = ordinalOrdered.GetProperty("ordering_operation")
+              Expect.isFalse (ordinalOrdering.GetProperty("using_filesort").GetBoolean()) "ordinal ordering reuses the distinct sort"
+              Expect.equal (ordinalOrdering.GetProperty("duplicates_removal").GetProperty("select_list_subqueries").GetArrayLength()) 1 "ordinal ordering keeps the scalar with duplicate removal"
+
               let groupedAndOrdered = plan (projectionSql "GROUP BY a.id ORDER BY a.id DESC")
               let outerOrdering = groupedAndOrdered.GetProperty("ordering_operation")
               let innerGrouping = outerOrdering.GetProperty("grouping_operation")
