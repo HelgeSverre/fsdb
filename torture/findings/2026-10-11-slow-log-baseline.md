@@ -99,6 +99,13 @@ classifier now exposes the equivalent bound to its costed index planner, so
 the larger query examines two rows while the original predicate still decides
 the result.
 
+On the indexed two-table left-join fixture, both `WHERE NOT (b.id=3)` and
+`WHERE b.id<>3` returned `(1,1)` and `(1,2)` while MySQL 8.4.11 examined five
+candidates. Fsdb previously examined seven. For exact integer keys, the two
+strict ranges on either side of the excluded value can be merged as indexed
+candidates; fsdb now uses that union for the join while evaluating the
+original condition on the resulting rows.
+
 The symmetric null-rejected `RIGHT JOIN ... WHERE a.id<2` already matches
 MySQL's observed counts: with an index on `b.left_id`, two result rows examine
 three candidates, or two with `LIMIT 1`; without that index, the full query

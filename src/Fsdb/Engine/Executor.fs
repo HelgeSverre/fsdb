@@ -11690,6 +11690,9 @@ and private reorderNullRejectedLeftJoin
             equalsIgnoreCase owner qualifier
         | Between(QualifiedCol(owner, _), LiteralValue _, LiteralValue _) ->
             equalsIgnoreCase owner qualifier
+        | Not(BinOp(Eq, QualifiedCol(owner, _), LiteralValue _))
+        | Not(BinOp(Eq, LiteralValue _, QualifiedCol(owner, _))) ->
+            equalsIgnoreCase owner qualifier
         | IsNotNull(QualifiedCol(owner, _)) -> equalsIgnoreCase owner qualifier
         | _ -> false
 
@@ -12166,6 +12169,36 @@ and private isDirectNumericIndexColumn (table: Table) (column: string, transform
     && (table.Columns
         |> List.tryFind (fun candidate -> equalsIgnoreCase candidate.Name column)
         |> Option.exists (fun candidate -> isNumericIndexType candidate.Type))
+
+/// For exact integer keys, inequality is the union of the two strict ranges.
+/// Keep the source expression for filtering; this form only chooses candidates.
+and private normalizeIndexedInequality registry (table: Table) tref expression =
+    let integerLiteral = function
+        | LiteralValue(VInt _ | VUInt _ | VBit _) -> true
+        | _ -> false
+
+    let integerKey indexed =
+        storedIndexedColumnFor registry tref indexed
+        |> Option.exists (fun (name, transform) ->
+            transform.IsNone
+            && (table.Columns
+                |> List.exists (fun column ->
+                    equalsIgnoreCase column.Name name
+                    && (match column.Type with
+                        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+                        | _ -> false))))
+
+    let ranges indexed literal =
+        BinOp(Or, BinOp(Lt, indexed, literal), BinOp(Gt, indexed, literal))
+
+    match expression with
+    | BinOp(Neq, indexed, literal)
+    | Not(BinOp(Eq, indexed, literal)) when integerKey indexed && integerLiteral literal ->
+        ranges indexed literal
+    | BinOp(Neq, literal, indexed)
+    | Not(BinOp(Eq, literal, indexed)) when integerLiteral literal && integerKey indexed ->
+        ranges indexed literal
+    | _ -> expression
 
 and private finalIndexTransform (_, transform) =
     match transform with
@@ -13714,7 +13747,7 @@ and private tryIndexUnionAccessInTableWith
     (whereExpr: Expr option)
     : IndexMergeAccessPlan option =
     let planFor expression =
-        match disjuncts expression with
+        match normalizeIndexedInequality registry table tref expression |> disjuncts with
         | [ _ ] -> None
         | branches ->
             branches

@@ -9744,17 +9744,19 @@ let tests =
 
               for predicate, expectedRows, examined in
                   [ "NOT (b.id>2)", selectedMatches, "4"
-                    "NOT (b.id<3)", [ [ Some "2"; Some "3" ] ], "3" ] do
+                    "NOT (b.id<3)", [ [ Some "2"; Some "3" ] ], "3"
+                    "NOT (b.id=3)", selectedMatches, "5"
+                    "b.id<>3", selectedMatches, "5" ] do
                   let query =
                       sprintf "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE %s" predicate
                   match run query with
                   | ResultSet([ "id"; "id" ], rows) ->
-                      Expect.equal (List.sort rows) (List.sort expectedRows) "negated range result"
-                  | other -> failtestf "unexpected negated range result: %A" other
+                      Expect.equal (List.sort rows) (List.sort expectedRows) "indexed inequality result"
+                  | other -> failtestf "unexpected indexed inequality result: %A" other
                   let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
                   Expect.equal logged
                       (ResultSet([ "rows_examined" ], [ [ Some examined ] ]))
-                      "negated range uses the indexed nullable side"
+                      "inequality uses the indexed nullable side"
 
               Expect.equal
                   (run "SELECT * FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id<2")
