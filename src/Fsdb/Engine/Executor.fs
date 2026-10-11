@@ -20800,33 +20800,52 @@ let private selectJsonMixedPlacements (select: SelectStmt) =
         select.Projections |> List.collect (fun projection -> collectSubqueries projection.Expression)
     let whereSubqueries = select.Where |> Option.toList |> List.collect collectSubqueries
     let havingSubqueries = select.Having |> Option.toList |> List.collect collectSubqueries
-    let otherSubqueries =
-        (select.GroupBy @ (select.OrderBy |> List.map fst)) |> List.collect collectSubqueries
+    let orderSubqueries = select.OrderBy |> List.collect (fst >> collectSubqueries)
+    let groupSubqueries = select.GroupBy |> List.collect collectSubqueries
     let scalarExpressions =
         (select.Projections |> List.map _.Expression)
         @ (select.Where |> Option.toList)
         @ (select.Having |> Option.toList)
+        @ (select.OrderBy |> List.map fst)
     let audited (subqueries: SelectStmt list) =
         not subqueries.IsEmpty
         && (subqueries |> List.forall (fun subquery ->
             simpleJsonSubquery subquery && Expression.hasQualifiedOuterReference subquery))
 
+    let activeClauses =
+        [ ExplainProjection, projectionSubqueries
+          ExplainWhere, whereSubqueries
+          ExplainHaving, havingSubqueries
+          ExplainOrderBy, orderSubqueries ]
+        |> List.filter (snd >> List.isEmpty >> not)
+
+    let supportedClauses =
+        match activeClauses |> List.map fst with
+        | [ ExplainProjection; ExplainWhere ] ->
+            select.GroupBy.IsEmpty && select.OrderBy.IsEmpty && select.Having.IsNone
+        | [ ExplainProjection; ExplainHaving ] -> not select.GroupBy.IsEmpty && select.OrderBy.IsEmpty
+        | [ ExplainProjection; ExplainOrderBy ]
+        | [ ExplainWhere; ExplainOrderBy ]
+        | [ ExplainProjection; ExplainWhere; ExplainOrderBy ] ->
+            select.GroupBy.IsEmpty && select.Having.IsNone
+        | _ -> false
+
     if not (simpleJsonSubqueryParent select)
-       || not (audited projectionSubqueries)
+       || select.Distinct
        || (scalarExpressions |> List.exists (onlyScalarSubqueries >> not))
-       || not otherSubqueries.IsEmpty then
+       || not groupSubqueries.IsEmpty
+       || not supportedClauses
+       || (activeClauses |> List.exists (snd >> audited >> not)) then
         None
-    elif audited whereSubqueries && havingSubqueries.IsEmpty && select.GroupBy.IsEmpty && select.OrderBy.IsEmpty && not select.Distinct then
-        Some
-            [ { Clause = ExplainProjection; Operations = [] }, projectionSubqueries.Length
-              { Clause = ExplainWhere; Operations = [] }, whereSubqueries.Length ]
-    elif audited havingSubqueries && whereSubqueries.IsEmpty && not select.GroupBy.IsEmpty && select.OrderBy.IsEmpty && not select.Distinct then
-        let operations = [ GroupingOperation ]
-        Some
-            [ { Clause = ExplainProjection; Operations = operations }, projectionSubqueries.Length
-              { Clause = ExplainHaving; Operations = operations }, havingSubqueries.Length ]
     else
-        None
+        let operations =
+            [ if not select.OrderBy.IsEmpty then OrderingOperation
+              if not select.GroupBy.IsEmpty then GroupingOperation ]
+        activeClauses
+        |> List.map (fun (clause, subqueries) ->
+            let clauseOperations = if clause = ExplainWhere then [] else operations
+            { Clause = clause; Operations = clauseOperations }, subqueries.Length)
+        |> Some
 
 let private selectSupportsJsonProjectionSubqueries (select: SelectStmt) =
     match selectJsonSubqueryPlacement select with

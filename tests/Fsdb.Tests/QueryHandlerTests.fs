@@ -4318,6 +4318,33 @@ let tests =
               Expect.equal (groupedHavingChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "grouped HAVING keeps its child ID"
               Expect.equal (groupedHavingChild.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "c" "HAVING owns its child access"
 
+              let projectedAndOrdered =
+                  plan "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a ORDER BY (SELECT c.id FROM scalar_plan c WHERE c.id=a.id)"
+              let mixedOrdering = projectedAndOrdered.GetProperty("ordering_operation")
+              Expect.isTrue (mixedOrdering.GetProperty("using_filesort").GetBoolean()) "dependent scalar order filesorts"
+              let orderedProjectionChild = mixedOrdering.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              let orderedOrderChild = mixedOrdering.GetProperty("order_by_subqueries").EnumerateArray() |> Seq.head
+              Expect.equal (orderedProjectionChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "ordered projection keeps its child ID"
+              Expect.equal (orderedOrderChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "ORDER BY keeps its child ID"
+
+              let filteredAndOrdered =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a WHERE a.id=(SELECT b.id FROM scalar_plan b WHERE b.id=a.id) ORDER BY (SELECT c.id FROM scalar_plan c WHERE c.id=a.id)"
+              let filteredOrdering = filteredAndOrdered.GetProperty("ordering_operation")
+              let filteredSourceChild = filteredOrdering.GetProperty("table").GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+              let filteredOrderChild = filteredOrdering.GetProperty("order_by_subqueries").EnumerateArray() |> Seq.head
+              Expect.equal (filteredSourceChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "WHERE stays attached below ordering"
+              Expect.equal (filteredOrderChild.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "ORDER BY stays with ordering"
+
+              let projectedFilteredAndOrdered =
+                  plan "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a WHERE a.id=(SELECT c.id FROM scalar_plan c WHERE c.id=a.id) ORDER BY (SELECT d.id FROM scalar_plan d WHERE d.id=a.id)"
+              let tripleOrdering = projectedFilteredAndOrdered.GetProperty("ordering_operation")
+              let tripleProjection = tripleOrdering.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              let tripleWhere = tripleOrdering.GetProperty("table").GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+              let tripleOrder = tripleOrdering.GetProperty("order_by_subqueries").EnumerateArray() |> Seq.head
+              Expect.equal (tripleProjection.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "three-clause projection owns child 2"
+              Expect.equal (tripleWhere.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "three-clause WHERE owns child 3"
+              Expect.equal (tripleOrder.GetProperty("query_block").GetProperty("select_id").GetInt32()) 4 "three-clause ORDER BY owns child 4"
+
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
               let unsafeMessage =

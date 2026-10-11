@@ -111,3 +111,12 @@ encounter order (projection first, predicate second). Fsdb now partitions the
 audited child blocks by clause and renders both without losing their IDs or
 table access. Other multi-clause combinations and optimizer-transformed
 `EXISTS`/`IN` subqueries remain open.
+
+Further MySQL 8.4.11 probes put dependent projection and ORDER BY scalars
+together under `ordering_operation`, while a dependent WHERE scalar stays on
+the table inside that operation. The three-clause projection/WHERE/ORDER BY
+case assigns child select IDs 2, 3, and 4 in that order, and the scalar order
+key filesorts. Fsdb now renders the audited projection-plus-order,
+WHERE-plus-order, and three-clause forms with those owners and IDs. Grouped
+multi-clause ordering, DISTINCT combinations, and other optimizer placements
+remain open.
