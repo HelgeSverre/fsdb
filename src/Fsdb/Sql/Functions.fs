@@ -6422,22 +6422,15 @@ let private geometryPredicateFn functionName predicate =
         | "ST_EQUALS" -> false
         | _ -> invalidArg (nameof functionName) "unsupported geographic topology predicate"
 
-    let lineShapes first second =
-        match linework first, linework second with
-        | Some firstLines, Some secondLines -> Some(firstLines, secondLines)
-        | _ -> None
-
-    let linePolygonShapes first second =
-        match linework first, polygons second with
-        | Some lines, Some areas -> Some(lines, areas)
-        | _ ->
-            match polygons first, linework second with
-            | Some areas, Some lines -> Some(lines, areas)
-            | _ -> None
-
-    let polygonShapes first second =
-        match polygons first, polygons second with
-        | Some firstAreas, Some secondAreas -> Some(firstAreas, secondAreas)
+    let lineOrPolygonIntersects referenceSystem first second =
+        match linework first, polygons first, linework second, polygons second with
+        | Some firstLines, _, Some secondLines, _ ->
+            Some(geographicLineLineDistance referenceSystem firstLines secondLines = Some 0.0)
+        | Some lines, _, _, Some areas
+        | _, Some areas, Some lines, _ ->
+            Some(geographicLinePolygonDistance referenceSystem lines areas = Some 0.0)
+        | _, Some firstAreas, _, Some secondAreas ->
+            Some(geographicPolygonPolygonDistance referenceSystem firstAreas secondAreas = Some 0.0)
         | _ -> None
 
     let pointPolygonShapes first second =
@@ -6490,17 +6483,14 @@ let private geometryPredicateFn functionName predicate =
                     | Some(lineFirst, point, lines) ->
                         Some(pointLinePredicate referenceSystem lineFirst point lines)
                     | None ->
-                        match functionName, lineShapes first.Shape second.Shape, linePolygonShapes first.Shape second.Shape, polygonShapes first.Shape second.Shape with
-                        | ("ST_INTERSECTS" | "ST_DISJOINT"), Some(firstLines, secondLines), _, _ ->
-                            let intersects = geographicLineLineDistance referenceSystem firstLines secondLines = Some 0.0
-                            Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
-                        | ("ST_INTERSECTS" | "ST_DISJOINT"), _, Some(lines, areas), _ ->
-                            let intersects = geographicLinePolygonDistance referenceSystem lines areas = Some 0.0
-                            Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
-                        | ("ST_INTERSECTS" | "ST_DISJOINT"), _, _, Some(firstAreas, secondAreas) ->
-                            let intersects = geographicPolygonPolygonDistance referenceSystem firstAreas secondAreas = Some 0.0
-                            Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
-                        | _ ->
+                        let intersects =
+                            match functionName with
+                            | "ST_INTERSECTS" | "ST_DISJOINT" ->
+                                lineOrPolygonIntersects referenceSystem first.Shape second.Shape
+                            | _ -> None
+                        match intersects with
+                        | Some value -> Some(if functionName = "ST_INTERSECTS" then value else not value)
+                        | None ->
                             requirePlanar functionName first |> ignore
                             predicate first second
             else predicate first second
