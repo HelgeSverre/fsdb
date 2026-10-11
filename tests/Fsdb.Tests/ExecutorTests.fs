@@ -14919,6 +14919,32 @@ let tests =
                         | ResultSet(_, [ row ]) when row = ([ intersects; disjoint; intersects; disjoint ] |> List.map Some) -> ()
                         | result -> failtestf "expected MySQL geographic polygon intersections for %s and %s, got %A" firstText secondText result
 
+                testCase "geographic polygon topology distinguishes overlap, containment, and contact"
+                <| fun _ ->
+                    let store = newStore ()
+                    let outer = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
+                    let hole = "POLYGON((0 0,0 5,5 5,5 0,0 0),(1 1,4 1,4 4,1 4,1 1))"
+                    let cases =
+                        [ outer, "POLYGON((2 2,2 6,6 6,6 2,2 2))", [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          outer, "POLYGON((1 1,1 2,2 2,2 1,1 1))", [ Some "0"; Some "0"; Some "1"; Some "0" ]
+                          outer, "POLYGON((1 -2,3 -2,3 0,1 0,1 -2))", [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          outer, "POLYGON((4 1,4 3,6 3,6 1,4 1))", [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          outer, "POLYGON((4 4,4 6,6 6,6 4,4 4))", [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          outer, outer, [ Some "0"; Some "0"; Some "1"; Some "1" ]
+                          outer, "POLYGON((0 0,4 0,4 4,0 4,0 0))", [ Some "0"; Some "0"; Some "1"; Some "1" ]
+                          outer, "POLYGON((6 6,6 7,7 7,7 6,6 6))", [ Some "0"; Some "0"; Some "0"; Some "0" ]
+                          hole, "POLYGON((2 2,2 3,3 3,3 2,2 2))", [ Some "0"; Some "0"; Some "0"; Some "0" ]
+                          hole, hole, [ Some "0"; Some "0"; Some "1"; Some "1" ]
+                          "POLYGON((0 0,0 5,5 5,5 0,0 0))", hole, [ Some "0"; Some "0"; Some "1"; Some "0" ]
+                          "MULTIPOLYGON(((0 0,0 4,4 4,4 0,0 0)),((10 10,10 14,14 14,14 10,10 10)))", "POLYGON((1 1,1 2,2 2,2 1,1 1))", [ Some "0"; Some "0"; Some "1"; Some "0" ] ]
+                    for firstText, secondText, expected in cases do
+                        let first = sprintf "ST_GeomFromText('%s',4326)" firstText
+                        let second = sprintf "ST_GeomFromText('%s',4326)" secondText
+                        let sql = sprintf "SELECT ST_Touches(%s,%s),ST_Overlaps(%s,%s),ST_Contains(%s,%s),ST_Equals(%s,%s)" first second first second first second first second
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = expected -> ()
+                        | result -> failtestf "expected MySQL geographic polygon topology for %s and %s, got %A" firstText secondText result
+
                 testCase "geographic point-to-line distance follows geodesic segments"
                 <| fun _ ->
                     let store = newStore ()

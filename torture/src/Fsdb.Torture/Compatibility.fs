@@ -3081,6 +3081,14 @@ module ContractCatalog =
                    "SELECT ST_Intersects(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326), ST_GeomFromText('POLYGON((1 1,1 2,2 2,2 1,1 1))',4326)), ST_Disjoint(ST_GeomFromText('POLYGON((0 0,0 5,5 5,5 0,0 0),(1 1,4 1,4 4,1 4,1 1))',4326), ST_GeomFromText('POLYGON((2 2,2 3,3 3,3 2,2 2))',4326))"
                |> Contract.comparingValues
                Contract.query
+                   "geographic-polygon-overlap-and-touch"
+                   "SELECT ST_Overlaps(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326),ST_GeomFromText('POLYGON((2 2,2 6,6 6,6 2,2 2))',4326)),ST_Touches(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326),ST_GeomFromText('POLYGON((1 -2,3 -2,3 0,1 0,1 -2))',4326)),ST_Overlaps(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326),ST_GeomFromText('POLYGON((4 1,4 3,6 3,6 1,4 1))',4326))"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-polygon-containment-and-equality"
+                   "SELECT ST_Contains(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326),ST_GeomFromText('POLYGON((1 1,1 2,2 2,2 1,1 1))',4326)),ST_Equals(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326),ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))',4326)),ST_Contains(ST_GeomFromText('POLYGON((0 0,0 5,5 5,5 0,0 0))',4326),ST_GeomFromText('POLYGON((0 0,0 5,5 5,5 0,0 0),(1 1,4 1,4 4,1 4,1 1))',4326))"
+               |> Contract.comparingValues
+               Contract.query
                    "geographic-point-set-crosses"
                    "SELECT ST_Crosses(ST_GeomFromText('MULTIPOINT((0 1),(2 2))',4326), ST_GeomFromText('LINESTRING(0 0,0 2)',4326)), ST_Crosses(ST_GeomFromText('LINESTRING(0 0,0 2)',4326), ST_GeomFromText('MULTIPOINT((0 1),(2 2))',4326)), ST_Overlaps(ST_GeomFromText('MULTIPOINT((0 1),(2 2))',4326), ST_GeomFromText('LINESTRING(0 0,0 2)',4326)), ST_Crosses(ST_GeomFromText('MULTIPOINT((1 1),(4 4))',4326), ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0))',4326))"
                |> Contract.comparingValues

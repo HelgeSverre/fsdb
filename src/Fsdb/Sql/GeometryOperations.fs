@@ -612,6 +612,79 @@ let internal geographicPolygonPolygonDistance referenceSystem firstPolygons seco
     | None, Some distance -> Some distance
     | None, None -> None
 
+type internal GeographicPolygonTopology =
+    { Touches: bool
+      Overlaps: bool
+      FirstContainsSecond: bool
+      SecondContainsFirst: bool }
+
+let internal geographicPolygonPolygonTopology referenceSystem firstPolygons secondPolygons =
+    let boundaryPositions source target =
+        let targetRings =
+            target
+            |> List.collect (function
+                | [] -> []
+                | exterior :: holes ->
+                    (GeographicPointPolygonPosition.ExteriorBoundary, exterior)
+                    :: (holes |> List.map (fun hole -> GeographicPointPolygonPosition.HoleBoundary, hole)))
+        let sharedBoundary start endpoint =
+            targetRings
+            |> List.tryPick (fun (boundary, ring) ->
+                ring
+                |> List.pairwise
+                |> List.tryPick (fun segment ->
+                    if geographicPointOnLineSegment referenceSystem start segment
+                       && geographicPointOnLineSegment referenceSystem endpoint segment then Some boundary
+                    else None))
+        let classify point =
+            let position = geographicPointPolygonPosition referenceSystem point target
+            match position with
+            | GeographicPointPolygonPosition.ExteriorBoundary
+            | GeographicPointPolygonPosition.HoleBoundary -> position
+            | _ ->
+                // ponytail: Thomas interpolation can move a shared edge sample by about 0.1 m.
+                // Keep the fallback at 0.2 m until boundary intersection no longer uses samples.
+                let nearRing ring =
+                    geographicPointLineDistance referenceSystem point [ ring ]
+                    |> Option.exists (fun distance -> distance < 0.2)
+                targetRings
+                |> List.tryPick (fun (boundary, ring) -> if nearRing ring then Some boundary else None)
+                |> Option.defaultValue position
+        source
+        |> List.collect id
+        |> List.collect (fun ring ->
+            ring
+            |> List.pairwise
+            |> List.collect (fun (start, endpoint) ->
+                let boundary = sharedBoundary start endpoint
+                sampleGeographicSegment referenceSystem start endpoint
+                |> Array.toList
+                |> List.map (fun point -> boundary |> Option.defaultWith (fun () -> classify point))))
+    let firstInSecond = boundaryPositions firstPolygons secondPolygons
+    let secondInFirst = boundaryPositions secondPolygons firstPolygons
+    let hasInterior positions =
+        positions |> List.contains GeographicPointPolygonPosition.Interior
+    let hasOutside positions =
+        positions |> List.exists (function GeographicPointPolygonPosition.Outside _ -> true | _ -> false)
+    let allBoundary positions =
+        not (List.isEmpty positions)
+        && (positions
+            |> List.forall (function
+                | GeographicPointPolygonPosition.ExteriorBoundary
+                | GeographicPointPolygonPosition.HoleBoundary -> true
+                | _ -> false))
+    let sameBoundary = allBoundary firstInSecond && allBoundary secondInFirst
+    let firstContainsSecond = not (hasOutside secondInFirst) && (hasInterior secondInFirst || sameBoundary)
+    let secondContainsFirst = not (hasOutside firstInSecond) && (hasInterior firstInSecond || sameBoundary)
+    let intersects = geographicPolygonPolygonDistance referenceSystem firstPolygons secondPolygons = Some 0.0
+    let overlaps =
+        intersects && not firstContainsSecond && not secondContainsFirst
+        && (hasInterior firstInSecond || hasInterior secondInFirst)
+    { Touches = intersects && not overlaps && not firstContainsSecond && not secondContainsFirst
+      Overlaps = overlaps
+      FirstContainsSecond = firstContainsSecond
+      SecondContainsFirst = secondContainsFirst }
+
 let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
     let length (points: (float * float) list) =
         points
