@@ -1195,6 +1195,18 @@ module ContractCatalog =
                    yield Contract.query (sprintf "numeric-cast-binary-source-%d" index) sql |> Contract.comparingValues
                    yield Contract.query (sprintf "numeric-cast-binary-source-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               yield Contract.query "numeric-cast-binary-columns-create" "CREATE TEMPORARY TABLE cast_numeric_binary_columns(v VARBINARY(20), b BLOB)"
+                     |> Contract.comparingValues
+               yield Contract.query "numeric-cast-binary-columns-insert" "INSERT INTO cast_numeric_binary_columns VALUES ('abc', 'abc')"
+                     |> Contract.comparingValues
+               for index, sql in
+                   [ "SELECT CAST(v AS DOUBLE) FROM cast_numeric_binary_columns"
+                     "SELECT CAST(b AS DOUBLE) FROM cast_numeric_binary_columns"
+                     "SELECT CAST(v AS DECIMAL(10,2)) FROM cast_numeric_binary_columns"
+                     "SELECT CAST(b AS DECIMAL(10,2)) FROM cast_numeric_binary_columns" ] |> List.indexed do
+                   yield Contract.query (sprintf "numeric-cast-binary-column-%d" index) sql |> Contract.comparingValues
+                   yield Contract.query (sprintf "numeric-cast-binary-column-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                for index, text in [ "abc"; "12x"; "1e309"; "-1e309"; "1e309x"; "-1e309x"; "nan" ] |> List.indexed do
                    yield Contract.query (sprintf "double-cast-value-%d" index) (sprintf "SELECT CAST('%s' AS DOUBLE)" text)
                          |> Contract.comparingValues

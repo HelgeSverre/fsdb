@@ -3051,6 +3051,25 @@ let tests =
                           sql
                   | _, result -> failtestf "expected binary-source numeric CAST for %s, got %A" sql result
 
+          testCase "numeric CASTs distinguish VARBINARY and BLOB column warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE numeric_binary_columns(v VARBINARY(20), b BLOB)"
+              let session, _ = handle session "INSERT INTO numeric_binary_columns VALUES ('abc', 'abc')"
+              for sql, expected, warnings in
+                  [ "SELECT CAST(v AS DOUBLE) FROM numeric_binary_columns", "0", [ 1292, "Truncated incorrect DOUBLE value: 'abc'" ]
+                    "SELECT CAST(b AS DOUBLE) FROM numeric_binary_columns", "0", []
+                    "SELECT CAST(v AS DECIMAL(10,2)) FROM numeric_binary_columns", "0.00", [ 1366, "Incorrect DECIMAL value: '0' for column '' at row -1"; 1292, "Truncated incorrect DECIMAL value: 'abc'" ]
+                    "SELECT CAST(b AS DECIMAL(10,2)) FROM numeric_binary_columns", "0.00", [ 1366, "Incorrect DECIMAL value: '0' for column '' at row -1" ] ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected binary-column numeric CAST for %s, got %A" sql result
+
           testCase "FLOAT casts distinguish invalid text from range overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

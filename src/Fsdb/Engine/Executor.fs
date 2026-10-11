@@ -3106,6 +3106,22 @@ let private truncatedNumericCastInput text =
     let prefix = leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue ""
     prefix = "" || not (text.Trim().Equals(prefix, System.StringComparison.Ordinal))
 
+let private numericCastSourceText = function
+    | VString text -> Some text
+    | (VEncodedString _ | VBytes _) as value -> toText value
+    | _ -> None
+
+let private numericCastBinaryColumnType ctx expr =
+    tryColumnDefForExpr ctx expr
+    |> Option.bind (fun column ->
+        match column.Type with
+        | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob -> Some column.Type
+        | _ -> None)
+
+let private isBlobColumnType = function
+    | Some(TTinyBlob | TBlob | TMediumBlob | TLongBlob) -> true
+    | _ -> false
+
 let private oversizedDecimalExponentMantissa (prefix: string) =
     let exponentIndex = prefix.IndexOfAny([| 'e'; 'E' |])
     if exponentIndex < 0 then None
@@ -5966,12 +5982,6 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     VString(leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue "")
                 | _ -> v
 
-            let numericSourceText =
-                match source with
-                | VString text -> Some text
-                | VEncodedString _ | VBytes _ -> toText source
-                | _ -> None
-
             let coerce mode value =
                 let castCol: ColumnDef =
                     { Name = "CAST"
@@ -6016,23 +6026,28 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     Diagnostics.warning 1292 (sprintf "Incorrect datetime value: '%s'" (Value.toText v |> Option.defaultValue "NULL"))
                     Ok VNull
             | TDecimal(precision, scale, _), _ ->
+                let numericSourceText = numericCastSourceText source
+                let binaryColumnType = numericCastBinaryColumnType ctx e
+                let blobColumnSource = isBlobColumnType binaryColumnType
                 let warnTruncated text =
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" text)
                 let castBinaryString =
                     match e, source with
                     | CastAsBinary(_, _), VBytes _ -> true
                     | _ -> false
+                let quietBinarySource = castBinaryString || blobColumnSource
                 match numericSourceText, v with
                 | Some text, VString prefix ->
                     match oversizedDecimalExponentMantissa prefix with
-                    | Some mantissa when castBinaryString ->
+                    | Some mantissa when quietBinarySource ->
                         warnTruncated mantissa
                     | Some mantissa ->
                         warnTruncated mantissa
                         warnTruncated text
-                    | None when prefix = "" && castBinaryString ->
+                    | None when prefix = "" && (castBinaryString || Option.isSome binaryColumnType) ->
                         Diagnostics.warning 1366 "Incorrect DECIMAL value: '0' for column '' at row -1"
-                    | None when castBinaryString -> ()
+                        if not quietBinarySource then warnTruncated text
+                    | None when quietBinarySource -> ()
                     | None when truncatedNumericCastInput text -> warnTruncated text
                     | None -> ()
                 | _ -> ()
@@ -6069,8 +6084,10 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | result -> result)
                     |> Result.mapError Storage.toMySqlError
             | (TDouble _ | TFloat _), _ ->
+                let numericSourceText = numericCastSourceText source
+                let blobColumnSource = numericCastBinaryColumnType ctx e |> isBlobColumnType
                 let truncatedText =
-                    numericSourceText |> Option.exists truncatedNumericCastInput
+                    not blobColumnSource && (numericSourceText |> Option.exists truncatedNumericCastInput)
                 match numericSourceText with
                 | Some text when truncatedText ->
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
@@ -6080,7 +6097,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 |> Result.bind (function
                     | VDouble value when System.Double.IsInfinity value ->
                         match ty, numericSourceText with
-                        | TDouble _, Some text ->
+                        | TDouble _, Some text when not blobColumnSource ->
                             if not truncatedText then
                                 Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
                             Ok(VDouble(if value < 0.0 then -System.Double.MaxValue else System.Double.MaxValue))

@@ -95,3 +95,7 @@ BINARY)` also returns 12, but MySQL suppresses the DECIMAL truncation warning;
 an entirely invalid binary result instead emits error-class warning 1366.
 The bounded range and high-exponent paths also accept audited binary text.
 Bare hex/bit literals retain their separate numeric interpretation.
+Stored VARBINARY and BLOB columns both parse numeric prefixes, but BLOB
+suppresses DOUBLE truncation warnings. Invalid DECIMAL text in either column
+produces warning 1366; VARBINARY also retains warning 1292 for the original
+text. These column distinctions are covered by focused and differential tests.

@@ -741,6 +741,8 @@ mixed Unicode-digit and fullwidth-digit input.
 Audited introduced binary strings and results of `CAST(... AS BINARY)` now
 use numeric prefixes for DOUBLE and DECIMAL casts, with their distinct warning
 behavior; broader binary-expression sources remain open.
+Audited VARBINARY/BLOB column casts now retain their distinct DOUBLE and
+DECIMAL warning behavior; other binary-derived expressions remain open.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common
