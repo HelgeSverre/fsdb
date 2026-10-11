@@ -754,6 +754,58 @@ let tests =
 
                   Expect.isLessThan touches 10 "the numeric bound is narrower than the equality key"
 
+          testCase "correlated text ranges use the materialized source collation"
+          <| fun _ ->
+              let mutable touches = 0
+
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_bound (min_label VARCHAR(20) COLLATE utf8mb4_0900_ai_ci)" |> ignore
+              runDefault store "CREATE TABLE inner_values (label VARCHAR(20) COLLATE utf8mb4_0900_ai_ci, active INT)" |> ignore
+              runDefault store "INSERT INTO outer_bound VALUES ('WORD099')" |> ignore
+
+              [ 0 .. 99 ]
+              |> List.map (fun index -> sprintf "('word%03d', 1)" index)
+              |> String.concat ", "
+              |> fun values -> runDefault store ("INSERT INTO inner_values VALUES " + values)
+              |> ignore
+
+              for prefix, source in
+                  [ "", "(SELECT label, MAX(active) AS active FROM inner_values GROUP BY label) d"
+                    "WITH grouped AS (SELECT label, MAX(active) AS active FROM inner_values GROUP BY label) ", "grouped d" ] do
+                  touches <- 0
+
+                  let sql =
+                      prefix + "SELECT EXISTS (SELECT 1 FROM " + source
+                      + " WHERE TOUCH(d.active) = 1 AND d.label >= o.min_label) FROM outer_bound o"
+
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected the case-insensitive text bound, got %A" other
+
+                  Expect.isLessThan touches 10 "the text bound excludes lower materialized keys"
+
+          testCase "materialized text ranges retain a stronger bound collation"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_bound (min_label VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "CREATE TABLE inner_values (label VARCHAR(20) COLLATE utf8mb4_0900_ai_ci)" |> ignore
+              runDefault store "INSERT INTO outer_bound VALUES ('WORD099')" |> ignore
+              runDefault store "INSERT INTO inner_values VALUES ('word000'), ('word099')" |> ignore
+
+              let sql =
+                  "SELECT (SELECT COUNT(*) FROM "
+                  + "(SELECT label FROM inner_values GROUP BY label) d "
+                  + "WHERE d.label >= o.min_label) FROM outer_bound o"
+
+              match runDefault store sql with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected binary-bound comparison over both labels, got %A" other
+
           testCase "scalar subquery returning more than one row is MySQL error 1242"
           <| fun _ ->
               let store = newStore ()

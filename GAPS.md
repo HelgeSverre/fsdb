@@ -193,9 +193,9 @@ Correlated equality probes use single keys, complete composite keys, or safe
 ordered left prefixes through direct tables and pass-through derived tables or
 CTEs. Materialized derived tables and stable CTEs build statement-local composite
 equality keys from their usable correlated predicates. Outer values and literals
-may bind different key parts. Numeric correlated ranges over materialized sources
-use a statement-local ordered lookup; competing equality and range probes choose
-the narrower observed candidate set. Correlated forms
+may bind different key parts. Numeric and matching-collation text ranges over
+materialized sources use statement-local ordered lookups. Competing equality
+and range probes choose the narrower observed candidate set. Correlated forms
 preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
@@ -216,7 +216,7 @@ or locking retain the general SELECT pipeline.
 | Optimizer hints | query-block, table, and index target resolution with ordered diagnostics and plan controls | shared ordered syntax parsing, audited timeout/geometry effects and nested SET_VAR precedence, SELECT and audited mutation table/query-block/index resolution, family conflicts, audited CTE instantiation, lexical scope and repeated syntax warnings, diagnostic ordering, preparation warning lifetimes, and audited bound-query join-hint elimination and [merged/materialized source warning ownership](torture/findings/2026-10-08-join-hint-merging.md) work; table `USE`/`FORCE`/`IGNORE INDEX` now controls simple JOIN-scope equality, membership, range, and index-merge access, including alternate eligible keys, single-source ORDER/GROUP index selection, and direct joined-table equality probes (and the [measured `IGNORE INDEX` case](benchmarks/results/2026-10-10-functional-bound-pipeline.md)); unknown named keys return 1176 for SELECT/EXPLAIN on physical tables, views, and metadata tables, single-table UPDATE, and joined UPDATE/DELETE; `USE INDEX` range cost decisions, multi-source ORDER/GROUP plans, broader join access, other mutation forms, optimizer_switch configuration, broader hint combinations, stored-program contexts, and other physical plan controls remain incomplete ([SELECT cases](torture/findings/2026-10-08-hint-families.md), [mutation cases](torture/findings/2026-10-08-mutation-hints.md)) | medium | divergence |
 | Mixed-type join filters | numeric `IN` conditions can move between collation-equivalent text keys as join order changes | the [audited two-source equality joins](torture/findings/2026-10-07-fulltext-join-bounds.md#mixed-type-in-across-equality-joins) transfer literal multi-value `IN` when STRAIGHT_JOIN or MATCH identifies the owner; costed joins without MATCH, broader join graphs, and physical-plan reporting remain incomplete | medium (result membership) | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/index_merge/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings, index unions and intersections, and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
-| Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once; common correlated equality/range shapes and compatible functional probes over physical or pass-through projected sources use maintained indexes; stable materialized sources use statement-local composite equality and numeric range lookups; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
+| Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once; common correlated equality/range shapes and compatible functional probes over physical or pass-through projected sources use maintained indexes; stable materialized sources use statement-local composite equality, numeric range, and matching-collation text range lookups; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 
 ## 3. Built-in functions
 

@@ -594,70 +594,87 @@ let private isNumericIndexValue = function
     | _ -> false
 
 let private materializedRangeLookup
+    (store: Store)
     (columns: ColumnDef list)
     (rows: Value[] list)
     (columnName: string)
     : MaterializedRangeLookup option =
     resolveColumn columns columnName
     |> Result.toOption
-    |> Option.filter (fun index -> isNumericIndexType columns.[index].Type)
     |> Option.bind (fun columnIndex ->
-        let sourceRows = List.toArray rows
-        let entries =
-            sourceRows
-            |> Array.mapi (fun index row -> row.[columnIndex], index)
-            |> Array.filter (fun (value, _) -> value <> VNull)
+        let column = columns.[columnIndex]
+        let domain =
+            if isNumericIndexType column.Type then
+                Some(Value.compare, isNumericIndexValue)
+            else
+                match equalityMembershipDomain store column with
+                | Some(TextMembership collation) ->
+                    let compare left right =
+                        match left, right with
+                        | VString left, VString right -> collation.ComparePrimary left right
+                        | _ -> Value.compare left right
 
-        if entries |> Array.exists (fst >> isNumericIndexValue >> not) then
-            None
-        else
-            Array.sortInPlaceWith (fun (left, _) (right, _) -> Value.compare left right) entries
+                    Some(compare, (function VString _ -> true | _ -> false))
+                | _ -> None
 
-            let firstMatching bound inclusive =
-                let mutable lower = 0
-                let mutable upper = entries.Length
+        domain
+        |> Option.bind (fun (compare, compatibleValue) ->
+            let sourceRows = List.toArray rows
+            let entries =
+                sourceRows
+                |> Array.mapi (fun index row -> row.[columnIndex], index)
+                |> Array.filter (fun (value, _) -> value <> VNull)
 
-                while lower < upper do
-                    let middle = lower + (upper - lower) / 2
-                    let comparison = Value.compare (fst entries.[middle]) bound
+            if entries |> Array.exists (fst >> compatibleValue >> not) then
+                None
+            else
+                Array.sortInPlaceWith (fun (left, _) (right, _) -> compare left right) entries
 
-                    if comparison < 0 || (comparison = 0 && not inclusive) then
-                        lower <- middle + 1
+                let firstMatching bound inclusive =
+                    let mutable lower = 0
+                    let mutable upper = entries.Length
+
+                    while lower < upper do
+                        let middle = lower + (upper - lower) / 2
+                        let comparison = compare (fst entries.[middle]) bound
+
+                        if comparison < 0 || (comparison = 0 && not inclusive) then
+                            lower <- middle + 1
+                        else
+                            upper <- middle
+
+                    lower
+
+                let findRows lower upper =
+                    let compatible bound =
+                        bound
+                        |> Option.forall (fun (value, _) -> value = VNull || compatibleValue value)
+
+                    if not (compatible lower && compatible upper) then
+                        None
+                    elif lower |> Option.exists (fst >> (=) VNull)
+                         || upper |> Option.exists (fst >> (=) VNull) then
+                        Some []
                     else
-                        upper <- middle
+                        let first =
+                            lower
+                            |> Option.map (fun (value, inclusive) -> firstMatching value inclusive)
+                            |> Option.defaultValue 0
+                        let afterLast =
+                            upper
+                            |> Option.map (fun (value, inclusive) -> firstMatching value (not inclusive))
+                            |> Option.defaultValue entries.Length
 
-                lower
+                        // A range is selected in key order, but the query still sees
+                        // candidates in the materialized source's original order.
+                        entries.[first .. afterLast - 1]
+                        |> Array.map snd
+                        |> Array.sort
+                        |> Array.map (fun index -> sourceRows.[index])
+                        |> Array.toList
+                        |> Some
 
-            let findRows lower upper =
-                let compatible bound =
-                    bound
-                    |> Option.forall (fun (value, _) -> value = VNull || isNumericIndexValue value)
-
-                if not (compatible lower && compatible upper) then
-                    None
-                elif lower |> Option.exists (fst >> (=) VNull)
-                     || upper |> Option.exists (fst >> (=) VNull) then
-                    Some []
-                else
-                    let first =
-                        lower
-                        |> Option.map (fun (value, inclusive) -> firstMatching value inclusive)
-                        |> Option.defaultValue 0
-                    let afterLast =
-                        upper
-                        |> Option.map (fun (value, inclusive) -> firstMatching value (not inclusive))
-                        |> Option.defaultValue entries.Length
-
-                    // A range is selected in key order, but the query still sees
-                    // candidates in the materialized source's original order.
-                    entries.[first .. afterLast - 1]
-                    |> Array.map snd
-                    |> Array.sort
-                    |> Array.map (fun index -> sourceRows.[index])
-                    |> Array.toList
-                    |> Some
-
-            Some findRows)
+                Some findRows))
 
 let private tryLiteralValues expressions =
     let rec collect values =
@@ -13555,7 +13572,37 @@ and private tryMaterializedCorrelatedLookup
                     |> Option.bind (fun lookup -> lookup values)
 
             let rangeCandidates () =
-                let bounds = correlatedRangeBounds probeSource whereExpr (Some context)
+                let bounds =
+                    functionalRangeLookupBounds
+                        (tryCorrelatedInnerColumn probeSource)
+                        (tryCorrelatedOuterValue probeSource context)
+                        whereExpr
+
+                let usesStoredCollation (bound: RangeLookupBounds<string, Expr * Value>) =
+                    match resolveColumn columns bound.Column with
+                    | Ok index ->
+                        let column = columns.[index]
+
+                        match equalityMembershipDomain store column with
+                        | Some(TextMembership stored) ->
+                            [ bound.Lower; bound.Upper ]
+                            |> List.choose id
+                            |> List.forall (fun ((expression, value), _) ->
+                                match value with
+                                | VNull -> true
+                                | VString _ ->
+                                    comparisonCollation
+                                        context
+                                        "<"
+                                        (Col column.Name)
+                                        (Some column)
+                                        expression
+                                        (tryColumnDefForExpr context expression)
+                                    |> Result.toOption
+                                    |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
+                                | _ -> false)
+                        | _ -> true
+                    | Error _ -> false
 
                 if bounds.IsEmpty then
                     None
@@ -13566,8 +13613,13 @@ and private tryMaterializedCorrelatedLookup
 
                     bounds
                     |> List.choose (fun bound ->
-                        getMemoized lookups bound.Column (fun () -> materializedRangeLookup columns rows bound.Column)
-                        |> Option.bind (fun lookup -> lookup bound.Lower bound.Upper))
+                        if not (usesStoredCollation bound) then
+                            None
+                        else
+                            let values = functionalRangeValues bound
+
+                            getMemoized lookups bound.Column (fun () -> materializedRangeLookup store columns rows bound.Column)
+                            |> Option.bind (fun lookup -> lookup values.Lower values.Upper))
                     |> function
                         | [] -> None
                         | candidates -> Some(List.minBy List.length candidates)
