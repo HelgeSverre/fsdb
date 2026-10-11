@@ -9848,7 +9848,7 @@ and private applyResolvedJoin
     // dependent sources have their own evaluation boundaries.
     let sourcePredicates =
         match join.Kind, join.Table with
-        | (LeftJoin | NaturalLeftJoin), FromTable tableRef when consumption = MayStopEarly ->
+        | (LeftJoin | NaturalLeftJoin), FromTable tableRef ->
             let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
             if Map.containsKey (qualifier.ToLowerInvariant()) sourceOverrides then sourcePredicates
             else
@@ -10029,7 +10029,7 @@ and private applyPreparedJoin
 
         let hashEligible = lazy (preservedRightIndexProbe.IsNone && indexedJoinProbe.IsNone && hashCompatible.Value)
 
-        let streamingLeftHashEligible =
+        let streamingLeftHashClasses =
             match keyClasses with
             | Some classes when
                 consumption = MayStopEarly
@@ -10039,8 +10039,8 @@ and private applyPreparedJoin
                 && not equiKeys.IsEmpty
                 && storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
                 && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys ->
-                rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
-            | _ -> false
+                if rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows then Some classes else None
+            | _ -> None
 
         let isConstantTrue =
             function
@@ -10048,8 +10048,8 @@ and private applyPreparedJoin
             | BinOp(Eq, LiteralValue left, LiteralValue right) -> Value.equals left right = Some true
             | _ -> false
 
-        match preservedRightIndexProbe, indexedJoinProbe with
-        | Some probe, _ ->
+        match preservedRightIndexProbe, indexedJoinProbe, streamingLeftHashClasses with
+        | Some probe, _, _ ->
             let leftRowsFor (right: Value[]) =
                 let indexedRows =
                     probe.ProbeIndices
@@ -10089,7 +10089,7 @@ and private applyPreparedJoin
                                 yield Array.append left right
                 }
             Ok(newSources, rows, coalesceNames)
-        | _, Some probe ->
+        | _, Some probe, _ ->
             let exactKey =
                 probe.Index.UsesWholeStoredValues
                 && probe.ProbeIndices.Length = equiKeys.Length
@@ -10204,10 +10204,10 @@ and private applyPreparedJoin
                 |> Result.map (List.map (fun (leftIndex, rightIndex, (_, combined)) -> leftIndex, rightIndex, combined))
                 |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
             | _ -> failwith "indexed join kind"
-        | _, None when streamingLeftHashEligible ->
-            let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
+        | _, None, Some classes ->
+            let leftKeyPositions = equiKeys |> List.map fst
+            let leftKeyIndices = leftKeyPositions |> Array.ofList
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-            let classes = keyClasses.Value
             let rightIndexed = joinRows |> cacheExaminedRows |> Seq.indexed |> List.ofSeq
             let buckets = hashBuckets keyCollations (equiKeyOf rightKeyIndices) rightIndexed
 
@@ -10222,7 +10222,7 @@ and private applyPreparedJoin
                     for left in rowsSoFar do
                         let safeKey =
                             List.forall2 (fun index isNumeric -> valueMatchesKeyClass isNumeric left.[index])
-                                (equiKeys |> List.map fst) classes
+                                leftKeyPositions classes
                         let candidates =
                             if safeKey then
                                 match equiKeyOf leftKeyIndices left with
@@ -10251,7 +10251,7 @@ and private applyPreparedJoin
                 }
 
             Ok(newSources, rows, coalesceNames)
-        | _, None when hashEligible.Value ->
+        | _, None, _ when hashEligible.Value ->
             let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
             let rightCount = joinRows |> Seq.length
@@ -10286,7 +10286,7 @@ and private applyPreparedJoin
                 candidates
                 |> keepMatches residualHolds id
                 |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
-        | _, None ->
+        | _, None, _ ->
             let joinRows = cacheExaminedRows joinRows
             let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 

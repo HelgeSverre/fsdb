@@ -9603,7 +9603,7 @@ let tests =
                   handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" rightWithUnmatchedLeft)
               Expect.equal extraLeftLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "unused left rows are not scanned by the index probe"
 
-          testCase "slow log stops scan-shaped left joins at LIMIT"
+          testCase "slow log counts scan-shaped left joins across LIMIT and ON filters"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               let run sql =
@@ -9659,6 +9659,15 @@ let tests =
               Expect.equal narrowedResult (ResultSet([ "id"; "id" ], [ [ Some "1"; Some "1" ] ])) "right-side ON filter result"
               let narrowedLog = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" narrowedRight)
               Expect.equal narrowedLog (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "right-side ON filter narrows the scan"
+
+              let fullNarrowedRight =
+                  "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id AND b.id<2"
+              let fullNarrowedRows = run fullNarrowedRight
+              Expect.equal fullNarrowedRows
+                  (ResultSet([ "id"; "id" ], [ [ Some "1"; Some "1" ]; [ Some "2"; None ]; [ Some "3"; None ] ]))
+                  "right-side ON filter preserves unmatched left rows"
+              let fullNarrowedLog = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" fullNarrowedRight)
+              Expect.equal fullNarrowedLog (ResultSet([ "rows_examined" ], [ [ Some "4" ] ])) "full join reads the narrowed right source"
 
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->

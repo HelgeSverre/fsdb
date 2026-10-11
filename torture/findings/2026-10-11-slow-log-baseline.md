@@ -58,6 +58,9 @@ for `LIMIT 2`, `LIMIT 1 OFFSET 1`, and `LIMIT 1` when the leading left row is
 unmatched; the regression covers all four shapes. A residual predicate
 `ON b.left_id=a.id AND b.id<2 LIMIT 1` reported two examined rows in MySQL;
 fsdb now matches by applying the indexed right-only condition before joining.
+Without `LIMIT`, the same condition returned three left rows (two null-padded)
+and examined four rows in MySQL 8.4.11: three left candidates plus the one
+right candidate selected by the primary-key range. Fsdb matches that case too.
 
 A prepared `SELECT ? AS fsdb_slow_prepared_probe` executed with 43 produced a
 slow-log row for `SELECT 43 AS fsdb_slow_prepared_probe` with one row sent and
