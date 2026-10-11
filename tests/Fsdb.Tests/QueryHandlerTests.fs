@@ -4201,6 +4201,32 @@ let tests =
                     checkBranch 1 2 3 (branches.[0].GetProperty("query_block"))
                     checkBranch 4 5 6 (branches.[1].GetProperty("query_block"))
 
+                testCase "derived source WHERE and projection scalars keep clause owners and IDs"
+                <| fun _ ->
+                    let plan = scalarExplainPlan ()
+                    let derived = "FROM (SELECT id FROM scalar_plan LIMIT 2) d"
+                    let predicate = "d.id=(SELECT b.id FROM scalar_plan b WHERE b.id=d.id)"
+                    let filtered = plan ("EXPLAIN FORMAT=JSON SELECT d.id " + derived + " WHERE " + predicate)
+                    let source = filtered.GetProperty("table")
+                    Expect.equal (source.GetProperty("table_name").GetString()) "d" "derived alias is retained"
+                    let nested = source.GetProperty("materialized_from_subquery").GetProperty("query_block")
+                    Expect.equal (nested.GetProperty("select_id").GetInt32()) 2 "derived source precedes WHERE scalar"
+                    let attached = source.GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+                    Expect.equal (attached.GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "WHERE scalar follows source"
+
+                    let projected =
+                        plan
+                            ("EXPLAIN FORMAT=JSON SELECT "
+                             + "(SELECT c.id FROM scalar_plan c WHERE c.id=d.id) AS x "
+                             + derived + " WHERE " + predicate)
+                    let selected = projected.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+                    Expect.equal (selected.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "projection scalar comes first"
+                    let source = projected.GetProperty("table")
+                    let nested = source.GetProperty("materialized_from_subquery").GetProperty("query_block")
+                    Expect.equal (nested.GetProperty("select_id").GetInt32()) 3 "derived source comes second"
+                    let attached = source.GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+                    Expect.equal (attached.GetProperty("query_block").GetProperty("select_id").GetInt32()) 4 "WHERE scalar comes last"
+
                 testCase "single-clause placement"
                 <| fun _ ->
                     let plan = scalarExplainPlan ()

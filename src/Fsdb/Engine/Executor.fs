@@ -19905,15 +19905,18 @@ let rec private explainJoinBlock
     (whereOpt: Expr option)
     (extra: string list)
     (subqueryExprs: Expr list)
+    (earlySubqueryCount: int)
     (indexOrderPlan: IndexOrderPlan option)
     (consumption: JoinConsumption)
     : Result<unit, QueryResult> =
     let tableCount = (from |> Option.toList |> List.length) + joins.Length
-    // MySQL numbers expression subqueries before materialized FROM sources.
-    let expressionSubqueries =
+    // MySQL numbers projection subqueries before materialized FROM sources;
+    // predicate and later-clause subqueries follow those sources.
+    let earlySubqueries, laterSubqueries =
         subqueryExprs
         |> List.collect collectSubqueries
-        |> List.map (fun subquery -> nextId (), subquery)
+        |> List.splitAt earlySubqueryCount
+    let reservedSubqueries = earlySubqueries |> List.map (fun subquery -> nextId (), subquery)
 
     let sourcePredicates =
         from
@@ -20062,7 +20065,7 @@ let rec private explainJoinBlock
         | FromJoinGroup(source, innerJoins) ->
             let groupExtra = if idx = tableCount - 1 then extra else []
             explainJoinBlock store registry dbName nextId acc id selectType
-                (Some source) innerJoins None groupExtra (innerJoins |> List.map _.On) None consumption
+                (Some source) innerJoins None groupExtra (innerJoins |> List.map _.On) 0 None consumption
         | FromTable tref ->
             explainTableStats store registry dbName tref
             |> Result.map (fun (n, ty) ->
@@ -20139,6 +20142,9 @@ let rec private explainJoinBlock
                   Rows = None
                   Extra = [ "No tables used" ] })
     |> Result.bind (fun () ->
+        let expressionSubqueries =
+            reservedSubqueries @ (laterSubqueries |> List.map (fun subquery -> nextId (), subquery))
+
         expressionSubqueries
         |> traverse (fun (sid, sub) ->
             let stype = if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
@@ -20219,6 +20225,7 @@ and private explainSelectBlock
         select.Where
         extra
         (selectSubqueryExprs select)
+        (select.Projections |> List.sumBy (fun projection -> collectSubqueries projection.Expression |> List.length))
         selectedIndexOrderPlan
         consumption
 
@@ -20576,6 +20583,8 @@ let private renderExplainJson (shape: ExplainJsonShape) (derivedAliases: Map<int
                 | Some { Clause = ExplainHaving; Operations = [ GroupingOperation ] }
                 | Some { Clause = ExplainHaving; Operations = [ OrderingOperation; GroupingOperation ] } ->
                     derivedBlocks.IsEmpty && branchRows.Length = 1 && branchRows.Head.Table.IsSome
+                | Some { Clause = ExplainWhere; Operations = [] } ->
+                    branchRows.Length = 1 && branchRows.Head.Table.IsSome
                 | Some _ ->
                     derivedBlocks.IsEmpty
                     && branchRows.Length = 1
@@ -20588,12 +20597,18 @@ let private renderExplainJson (shape: ExplainJsonShape) (derivedAliases: Map<int
     let plainMixedSelectShape placements =
         match branches with
         | [ (branchId, branchRows) ] ->
-            derivedBlocks.IsEmpty
+            (derivedBlocks |> Map.keys |> Set.ofSeq) = referencedDerivedIds
+            && (derivedBlocks.IsEmpty
+                || ((placements |> List.map (fun (placement, _) -> placement.Clause)) = [ ExplainProjection; ExplainWhere ]
+                    && (placements |> List.forall (fun (placement, _) -> placement.Operations.IsEmpty))))
             && branchRows.Length = 1
             && branchRows.Head.Table.IsSome
             && (subqueryBlocks |> List.forall (fun (id, rows) -> id > branchId && rows.Head.SelectType = "DEPENDENT SUBQUERY"))
             && (sorted
-                |> List.forall (fun row -> row.SelectType = "PRIMARY" || row.SelectType = "DEPENDENT SUBQUERY"))
+                |> List.forall (fun row ->
+                    row.SelectType = "PRIMARY"
+                    || row.SelectType = "DERIVED"
+                    || row.SelectType = "DEPENDENT SUBQUERY"))
             && (placements |> List.sumBy snd) = subqueryBlocks.Length
         | _ -> false
 
@@ -20609,7 +20624,7 @@ let private renderExplainJson (shape: ExplainJsonShape) (derivedAliases: Map<int
                 |> List.mapFold (fun remaining (placement, count) ->
                     let owned, rest = List.splitAt count remaining
                     (placement, owned), rest) (branchSubqueries branchId)
-            queryBlock Map.empty (NestedSubqueries assigned) branchRows
+            queryBlock derivedBlocks (NestedSubqueries assigned) branchRows
         | UnionJson unionShape when plainBranchShape unionShape ->
             let unionResult = JsonObject()
             unionResult["using_temporary_table"] <- JsonValue.Create(unionShape.Materialized)
@@ -20789,6 +20804,11 @@ let private selectJsonSubqueryPlacement (select: SelectStmt) =
             let allDependent = subqueries |> List.forall Expression.hasQualifiedOuterReference
             let allIndependent = subqueries |> List.forall (Expression.hasQualifiedOuterReference >> not)
             let tableSource = match select.From with Some(FromTable _) -> true | _ -> false
+            let attachedSource =
+                match select.From with
+                | Some(FromTable _)
+                | Some(FromSubquery(PlainSelect _, _)) -> true
+                | _ -> false
 
             let supported =
                 match clause, operations with
@@ -20807,7 +20827,7 @@ let private selectJsonSubqueryPlacement (select: SelectStmt) =
                         | _ -> false
 
                     tableSource && allDependent && ordersByProjectedValue
-                | ExplainWhere, [] -> tableSource && allDependent
+                | ExplainWhere, [] -> attachedSource && allDependent
                 | ExplainHaving, [ GroupingOperation ]
                 | ExplainOrderBy, [ OrderingOperation ] -> tableSource
                 | ExplainHaving, [ OrderingOperation; GroupingOperation ]
@@ -21095,7 +21115,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor u.Limit
 
-                explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs None consumption)
+                explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs 0 None consumption)
         )
     | Delete d when not d.Ctes.IsEmpty ->
         let expressions =
@@ -21115,7 +21135,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor d.Limit
 
-                explainJoinBlock store registry dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs None consumption)
+                explainJoinBlock store registry dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs 0 None consumption)
         )
     | Insert(table, _, rowsExprs, _, _)
     | Replace(table, _, rowsExprs) ->

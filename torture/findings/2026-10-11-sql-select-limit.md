@@ -107,6 +107,17 @@ shape also remains in `select_list_subqueries`, with `dependent: false` and
 focused regression now covers these audited combinations. Joined, mergeable,
 lateral, and nested derived/scalar combinations remain unverified.
 
+A follow-up native probe with a dependent scalar in `WHERE` attached that
+subquery to the materialized source's `table.attached_subqueries`. Here the
+derived block receives ID 2 and the WHERE scalar ID 3. When the SELECT also
+projects a dependent scalar, MySQL numbers projection, derived source, and
+WHERE scalar as 2, 3, and 4, respectively; the projected scalar remains at
+the branch level while the predicate scalar stays on the source table. Fsdb
+now reserves projection IDs before planning FROM and assigns later-clause IDs
+after the source, matching these audited cases. The renderer still falls back
+for materialized-source joins, aggregate/order wrappers, and derived scalars
+inside UNION branches outside the projection shape.
+
 A further native DISTINCT probe used both a primary-key projection and a
 duplicate-prone non-key value ordered by an independent scalar. MySQL puts
 `optimized_away_subqueries` under `duplicates_removal`, inside
