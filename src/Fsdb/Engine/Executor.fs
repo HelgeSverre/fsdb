@@ -408,7 +408,7 @@ type private MemoizedSubquery =
 
 type private MaterializedEqualityLookup =
     { Columns: ColumnDef list
-      FindRows: Value -> Value[] list option }
+      FindRows: Value list -> Value[] list option }
 
 type private PhysicalProjectionStep =
     { InputColumns: ColumnDef list
@@ -526,37 +526,45 @@ let private materializedEqualityLookup
     (store: Store)
     (columns: ColumnDef list)
     (rows: Value[] list)
-    (columnName: string)
+    (columnNames: string list)
     : MaterializedEqualityLookup option =
-    resolveColumn columns columnName
-    |> Result.toOption
-    |> Option.bind (fun columnIndex ->
-        equalityMembershipDomain store columns.[columnIndex]
-        |> Option.bind (fun domain ->
-            let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
+    columnNames
+    |> List.map (resolveColumn columns >> Result.toOption)
+    |> tryAllSome
+    |> Option.bind (fun indices ->
+        indices
+        |> List.map (fun index -> equalityMembershipDomain store columns.[index])
+        |> tryAllSome
+        |> Option.bind (fun domains ->
+            let rowsByKey = Dictionary<Value list, ResizeArray<Value[]>>()
             let mutable compatible = true
 
+            let key values =
+                List.zip domains values
+                |> List.map (fun (domain, value) -> equalityMembershipKey domain value)
+                |> tryAllSome
+
             for row in rows do
-                match row.[columnIndex] with
-                | VNull -> ()
-                | value ->
-                    match equalityMembershipKey domain value with
+                let values = indices |> List.map (fun index -> row.[index])
+
+                if not (List.contains VNull values) then
+                    match key values with
                     | None -> compatible <- false
-                    | Some key ->
-                        match rowsByKey.TryGetValue key with
+                    | Some rowKey ->
+                        match rowsByKey.TryGetValue rowKey with
                         | true, matches -> matches.Add row
-                        | _ -> rowsByKey.[key] <- ResizeArray [ row ]
+                        | _ -> rowsByKey.[rowKey] <- ResizeArray [ row ]
 
             if not compatible then
                 None
             else
-                let findRows value =
-                    match value with
-                    | VNull -> Some []
-                    | _ ->
-                        equalityMembershipKey domain value
-                        |> Option.map (fun key ->
-                            match rowsByKey.TryGetValue key with
+                let findRows values =
+                    if List.contains VNull values then
+                        Some []
+                    else
+                        key values
+                        |> Option.map (fun probeKey ->
+                            match rowsByKey.TryGetValue probeKey with
                             | true, matches -> List.ofSeq matches
                             | _ -> [])
 
@@ -591,7 +599,7 @@ type private StatementMemo =
       LiteralMemberships: Dictionary<Expr, EqualityMembership option>
       Regexes: Dictionary<Expr, MemoizedRegex>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
-      MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
@@ -604,7 +612,7 @@ let private freshStatementMemo () =
       Regexes = Dictionary<Expr, MemoizedRegex>(HashIdentity.Reference)
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
       MaterializedCorrelatedEqualities =
-        Dictionary<FromItem, Dictionary<string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+        Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       PhysicalProjections = Dictionary<FromItem, PhysicalProjection>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
@@ -13463,17 +13471,25 @@ and private tryMaterializedCorrelatedEqualityLookup
 
                         let sourceLookups =
                             getMemoized byColumn source (fun () ->
-                                Dictionary<string, MaterializedEqualityLookup option>(System.StringComparer.OrdinalIgnoreCase))
+                                Dictionary<string list, MaterializedEqualityLookup option>())
 
-                        equalities
-                        |> List.tryPick (fun (column, value) ->
-                            let lookup =
-                                getMemoized sourceLookups column (fun () -> materializedEqualityLookup store columns rows column)
+                        // A materialized CTE or derived table has no maintained physical
+                        // index. Build one statement-local key from all usable equalities.
+                        let probes =
+                            equalities
+                            |> List.distinctBy (fst >> fun name -> name.ToLowerInvariant())
+                            |> List.sortBy (fst >> fun name -> name.ToLowerInvariant())
 
-                            lookup
+                        let names = probes |> List.map (fst >> fun name -> name.ToLowerInvariant())
+                        let values = probes |> List.map snd
+
+                        if names.IsEmpty then
+                            None
+                        else
+                            getMemoized sourceLookups names (fun () -> materializedEqualityLookup store columns rows names)
                             |> Option.bind (fun lookup ->
-                                lookup.FindRows value
-                                |> Option.map (fun rows -> lookup.Columns, rows)))))))
+                                lookup.FindRows values
+                                |> Option.map (fun rows -> lookup.Columns, rows))))))
 
 and private tryCorrelatedSourceLookup
     (store: Store)

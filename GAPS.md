@@ -191,7 +191,9 @@ representation.
 
 Correlated equality probes use single keys, complete composite keys, or safe
 ordered left prefixes through direct tables and pass-through derived tables or
-CTEs. Outer values and literals may bind different key parts. Correlated forms
+CTEs. Materialized derived tables and stable CTEs build statement-local composite
+equality keys from their usable correlated predicates. Outer values and literals
+may bind different key parts. Correlated forms
 preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

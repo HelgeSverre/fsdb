@@ -599,6 +599,33 @@ let tests =
                       "an outer-dependent CTE is rebuilt for each outer row"
               | other -> failtestf "expected correlated CTE results, got %A" other
 
+          testCase "correlated materialized lookup combines equality columns"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_pairs (id INT, a INT, b VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "CREATE TABLE inner_pairs (a INT, b VARCHAR(10) COLLATE utf8mb4_bin, active INT)" |> ignore
+              runDefault store "INSERT INTO outer_pairs VALUES (1, 1, 'A'), (2, 1, 'a'), (3, 2, 'a'), (4, 1, NULL)" |> ignore
+              runDefault store "INSERT INTO inner_pairs VALUES (1, 'A', 0), (1, 'a', 1), (2, 'a', 1), (1, NULL, 1)" |> ignore
+
+              let expected = [ [ Some "1"; Some "0" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "0" ] ]
+
+              for source in [ "(SELECT a, b, active FROM inner_pairs) d"; "pairs d" ] do
+                  let prefix =
+                      if source = "pairs d" then
+                          "WITH pairs AS (SELECT a, b, active FROM inner_pairs) "
+                      else
+                          ""
+
+                  let sql =
+                      prefix
+                      + "SELECT o.id, EXISTS (SELECT 1 FROM " + source
+                      + " WHERE d.a = o.a AND d.b = o.b AND d.active = 1) "
+                      + "FROM outer_pairs o ORDER BY o.id"
+
+                  match runDefault store sql with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "expected composite correlated results, got %A" other
+
           testCase "scalar subquery returning more than one row is MySQL error 1242"
           <| fun _ ->
               let store = newStore ()
