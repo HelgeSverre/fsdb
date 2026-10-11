@@ -29,9 +29,14 @@ type Scalar = Value list -> Value
 exception SqlError of code: int * message: string
 
 let private intervalTimeZone = AsyncLocal<SqlTimeZone option>()
+let private synchronousIntervalTimeZone = new ThreadLocal<SqlTimeZone option>()
 
 let withIntervalTimeZone zone body =
-    DynamicScope.withValue intervalTimeZone (Some zone) body
+    DynamicScope.withValue intervalTimeZone (Some zone) (fun () ->
+        DynamicScope.withThreadValue synchronousIntervalTimeZone (Some zone) body)
+
+let internal withSynchronousIntervalTimeZone zone body =
+    DynamicScope.withThreadValue synchronousIntervalTimeZone (Some zone) body
 
 /// Statement context supplied to registered scalar functions.
 /// `Cancellation` is signalled when the client disconnects or is killed.
@@ -2332,7 +2337,10 @@ let private applyDateInterval (sign: float) (dateV: Value) (amount: float) (unit
         let dateTime =
             match dateV with
             | VTime value ->
-                let zone = intervalTimeZone.Value |> Option.defaultValue SystemTimeZone
+                let zone =
+                    synchronousIntervalTimeZone.Value
+                    |> Option.orElse intervalTimeZone.Value
+                    |> Option.defaultValue SystemTimeZone
                 let today = (sqlTimeZoneFromUtc zone DateTime.UtcNow).Date
                 try Some(today.AddTicks(timeTicks value))
                 with :? ArgumentOutOfRangeException -> None

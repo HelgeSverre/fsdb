@@ -922,7 +922,7 @@ let private evaluateSessionExpression
     |> checkSessionAccess session store
     |> Result.mapError (fun (code, message) -> Err(code, message))
     |> Result.bind (fun () ->
-        Executor.withVariableContext variables (fun () ->
+        Executor.withSynchronousVariableContext variables (fun () ->
             try Executor.evaluateExpression store (registryFor session) database expression
             with Diagnostics.RaisedCondition error -> Error(ErrInfo error)))
 
@@ -3365,7 +3365,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             | None, _, _ -> result, types
 
         let evaluate () =
-            Executor.withVariableContext variables (fun () ->
+            Executor.withSynchronousVariableContext variables (fun () ->
                 match stmt with
                 | Select select ->
                     let result, types, calculatedFoundRows, rows =

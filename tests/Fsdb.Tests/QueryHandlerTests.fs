@@ -6065,6 +6065,63 @@ let tests =
                   [| checkSession "4" true first
                      checkSession "13" false second |]
 
+          testCase "concurrent sessions retain variable and interval time-zone scopes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first, _ = handle (create 1 store) "SET time_zone='-12:00'"
+              let first, _ = handle first "SET @label='first'"
+              let second, _ = handle (create 2 store) "SET time_zone='+14:00'"
+              let second, _ = handle second "SET @label='second'"
+              let query = "SELECT @label, DATE_ADD(CAST('12:00:00' AS TIME), INTERVAL 1 DAY)"
+
+              let dateFor expectedLabel result =
+                  match result with
+                  | ResultSet(_, [ [ Some label; Some date ] ]) ->
+                      Expect.equal label expectedLabel "user variable stays in its session"
+                      date
+                  | other -> failtestf "expected scoped variable and date result, got %A" other
+
+              use barrier = new System.Threading.Barrier(2)
+
+              let checkSession label initial =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      let mutable session = initial
+                      let dates = ResizeArray<string>()
+                      barrier.SignalAndWait() |> ignore
+
+                      for _ in 1 .. 50 do
+                          let next, result = handle session query
+                          session <- next
+                          dates.Add(dateFor label result)
+
+                      List.ofSeq dates)
+
+              let firstDates = checkSession "first" first
+              let secondDates = checkSession "second" second
+              List.zip firstDates.Result secondDates.Result
+              |> List.iter (fun (early, late) ->
+                  Expect.isTrue (String.CompareOrdinal(early, late) < 0) "opposite time zones keep their ordered dates")
+
+          testCase "public variable context flows into a delayed task"
+          <| fun _ ->
+              let variables: Fsdb.Executor.VariableContext =
+                  { UserVariables = ref (Map.ofList [ "label", VString "retained" ])
+                    ReadSystemVariable = fun _ _ -> Ok None
+                    MaxUserVariables = 100
+                    TimeZone = Fsdb.Temporal.FixedOffset 840 }
+              let store = Fsdb.Storage.create ()
+              let variable = UserVariable { Name = "label"; Sql = "@label"; PreparedType = None }
+              let gate =
+                  System.Threading.Tasks.TaskCompletionSource<unit>(
+                      System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+              let pending =
+                  Fsdb.Executor.withVariableContext variables (fun () ->
+                      System.Threading.Tasks.Task.Run(fun () ->
+                          gate.Task.Wait()
+                          Fsdb.Executor.evaluateExpression store Fsdb.Functions.builtins "test" variable))
+              gate.SetResult(())
+              Expect.equal pending.Result (Ok(VString "retained")) "the public scope retains async execution-context flow"
+
           testCase "sql_mode inside Laravel's real comma-joined connect-time SET turns off strict coercion"
           <| fun _ ->
               // The exact statement `strict => false` sends

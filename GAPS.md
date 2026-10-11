@@ -831,6 +831,13 @@ execution-limit scopes to thread-local storage reduced handler allocation by
 about 3.8–4.7 KiB per call on that fixture; a latency gain and the remaining
 fixed-cost gap are unproven.
 
+A [follow-up Release comparison](benchmarks/results/2026-10-11-thread-scoped-variable-context.md)
+uses thread-local variable and interval-time-zone scopes for synchronous
+QueryHandler execution while retaining the public asynchronous scopes.
+Warmed text and reused prepared handler allocation fell by about 6.5 and
+6.2 KiB per call on the fixed lookup fixture. The short latency runs still
+do not establish a speedup.
+
 A [three-run indexed constant-bound snapshot](benchmarks/results/2026-10-10-constant-index-bounds.md)
 finds fsdb's fixed primary-key lookup around 220–248 µs versus MySQL's
 41–43 µs. `ROUND(PI())` and `BIT_COUNT(7)` lookups fall within the run-to-run

@@ -777,6 +777,8 @@ let private groupConcatMaxLen = new System.Threading.ThreadLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 let private viewMergeDepth = System.Threading.AsyncLocal<int>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
+// QueryHandler completes expression execution before this scope returns.
+let private synchronousVariableContext = new System.Threading.ThreadLocal<VariableContext option>()
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
 let private triggerSessionExecutor = System.Threading.AsyncLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
 let private foundRowsOutputSlice = System.Threading.AsyncLocal<(int option * int option) option>()
@@ -844,7 +846,15 @@ let private cacheExaminedRows rows =
 
 let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
     DynamicScope.withValue variableContext (Some variables) (fun () ->
-        Functions.withIntervalTimeZone variables.TimeZone body)
+        DynamicScope.withThreadValue synchronousVariableContext (Some variables) (fun () ->
+            Functions.withIntervalTimeZone variables.TimeZone body))
+
+let internal withSynchronousVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
+    DynamicScope.withThreadValue synchronousVariableContext (Some variables) (fun () ->
+        Functions.withSynchronousIntervalTimeZone variables.TimeZone body)
+
+let private currentVariableContext () =
+    synchronousVariableContext.Value |> Option.orElse variableContext.Value
 
 let withRoutineVariables (variables: Map<string, RoutineVariable>) (body: unit -> 'a) : 'a =
     DynamicScope.withValue routineVariables (Some(ref variables)) body
@@ -859,8 +869,6 @@ let replaceRoutineVariables variables =
 
 let internal withTriggerSessionExecutor executor body =
     DynamicScope.withValue triggerSessionExecutor (Some executor) body
-
-let private currentVariableContext () = variableContext.Value
 
 let private informationSchemaStatisticsExpiry () =
     currentVariableContext ()
