@@ -634,6 +634,9 @@ larger than one protocol packet.
 SQL wildcard; [view metadata](torture/findings/2026-10-11-field-list-views.md)
 comes from the session-aware descriptor without reading rows, including the
 view-specific scale for string-like columns.
+The [wire mutation comparison](torture/findings/2026-10-11-wire-mutation-parity.md)
+passes its 70-case MySQL 8.4 corpus, including malformed `COM_FIELD_LIST` and
+restricted database selection during handshake and `COM_INIT_DB`.
 
 Transport supports zlib, Zstandard, TLS 1.2 and 1.3, optional server and client
 CA certificates, secure-transport enforcement, and per-account SSL, X509,

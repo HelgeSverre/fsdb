@@ -2331,7 +2331,7 @@ let tests =
                   | Choice1Of2() -> failtest "expected a missing handshake database to be refused"
                   | Choice2Of2 e ->
                       match mysqlError e with
-                      | Some m -> Expect.equal m.Number 1049 "the handshake reports an unknown database"
+                      | Some m -> Expect.equal m.Number 1044 "the handshake checks access before database existence"
                       | None -> raise e
 
                   Expect.isFalse (Fsdb.Storage.databaseExists store unprivilegedDatabase) "denied handshake did not grow the catalog"
@@ -2350,6 +2350,16 @@ let tests =
 
                   use restrictedCommand = new MySqlConnector.MySqlConnection(connStr "bob" "s3cret")
                   do! restrictedCommand.OpenAsync() |> Async.AwaitTask
+                  let! missingCommandResult =
+                      restrictedCommand.ChangeDatabaseAsync(unprivilegedDatabase) |> Async.AwaitTask |> Async.Catch
+
+                  match missingCommandResult with
+                  | Choice1Of2() -> failtest "expected COM_INIT_DB to reject a missing, unprivileged database"
+                  | Choice2Of2 error ->
+                      match mysqlError error with
+                      | Some mysql -> Expect.equal mysql.Number 1044 "COM_INIT_DB checks access before database existence"
+                      | None -> raise error
+
                   let! restrictedCommandResult =
                       restrictedCommand.ChangeDatabaseAsync(restrictedDatabase) |> Async.AwaitTask |> Async.Catch
 
@@ -3473,6 +3483,8 @@ let tests =
                   do! expectError [| 0x02uy |] 1046 "3D000"
                   do! expectError [| 0x02uy; byte ' ' |] 1102 "42000"
                   do! expectError [| 0x02uy; byte ' '; byte 'h'; byte ' ' |] 1102 "42000"
+                  do! expectError [| 0x04uy |] 1835 "HY000"
+                  do! expectError [| 0x04uy; byte 't' |] 1835 "HY000"
                   do! expectError [| 0x19uy |] 1835 "HY000"
                   do! expectError [| 0x1buy; 2uy; 0uy |] 1047 "08S01"
                   do! expectError [| 0x16uy; byte ';' |] 1065 "42000"

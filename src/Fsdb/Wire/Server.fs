@@ -23,16 +23,16 @@ open Fsdb.Value
 open Fsdb.Executor
 
 let private validateDatabaseSelection store account activeRoles database =
-    if not (Storage.databaseExists store database) then
-        let code, message = Storage.toMySqlError (Storage.NoSuchDatabase database)
-        Error(code, message)
-    elif Auth.canSeeDatabaseForAccountWithRoles store account activeRoles database then
-        Ok()
-    else
+    if not (Auth.canSeeDatabaseForAccountWithRoles store account activeRoles database) then
         Error(
             1044,
             sprintf "Access denied for user '%s'@'%s' to database '%s'" account.Name account.Host database
         )
+    elif not (Storage.databaseExists store database) then
+        let code, message = Storage.toMySqlError (Storage.NoSuchDatabase database)
+        Error(code, message)
+    else
+        Ok()
 
 let private isValidClientCertificate
     (certificateAuthorities: X509Certificate2 list)
@@ -291,14 +291,12 @@ let private parseCommand (capabilities: uint32) (payload: byte[]) : Command opti
                 | CommandByte.Query -> Query(sql ())
                 | CommandByte.FieldList ->
                     let bytes = restBytes ()
-                    let separator = bytes |> Array.tryFindIndex ((=) 0uy) |> Option.defaultValue bytes.Length
-                    let table = Encoding.UTF8.GetString(bytes, 0, separator)
-                    let wildcard =
-                        if separator < bytes.Length then
-                            Encoding.UTF8.GetString(bytes, separator + 1, bytes.Length - separator - 1)
-                        else ""
-
-                    FieldList(table, wildcard)
+                    match bytes |> Array.tryFindIndex ((=) 0uy) with
+                    | None -> Malformed commandByte
+                    | Some separator ->
+                        let table = Encoding.UTF8.GetString(bytes, 0, separator)
+                        let wildcard = Encoding.UTF8.GetString(bytes, separator + 1, bytes.Length - separator - 1)
+                        FieldList(table, wildcard)
                 | CommandByte.Statistics -> Statistics
                 | CommandByte.ProcessInfo -> ProcessInfo
                 | CommandByte.ProcessKill -> ProcessKill(int64 (Reader(restBytes ()).ReadInt32LE()))

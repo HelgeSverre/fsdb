@@ -365,6 +365,9 @@ module WireRunner =
             builder.UserID <- username
             builder.Password <- ""
             builder.Pooling <- false
+            // Both targets allow metadata reads here; neither needs a grant
+            // to the harness runner's own default database.
+            builder.Database <- "information_schema"
             builder.SslMode <- if requireTls then MySqlSslMode.Required else MySqlSslMode.None
             builder.UseCompression <- compression
 
@@ -526,7 +529,8 @@ module WireRunner =
             Directory.CreateDirectory directory |> ignore
             let! revision, dirty = Tooling.gitState ()
             let assemblyPath = typeof<Fsdb.Storage.Store>.Assembly.Location
-            let nonce = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes 16).ToLowerInvariant()
+            // MySQL account names are limited to 32 characters; the prefix uses ten.
+            let nonce = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes 10).ToLowerInvariant()
             let username = "fsdb_wire_" + nonce
             let localDatabase = "fsdb_wire_" + nonce
             Fsdb.Log.silence ()

@@ -620,6 +620,7 @@ let tests =
                   "SELECT �"
                   "invalid syntax bytes remain parser-visible"
 
+              Expect.equal (sqlStateForCode 1044) "42000" "database access denial state"
               Expect.equal (sqlStateForCode 1049) "42000" "unknown database state"
 
           testCase "existing table errors retain their MySQL SQLSTATE"
