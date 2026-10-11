@@ -9693,7 +9693,21 @@ let tests =
               let source = " FROM slow_fulltext_group_probe WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE)"
 
               for sql, examined, expected in
-                  [ "SELECT SUM(owner_id)" + source, "3",
+                  [ "SELECT COUNT(*)" + source, "1",
+                    ResultSet([ "COUNT(*)" ], [ [ Some "3" ] ])
+                    "SELECT COUNT(*) AS n" + source, "1",
+                    ResultSet([ "n" ], [ [ Some "3" ] ])
+                    "SELECT COUNT(*)" + source.Replace("'alpha'", "'missing'"), "1",
+                    ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ])
+                    "SELECT COUNT(*)" + source.Replace(" IN BOOLEAN MODE", ""), "1",
+                    ResultSet([ "COUNT(*)" ], [ [ Some "3" ] ])
+                    "SELECT COUNT(id)" + source, "1",
+                    ResultSet([ "COUNT(id)" ], [ [ Some "3" ] ])
+                    "SELECT COUNT(owner_id)" + source, "3",
+                    ResultSet([ "COUNT(owner_id)" ], [ [ Some "3" ] ])
+                    "SELECT COUNT(*)" + source + " AND owner_id=1", "3",
+                    ResultSet([ "COUNT(*)" ], [ [ Some "2" ] ])
+                    "SELECT SUM(owner_id)" + source, "3",
                     ResultSet([ "SUM(owner_id)" ], [ [ Some "4" ] ])
                     "SELECT owner_id,COUNT(*)" + source + " GROUP BY owner_id", "3",
                     ResultSet([ "owner_id"; "COUNT(*)" ], [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ])

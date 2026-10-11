@@ -57,8 +57,11 @@ fixture with three `alpha` matches, MySQL reported three examined rows for
 `ORDER BY owner_id`, and three for grouped `LIMIT 1`; fsdb matches those
 counts and results. A sole `COUNT(*)` or `COUNT(id)` is different: MySQL's
 full-text count path reported one examined row, even when a missing term
-returned zero. Fsdb still fetches and counts matching rows (three for the
-`alpha` case), so the index-only aggregate remains open.
+returned zero. Fsdb now returns the posting-set cardinality for this exact
+shape without fetching every matched row, and retains the normal aggregate
+metadata. `COUNT(owner_id)` on a nullable column and `COUNT(*)` with an
+additional owner filter each examined three rows in MySQL; fsdb leaves
+those on the row-evaluation path.
 
 An `INSERT … SELECT` that read three source rows and inserted two reported
 `rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives

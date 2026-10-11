@@ -18088,6 +18088,41 @@ and private runFullTextSelect
         match matchNodes |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node)) with
         | Error error -> error, [], []
         | Ok ownedNodes ->
+            let countArgumentUsesPostingCount (source: FullTextPhysicalSource) =
+                let nonNullColumn name =
+                    source.Table.Columns
+                    |> List.exists (fun column ->
+                        equalsIgnoreCase column.Name name
+                        && not column.Nullable
+                        && column.Generated.IsNone)
+
+                function
+                | Star None -> true
+                | Col name -> nonNullColumn name
+                | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier source.Qualifier -> nonNullColumn name
+                | _ -> false
+
+            let indexOnlyCountNode =
+                match select.From, select.Projections, select.Where, ownedNodes with
+                | Some(FromTable _), [ { Expression = FuncCall(name, [ argument ]) } ], Some predicate, [ owner, node ]
+                    when equalsIgnoreCase name "COUNT"
+                         && Functions.isUnmodifiedBuiltinAggregate name registry
+                         && countArgumentUsesPostingCount owner argument
+                         && predicate = node
+                         && select.Joins.IsEmpty
+                         && select.GroupBy.IsEmpty
+                         && select.Having.IsNone
+                         && select.OrderBy.IsEmpty
+                         && select.Limit.IsNone
+                         && select.Offset.IsNone
+                         && select.Locking.IsEmpty
+                         && select.Windows.IsEmpty
+                         && select.Ctes.IsEmpty
+                         && not select.Distinct
+                         && not select.Rollup
+                         && not select.CalculateFoundRows -> Some node
+                | _ -> None
+
             // Costing an unbounded reversed join needs the posting count.
             // Reuse its score set when execution reads the same full corpus.
             let reusableScores: ReusableFullTextScores option =
@@ -18210,6 +18245,10 @@ and private runFullTextSelect
                 let computed = preparedSources |> List.collect _.Scores
                 let synthetic = preparedSources |> List.collect _.Synthetic
                 let baseKey = baseQualifier.ToLowerInvariant()
+                let indexOnlyCount =
+                    match indexOnlyCountNode, computed with
+                    | Some expected, [ node, _, scores ] when expected = node -> Some(fullTextScoreCount scores)
+                    | _ -> None
 
                 let explicitRelevanceOrder =
                     match select.OrderBy with
@@ -18390,16 +18429,27 @@ and private runFullTextSelect
                                         else implicitOrder }
 
                             let result, metadata, outputRows =
+                                // Bind and describe COUNT through the normal aggregate path,
+                                // without fetching rows already counted by the full-text index.
                                 runSelect
                                     store
                                     registry
                                     dbName
                                     (resolvedSources |> List.collect snd)
                                     (qualifierRanges resolvedSources)
-                                    rows
+                                    (if indexOnlyCount.IsSome then Seq.empty else rows)
                                     ArbitraryGroupRows
                                     rewritten
                                     outer
+
+                            let result, outputRows =
+                                match indexOnlyCount, result with
+                                | Some count, Rows([ column ], [ [ _ ] ], rawColumns) ->
+                                    countExaminedRow ()
+                                    let value = VInt(int64 count)
+                                    let typed = [ [| value |] ]
+                                    ResultSetWithValues([ column ], [ [ Some(string count) ] ], rawColumns, typed), typed
+                                | _ -> result, outputRows
 
                             if
                                 select.Joins.IsEmpty
