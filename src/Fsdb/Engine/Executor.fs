@@ -3102,10 +3102,6 @@ let private decimalCastMaximum precision scale =
     if precision > 28 then None
     else Some(pown 10m (precision - scale) - 1m / pown 10m scale)
 
-let private truncatedNumericCastInput text =
-    let prefix = leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue ""
-    prefix = "" || not (text.Trim().Equals(prefix, System.StringComparison.Ordinal))
-
 let private numericCastSourceText = function
     | VString text -> Some text
     | (VEncodedString _ | VBytes _) as value -> toText value
@@ -3128,9 +3124,40 @@ let private numericCastBinaryColumnType ctx expr =
         | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob -> Some column.Type
         | _ -> None)
 
-let private isBlobColumnType = function
-    | Some(TTinyBlob | TBlob | TMediumBlob | TLongBlob) -> true
-    | _ -> false
+type private DecimalCastTextWarnings =
+    | RegularText
+    | StoredBinary
+    | QuietBinary
+
+type private NumericCastTextInput =
+    { Prefix: string
+      Text: string
+      Truncated: bool
+      DecimalWarnings: DecimalCastTextWarnings
+      WarnOnDouble: bool }
+
+/// Describe numeric text once so value parsing and target-specific warnings
+/// agree on the consumed prefix and on the source's binary provenance.
+let private numericCastTextInput ctx expr source =
+    numericCastSourceText source
+    |> Option.map (fun text ->
+        let prefix = leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue ""
+        let decimalWarnings, warnOnDouble =
+            match source with
+            | VBytes _ ->
+                match numericCastBinaryColumnType ctx expr with
+                | Some(TTinyBlob | TBlob | TMediumBlob | TLongBlob) -> QuietBinary, false
+                | Some _ -> StoredBinary, true
+                | None ->
+                    match expr with
+                    | Lit(VBytes _) -> RegularText, true
+                    | _ -> QuietBinary, true
+            | _ -> RegularText, true
+        { Prefix = prefix
+          Text = text
+          Truncated = prefix = "" || not (text.Trim().Equals(prefix, System.StringComparison.Ordinal))
+          DecimalWarnings = decimalWarnings
+          WarnOnDouble = warnOnDouble })
 
 let private oversizedDecimalExponentMantissa (prefix: string) =
     let exponentIndex = prefix.IndexOfAny([| 'e'; 'E' |])
@@ -5979,6 +6006,10 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             // to distinguish invalid input from an allowed zero-component date;
             // rejection becomes a warning and NULL rather than a statement error.
             let source = v
+            let numericText =
+                match ty with
+                | TDouble _ | TFloat _ | TDecimal _ -> numericCastTextInput ctx e source
+                | _ -> None
             let v =
                 match v, ty with
                 | VBinaryLiteral bytes, TBigInt false -> VInt(int64 (Value.binaryLiteralNumber bytes))
@@ -5987,9 +6018,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     castIntegerText false (toText v |> Option.defaultValue "")
                 | VString s, (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
                     VString(leadingNumericPrefix leadingIntegerPrefixRegex s |> Option.defaultValue "")
-                | (VString _ | VEncodedString _ | VBytes _) as textValue, (TDouble _ | TFloat _ | TDecimal _) ->
-                    let text = toText textValue |> Option.defaultValue ""
-                    VString(leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue "")
+                | _, (TDouble _ | TFloat _ | TDecimal _) ->
+                    numericText |> Option.map (fun input -> VString input.Prefix) |> Option.defaultValue v
                 | _ -> v
 
             let coerce mode value =
@@ -6036,33 +6066,22 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     Diagnostics.warning 1292 (sprintf "Incorrect datetime value: '%s'" (Value.toText v |> Option.defaultValue "NULL"))
                     Ok VNull
             | TDecimal(precision, scale, _), _ ->
-                let numericSourceText = numericCastSourceText source
-                let binaryColumnType = numericCastBinaryColumnType ctx e
-                let blobColumnSource = isBlobColumnType binaryColumnType
                 let warnTruncated text =
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" text)
-                // A binary literal still carries string-conversion warnings; a
-                // materialized binary expression uses MySQL's quieter DECIMAL path.
-                let computedBinaryString =
-                    match e, source with
-                    | Lit(VBytes _), _ -> false
-                    | _, VBytes _ when Option.isNone binaryColumnType -> true
-                    | _ -> false
-                let quietBinarySource = computedBinaryString || blobColumnSource
-                match numericSourceText, v with
-                | Some text, VString prefix ->
-                    let warningText = numericCastDiagnosticText source text
-                    match oversizedDecimalExponentMantissa prefix with
-                    | Some mantissa when quietBinarySource ->
+                match numericText with
+                | Some input ->
+                    let warnSource () = warnTruncated (numericCastDiagnosticText source input.Text)
+                    match oversizedDecimalExponentMantissa input.Prefix with
+                    | Some mantissa when input.DecimalWarnings = QuietBinary ->
                         warnTruncated mantissa
                     | Some mantissa ->
                         warnTruncated mantissa
-                        warnTruncated warningText
-                    | None when prefix = "" && (computedBinaryString || Option.isSome binaryColumnType) ->
+                        warnSource ()
+                    | None when input.Prefix = "" && input.DecimalWarnings <> RegularText ->
                         Diagnostics.warning 1366 "Incorrect DECIMAL value: '0' for column '' at row -1"
-                        if not quietBinarySource then warnTruncated warningText
-                    | None when quietBinarySource -> ()
-                    | None when truncatedNumericCastInput text -> warnTruncated warningText
+                        if input.DecimalWarnings = StoredBinary then warnSource ()
+                    | None when input.DecimalWarnings = QuietBinary -> ()
+                    | None when input.Truncated -> warnSource ()
                     | None -> ()
                 | _ -> ()
                 let warnOutOfRange () =
@@ -6098,22 +6117,20 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | result -> result)
                     |> Result.mapError Storage.toMySqlError
             | (TDouble _ | TFloat _), _ ->
-                let numericSourceText = numericCastSourceText source
-                let blobColumnSource = numericCastBinaryColumnType ctx e |> isBlobColumnType
+                let warnTruncated input =
+                    Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" (numericCastDiagnosticText source input.Text))
                 let truncatedText =
-                    not blobColumnSource && (numericSourceText |> Option.exists truncatedNumericCastInput)
-                match numericSourceText with
-                | Some text when truncatedText ->
-                    Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" (numericCastDiagnosticText source text))
+                    numericText |> Option.exists (fun input -> input.WarnOnDouble && input.Truncated)
+                match numericText with
+                | Some input when truncatedText -> warnTruncated input
                 | _ -> ()
                 coerce castMode v
                 |> Result.mapError Storage.toMySqlError
                 |> Result.bind (function
                     | VDouble value when System.Double.IsInfinity value ->
-                        match ty, numericSourceText with
-                        | TDouble _, Some text when not blobColumnSource ->
-                            if not truncatedText then
-                                Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" (numericCastDiagnosticText source text))
+                        match ty, numericText with
+                        | TDouble _, Some input when input.WarnOnDouble ->
+                            if not truncatedText then warnTruncated input
                             Ok(VDouble(if value < 0.0 then -System.Double.MaxValue else System.Double.MaxValue))
                         | _ -> Error(1690, sprintf "DOUBLE value is out of range in '%s'" (SqlText.expression expr))
                     | result -> Ok result)
