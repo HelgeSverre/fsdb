@@ -3120,6 +3120,13 @@ let tests =
                               Expect.throws
                                   (fun () -> call "REGEXP_LIKE" [ VString "A"; VString pattern; VString "c" ] |> ignore)
                                   (sprintf "%s is not an ICU property spelling" pattern)
+                      testCase "REGEXP negative properties consume whole supplementary symbols"
+                      <| fun _ ->
+                          for pattern in [ "\\P{ASCII}"; "\\W"; "\\H"; "\\V"; "[\\P{ASCII}]" ] do
+                              Expect.equal
+                                  (call "REGEXP_SUBSTR" [ VString "😀"; VString pattern; VInt 1L; VInt 1L; VString "c" ])
+                                  (VString "😀")
+                                  (sprintf "%s consumes one Unicode scalar" pattern)
                       testCase "REGEXP negated POSIX classes include line terminators"
                       <| fun _ ->
                           for pattern, value, expected in

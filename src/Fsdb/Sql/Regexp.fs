@@ -153,15 +153,19 @@ let private unicodePropertyAt (pattern: string) index =
             if name.StartsWith("GC=", StringComparison.Ordinal) then name.Substring(3)
             elif name.StartsWith("GENERAL_CATEGORY=", StringComparison.Ordinal) then name.Substring(17)
             else name
-        let translated =
+        let positive =
             if name = "WHITE_SPACE" then
-                Some(if pattern[index + 1] = 'p' then "\\s" else "\\S")
+                Some "\\s"
             elif Set.contains name basicLatinAliases then
-                Some("\\" + string pattern[index + 1] + "{IsBasicLatin}")
+                Some "\\p{IsBasicLatin}"
             else
                 Map.tryFind categoryName unicodeCategoryAliases
-                |> Option.map (fun category -> "\\" + string pattern[index + 1] + "{" + category + "}")
-        translated |> Option.map (fun property -> nextIndex, property)
+                |> Option.map (fun category -> "\\p{" + category + "}")
+        positive
+        |> Option.map (fun property ->
+            nextIndex,
+            if pattern[index + 1] = 'P' then scalarNegatedClass ("[^" + property + "]")
+            else property)
 
 let private mixedNegatedClassAt (pattern: string) start =
     let outerNegated = start + 1 < pattern.Length && pattern[start + 1] = '^'
@@ -180,7 +184,7 @@ let private mixedNegatedClassAt (pattern: string) start =
             invalidMember <- invalidMember || rejectedUnicodePropertyAt pattern index
             match unicodePropertyAt pattern index with
             | Some(nextIndex, property) ->
-                if pattern[index + 1] = 'P' then alternatives.Add("[" + property + "]")
+                if pattern[index + 1] = 'P' then alternatives.Add property
                 else ordinary.Append property |> ignore
                 index <- nextIndex
             | None ->
@@ -259,7 +263,7 @@ let private normalizePosixClasses (pattern: string) =
                 | None ->
                     match if index + 1 < pattern.Length then characterEscape pattern[index + 1] else None with
                     | Some target when not inClass ->
-                        builder.Append target |> ignore
+                        builder.Append(if target[1] = '^' then scalarNegatedClass target else target) |> ignore
                         index <- index + 2
                     | Some target when target[1] <> '^' ->
                         builder.Append(target, 1, target.Length - 2) |> ignore

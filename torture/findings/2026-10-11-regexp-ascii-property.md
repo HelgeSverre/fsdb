@@ -17,3 +17,10 @@ covers positive, negative, bracket, supplementary, and rejected forms.
 
 Other ICU script and binary properties, and supplementary-scalar category
 matching, remain outside this audit.
+
+A later MySQL 8.4.11 probe found that `REGEXP_SUBSTR('😀', '\\P{ASCII}')`
+and its bracket form both return the complete emoji. `\\W`, `\\H`, and
+`\\V` behave the same.
+Fsdb now makes these audited negative-property and shorthand matches consume
+one supplementary scalar rather than one UTF-16 surrogate. Positive ICU
+properties on supplementary scalars and script-property coverage remain open.
