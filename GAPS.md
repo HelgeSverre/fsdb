@@ -725,6 +725,10 @@ audited YEAR casts now distinguish text zero from numeric zero, return NULL
 with MySQL's invalid/out-of-range warnings, and warn on trailing text;
 audited date/datetime/timestamp, TIME, and bare bit/hex sources retain their
 distinct year and numeric-origin behavior;
+audited TIME casts now return NULL with warning 1292 for invalid text and
+numeric overflow, accept a valid time prefix with a truncation warning, parse
+`HH:MM`, and clamp overflowing text with warning 1292; whitespace-delimiter
+warnings and broader source expressions remain open;
 audited DECIMAL precision/scale limits follow MySQL's validation order and
 source-expression labels, including the zero-precision default. Negative
 FLOAT, TIME, DATETIME, and DECIMAL target precisions now fail as syntax in

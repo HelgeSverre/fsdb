@@ -148,3 +148,11 @@ DOUBLE warning. With a UTF-8 client, the cap also counts encoded bytes:
 `€` ends with two. Supplementary characters become `?` in this diagnostic
 before clipping. Fsdb now matches these audited text-source boundaries;
 other source charsets and client-charset conversions remain open.
+
+TIME casts have a separate audited value boundary. MySQL returns NULL and
+warning 1292 for invalid text (`'abc'`) or numeric overflow (`8390000`).
+It accepts `HH:MM` as a clock time, keeps a valid prefix before trailing
+text with warning 1292, and clamps overflowing text such as `'839:00:00'`
+to `838:59:59` with warning 1292. Fsdb now matches these seven value and
+warning cases. Whitespace-delimiter warning 4096, other source types, and
+the wider TIME conversion grammar remain open.

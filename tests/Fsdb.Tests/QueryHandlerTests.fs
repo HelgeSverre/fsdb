@@ -3232,6 +3232,27 @@ let tests =
                       Expect.isEmpty session.Diagnostics sql
                   | _, result -> failtestf "expected TIME-to-YEAR CAST for %s, got %A" sql result
 
+          testCase "TIME casts distinguish invalid text, prefixes, and overflow"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for source, expected, warnings in
+                  [ "'abc'", None, [ 1292, "Truncated incorrect time value: 'abc'" ]
+                    "'12:34:56x'", Some "12:34:56", [ 1292, "Truncated incorrect time value: '12:34:56x'" ]
+                    "'123456x'", Some "12:34:56", [ 1292, "Truncated incorrect time value: '123456x'" ]
+                    "'12:34'", Some "12:34:00", []
+                    "'839:00:00'", Some "838:59:59", [ 1292, "Truncated incorrect time value: '839:00:00'" ]
+                    "'12:99:56'", None, [ 1292, "Truncated incorrect time value: '12:99:56'" ]
+                    "8390000", None, [ 1292, "Truncated incorrect time value: '8390000'" ] ] do
+                  let sql = sprintf "SELECT CAST(%s AS TIME)" source
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected TIME CAST result for %s, got %A" sql result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

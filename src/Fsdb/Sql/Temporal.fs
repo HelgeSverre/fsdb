@@ -188,7 +188,7 @@ let internal timeTicksAtSessionPrecision ticks =
 
 let private timePattern =
     Regex(
-        @"^(?<sign>[+-])?(?:(?<days>\d+)\s+)?(?<hours>\d+):(?<minutes>\d{1,2}):(?<seconds>\d{1,2})(?:\.(?<fraction>\d+))?$",
+        @"^(?<sign>[+-])?(?:(?<days>\d+)\s+)?(?<hours>\d+):(?<minutes>\d{1,2})(?::(?<seconds>\d{1,2}))?(?:\.(?<fraction>\d+))?$",
         RegexOptions.CultureInvariant
     )
 

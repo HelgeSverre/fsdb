@@ -2005,6 +2005,8 @@ let private validateCreateDirectories (store: Store) tableName (table: CreateTab
 /// (`CAST('1e3' AS DECIMAL(10,2))` is `1000`), so the two targets need
 /// different grammars rather than one regex serving both.
 let private leadingIntegerPrefixRegex = Regex(@"^[\t-\r ]*[+-]?[0-9]+")
+let private leadingClockTimePrefixRegex = Regex(@"^[+-]?(?:(?:[0-9]+[ ]+)?[0-9]+:[0-9]{1,2}(?::[0-9]{1,2})?(?:\.[0-9]+)?)")
+let private leadingNumericTimePrefixRegex = Regex(@"^[+-]?[0-9]+(?:\.[0-9]+)?")
 let private leadingFloatPrefixRegex = Regex(@"^[\t-\r ]*[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
 
 let private leadingNumericPrefix (regex: Regex) (s: string) : string option =
@@ -6143,6 +6145,40 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 match castYearValue source with
                 | Some result -> Ok result
                 | None -> coerce castMode source |> Result.mapError Storage.toMySqlError
+            | TTime fsp, (VString _ | VBytes _ | VEncodedString _ | VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
+                let raw = Value.toText source |> Option.defaultValue ""
+                let isNumeric =
+                    match source with
+                    | VInt _ | VUInt _ | VDecimal _ | VDouble _ -> true
+                    | _ -> false
+                let warn () =
+                    Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" raw)
+                let parsed, truncated =
+                    match parseTimeInput raw with
+                    | ParsedTime _ as result -> result, false
+                    | TimeComponentsOutOfRange as result -> result, false
+                    | NotATime ->
+                        let input = raw.TrimStart()
+                        let pattern =
+                            if input.Contains(':') then leadingClockTimePrefixRegex
+                            else leadingNumericTimePrefixRegex
+                        let prefix = pattern.Match input
+                        if prefix.Success then parseTimeInput prefix.Value, true
+                        else NotATime, false
+                match parsed with
+                | ParsedTime ticks ->
+                    let adjusted =
+                        if castMode.TruncateFractional then truncateTicksToFsp fsp ticks
+                        else roundTimeTicksToFsp fsp ticks
+                    if timeMagnitude ticks > uint64 maxTimeTicks || timeMagnitude adjusted > uint64 maxTimeTicks then
+                        warn ()
+                        if isNumeric then Ok VNull else Ok(VTime(timeValueOrClamp adjusted))
+                    else
+                        if truncated then warn ()
+                        Ok(VTime(timeValueOrClamp adjusted))
+                | NotATime | TimeComponentsOutOfRange ->
+                    warn ()
+                    Ok VNull
             | (TDate | TDateTime _), _ ->
                 let source =
                     match v with

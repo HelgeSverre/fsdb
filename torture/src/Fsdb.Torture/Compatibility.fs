@@ -1175,6 +1175,13 @@ module ContractCatalog =
                          |> Contract.comparingValues
                    yield Contract.query (sprintf "year-cast-source-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               for index, source in
+                   [ "'abc'"; "'12:34:56x'"; "'123456x'"; "'12:34'";
+                     "'839:00:00'"; "'12:99:56'"; "8390000" ] |> List.indexed do
+                   yield Contract.query (sprintf "time-cast-value-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)
+                         |> Contract.comparingValues
+                   yield Contract.query (sprintf "time-cast-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                for index, sql in
                    [ "SELECT CAST('abc' AS DECIMAL(5,2))"
                      "SELECT CAST('1.239' AS DECIMAL(5,2))"
