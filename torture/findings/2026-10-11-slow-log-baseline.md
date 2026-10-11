@@ -63,6 +63,14 @@ metadata. `COUNT(owner_id)` on a nullable column and `COUNT(*)` with an
 additional owner filter each examined three rows in MySQL; fsdb leaves
 those on the row-evaluation path.
 
+The count shortcut also bypasses unrelated virtual generated columns. On
+MySQL 8.4.11, a two-row full-text table with virtual
+`g INT AS (CAST(body AS SIGNED))` returned `COUNT(*) = 2` with no warnings
+for `MATCH(body) AGAINST('alpha' IN BOOLEAN MODE)`, even though selecting
+`g` emitted two 1292 conversion warnings. Fsdb previously evaluated `g`
+while preparing the count's source rows; the focused regression now confirms
+that the index-only count leaves those columns unevaluated.
+
 An `INSERT … SELECT` that read three source rows and inserted two reported
 `rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives
 the same result in a regression.

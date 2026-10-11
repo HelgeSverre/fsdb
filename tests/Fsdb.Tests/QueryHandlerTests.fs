@@ -9721,6 +9721,18 @@ let tests =
                   let _, logged = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" escaped)
                   Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) (sprintf "grouped full-text examined rows: %s" sql)
 
+          testCase "index-only full-text count does not evaluate unused virtual columns"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE ft_count_virtual (id INT PRIMARY KEY, body TEXT, g INT GENERATED ALWAYS AS (CAST(body AS SIGNED)) VIRTUAL, FULLTEXT KEY ft(body))"
+              let session, _ = handle session "SET SESSION sql_mode=''"
+              let session, _ = handle session "INSERT INTO ft_count_virtual(id,body) VALUES (1,'alpha beta'),(2,'alpha gamma')"
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+              let session, result = handle session "SELECT COUNT(*) FROM ft_count_virtual WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE)"
+              Expect.equal result (ResultSet([ "COUNT(*)" ], [ [ Some "2" ] ])) "full-text posting count"
+              let _, warnings = handle session "SHOW WARNINGS"
+              Expect.equal warnings (ResultSet([ "Level"; "Code"; "Message" ], [])) "unused virtual column has no conversion warnings"
+
           testCase "slow log counts indexed and scan join candidates"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

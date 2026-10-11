@@ -18123,6 +18123,11 @@ and private runFullTextSelect
                          && not select.CalculateFoundRows -> Some node
                 | _ -> None
 
+            let indexOnlyCountFromScores scores =
+                match indexOnlyCountNode, scores with
+                | Some expected, [ node, _, values ] when expected = node -> Some(fullTextScoreCount values)
+                | _ -> None
+
             // Costing an unbounded reversed join needs the posting count.
             // Reuse its score set when execution reads the same full corpus.
             let reusableScores: ReusableFullTextScores option =
@@ -18227,8 +18232,11 @@ and private runFullTextSelect
                               Rows = rows }))
                 |> Result.bind (
                     traverse (fun plan ->
-                        prepareVirtualRows store registry dbName plan.Source.Qualifier plan.Columns plan.Rows
-                        |> Result.map (fun rows -> { plan with Rows = rows }))
+                        match indexOnlyCountFromScores plan.Scores with
+                        | Some _ -> Ok { plan with Rows = Seq.empty }
+                        | None ->
+                            prepareVirtualRows store registry dbName plan.Source.Qualifier plan.Columns plan.Rows
+                            |> Result.map (fun rows -> { plan with Rows = rows }))
                 )
 
             match prepared with
@@ -18245,10 +18253,7 @@ and private runFullTextSelect
                 let computed = preparedSources |> List.collect _.Scores
                 let synthetic = preparedSources |> List.collect _.Synthetic
                 let baseKey = baseQualifier.ToLowerInvariant()
-                let indexOnlyCount =
-                    match indexOnlyCountNode, computed with
-                    | Some expected, [ node, _, scores ] when expected = node -> Some(fullTextScoreCount scores)
-                    | _ -> None
+                let indexOnlyCount = indexOnlyCountFromScores computed
 
                 let explicitRelevanceOrder =
                     match select.OrderBy with
