@@ -15056,6 +15056,29 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected NAD83 to Pseudo-Mercator transform, got %A" result
 
+                testCase "WGS 84 UTM zone 33N matches MySQL projected coordinates"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ 59.9139, 10.7522, 262560.48218418856, 6649443.584095765
+                          0.0, 12.0, 166021.44308053842, 0.0
+                          0.0, 18.0, 833978.5569194583, 0.0
+                          80.0, 12.0, 441867.78486720024, 8883084.955948295 ]
+                    for latitude, longitude, easting, northing in cases do
+                        let point = sprintf "ST_Transform(ST_GeomFromText('POINT(%g %g)',4326),32633)" latitude longitude
+                        let sql = sprintf "SELECT ABS(ST_X(%s)-%.12f)<0.001,ABS(ST_Y(%s)-%.12f)<0.001" point easting point northing
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL UTM zone 33N at (%g,%g), got %A" latitude longitude result
+                        let projected = sprintf "ST_Transform(ST_GeomFromText('POINT(%.12f %.12f)',32633),4326)" easting northing
+                        let reverseSql = sprintf "SELECT ABS(ST_X(%s)-%.10f)<0.00000001,ABS(ST_Y(%s)-%.10f)<0.00000001" projected latitude projected longitude
+                        match runDefault store reverseSql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL inverse UTM zone 33N at (%g,%g), got %A" easting northing result
+                    match runDefault store "SELECT SRS_NAME FROM INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=32633" with
+                    | ResultSet(_, [ [ Some "WGS 84 / UTM zone 33N" ] ]) -> ()
+                    | result -> failtestf "expected UTM zone 33N catalog row, got %A" result
+
                 testCase "projected transforms wrap geographic longitude"
                 <| fun _ ->
                     let store = newStore ()

@@ -3284,6 +3284,22 @@ module ContractCatalog =
                    "SELECT SRS_NAME,SRS_ID,ORGANIZATION,ORGANIZATION_COORDSYS_ID,DEFINITION,DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=3395"
                |> Contract.comparingValues
                Contract.query
+                   "utm33-north-srs-catalog"
+                   "SELECT SRS_NAME,SRS_ID,ORGANIZATION,ORGANIZATION_COORDSYS_ID,DEFINITION,DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=32633"
+               |> Contract.comparingValues
+               Contract.query
+                   "utm33-north-forward"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),32633)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),32633)),3),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),32633)),3)"
+               |> Contract.comparingValues
+               Contract.query
+                   "utm33-north-reverse"
+                   "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(262560.48218418856 6649443.584095765)',32633),4326)),8),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(262560.48218418856 6649443.584095765)',32633),4326)),8)"
+               |> Contract.comparingValues
+               Contract.query
+                   "utm33-north-planar-distance"
+                   "SELECT ST_Distance(ST_GeomFromText('POINT(1 2)',32633),ST_GeomFromText('POINT(4 6)',32633))"
+               |> Contract.comparingValues
+               Contract.query
                    "world-mercator-forward"
                    "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5)"
                |> Contract.comparingValues

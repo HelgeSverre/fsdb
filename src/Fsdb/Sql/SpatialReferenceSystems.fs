@@ -61,6 +61,18 @@ let private worldMercatorDefinition =
       ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"3395\"]]" ]
     |> String.concat ""
 
+let private utm33NorthDefinition =
+    [ "PROJCS[\"WGS 84 / UTM zone 33N\","
+      wgs84Definition
+      ",PROJECTION[\"Transverse Mercator\",AUTHORITY[\"EPSG\",\"9807\"]]"
+      ",PARAMETER[\"Latitude of natural origin\",0,AUTHORITY[\"EPSG\",\"8801\"]]"
+      ",PARAMETER[\"Longitude of natural origin\",15,AUTHORITY[\"EPSG\",\"8802\"]]"
+      ",PARAMETER[\"Scale factor at natural origin\",0.9996,AUTHORITY[\"EPSG\",\"8805\"]]"
+      ",PARAMETER[\"False easting\",500000,AUTHORITY[\"EPSG\",\"8806\"]]"
+      ",PARAMETER[\"False northing\",0,AUTHORITY[\"EPSG\",\"8807\"]]"
+      ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"32633\"]]" ]
+    |> String.concat ""
+
 let internal all =
     [ { Name = ""
         Srid = 0
@@ -131,6 +143,16 @@ let internal all =
         AxisOrder = LongitudeLatitude
         SemiMajorAxis = None
         InverseFlattening = None
+        LinearUnitInMetres = Some 1.0 }
+      { Name = "WGS 84 / UTM zone 33N"
+        Srid = 32633
+        Organization = Some "EPSG"
+        OrganizationCoordinateSystemId = Some 32633
+        Definition = utm33NorthDefinition
+        Description = None
+        AxisOrder = LongitudeLatitude
+        SemiMajorAxis = None
+        InverseFlattening = None
         LinearUnitInMetres = Some 1.0 } ]
 
 let internal tryFind srid = all |> List.tryFind (fun referenceSystem -> referenceSystem.Srid = srid)
@@ -180,6 +202,61 @@ let private worldMercatorInverse (x, y) =
     let latitude = latitudeAt 8 (atan (sinh (y / earthRadius)))
     latitude * 180.0 / Math.PI, wrapProjectedLongitude (x * 180.0 / (earthRadius * Math.PI))
 
+// Fourth-order Krüger series for WGS 84 / UTM zone 33N. The omitted terms are
+// below a micrometre inside the zone. Coefficients are from PROJ's tmerc series:
+// https://proj.org/en/stable/operations/projections/tmerc.html
+let private utmThirdFlattening =
+    let flattening = 1.0 / 298.257223563
+    flattening / (2.0 - flattening)
+
+let private utmScale =
+    let n = utmThirdFlattening
+    0.9996 * earthRadius / (1.0 + n) * (1.0 + n * n / 4.0 + n ** 4.0 / 64.0)
+
+let private utmForwardCoefficients =
+    let n = utmThirdFlattening
+    [| n / 2.0 - 2.0 * n ** 2.0 / 3.0 + 5.0 * n ** 3.0 / 16.0 + 41.0 * n ** 4.0 / 180.0
+       13.0 * n ** 2.0 / 48.0 - 3.0 * n ** 3.0 / 5.0 + 557.0 * n ** 4.0 / 1440.0
+       61.0 * n ** 3.0 / 240.0 - 103.0 * n ** 4.0 / 140.0
+       49561.0 * n ** 4.0 / 161280.0 |]
+
+let private utmInverseCoefficients =
+    let n = utmThirdFlattening
+    [| -n / 2.0 + 2.0 * n ** 2.0 / 3.0 - 37.0 * n ** 3.0 / 96.0 + n ** 4.0 / 360.0
+       -(n ** 2.0) / 48.0 - n ** 3.0 / 15.0 + 437.0 * n ** 4.0 / 1440.0
+       -17.0 * n ** 3.0 / 480.0 + 37.0 * n ** 4.0 / 840.0
+       -4397.0 * n ** 4.0 / 161280.0 |]
+
+let private utmSeries coefficients (xi, eta) =
+    coefficients
+    |> Array.mapi (fun index coefficient ->
+        let harmonic = float (2 * (index + 1))
+        coefficient * sin (harmonic * xi) * cosh (harmonic * eta),
+        coefficient * cos (harmonic * xi) * sinh (harmonic * eta))
+    |> Array.fold (fun (xi, eta) (deltaXi, deltaEta) -> xi + deltaXi, eta + deltaEta) (xi, eta)
+
+let private utm33NorthForward (latitude, longitude) =
+    let phi = latitude * Math.PI / 180.0
+    let lambda = Math.IEEERemainder(longitude - 15.0, 360.0) * Math.PI / 180.0
+    let conformal = atan (sinh (Math.Asinh(tan phi) - eccentricity * Math.Atanh(eccentricity * sin phi)))
+    let xi = atan2 (tan conformal) (cos lambda)
+    let eta = Math.Asinh(sin lambda / sqrt (tan conformal ** 2.0 + cos lambda ** 2.0))
+    let xi, eta = utmSeries utmForwardCoefficients (xi, eta)
+    500000.0 + utmScale * eta, utmScale * xi
+
+let private utm33NorthInverse (x, y) =
+    let xi, eta = utmSeries utmInverseCoefficients (y / utmScale, (x - 500000.0) / utmScale)
+    let conformal = atan (sin xi / sqrt (sinh eta ** 2.0 + cos xi ** 2.0))
+    let longitude = atan2 (sinh eta) (cos xi) * 180.0 / Math.PI + 15.0
+    let target = Math.Asinh(tan conformal)
+    let rec recoverLatitude iterations latitude =
+        if iterations = 0 then latitude
+        else
+            let next = atan (sinh (target + eccentricity * Math.Atanh(eccentricity * sin latitude)))
+            recoverLatitude (iterations - 1) next
+    let latitude = recoverLatitude 8 conformal * 180.0 / Math.PI
+    latitude, wrapProjectedLongitude longitude
+
 let private cartesianFromGeographic inverseFlattening (latitude, longitude) =
     let latitude = latitude * Math.PI / 180.0
     let longitude = longitude * Math.PI / 180.0
@@ -220,6 +297,7 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         | 4269 -> Some nad83ToWgs84
         | 3857 -> Some pseudoMercatorInverse
         | 3395 -> Some worldMercatorInverse
+        | 32633 -> Some utm33NorthInverse
         | _ -> None
     let fromWgs84 =
         match targetSrid with
@@ -227,6 +305,7 @@ let internal tryCoordinateTransform sourceSrid targetSrid =
         | 4269 -> Some wgs84ToNad83
         | 3857 -> Some pseudoMercatorForward
         | 3395 -> Some worldMercatorForward
+        | 32633 -> Some utm33NorthForward
         | _ -> None
     Option.map2 compose toWgs84 fromWgs84
 
