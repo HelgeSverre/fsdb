@@ -76,6 +76,25 @@ let private lookupVar (session: Session) (name: string) : string option option =
 let private sessionValue session name =
     lookupVar session name |> Option.flatten
 
+let private sqlSelectLimit session =
+    sessionValue session "sql_select_limit"
+    |> Option.bind (fun value ->
+        match UInt64.TryParse value with
+        | true, limit when limit < UInt64.MaxValue -> Some limit
+        | _ -> None)
+
+let private withSqlSelectLimit session statement =
+    let implicitLimit explicitLimit =
+        explicitLimit |> Option.orElseWith (fun () -> sqlSelectLimit session |> Option.map (VUInt >> Lit))
+
+    let limitQuery = function
+        | Select select -> Select { select with Limit = implicitLimit select.Limit }
+        | Union(first, rest, orderBy, limit, offset) ->
+            Union(first, rest, orderBy, implicitLimit limit, offset)
+        | other -> other
+
+    limitQuery statement
+
 let private sessionTimeZone (session: Session) =
     sessionValue session "time_zone"
     |> Option.bind (TimeZones.resolve session.Store)
@@ -394,6 +413,7 @@ let private numericSystemVariables =
           "query_cache_size"
           "sql_notes"
           "sql_safe_updates"
+          "sql_select_limit"
           "sql_log_bin"
           "tmp_table_size"
           "transaction_read_only"
@@ -1229,7 +1249,8 @@ let private boundedIntegerVariables =
           "max_error_count", 65535UL
           "div_precision_increment", 30UL
           "information_schema_stats_expiry", 31536000UL
-          "max_execution_time", UInt64.MaxValue ]
+          "max_execution_time", UInt64.MaxValue
+          "sql_select_limit", UInt64.MaxValue ]
 
 let private typedSetVariables =
     Set.union fullTextStopwordTableVariables (boundedIntegerVariables |> Map.keys |> Set.ofSeq)
@@ -3203,6 +3224,7 @@ let private formatResultForProtocol metadata (typedRows: Value[] list) result =
     | _ -> result
 
 let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
+    let stmt = withSqlSelectLimit session stmt
     stmt
     |> statementStatusCommand
     |> Option.iter (InformationSchema.recordCommand session.StatusCounters)
@@ -4175,6 +4197,31 @@ type private Probe =
     | FlushLogs
     | LockTables
     | UnlockTables
+
+let private probeUsesSqlSelectLimit = function
+    | ShowVariables _
+    | ShowStatus _
+    | ShowEngines
+    | ShowPlugins
+    | ShowOpenTables _
+    | ShowCharset
+    | ShowTriggers _
+    | ShowEvents _
+    | ShowRoutineStatus _
+    | ShowDatabases
+    | ShowTableStatus
+    | ShowTables
+    | ShowColumns _
+    | Describe _
+    | ShowIndex _
+    | ShowCollation -> true
+    | _ -> false
+
+let private applyProbeSelectLimit session probe result =
+    match result, sqlSelectLimit session with
+    | ResultSet(columns, rows), Some limit when probeUsesSqlSelectLimit probe ->
+        ResultSet(columns, List.truncate (int (min limit (uint64 Int32.MaxValue))) rows)
+    | _ -> result
 
 let private probeResultMetadata session probe result =
     let text length =
@@ -7925,7 +7972,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             // Text probes bypass the typed executor, so their
                             // protocol-specific descriptors are supplied here.
                             let session, result = runProbe (beginProbeExecution session probe) sql probe
-                            { session with LastResultColumnMetadata = probeResultMetadata session probe result }, result
+                            let metadata = probeResultMetadata session probe result
+                            let result = applyProbeSelectLimit session probe result
+                            { session with LastResultColumnMetadata = metadata }, result
                         | None -> withStoredFunctionRegistry dispatch session (fun current -> executeStatement current sql rawSql)
 
 let private recordResult ((session, result): Session * QueryResult) : Session * QueryResult =

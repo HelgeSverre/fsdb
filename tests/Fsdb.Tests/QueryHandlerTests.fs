@@ -3952,6 +3952,67 @@ let tests =
               | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES, got %A" other
 
+          testCase "sql_select_limit caps top-level reads but not nested or mutation sources"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE select_limit_source (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO select_limit_source VALUES (1),(2),(3)"
+              let session, _ = handle session "CREATE TABLE select_limit_copy (id INT PRIMARY KEY)"
+              let session, setting = handle session "SET SESSION sql_select_limit=2"
+              Expect.equal setting (Affected 0UL) "the session limit is writable"
+
+              let expectRows session sql expected =
+                  match handle session sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "expected rows for %s, got %A" sql other
+
+              expectRows session "SELECT id FROM select_limit_source ORDER BY id" [ [ Some "1" ]; [ Some "2" ] ]
+              expectRows session "SELECT id FROM select_limit_source ORDER BY id LIMIT 3" [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
+              expectRows session "SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3" [ [ Some "1" ]; [ Some "2" ] ]
+              expectRows session "SELECT (SELECT COUNT(*) FROM select_limit_source)" [ [ Some "3" ] ]
+              let counted, result = handle session "SELECT SQL_CALC_FOUND_ROWS id FROM select_limit_source ORDER BY id"
+              match result with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "the returned rows obey the limit"
+              | other -> failtestf "expected limited calculated rows, got %A" other
+              expectRows counted "SELECT FOUND_ROWS()" [ [ Some "3" ] ]
+
+              let session, inserted = handle session "INSERT INTO select_limit_copy SELECT id FROM select_limit_source"
+              Expect.equal inserted (Affected 3UL) "INSERT SELECT reads all source rows"
+              expectRows session "SELECT COUNT(*) FROM select_limit_copy" [ [ Some "3" ] ]
+
+              let session, _ = handle session "PREPARE select_limit_stmt FROM 'SELECT id FROM select_limit_source ORDER BY id'"
+              expectRows session "EXECUTE select_limit_stmt" [ [ Some "1" ]; [ Some "2" ] ]
+              let shownColumns, _ = handle session "SHOW COLUMNS FROM select_limit_source"
+              let session, _ = handle session "SET SESSION sql_select_limit=0"
+              expectRows session "SELECT id FROM select_limit_source" []
+              expectRows session "EXECUTE select_limit_stmt" []
+              expectRows session "SHOW SESSION STATUS LIKE 'Connections'" []
+              expectRows session "SHOW VARIABLES LIKE 'sql_select_limit'" []
+              let zeroColumns, columnResult = handle session "SHOW COLUMNS FROM select_limit_source"
+              match columnResult with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected zero SHOW COLUMNS rows, got %A" other
+              Expect.equal zeroColumns.LastResultColumnMetadata shownColumns.LastResultColumnMetadata "row limits preserve column descriptors"
+              expectRows session "SELECT @@session.sql_select_limit LIMIT 1" [ [ Some "0" ] ]
+
+              match handle session "SET SESSION sql_select_limit='2'" |> snd with
+              | Err(1232, _) -> ()
+              | other -> failtestf "expected typed sql_select_limit rejection, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_select_limit=-1"
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ Some "Warning"; Some "1292"; Some "Truncated incorrect sql_select_limit value: '-1'" ] ]) -> ()
+              | other -> failtestf "expected MySQL's clipped-value warning, got %A" other
+              expectRows session "SELECT @@session.sql_select_limit LIMIT 1" [ [ Some "0" ] ]
+
+              let session, _ = handle session "SET GLOBAL sql_select_limit=3"
+              expectRows (create 2 store) "SELECT @@session.sql_select_limit" [ [ Some "3" ] ]
+              let session, _ = handle session "SET SESSION sql_select_limit=DEFAULT"
+              expectRows session "SELECT @@session.sql_select_limit" [ [ Some "3" ] ]
+              expectRows session "SELECT id FROM select_limit_source ORDER BY id" [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
+              expectRows session "EXECUTE select_limit_stmt" [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
+
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
               let unsafeMessage =
