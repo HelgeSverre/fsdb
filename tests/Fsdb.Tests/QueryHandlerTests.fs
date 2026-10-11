@@ -3125,6 +3125,18 @@ let tests =
                           sql
                   | _, result -> failtestf "expected NUL-text numeric CAST result for %s, got %A" sql result
 
+          testCase "numeric CAST warnings cap long ASCII previews"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT CAST(CONCAT('12x', REPEAT('a', 300)) AS DOUBLE)"
+              match handle session sql with
+              | session, ResultSet(_, [ [ Some "12" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect DOUBLE value: '12x" + String.replicate 125 "a" + "'" ]
+                      "MySQL limits the diagnostic argument to 128 ASCII bytes"
+              | _, result -> failtestf "expected long numeric CAST result, got %A" result
+
           testCase "FLOAT casts distinguish invalid text from range overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

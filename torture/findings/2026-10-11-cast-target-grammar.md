@@ -110,3 +110,7 @@ exception; other expression producers remain to be audited.
 Text-string numeric CAST warning previews stop at the first NUL byte, as in
 MySQL, while binary-source warnings keep the escaped `\x00` representation.
 The result still uses the numeric prefix preceding the NUL.
+Long ASCII warning arguments are capped at 128 rendered bytes: a `12x` prefix
+followed by 300 `a` characters retains only 125 `a` characters in MySQL's
+DOUBLE warning. Fsdb now matches that audited boundary. Multibyte previews
+can end in replacement or partial-byte output and remain outside this fix.

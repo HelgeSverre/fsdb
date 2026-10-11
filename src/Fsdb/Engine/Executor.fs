@@ -3108,17 +3108,21 @@ let private numericCastSourceText = function
     | _ -> None
 
 let private numericCastDiagnosticText source (text: string) =
-    match source with
-    | VBytes bytes ->
-        bytes
-        |> Array.map (fun value ->
-            if value >= 0x20uy && value <= 0x7Euy then string (char value)
-            else sprintf "\\x%02X" value)
-        |> String.concat ""
-    | _ ->
-        match text.IndexOf('\000') with
-        | -1 -> text
-        | index -> text.Substring(0, index)
+    let preview =
+        match source with
+        | VBytes bytes ->
+            bytes
+            |> Array.map (fun value ->
+                if value >= 0x20uy && value <= 0x7Euy then string (char value)
+                else sprintf "\\x%02X" value)
+            |> String.concat ""
+        | _ ->
+            match text.IndexOf('\000') with
+            | -1 -> text
+            | index -> text.Substring(0, index)
+    // The audited ASCII warning argument stops after 128 rendered bytes.
+    if preview.Length > 128 && Seq.forall (fun value -> int value < 128) preview then preview.Substring(0, 128)
+    else preview
 
 let private numericCastBinaryColumnType ctx expr =
     tryColumnDefForExpr ctx expr

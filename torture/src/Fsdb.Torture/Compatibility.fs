@@ -1236,6 +1236,10 @@ module ContractCatalog =
                    yield Contract.query (sprintf "numeric-cast-nul-text-%d" index) sql |> Contract.comparingValues
                    yield Contract.query (sprintf "numeric-cast-nul-text-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               yield Contract.query "numeric-cast-long-ascii-preview" "SELECT CAST(CONCAT('12x', REPEAT('a', 300)) AS DOUBLE)"
+                     |> Contract.comparingValues
+               yield Contract.query "numeric-cast-long-ascii-preview-warnings" "SHOW WARNINGS"
+                     |> Contract.comparingValues
                for index, text in [ "abc"; "12x"; "1e309"; "-1e309"; "1e309x"; "-1e309x"; "nan" ] |> List.indexed do
                    yield Contract.query (sprintf "double-cast-value-%d" index) (sprintf "SELECT CAST('%s' AS DOUBLE)" text)
                          |> Contract.comparingValues
