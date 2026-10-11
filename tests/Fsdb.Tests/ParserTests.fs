@@ -127,6 +127,18 @@ let tests =
                       Expect.equal (Fsdb.Parser.parseExpression (SqlText.expression expression)) (Ok expression) "binary cast renders"
                   | other -> failtestf "expected binary cast for %s, got %A" sql other
 
+              for sql, alias, width in
+                  [ "CAST(value AS NCHAR)", NationalChar, None
+                    "CAST(value AS NATIONAL CHARACTER(2))", NationalChar, Some 2
+                    "CONVERT(value, NCHAR(1))", NationalChar, Some 1
+                    "CAST(value AS CHAR(1) ASCII)", AsciiChar, Some 1
+                    "CONVERT(value, CHAR UNICODE)", UnicodeChar, None ] do
+                  match Fsdb.Parser.parseExpression sql with
+                  | Ok(CastCharAlias(Col "value", actualWidth, actualAlias) as expression) ->
+                      Expect.equal (actualAlias, actualWidth) (alias, width) sql
+                      Expect.equal (Fsdb.Parser.parseExpression (SqlText.expression expression)) (Ok expression) "alias cast renders"
+                  | other -> failtestf "expected character alias cast for %s, got %A" sql other
+
           testList
               "expression traversal"
               [ testCase "walks window arguments, ordering, and frame bounds in encounter order"

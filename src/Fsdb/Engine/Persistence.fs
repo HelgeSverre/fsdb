@@ -534,6 +534,17 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
         | None -> w.WriteByte 0uy
         writeStr w charset
+    | CastCharAlias(e, length, alias) ->
+        w.WriteByte 0x1Fuy
+        encodeExpr w e
+        match length with
+        | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
+        | None -> w.WriteByte 0uy
+        w.WriteByte (
+            match alias with
+            | NationalChar -> 0uy
+            | AsciiChar -> 1uy
+            | UnicodeChar -> 2uy)
     | CastAsBinary(e, length) ->
         w.WriteByte 0x1Euy
         encodeExpr w e
@@ -615,6 +626,16 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
         let source = nested ()
         let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
         CastCharset(source, length, readStr r)
+    | 0x1Fuy ->
+        let source = nested ()
+        let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+        let alias =
+            match r.ReadByte() with
+            | 0uy -> NationalChar
+            | 1uy -> AsciiChar
+            | 2uy -> UnicodeChar
+            | _ -> failwith "Unknown character cast alias"
+        CastCharAlias(source, length, alias)
     | 0x1Euy ->
         let source = nested ()
         let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())

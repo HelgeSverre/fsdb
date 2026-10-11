@@ -702,6 +702,8 @@ for `SIGNED`. Bare and explicit-width `BINARY` casts now preserve byte width,
 padding, truncation warnings, and audited wire metadata; broader cast
 families and source expression shapes remain open. Audited non-`CHAR`
 charset clauses are rejected with MySQL's syntax code before charset lookup.
+Audited `NCHAR`/`NATIONAL CHARACTER` and `CHAR ASCII`/`CHAR UNICODE` casts
+retain their target bytes and syntax-specific deprecation warnings.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common

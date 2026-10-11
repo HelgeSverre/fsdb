@@ -128,6 +128,24 @@ type LiteralIntroducer =
     | NationalIntroducer
     | ResolvedIntroducer
 
+type CharCastAlias =
+    | NationalChar
+    | AsciiChar
+    | UnicodeChar
+
+module CharCastAlias =
+    let charset = function
+        | NationalChar -> "utf8mb3"
+        | AsciiChar -> "latin1"
+        | UnicodeChar -> "ucs2"
+
+    let target length alias =
+        let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
+        match alias with
+        | NationalChar -> "nchar" + width
+        | AsciiChar -> "char" + width + " ascii"
+        | UnicodeChar -> "char" + width + " unicode"
+
 // `Expr` and `SelectStmt` are mutually recursive: `Exists`/a scalar subquery
 // carries a nested `SelectStmt`, whose projections/`WHERE` are themselves
 // built from `Expr`. Every type in between (`Projection`, `TableRef`, ...)
@@ -208,6 +226,8 @@ type Expr =
     /// `CAST(expr AS CHAR[(n)] CHARACTER SET charset)` retains both its
     /// target encoding and whether a character limit was written.
     | CastCharset of Expr * length: int option * charset: string
+    /// Retains national and legacy CHAR spelling for its syntax warning.
+    | CastCharAlias of Expr * length: int option * alias: CharCastAlias
     /// `CAST(expr AS BINARY[(n)])` retains whether a byte width was written.
     | CastAsBinary of Expr * length: int option
     /// `expr COLLATE collation_name` — evaluates as its inner expression;

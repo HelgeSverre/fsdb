@@ -55,3 +55,14 @@ MySQL accepts `CHARSET` as the spelling of a `CHAR` target clause, but rejects
 `CHARACTER SET` after `SIGNED` or `BINARY` with syntax error 1064, even when
 the named charset is unknown. Fsdb now applies that target restriction before
 charset-name validation. Other CAST conversion contexts remain open.
+
+The national and legacy character targets are syntax-bearing conversions.
+`NCHAR` and `NATIONAL CHARACTER` target `utf8mb3` and emit warning 3720;
+`CHAR ASCII` targets `latin1` and `CHAR UNICODE` targets `ucs2`, each with its
+own warning 1287. For `é`, MySQL returns bytes `C3A9`, `E9`, and `00E9`
+respectively. Fsdb keeps the source spelling in a character-alias cast node
+so evaluation can share ordinary charset conversion while parsing and
+preparation preserve the distinct warning. The audited forms also retain
+their optional character width through SQL rendering and persistence.
+Combined legacy modifiers such as `CHAR ASCII BINARY` remain outside this
+audit.

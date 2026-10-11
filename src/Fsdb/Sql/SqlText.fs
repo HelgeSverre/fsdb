@@ -249,6 +249,8 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
     | CastCharset(value, length, charset) ->
         let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
         sprintf "cast(%s as char%s character set %s)" (render value) width charset
+    | CastCharAlias(value, length, alias) ->
+        sprintf "cast(%s as %s)" (render value) (CharCastAlias.target length alias)
     | CastAsBinary(value, length) ->
         let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
         sprintf "cast(%s as binary%s)" (render value) width

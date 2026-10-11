@@ -36,12 +36,22 @@ let private reportCharsetConversions statement =
 
 /// Syntax warnings belong to submission or preparation, not row evaluation.
 let reportParsedSyntax statement =
+    let reportNationalChar () =
+        Diagnostics.warning 3720
+            "NATIONAL/NCHAR/NVARCHAR implies the character set UTF8MB3, which will be replaced by UTF8MB4 in a future release. Please consider using CHAR(x) CHARACTER SET UTF8MB4 in order to be unambiguous."
+
     let reportIntroducer = function
         | IntroducedLiteral(_, _, NationalIntroducer) ->
-            Diagnostics.warning 3720
-                "NATIONAL/NCHAR/NVARCHAR implies the character set UTF8MB3, which will be replaced by UTF8MB4 in a future release. Please consider using CHAR(x) CHARACTER SET UTF8MB4 in order to be unambiguous."
+            reportNationalChar ()
         | IntroducedLiteral(_, _, CharsetIntroducer spelling) ->
             reportCharsetDeprecation spelling
+        | CastCharAlias(_, _, NationalChar) -> reportNationalChar ()
+        | CastCharAlias(_, _, AsciiChar) ->
+            Diagnostics.warning 1287
+                "'ASCII' is deprecated and will be removed in a future release. Please use CHARACTER SET charset_name instead"
+        | CastCharAlias(_, _, UnicodeChar) ->
+            Diagnostics.warning 1287
+                "'UNICODE' is deprecated and will be removed in a future release. Please use CHARACTER SET charset_name instead"
         | _ -> ()
 
     let rec report expression =

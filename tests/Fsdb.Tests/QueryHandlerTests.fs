@@ -2865,6 +2865,20 @@ let tests =
               | _, ResultSet(_, [ [ Some "latin1" ] ]) -> ()
               | _, result -> failtestf "expected CHARSET spelling to remain valid, got %A" result
 
+          testCase "national ASCII and UNICODE casts retain syntax warnings and charset bytes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT HEX(CAST('é' AS NCHAR)), HEX(CAST('é' AS CHAR ASCII)), "
+                  + "HEX(CAST('é' AS CHAR UNICODE))"
+              match handle session sql with
+              | session, ResultSet(_, [ [ Some "C3A9"; Some "E9"; Some "00E9" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code))
+                      [ 3720; 1287; 1287 ]
+                      "cast syntax warnings"
+              | _, result -> failtestf "unexpected character alias cast result: %A" result
+
           testCase "explicit BINARY cast widths truncate and pad bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

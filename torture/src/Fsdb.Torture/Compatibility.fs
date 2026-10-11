@@ -1065,6 +1065,18 @@ module ContractCatalog =
                          |> Contract.fails 1064 "42000"
                yield Contract.query "cast-charset-spelling" "SELECT CHARSET(CAST('x' AS CHAR CHARSET latin1))"
                      |> Contract.comparingValues
+               let aliasCasts =
+                   "SELECT HEX(CAST('é' AS NCHAR)), HEX(CAST('é' AS CHAR ASCII)), HEX(CAST('é' AS CHAR UNICODE))"
+               yield Contract.query "cast-char-alias-values" aliasCasts |> Contract.comparingValues
+               yield Contract.query "cast-char-alias-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.preparedQuery "cast-char-alias-prepared" aliasCasts [||]
+               yield
+                   Contract.query
+                       "cast-national-spellings"
+                       "SELECT CHARSET(CAST('x' AS NATIONAL CHARACTER(1))), CHARSET(CONVERT('x', NCHAR(1)))"
+                   |> Contract.comparingValues
+               yield Contract.query "cast-national-charset-conflict" "SELECT CAST('x' AS NCHAR CHARACTER SET utf8mb4)"
+                     |> Contract.fails 1064 "42000"
                yield
                    Contract.query
                        "cast-binary-width-values"

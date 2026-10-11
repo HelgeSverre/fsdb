@@ -1644,35 +1644,52 @@ let private windowCallAtom: Parser<Expr, unit> =
 /// `CAST(expr AS type)` — `SIGNED`/`UNSIGNED [INTEGER]` are only valid as a
 /// cast target, not a column type, so they're handled here rather than in
 /// `columnType`.
-let private castTargetType: Parser<ColumnType * int option, unit> =
+type private CastTarget =
+    | TypedCast of ColumnType * int option
+    | AliasedCharCast of CharCastAlias * int option
+
+type private CastCharClause =
+    | NamedCharset of string
+    | LegacyCharset of CharCastAlias
+
+let private castTargetType: Parser<CastTarget, unit> =
     choice
-        [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% (TBigInt false, None)
+        [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% TypedCast(TBigInt false, None)
           // `UNSIGNED` names the 64-bit unsigned domain, not `INT UNSIGNED`:
           // `CAST(-1 AS UNSIGNED)` is 18446744073709551615, and
           // `CAST(x AS SIGNED)` likewise round-trips the full BIGINT range.
-          attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% (TBigInt true, None)
-          keyword "CHAR" >>. opt widthLen |>> (fun width -> TChar(defaultArg width 1), width)
+          attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% TypedCast(TBigInt true, None)
+          keyword "NCHAR" >>. opt widthLen |>> (fun width -> AliasedCharCast(NationalChar, width))
+          attempt (keyword "NATIONAL" >>. (keyword "CHARACTER" <|> keyword "CHAR"))
+          >>. opt widthLen |>> (fun width -> AliasedCharCast(NationalChar, width))
+          keyword "CHAR" >>. opt widthLen |>> (fun width -> TypedCast(TChar(defaultArg width 1), width))
           (keyword "BINARY" >>. optWidthLen
            |>> fun width ->
                if width |> Option.exists (fun value -> value < 0) then
                    raise (SemanticParseError "Invalid BINARY cast width")
-               TBinary(defaultArg width 1), width)
-          columnType |>> (fun target -> target, None) ]
+               TypedCast(TBinary(defaultArg width 1), width))
+          columnType |>> (fun target -> TypedCast(target, None)) ]
 
 /// `CAST(x AS CHAR CHARACTER SET cs)` retains the requested charset through
 /// the same conversion path as `CONVERT(x USING cs)`.
-let private castCharsetClause: Parser<string, unit> =
-    (keyword "CHARACTER" >>. keyword "SET" >>. identifier) <|> (keyword "CHARSET" >>. identifier)
+let private castCharsetClause: Parser<CastCharClause, unit> =
+    choice
+        [ (keyword "CHARACTER" >>. keyword "SET" >>. identifier) |>> NamedCharset
+          (keyword "CHARSET" >>. identifier) |>> NamedCharset
+          keyword "ASCII" >>% LegacyCharset AsciiChar
+          keyword "UNICODE" >>% LegacyCharset UnicodeChar ]
 
-let private castConversion e (target, explicitLength) charset =
-    match target, charset with
-    | TChar _, Some cs ->
+let private castConversion e target clause =
+    match target, clause with
+    | TypedCast(TChar _, explicitLength), Some(NamedCharset cs) ->
         if Charset.tryFind cs |> Option.isNone then
             raise (SemanticParseError(sprintf "Unknown character set: '%s'" cs))
         CastCharset(e, explicitLength, cs)
+    | TypedCast(TChar _, explicitLength), Some(LegacyCharset alias) -> CastCharAlias(e, explicitLength, alias)
+    | AliasedCharCast(alias, explicitLength), None -> CastCharAlias(e, explicitLength, alias)
     | _, Some _ -> raise (SemanticParseError "CHARACTER SET requires a CHAR cast target")
-    | TBinary _, None -> CastAsBinary(e, explicitLength)
-    | _, None -> Cast(e, target)
+    | TypedCast(TBinary _, explicitLength), None -> CastAsBinary(e, explicitLength)
+    | TypedCast(columnType, _), None -> Cast(e, columnType)
 
 let private castExpr: Parser<Expr, unit> =
     attempt (
