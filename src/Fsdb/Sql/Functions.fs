@@ -5864,13 +5864,13 @@ let private geometryTransformFn: Scalar =
             if targetSrid = 0 then
                 raise (SqlError(3742, "Transformation to SRID 0 is not supported."))
             spatialReferenceSystem "ST_Transform" sourceSrid |> ignore
-            spatialReferenceSystem "ST_Transform" targetSrid |> ignore
+            let targetReferenceSystem = spatialReferenceSystem "ST_Transform" targetSrid
             let transform =
                 SpatialReferenceSystems.tryCoordinateTransform sourceSrid targetSrid
                 |> Option.defaultWith (fun () -> geometryError "ST_Transform" "the coordinate transformation is not supported")
             let transformed = SpatialReferenceSystems.mapGeometry transform geometry
-            if SpatialReferenceSystems.tryCoordinateDomainError transformed |> Option.isSome
-               && targetSrid = 4326 then
+            if targetReferenceSystem.SemiMajorAxis.IsSome
+               && (SpatialReferenceSystems.tryTransformedCoordinateDomainError transformed |> Option.isSome) then
                 VNull
             else
                 VGeometry(SpatialReferenceSystems.withSrid targetSrid transformed)

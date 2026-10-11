@@ -14661,6 +14661,32 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected NAD83 to Pseudo-Mercator transform, got %A" result
 
+                testCase "projected transforms wrap geographic longitude"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ 3857, 30000000.0, 4326, 0.0, -90.50541476414367
+                          3857, -30000000.0, 4326, 0.0, 90.50541476414367
+                          3857, 50000000.0, 4326, 0.0, 89.15764205976076
+                          3395, 30000000.0, 4258, 0.0, -90.50541476414367
+                          3857, 30000000.0, 4269, 0.00000904369333078871, -90.50542366770487 ]
+                    for source, x, target, latitude, longitude in cases do
+                        let point = sprintf "ST_Transform(ST_GeomFromText('POINT(%.0f 0)',%d),%d)" x source target
+                        let sql = sprintf "SELECT ABS(ST_X(%s)-%.14f)<0.0000001,ABS(ST_Y(%s)-%.14f)<0.0000001" point latitude point longitude
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected wrapped %d to %d transform at %g, got %A" source target x result
+                    for x in [ 20037508.342789244; -20037508.342789244 ] do
+                        let point = sprintf "ST_Transform(ST_GeomFromText('POINT(%.15f 0)',3857),4326)" x
+                        let sql = sprintf "SELECT ABS(ABS(ST_Y(%s))-180)<0.0000001" point
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | result -> failtestf "expected antimeridian transform at %g, got %A" x result
+                    let projected = "ST_Transform(ST_GeomFromText('POINT(30000000 0)',3857),3395)"
+                    match runDefault store (sprintf "SELECT ABS(ST_X(%s)+10075016.685578488)<0.02" projected) with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | result -> failtestf "expected wrapped projection-to-projection transform, got %A" result
+
                 testCase "EPSG 3857 uses planar metric operations"
                 <| fun _ ->
                     let store = newStore ()

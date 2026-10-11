@@ -123,9 +123,15 @@ let internal all =
 let internal tryFind srid = all |> List.tryFind (fun referenceSystem -> referenceSystem.Srid = srid)
 
 let private earthRadius = 6378137.0
+let private antimeridianRoundoff = 1e-9
 let private eccentricity =
     let flattening = 1.0 / 298.257223563
     sqrt (flattening * (2.0 - flattening))
+
+let private wrapProjectedLongitude longitude =
+    // Preserve floating-point noise at the antimeridian while wrapping full turns.
+    if abs longitude > 180.0 + antimeridianRoundoff then Math.IEEERemainder(longitude, 360.0)
+    else longitude
 
 let private pseudoMercatorForward (latitude, longitude) =
     if abs latitude >= 90.0 then
@@ -136,7 +142,7 @@ let private pseudoMercatorForward (latitude, longitude) =
 
 let private pseudoMercatorInverse (x, y) =
     (2.0 * atan (exp (y / earthRadius)) - Math.PI / 2.0) * 180.0 / Math.PI,
-    x * 180.0 / (earthRadius * Math.PI)
+    wrapProjectedLongitude (x * 180.0 / (earthRadius * Math.PI))
 
 let private worldMercatorForward (latitude, longitude) =
     if abs latitude >= 90.0 then
@@ -157,7 +163,7 @@ let private worldMercatorInverse (x, y) =
             let correction = ((1.0 - eccentricity * sine) / (1.0 + eccentricity * sine)) ** (eccentricity / 2.0)
             latitudeAt (iteration - 1) (Math.PI / 2.0 - 2.0 * atan (t * correction))
     let latitude = latitudeAt 8 (atan (sinh (y / earthRadius)))
-    latitude * 180.0 / Math.PI, x * 180.0 / (earthRadius * Math.PI)
+    latitude * 180.0 / Math.PI, wrapProjectedLongitude (x * 180.0 / (earthRadius * Math.PI))
 
 let private cartesianFromGeographic inverseFlattening (latitude, longitude) =
     let latitude = latitude * Math.PI / 180.0
@@ -320,3 +326,11 @@ let internal tryPointDomainError (latitude, longitude) =
 
 let internal tryCoordinateDomainError (geometry: Geometry) =
     coordinates geometry.Shape |> List.tryPick tryPointDomainError
+
+let internal tryTransformedCoordinateDomainError (geometry: Geometry) =
+    // MySQL retains tiny projection roundoff beyond either antimeridian.
+    coordinates geometry.Shape
+    |> List.tryPick (fun point ->
+        match tryPointDomainError point with
+        | Some(LongitudeOutOfRange longitude) when abs (abs longitude - 180.0) < antimeridianRoundoff -> None
+        | error -> error)

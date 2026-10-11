@@ -1088,8 +1088,9 @@ implementation effort:
    geographic strategy. Geographic multipoint distance is also covered;
    geographic point-set topology is covered; [ETRS89 (4258) and NAD83 (4269)](torture/findings/2026-10-11-grs1980-geographic-systems.md)
    geographic constructors, catalog rows, and distance use their GRS 1980
-   ellipsoid and transform through WGS84. Line/polygon distance and topology
-   and other reference systems remain absent.
+   ellipsoid and transform through WGS84. [Inverse projected longitude wrapping](torture/findings/2026-10-11-projected-longitude-wrap.md)
+   follows MySQL across geographic and projected targets. Line/polygon distance
+   and topology and other reference systems remain absent.
 
 5. Extensible authentication providers. The built-in caching-SHA2, SHA-256,
    and native password exchanges are covered; external identity providers and
