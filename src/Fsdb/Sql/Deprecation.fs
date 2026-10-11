@@ -40,18 +40,29 @@ let reportParsedSyntax statement =
         Diagnostics.warning 3720
             "NATIONAL/NCHAR/NVARCHAR implies the character set UTF8MB3, which will be replaced by UTF8MB4 in a future release. Please consider using CHAR(x) CHARACTER SET UTF8MB4 in order to be unambiguous."
 
+    let reportCharAlias = function
+        | NationalChar -> reportNationalChar ()
+        | AsciiChar ->
+            Diagnostics.warning 1287
+                "'ASCII' is deprecated and will be removed in a future release. Please use CHARACTER SET charset_name instead"
+        | UnicodeChar ->
+            Diagnostics.warning 1287
+                "'UNICODE' is deprecated and will be removed in a future release. Please use CHARACTER SET charset_name instead"
+
+    let reportCharModifier = function
+        | CastCharsetName name -> reportCharsetDeprecation name
+        | CastLegacyAlias alias -> reportCharAlias alias
+        | CastBinaryAttribute ->
+            Diagnostics.warning 1287
+                "'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead"
+
     let reportIntroducer = function
         | IntroducedLiteral(_, _, NationalIntroducer) ->
             reportNationalChar ()
         | IntroducedLiteral(_, _, CharsetIntroducer spelling) ->
             reportCharsetDeprecation spelling
-        | CastCharAlias(_, _, NationalChar) -> reportNationalChar ()
-        | CastCharAlias(_, _, AsciiChar) ->
-            Diagnostics.warning 1287
-                "'ASCII' is deprecated and will be removed in a future release. Please use CHARACTER SET charset_name instead"
-        | CastCharAlias(_, _, UnicodeChar) ->
-            Diagnostics.warning 1287
-                "'UNICODE' is deprecated and will be removed in a future release. Please use CHARACTER SET charset_name instead"
+        | CastCharAlias(_, _, alias) -> reportCharAlias alias
+        | CastCharModifiers(_, _, modifiers) -> modifiers |> List.iter reportCharModifier
         | _ -> ()
 
     let rec report expression =

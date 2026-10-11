@@ -545,6 +545,20 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
             | NationalChar -> 0uy
             | AsciiChar -> 1uy
             | UnicodeChar -> 2uy)
+    | CastCharModifiers(e, length, modifiers) ->
+        w.WriteByte 0x20uy
+        encodeExpr w e
+        match length with
+        | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
+        | None -> w.WriteByte 0uy
+        w.WriteInt32LE(List.length modifiers)
+        for modifier in modifiers do
+            match modifier with
+            | CastCharsetName name -> w.WriteByte 0uy; writeStr w name
+            | CastLegacyAlias AsciiChar -> w.WriteByte 1uy
+            | CastLegacyAlias UnicodeChar -> w.WriteByte 2uy
+            | CastLegacyAlias NationalChar -> w.WriteByte 3uy
+            | CastBinaryAttribute -> w.WriteByte 4uy
     | CastAsBinary(e, length) ->
         w.WriteByte 0x1Euy
         encodeExpr w e
@@ -636,6 +650,19 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
             | 2uy -> UnicodeChar
             | _ -> failwith "Unknown character cast alias"
         CastCharAlias(source, length, alias)
+    | 0x20uy ->
+        let source = nested ()
+        let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+        let modifiers =
+            List.init (r.ReadInt32LE()) (fun _ ->
+                match r.ReadByte() with
+                | 0uy -> CastCharsetName(readStr r)
+                | 1uy -> CastLegacyAlias AsciiChar
+                | 2uy -> CastLegacyAlias UnicodeChar
+                | 3uy -> CastLegacyAlias NationalChar
+                | 4uy -> CastBinaryAttribute
+                | _ -> failwith "Unknown character cast modifier")
+        CastCharModifiers(source, length, modifiers)
     | 0x1Euy ->
         let source = nested ()
         let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())

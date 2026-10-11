@@ -1347,6 +1347,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     | Cast(value, _)
                     | CastCharset(value, _, _)
                     | CastCharAlias(value, _, _)
+                    | CastCharModifiers(value, _, _)
                     | CastAsBinary(value, _)
                     | Expression.CollationOverride(value, _)
                     | AssignUserVariable(_, value) -> simplePredicate value
@@ -2416,6 +2417,10 @@ let rec internal exprLabel (expr: Expr) : string =
         sprintf "cast(%s as char%s character set %s)" (expressionLabelFragment e) width charset
     | CastCharAlias(e, length, alias) ->
         sprintf "cast(%s as %s)" (expressionLabelFragment e) (CharCastAlias.target length alias)
+    | CastCharModifiers(e, length, modifiers) ->
+        let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
+        let attributes = modifiers |> List.map CharCastModifier.render |> String.concat " "
+        sprintf "cast(%s as char%s %s)" (expressionLabelFragment e) width attributes
     | CastAsBinary(e, length) ->
         let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
         sprintf "cast(%s as binary%s)" (expressionLabelFragment e) width
@@ -3033,6 +3038,7 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
     | Cast(source, TVarchar _) -> fspOfExpr ctx source
     | CastCharset(source, _, _) -> fspOfExpr ctx source
     | CastCharAlias(source, _, _) -> fspOfExpr ctx source
+    | CastCharModifiers(source, _, _) -> fspOfExpr ctx source
     | CastAsBinary(source, _) -> fspOfExpr ctx source
     | Cast(_, ty) -> fspOfType ty
     | ApproximateLiteral _
@@ -3821,6 +3827,9 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | Cast(_, (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _)) -> Ok(connection 2)
     | CastCharset(_, _, charset) -> named (Collation.defaultNameForCharset charset) 2
     | CastCharAlias(_, _, alias) -> named (Collation.defaultNameForCharset (CharCastAlias.charset alias)) 2
+    | CastCharModifiers(_, _, modifiers) ->
+        let charset = CharCastModifier.charset ctx.Store.ExecutionSettings.ConnectionCharset modifiers |> Charset.canonicalName
+        named (charset + "_bin") 2
     | CastAsBinary _ -> named "binary" 2
     | Cast(_, TJson) -> named "utf8mb4_bin" 2
     | Cast(_, (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob | TBit _)) -> named "binary" 2
@@ -5007,6 +5016,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
     | Cast(value, _)
     | CastCharset(value, _, _)
     | CastCharAlias(value, _, _)
+    | CastCharModifiers(value, _, _)
     | CastAsBinary(value, _)
     | BinaryCast value | Collate(value, _) -> isStatementStableExpr store registry dbName scope value
     | Like(value, pattern, _, _)
@@ -5800,6 +5810,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 else converted
             | _ -> converted)
     | CastCharAlias(e, length, alias) -> eval (CastCharset(e, length, CharCastAlias.charset alias))
+    | CastCharModifiers(e, length, modifiers) ->
+        let charset = CharCastModifier.charset ctx.Store.ExecutionSettings.ConnectionCharset modifiers
+        eval (CastCharset(e, length, charset))
     | CastAsBinary(_, Some length) when length > Limits.maxAllowedPacket ->
         Diagnostics.warning
             1301
@@ -6817,6 +6830,9 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 Flags = if binary then metadata.Flags ||| BinaryFlag else metadata.Flags })
     | CastCharAlias(value, length, alias) ->
         metadataOfExpr ctx (CastCharset(value, length, CharCastAlias.charset alias))
+    | CastCharModifiers(value, length, modifiers) ->
+        let charset = CharCastModifier.charset ctx.Store.ExecutionSettings.ConnectionCharset modifiers |> Charset.canonicalName
+        withCollation (CastCharset(value, length, charset)) (charset + "_bin")
     | CastAsBinary(value, length) -> metadataOfExpr ctx (CastCharset(value, length, "binary"))
     | BinaryCast inner -> withCollation inner "binary"
     | Collate(inner, collation) -> withCollation inner collation
@@ -11068,6 +11084,7 @@ and private tryMergeDirectView
         | Cast(value, _)
         | CastCharset(value, _, _)
         | CastCharAlias(value, _, _)
+        | CastCharModifiers(value, _, _)
         | CastAsBinary(value, _)
         | Expression.CollationOverride(value, _) -> mergeablePredicate value
         | In(value, candidates) -> mergeablePredicate value && candidates |> List.forall mergeablePredicate
@@ -15389,6 +15406,7 @@ and private rewriteAggregateValues
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
     | CastCharset(e, length, charset) -> sub e |> Result.map (fun e' -> CastCharset(e', length, charset))
     | CastCharAlias(e, length, alias) -> sub e |> Result.map (fun e' -> CastCharAlias(e', length, alias))
+    | CastCharModifiers(e, length, modifiers) -> sub e |> Result.map (fun e' -> CastCharModifiers(e', length, modifiers))
     | CastAsBinary(e, length) -> sub e |> Result.map (fun e' -> CastAsBinary(e', length))
     | BinaryCast e -> sub e |> Result.map BinaryCast
     | Collate(e, name) -> sub e |> Result.map (fun e' -> Collate(e', name))
@@ -15477,6 +15495,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
     | CastCharset(e, length, charset) -> sub e |> Result.map (fun e' -> CastCharset(e', length, charset))
     | CastCharAlias(e, length, alias) -> sub e |> Result.map (fun e' -> CastCharAlias(e', length, alias))
+    | CastCharModifiers(e, length, modifiers) -> sub e |> Result.map (fun e' -> CastCharModifiers(e', length, modifiers))
     | CastAsBinary(e, length) -> sub e |> Result.map (fun e' -> CastAsBinary(e', length))
     | BinaryCast e -> sub e |> Result.map BinaryCast
     | Collate(e, name) -> sub e |> Result.map (fun e' -> Collate(e', name))
@@ -22360,6 +22379,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | Cast(expression, _)
         | CastCharset(expression, _, _)
         | CastCharAlias(expression, _, _)
+        | CastCharModifiers(expression, _, _)
         | CastAsBinary(expression, _)
         | Expression.CollationOverride(expression, _)
         | AssignUserVariable(_, expression) -> references expression

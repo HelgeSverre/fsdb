@@ -64,5 +64,15 @@ respectively. Fsdb keeps the source spelling in a character-alias cast node
 so evaluation can share ordinary charset conversion while parsing and
 preparation preserve the distinct warning. The audited forms also retain
 their optional character width through SQL rendering and persistence.
-Combined legacy modifiers such as `CHAR ASCII BINARY` remain outside this
-audit.
+MySQL also accepts `BINARY` as a `CHAR` target attribute. On its own, it
+selects the connection charset's `_bin` collation. Combined with `ASCII`,
+`UNICODE`, or `CHARACTER SET charset_name`, it retains that target charset and
+selects its `_bin` collation. Both orders are valid, and each deprecated
+modifier emits warning 1287 in source order. For `é`, the audited `CHAR ASCII
+BINARY`, `CHAR BINARY UNICODE`, and `CHAR CHARACTER SET latin1 BINARY` forms
+report `latin1`, `ucs2_bin`, and byte `E9` respectively, with the five
+expected warnings across one statement. Fsdb now retains the ordered
+modifiers through evaluation, metadata, SQL rendering, and persistence.
+`NCHAR BINARY`, two charset modifiers, and duplicate `BINARY` remain syntax
+errors, as in MySQL. The focused regression and differential contract cover
+these accepted and rejected forms.

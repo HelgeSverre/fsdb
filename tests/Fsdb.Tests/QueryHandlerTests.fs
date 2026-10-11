@@ -2879,6 +2879,27 @@ let tests =
                       "cast syntax warnings"
               | _, result -> failtestf "unexpected character alias cast result: %A" result
 
+          testCase "CHAR binary attribute preserves charset and modifier warning order"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT CHARSET(CAST('é' AS CHAR ASCII BINARY)), "
+                  + "COLLATION(CAST('é' AS CHAR BINARY UNICODE)), "
+                  + "HEX(CAST('é' AS CHAR CHARACTER SET latin1 BINARY))"
+              let asciiWarning =
+                  "'ASCII' is deprecated and will be removed in a future release. Please use CHARACTER SET charset_name instead"
+              let unicodeWarning =
+                  "'UNICODE' is deprecated and will be removed in a future release. Please use CHARACTER SET charset_name instead"
+              let binaryWarning =
+                  "'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead"
+              match handle session sql with
+              | session, ResultSet(_, [ [ Some "latin1"; Some "ucs2_bin"; Some "E9" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Message))
+                      [ asciiWarning; binaryWarning; binaryWarning; unicodeWarning; binaryWarning ]
+                      "modifier warnings follow source order"
+              | _, result -> failtestf "unexpected binary attribute cast result: %A" result
+
           testCase "explicit BINARY cast widths truncate and pad bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

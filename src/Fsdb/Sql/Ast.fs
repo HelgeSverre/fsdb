@@ -146,6 +146,29 @@ module CharCastAlias =
         | AsciiChar -> "char" + width + " ascii"
         | UnicodeChar -> "char" + width + " unicode"
 
+type CharCastModifier =
+    | CastCharsetName of string
+    | CastLegacyAlias of CharCastAlias
+    | CastBinaryAttribute
+
+module CharCastModifier =
+    let tryCharset modifiers =
+        modifiers
+        |> List.tryPick (function
+            | CastCharsetName name -> Some name
+            | CastLegacyAlias alias -> Some(CharCastAlias.charset alias)
+            | CastBinaryAttribute -> None)
+
+    let charset connectionCharset modifiers =
+        tryCharset modifiers |> Option.defaultValue connectionCharset
+
+    let render = function
+        | CastCharsetName name -> "character set " + name
+        | CastLegacyAlias AsciiChar -> "ascii"
+        | CastLegacyAlias UnicodeChar -> "unicode"
+        | CastLegacyAlias NationalChar -> "nchar"
+        | CastBinaryAttribute -> "binary"
+
 // `Expr` and `SelectStmt` are mutually recursive: `Exists`/a scalar subquery
 // carries a nested `SelectStmt`, whose projections/`WHERE` are themselves
 // built from `Expr`. Every type in between (`Projection`, `TableRef`, ...)
@@ -228,6 +251,8 @@ type Expr =
     | CastCharset of Expr * length: int option * charset: string
     /// Retains national and legacy CHAR spelling for its syntax warning.
     | CastCharAlias of Expr * length: int option * alias: CharCastAlias
+    /// Ordered CHAR target modifiers preserve deprecation-warning order.
+    | CastCharModifiers of Expr * length: int option * modifiers: CharCastModifier list
     /// `CAST(expr AS BINARY[(n)])` retains whether a byte width was written.
     | CastAsBinary of Expr * length: int option
     /// `expr COLLATE collation_name` — evaluates as its inner expression;

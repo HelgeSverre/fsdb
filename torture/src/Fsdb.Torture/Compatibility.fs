@@ -1070,6 +1070,18 @@ module ContractCatalog =
                yield Contract.query "cast-char-alias-values" aliasCasts |> Contract.comparingValues
                yield Contract.query "cast-char-alias-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.preparedQuery "cast-char-alias-prepared" aliasCasts [||]
+               let modifiedCharCasts =
+                   "SELECT CHARSET(CAST('é' AS CHAR ASCII BINARY)), COLLATION(CAST('é' AS CHAR BINARY UNICODE)), HEX(CAST('é' AS CHAR CHARACTER SET latin1 BINARY))"
+               yield Contract.query "cast-char-modifiers-values" modifiedCharCasts |> Contract.comparingValues
+               yield Contract.query "cast-char-modifiers-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.preparedQuery "cast-char-modifiers-prepared" modifiedCharCasts [||]
+               for index, sql in
+                   [ "SELECT CAST('x' AS NCHAR BINARY)"
+                     "SELECT CAST('x' AS CHAR ASCII UNICODE)"
+                     "SELECT CAST('x' AS CHAR BINARY BINARY)" ]
+                   |> List.indexed do
+                   yield Contract.query (sprintf "invalid-char-modifiers-%d" index) sql
+                         |> Contract.fails 1064 "42000"
                yield
                    Contract.query
                        "cast-national-spellings"

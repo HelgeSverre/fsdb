@@ -704,6 +704,9 @@ families and source expression shapes remain open. Audited non-`CHAR`
 charset clauses are rejected with MySQL's syntax code before charset lookup.
 Audited `NCHAR`/`NATIONAL CHARACTER` and `CHAR ASCII`/`CHAR UNICODE` casts
 retain their target bytes and syntax-specific deprecation warnings.
+Audited `CHAR BINARY` combinations now retain the target charset's `_bin`
+collation and report modifier warnings in source order; invalid duplicate or
+conflicting modifiers still fail with MySQL's syntax code.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common

@@ -1648,10 +1648,6 @@ type private CastTarget =
     | TypedCast of ColumnType * int option
     | AliasedCharCast of CharCastAlias * int option
 
-type private CastCharClause =
-    | NamedCharset of string
-    | LegacyCharset of CharCastAlias
-
 let private castTargetType: Parser<CastTarget, unit> =
     choice
         [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% TypedCast(TBigInt false, None)
@@ -1672,29 +1668,42 @@ let private castTargetType: Parser<CastTarget, unit> =
 
 /// `CAST(x AS CHAR CHARACTER SET cs)` retains the requested charset through
 /// the same conversion path as `CONVERT(x USING cs)`.
-let private castCharsetClause: Parser<CastCharClause, unit> =
+let private castCharModifier: Parser<CharCastModifier, unit> =
     choice
-        [ (keyword "CHARACTER" >>. keyword "SET" >>. identifier) |>> NamedCharset
-          (keyword "CHARSET" >>. identifier) |>> NamedCharset
-          keyword "ASCII" >>% LegacyCharset AsciiChar
-          keyword "UNICODE" >>% LegacyCharset UnicodeChar ]
+        [ attempt (keyword "CHARACTER" >>. keyword "SET" >>. identifier) |>> CastCharsetName
+          (keyword "CHARSET" >>. identifier) |>> CastCharsetName
+          keyword "ASCII" >>% CastLegacyAlias AsciiChar
+          keyword "UNICODE" >>% CastLegacyAlias UnicodeChar
+          keyword "BINARY" >>% CastBinaryAttribute ]
 
-let private castConversion e target clause =
-    match target, clause with
-    | TypedCast(TChar _, explicitLength), Some(NamedCharset cs) ->
-        if Charset.tryFind cs |> Option.isNone then
+let private castConversion e target modifiers =
+    let validateCharset = function
+        | CastCharsetName cs when Charset.tryFind cs |> Option.isNone ->
             raise (SemanticParseError(sprintf "Unknown character set: '%s'" cs))
+        | _ -> ()
+    let isBinary = function CastBinaryAttribute -> true | _ -> false
+    let isCharset = function CastCharsetName _ | CastLegacyAlias _ -> true | _ -> false
+    let invalid () = raise (SemanticParseError "Invalid CHAR cast modifiers")
+    match target, modifiers with
+    | TypedCast(TChar _, explicitLength), [ CastCharsetName cs ] ->
+        validateCharset (CastCharsetName cs)
         CastCharset(e, explicitLength, cs)
-    | TypedCast(TChar _, explicitLength), Some(LegacyCharset alias) -> CastCharAlias(e, explicitLength, alias)
-    | AliasedCharCast(alias, explicitLength), None -> CastCharAlias(e, explicitLength, alias)
-    | _, Some _ -> raise (SemanticParseError "CHARACTER SET requires a CHAR cast target")
-    | TypedCast(TBinary _, explicitLength), None -> CastAsBinary(e, explicitLength)
-    | TypedCast(columnType, _), None -> Cast(e, columnType)
+    | TypedCast(TChar _, explicitLength), [ CastLegacyAlias alias ] -> CastCharAlias(e, explicitLength, alias)
+    | TypedCast(TChar _, explicitLength), [ CastBinaryAttribute ] ->
+        CastCharModifiers(e, explicitLength, modifiers)
+    | TypedCast(TChar _, explicitLength), [ first; second ]
+        when (isBinary first && isCharset second) || (isCharset first && isBinary second) ->
+        modifiers |> List.iter validateCharset
+        CastCharModifiers(e, explicitLength, modifiers)
+    | AliasedCharCast(alias, explicitLength), [] -> CastCharAlias(e, explicitLength, alias)
+    | TypedCast(TBinary _, explicitLength), [] -> CastAsBinary(e, explicitLength)
+    | TypedCast(columnType, _), [] -> Cast(e, columnType)
+    | _ -> invalid ()
 
 let private castExpr: Parser<Expr, unit> =
     attempt (
         functionKeyword "CAST" >>. expr .>> keyword "AS" .>>. castTargetType
-        .>>. opt castCharsetClause
+        .>>. many castCharModifier
         .>> sym ")"
     )
     |>> fun ((e, target), charset) -> castConversion e target charset
@@ -1703,7 +1712,7 @@ let private castExpr: Parser<Expr, unit> =
 let private convertTypeExpr: Parser<Expr, unit> =
     attempt (
         functionKeyword "CONVERT" >>. expr .>> sym "," .>>. castTargetType
-        .>>. opt castCharsetClause
+        .>>. many castCharModifier
         .>> sym ")"
     )
     |>> fun ((e, target), charset) -> castConversion e target charset
