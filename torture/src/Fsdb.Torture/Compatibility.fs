@@ -10147,6 +10147,15 @@ module ContractCatalog =
                Contract.query "possessive-quantifiers"
                    "SELECT REGEXP_LIKE('aa','a++a','c'),REGEXP_LIKE('aa','a+a','c'),REGEXP_LIKE('aa','a*+a','c'),REGEXP_LIKE('aaa','a{1,3}+a','c'),REGEXP_LIKE('ab','[ab]++b','c'),REGEXP_LIKE('abab','(ab)++ab','c'),REGEXP_LIKE('aabb','a++b++','c'),REGEXP_LIKE('aa','.++a','c')"
                    |> Contract.comparingValues
+               for character in [ 'C'; 'F'; 'K'; 'L'; 'q'; 'y' ] do
+                   let pattern = "\\" + string character
+                   let hex = Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes pattern)
+                   Contract.query
+                       (sprintf "literal-letter-escape-%c" character)
+                       (sprintf "SELECT REGEXP_SUBSTR('%c', CONVERT(0x%s USING utf8mb4), 1, 1, 'c')" character hex)
+                   |> Contract.comparingValues
+               Contract.query "unsupported-N-escape" "SELECT REGEXP_LIKE('a', CONVERT(0x5C4E USING utf8mb4), 'c')"
+               |> Contract.fails 3685 "HY000"
                for name, pattern in
                    [ "repeated-possessive-plus", "a+++"
                      "lazy-possessive-plus", "a+?+"

@@ -141,9 +141,10 @@ let private unicodePropertyNameAt (pattern: string) index =
         if closing < 0 then None
         else Some(closing + 1, pattern.Substring(index + 3, closing - index - 3).ToUpperInvariant())
 
-let private rejectedUnicodePropertyAt pattern index =
-    unicodePropertyNameAt pattern index
-    |> Option.exists (fun (_, name) -> name = "ISBASICLATIN")
+let private rejectedEscapeAt (pattern: string) index =
+    (index + 1 < pattern.Length && pattern[index + 1] = 'N')
+    || (unicodePropertyNameAt pattern index
+        |> Option.exists (fun (_, name) -> name = "ISBASICLATIN"))
 
 let private unicodePropertyAt (pattern: string) index =
     match unicodePropertyNameAt pattern index with
@@ -181,7 +182,7 @@ let private mixedNegatedClassAt (pattern: string) start =
             ordinary.Append literal |> ignore
             index <- nextIndex
         elif pattern[index] = '\\' && index + 1 < pattern.Length then
-            invalidMember <- invalidMember || rejectedUnicodePropertyAt pattern index
+            invalidMember <- invalidMember || rejectedEscapeAt pattern index
             match unicodePropertyAt pattern index with
             | Some(nextIndex, property) ->
                 if pattern[index + 1] = 'P' then alternatives.Add property
@@ -228,6 +229,8 @@ let private mixedNegatedClassAt (pattern: string) start =
             else "(?:" + union + ")"
         Some(Ok(index - start, rewritten))
 
+let private literalLetterEscapes = "CFKLqy"
+
 let private normalizePosixClasses (pattern: string) =
     let builder = StringBuilder(pattern.Length)
     let mutable index = 0
@@ -249,7 +252,7 @@ let private normalizePosixClasses (pattern: string) =
                 builder.Append 'E' |> ignore
                 index <- index + 2
             else
-                invalid <- invalid || rejectedUnicodePropertyAt pattern index
+                invalid <- invalid || rejectedEscapeAt pattern index
                 match unicodePropertyAt pattern index with
                 | Some(nextIndex, category) ->
                     builder.Append category |> ignore
@@ -267,6 +270,9 @@ let private normalizePosixClasses (pattern: string) =
                         index <- index + 2
                     | Some target when target[1] <> '^' ->
                         builder.Append(target, 1, target.Length - 2) |> ignore
+                        index <- index + 2
+                    | None when index + 1 < pattern.Length && literalLetterEscapes.Contains(pattern[index + 1]) ->
+                        builder.Append pattern[index + 1] |> ignore
                         index <- index + 2
                     | _ ->
                         builder.Append '\\' |> ignore

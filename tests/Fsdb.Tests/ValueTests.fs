@@ -3329,6 +3329,24 @@ let tests =
                                       | Fsdb.Functions.SqlError(3688, _) -> ()
                                       | other -> failtestf "expected 3688 for %s, got %A" pattern other)
 
+                      testCase "REGEXP literal letter escapes follow MySQL"
+                      <| fun _ ->
+                          for character in [ 'C'; 'F'; 'K'; 'L'; 'q'; 'y' ] do
+                              let pattern = "\\" + string character
+                              Expect.equal
+                                  (call "REGEXP_SUBSTR" [ VString(string character); VString pattern; VInt 1L; VInt 1L; VString "c" ])
+                                  (VString(string character))
+                                  (sprintf "%s remains literal" pattern)
+
+                      testCase "REGEXP rejects unsupported N escape with MySQL diagnostic"
+                      <| fun _ ->
+                          Expect.throwsC
+                              (fun () -> call "REGEXP_LIKE" [ VString "a"; VString "\\N"; VString "c" ] |> ignore)
+                              (fun e ->
+                                  match e with
+                                  | Fsdb.Functions.SqlError(3685, _) -> ()
+                                  | other -> failtestf "expected 3685, got %A" other)
+
                       testCase "REGEXP word shorthand includes join controls"
                       <| fun _ ->
                           for pattern, value, expected in
