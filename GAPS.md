@@ -869,6 +869,10 @@ An [immutable planner-set follow-up](benchmarks/results/2026-10-11-planner-folda
 shares the foldable builtin names across constant evaluators, removing about
 5.1 KiB per prepared lookup on that fixture. Residual allocations remain
 substantial, and separate-process timings do not establish a latency gain.
+A [view-dependency lookup follow-up](benchmarks/results/2026-10-11-view-dependency-lookup.md)
+avoids rebuilding the stored-view map for ordinary physical-table reads. It
+saves about 1.2 KiB per cached text lookup and 1.8 KiB per prepared lookup
+on the same fixture; view lock dependencies retain their tested behavior.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes

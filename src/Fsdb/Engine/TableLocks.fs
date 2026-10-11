@@ -715,7 +715,9 @@ let private isTemporary (catalog: Catalog) access =
     |> Option.exists (Map.containsKey (normalizeTableName access.Table))
 
 let private expandDependencies store temporaryCatalog accesses =
-    let views = viewEntries store
+    // A physical table cannot share its name with a view. Most statements
+    // only touch physical tables, so avoid scanning the view catalog for them.
+    let views = lazy (viewEntries store)
     let triggers = lazy (triggerEntries store)
     let routines = lazy (routineEntries store)
 
@@ -728,7 +730,12 @@ let private expandDependencies store temporaryCatalog accesses =
             let visited = Set.add key visited
 
             let viewDependencies =
-                match Map.tryFind key views with
+                let view =
+                    match tableSnapshot store access.Database access.Table with
+                    | Ok _ -> None
+                    | Error _ -> Map.tryFind key views.Value
+
+                match view with
                 | None -> []
                 | Some view ->
                     match Parser.parseViewDefinition view.Definition with
@@ -793,7 +800,7 @@ let accessesForStatement store temporaryCatalog defaultDb statement =
     |> expandDependencies store temporaryCatalog
 
 let private resolveExplicitAccesses ignoreTemporary store temporaryCatalog defaultDb locks =
-    let views = viewEntries store
+    let views = lazy (viewEntries store)
 
     let rec resolve resolved =
         function
@@ -811,10 +818,11 @@ let private resolveExplicitAccesses ignoreTemporary store temporaryCatalog defau
             if isTemporary temporaryCatalog current && ignoreTemporary then
                 resolve resolved rest
             else
-                match tableSnapshot store database table, Map.containsKey (tableKey database table) views with
-                | Ok _, _
-                | _, true -> resolve (current :: resolved) rest
-                | Error _, false -> Error(1146, sprintf "Table '%s.%s' doesn't exist" database table)
+                match tableSnapshot store database table with
+                | Ok _ -> resolve (current :: resolved) rest
+                | Error _ when Map.containsKey (tableKey database table) views.Value ->
+                    resolve (current :: resolved) rest
+                | Error _ -> Error(1146, sprintf "Table '%s.%s' doesn't exist" database table)
 
     resolve [] locks |> Result.map (expandDependencies store temporaryCatalog)
 
