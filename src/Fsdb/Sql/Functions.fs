@@ -2148,11 +2148,21 @@ let private convertFn: Scalar =
                 | None -> VString(Charset.decodeBytes charset bytes)
         | _ -> VNull
     | [ v; VString charset ] ->
-        let text = v |> toText |> Option.defaultValue ""
-
         match Charset.canonicalName charset with
-        | "binary" -> VBytes(Text.Encoding.UTF8.GetBytes text)
-        | charset when Charset.tryFind charset |> Option.isSome -> VString(Charset.transcodeText charset text)
+        | "binary" ->
+            match v with
+            | VEncodedString(_, bytes) -> VBytes bytes
+            | _ -> VBytes(Text.Encoding.UTF8.GetBytes(v |> toText |> Option.defaultValue ""))
+        | charset when Charset.tryFind charset |> Option.isSome ->
+            match v with
+            | VEncodedString(source, _) when Charset.canonicalName source = charset -> v
+            | _ ->
+                let text =
+                    match v with
+                    | VEncodedString(source, bytes) when Charset.isSingleByte source ->
+                        Charset.decodeSingleByteConversionSource source bytes
+                    | _ -> v |> toText |> Option.defaultValue ""
+                VString(Charset.transcodeText charset text)
         | _ -> VNull
     | _ -> VNull
 

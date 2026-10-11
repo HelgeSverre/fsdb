@@ -1092,6 +1092,22 @@ let tests =
                             expected
                             (sprintf "%s warning" charset)
 
+                testCase "CONVERT replaces invalid single-byte source bytes when transcoding"
+                <| fun _ ->
+                    let store = newStore ()
+                    let sql =
+                        "SELECT HEX(CONVERT(CONVERT(0x98 USING cp1251) USING utf8mb4)), HEX(CONVERT(CONVERT(0x80 USING tis620) USING utf8mb4)), HEX(CONVERT(CONVERT(0x98 USING cp1251) USING binary)), HEX(CONVERT(CONVERT(0xE9 USING latin1) USING binary)), HEX(CONVERT(CONVERT(0x98 USING cp1251) USING cp1251))"
+                    let result, warnings = Fsdb.Diagnostics.capture (fun () -> runDefault store sql)
+                    match result with
+                    | ResultSet(_, [ [ Some "3F"; Some "C280"; Some "98"; Some "E9"; Some "98" ] ]) -> ()
+                    | other -> failtestf "expected MySQL source-byte replacements, got %A" other
+                    Expect.equal
+                        (warnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1300, "Invalid cp1251 character string: '98'"
+                          1300, "Invalid cp1251 character string: '98'"
+                          1300, "Invalid cp1251 character string: '98'" ]
+                        "only the three invalid source conversions warn"
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

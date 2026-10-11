@@ -35,4 +35,11 @@ charset marks them invalid. The warning sets vary by charset: CP1251 warns for
 Fsdb now preserves the raw bytes and emits warning 1300 for the audited holes.
 The same sweep showed that `dec8`, `hp8`, `macce`, and `macroman` also emit a
 preceding deprecation warning 1287, which the conversion path now preserves.
-Other conversion contexts remain open.
+
+A follow-up used the result as the source of another conversion. MySQL changes
+invalid CP1251 byte `98` to `?` when transcoding to UTF-8, but retains `98`
+when converting to binary or back to CP1251. TIS-620 control byte `80`
+becomes UTF-8 `C280` and Latin1 `E9` stays `E9` in binary. Fsdb now
+distinguishes text transcodes from
+binary byte preservation for these encoded sources. Other conversion contexts
+remain open.

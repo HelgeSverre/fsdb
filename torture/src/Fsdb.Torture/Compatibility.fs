@@ -983,6 +983,14 @@ module ContractCatalog =
                    yield Contract.query name (sprintf "SELECT HEX(CONVERT(0x%s USING %s))" hex charset)
                          |> Contract.comparingValues
                    yield Contract.query (name + "-warnings") "SHOW WARNINGS" |> Contract.comparingValues
+               yield
+                   Contract.query
+                       "convert-single-byte-source-transcode"
+                       "SELECT HEX(CONVERT(CONVERT(0x98 USING cp1251) USING utf8mb4)), HEX(CONVERT(CONVERT(0x80 USING tis620) USING utf8mb4)), HEX(CONVERT(CONVERT(0x98 USING cp1251) USING binary)), HEX(CONVERT(CONVERT(0xE9 USING latin1) USING binary)), HEX(CONVERT(CONVERT(0x98 USING cp1251) USING cp1251))"
+                   |> Contract.comparingValues
+               yield
+                   Contract.query "convert-single-byte-source-transcode-warnings" "SHOW WARNINGS"
+                   |> Contract.comparingValues
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do
