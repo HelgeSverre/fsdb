@@ -527,6 +527,13 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     | Distinct e -> w.WriteByte 0x11uy; encodeExpr w e
     | OrderBy(e, d) -> w.WriteByte 0x12uy; encodeExpr w e; encodeDirection w d
     | Cast(e, t) -> w.WriteByte 0x13uy; encodeExpr w e; encodeColumnType w t
+    | CastCharset(e, length, charset) ->
+        w.WriteByte 0x1Duy
+        encodeExpr w e
+        match length with
+        | Some value -> w.WriteByte 1uy; w.WriteInt32LE value
+        | None -> w.WriteByte 0uy
+        writeStr w charset
     | BinaryCast e -> w.WriteByte 0x1Auy; encodeExpr w e
     | Collate(e, name) -> w.WriteByte 0x14uy; encodeExpr w e; writeStr w name
     | Star q -> w.WriteByte 0x15uy; writeOptStr w q
@@ -598,6 +605,10 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
     | 0x11uy -> Distinct(nested ())
     | 0x12uy -> OrderBy(nested (), decodeDirection r)
     | 0x13uy -> Cast(nested (), decodeColumnType r)
+    | 0x1Duy ->
+        let source = nested ()
+        let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+        CastCharset(source, length, readStr r)
     | 0x1Auy -> BinaryCast(nested ())
     | 0x1Buy -> IntroducedLiteral(decodeValue r, readStr r, ResolvedIntroducer)
     | 0x1Cuy -> ConnectionLiteral(decodeValue r, readStr r)

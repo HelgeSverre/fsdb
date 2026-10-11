@@ -205,6 +205,9 @@ type Expr =
     /// separate cast-target vocabulary, coerced the same way a column of
     /// that type would be (see `Storage.coerceValue`).
     | Cast of Expr * ColumnType
+    /// `CAST(expr AS CHAR[(n)] CHARACTER SET charset)` retains both its
+    /// target encoding and whether a character limit was written.
+    | CastCharset of Expr * length: int option * charset: string
     /// `expr COLLATE collation_name` — evaluates as its inner expression;
     /// the tag overrides the collation any *comparison* involving this
     /// expression resolves under (see `Executor.resolvedCollation`).

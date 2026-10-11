@@ -2821,6 +2821,9 @@ let tests =
               let session, _ = handle session "SELECT CONVERT('x' USING utf8mb3), CONVERT('y' USING utf8)"
               expectWarnings [ utf8mb3Warning; aliasWarning ] session "CONVERT warnings follow expression order"
 
+              let session, _ = handle session "SELECT CAST('x' AS CHAR CHARACTER SET utf8mb3)"
+              expectWarnings [ utf8mb3Warning ] session "CAST charset deprecation"
+
           testCase "AES result metadata remains binary when LIMIT 0 returns no rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -2829,6 +2832,31 @@ let tests =
               | session, ResultSet(_, []) ->
                   Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeBlob ] "binary type"
               | _, other -> failtestf "expected an empty AES result, got %A" other
+
+          testCase "charset CAST reports its text result width"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql =
+                  "SELECT CAST('Привет' AS CHAR CHARACTER SET cp1251) AS v, CAST('éx' AS CHAR(1) CHARACTER SET latin1) AS w"
+              match handle session sql with
+              | session, ResultSet(_, _) ->
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeVarString; TypeVarString ]
+                      "MySQL uses variable text metadata"
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.ColumnLength)
+                      [ 24u; 4u ]
+                      "unbounded and explicit lengths follow the connection charset"
+                  match prepareStatementForSession session sql with
+                  | Ok(statement, parameterCount) ->
+                      let _, columns = preparedMetadata session statement parameterCount
+                      Expect.equal
+                          (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.ColumnLength))
+                          [ TypeVarString, 24u; TypeVarString, 4u ]
+                          "prepared metadata retains the same result widths"
+                  | Error error -> failtestf "expected charset CAST to prepare, got %A" error
+              | _, other -> failtestf "expected charset CAST result, got %A" other
 
           testCase "TIME functions infer MySQL fractional precision metadata"
           <| fun _ ->

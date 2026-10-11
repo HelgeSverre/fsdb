@@ -31,6 +31,7 @@ let private reportCharsetConversions statement =
         | FuncCall(name, [ _; Lit(VString charset) ])
             when name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase) ->
             reportCharsetDeprecation charset
+        | CastCharset(_, _, charset) -> reportCharsetDeprecation charset
         | _ -> ())
 
 /// Syntax warnings belong to submission or preparation, not row evaluation.

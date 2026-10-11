@@ -246,6 +246,9 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
     | Cast(value, TBigInt true) -> sprintf "cast(%s as unsigned)" (render value)
     | Cast(value, TBigInt false) -> sprintf "cast(%s as signed)" (render value)
     | Cast(value, target) -> sprintf "cast(%s as %s)" (render value) (columnType target)
+    | CastCharset(value, length, charset) ->
+        let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
+        sprintf "cast(%s as char%s character set %s)" (render value) width charset
     | BinaryCast value -> sprintf "binary (%s)" (render value)
     | Collate(value, collation) -> sprintf "(%s collate %s)" (render value) collation
     | Star qualifier -> (qualifier |> Option.map (quoteIdentifier >> fun value -> value + ".") |> Option.defaultValue "") + "*"

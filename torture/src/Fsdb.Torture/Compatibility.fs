@@ -1013,6 +1013,21 @@ module ContractCatalog =
                        "SELECT HEX(CONVERT(CONVERT('é' USING latin1) USING binary)), HEX(CONVERT(CONVERT('€' USING latin1) USING binary)), HEX(CONVERT(CONVERT('☃' USING latin1) USING binary)), HEX(CONVERT(CONVERT('Привет' USING cp1251) USING binary))"
                    |> Contract.comparingValues
                yield Contract.query "convert-text-source-binary-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield
+                   Contract.query
+                       "cast-char-charset-text"
+                       "SELECT HEX(CAST('é' AS CHAR CHARACTER SET latin1)), HEX(CONVERT(CAST('é' AS CHAR CHARACTER SET latin1) USING binary)), CHARSET(CAST('é' AS CHAR CHARACTER SET latin1)), COLLATION(CAST('é' AS CHAR CHARACTER SET latin1)), HEX(CAST(0xE9 AS CHAR CHARACTER SET latin1)), HEX(CAST('Привет' AS CHAR CHARACTER SET cp1251))"
+                   |> Contract.comparingValues
+               yield Contract.query "cast-char-charset-text-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield
+                   Contract.query "cast-char-charset-invalid" "SELECT HEX(CAST(0xFF AS CHAR CHARACTER SET utf8mb4))"
+                   |> Contract.comparingValues
+               yield Contract.query "cast-char-charset-invalid-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield
+                   Contract.query "cast-char-charset-width" "SELECT HEX(CAST('éx' AS CHAR(1) CHARACTER SET latin1))"
+                   |> Contract.comparingValues
+               yield Contract.query "cast-char-charset-width-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "cast-char-charset-metadata" "SELECT CAST('Привет' AS CHAR CHARACTER SET cp1251) AS v, CAST('éx' AS CHAR(1) CHARACTER SET latin1) AS w"
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

@@ -96,6 +96,18 @@ let tests =
               | Select { Projections = [ { Expression = BinaryCast(Cast(Col "value", _)) } ] } -> ()
               | statement -> failtestf "expected a binary charset conversion, got %A" statement
 
+              for sql, width in
+                  [ "CAST(value AS CHAR CHARACTER SET latin1)", None
+                    "CAST(value AS CHAR(2) CHARACTER SET latin1)", Some 2 ] do
+                  match Fsdb.Parser.parseExpression sql with
+                  | Ok(CastCharset(Col "value", actualWidth, "latin1") as expression) ->
+                      Expect.equal actualWidth width "explicit width survives parsing"
+                      Expect.equal
+                          (Fsdb.Parser.parseExpression (SqlText.expression expression))
+                          (Ok expression)
+                          "charset cast round-trips through SQL rendering"
+                  | other -> failtestf "expected a charset cast for %s, got %A" sql other
+
 
           testList
               "expression traversal"

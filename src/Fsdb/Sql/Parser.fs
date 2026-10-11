@@ -1640,18 +1640,18 @@ let private windowCallAtom: Parser<Expr, unit> =
 /// `CAST(expr AS type)` — `SIGNED`/`UNSIGNED [INTEGER]` are only valid as a
 /// cast target, not a column type, so they're handled here rather than in
 /// `columnType`.
-let private castTargetType: Parser<ColumnType, unit> =
+let private castTargetType: Parser<ColumnType * int option, unit> =
     choice
-        [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% TBigInt false
+        [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% (TBigInt false, None)
           // `UNSIGNED` names the 64-bit unsigned domain, not `INT UNSIGNED`:
           // `CAST(-1 AS UNSIGNED)` is 18446744073709551615, and
           // `CAST(x AS SIGNED)` likewise round-trips the full BIGINT range.
-          attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% TBigInt true
-          columnType ]
+          attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% (TBigInt true, None)
+          keyword "CHAR" >>. opt widthLen |>> (fun width -> TChar(defaultArg width 1), width)
+          columnType |>> (fun target -> target, None) ]
 
-/// `CAST(x AS CHAR CHARACTER SET cs)` — strings are Unicode internally, so
-/// the charset is parsed and dropped, except `binary`, which MySQL defines
-/// as equivalent to `CAST(x AS BINARY)` and retains as a binary conversion.
+/// `CAST(x AS CHAR CHARACTER SET cs)` retains the requested charset through
+/// the same conversion path as `CONVERT(x USING cs)`.
 let private castCharsetClause: Parser<string, unit> =
     (keyword "CHARACTER" >>. keyword "SET" >>. identifier) <|> (keyword "CHARSET" >>. identifier)
 
@@ -1661,11 +1661,15 @@ let private castExpr: Parser<Expr, unit> =
         .>>. opt castCharsetClause
         .>> sym ")"
     )
-    |>> fun ((e, target), charset) ->
+    |>> fun ((e, (target, explicitLength)), charset) ->
         let cast = Cast(e, target)
 
         match charset with
         | Some cs when cs.ToLowerInvariant() = "binary" -> BinaryCast cast
+        | Some cs ->
+            match target with
+            | TChar _ -> CastCharset(e, explicitLength, cs)
+            | _ -> cast
         | _ -> cast
 
 let private existsExpr: Parser<Expr, unit> =

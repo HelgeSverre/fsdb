@@ -1345,6 +1345,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     | Distinct value
                     | OrderBy(value, _)
                     | Cast(value, _)
+                    | CastCharset(value, _, _)
                     | Expression.CollationOverride(value, _)
                     | AssignUserVariable(_, value) -> simplePredicate value
                     | In(value, candidates) -> simplePredicate value && candidates |> List.forall simplePredicate
@@ -2408,6 +2409,9 @@ let rec internal exprLabel (expr: Expr) : string =
         sprintf "%s %s %s (...)" (expressionLabelFragment e) (opSymbol op) quantifierName
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (expressionLabelFragment e) (expressionLabelFragment lo) (expressionLabelFragment hi)
     | Cast(e, _) -> sprintf "cast(%s as ...)" (expressionLabelFragment e)
+    | CastCharset(e, length, charset) ->
+        let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
+        sprintf "cast(%s as char%s character set %s)" (expressionLabelFragment e) width charset
     | BinaryCast e | Collate(e, _) -> exprLabel e
     | Distinct e -> sprintf "distinct %s" (expressionLabelFragment e)
     | OrderBy(e, _) -> exprLabel e
@@ -3020,6 +3024,7 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
     | Cast(_, TFloat _) -> Some 6
     | Cast(source, TChar _)
     | Cast(source, TVarchar _) -> fspOfExpr ctx source
+    | CastCharset(source, _, _) -> fspOfExpr ctx source
     | Cast(_, ty) -> fspOfType ty
     | ApproximateLiteral _
     | Lit(VDouble _) -> Some 6
@@ -3799,6 +3804,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | Lit(VJson _) -> named "utf8mb4_bin" 4
     | Lit _ | ApproximateLiteral _ -> named "binary" 5
     | Cast(_, (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _)) -> Ok(connection 2)
+    | CastCharset(_, _, charset) -> named (Collation.defaultNameForCharset charset) 2
     | Cast(_, TJson) -> named "utf8mb4_bin" 2
     | Cast(_, (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob | TBit _)) -> named "binary" 2
     | Cast _ -> named "binary" 5
@@ -4982,6 +4988,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
     | Distinct value
     | OrderBy(value, _)
     | Cast(value, _)
+    | CastCharset(value, _, _)
     | BinaryCast value | Collate(value, _) -> isStatementStableExpr store registry dbName scope value
     | Like(value, pattern, _, _)
     | Regexp(value, pattern) -> every [ value; pattern ]
@@ -5755,6 +5762,22 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | Some error -> Error error
         | None -> eval e
     | BinaryCast e -> eval e
+    | CastCharset(e, length, charset) ->
+        eval (FuncCall("CONVERT", [ e; Lit(VString charset) ]))
+        |> Result.map (fun converted ->
+            match converted, length with
+            | VEncodedString(source, bytes), Some limit ->
+                let offsets = Charset.characterByteOffsets source bytes
+                if offsets.Length - 1 > limit then
+                    Diagnostics.warning
+                        1292
+                        (sprintf
+                            "Truncated incorrect CHAR(%d) value: '%s'"
+                            limit
+                            (Value.toText converted |> Option.defaultValue ""))
+                    VEncodedString(source, bytes.[0 .. offsets.[limit] - 1])
+                else converted
+            | _ -> converted)
     | Cast(e, ((TChar _ | TVarchar _ | TBinary _ | TVarBinary _) as ty))
         when (tryColumnDefForExpr ctx e |> Option.bind _.NumericDisplay |> Option.exists _.ZeroFill)
              || (let format = outputFormatOfExpr ctx e
@@ -6731,6 +6754,10 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         |> Option.filter (hasMetadataFlag NotNullFlag)
         |> Option.map (fun _ -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
         |> Option.orElse (Some metadata)
+    | CastCharset(value, length, charset) ->
+        let characters = length |> Option.defaultWith (fun () -> characterBound value)
+        withCollation (Cast(value, TChar characters)) (Collation.defaultNameForCharset charset)
+        |> Option.map (fun metadata -> { metadata with TypeId = TypeVarString })
     | BinaryCast inner -> withCollation inner "binary"
     | Collate(inner, collation) -> withCollation inner collation
     | Distinct inner
@@ -10979,6 +11006,7 @@ and private tryMergeDirectView
         | Distinct value
         | OrderBy(value, _)
         | Cast(value, _)
+        | CastCharset(value, _, _)
         | Expression.CollationOverride(value, _) -> mergeablePredicate value
         | In(value, candidates) -> mergeablePredicate value && candidates |> List.forall mergeablePredicate
         | Between(value, lower, upper) ->
@@ -15297,6 +15325,7 @@ and private rewriteAggregateValues
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
+    | CastCharset(e, length, charset) -> sub e |> Result.map (fun e' -> CastCharset(e', length, charset))
     | BinaryCast e -> sub e |> Result.map BinaryCast
     | Collate(e, name) -> sub e |> Result.map (fun e' -> Collate(e', name))
     | Case(subject, whens, elseBranch) ->
@@ -15382,6 +15411,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
+    | CastCharset(e, length, charset) -> sub e |> Result.map (fun e' -> CastCharset(e', length, charset))
     | BinaryCast e -> sub e |> Result.map BinaryCast
     | Collate(e, name) -> sub e |> Result.map (fun e' -> Collate(e', name))
     | Case(subject, whens, elseBranch) ->
@@ -22262,6 +22292,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | Distinct expression
         | OrderBy(expression, _)
         | Cast(expression, _)
+        | CastCharset(expression, _, _)
         | Expression.CollationOverride(expression, _)
         | AssignUserVariable(_, expression) -> references expression
         | In(expression, candidates) -> references expression @ (candidates |> List.collect references)

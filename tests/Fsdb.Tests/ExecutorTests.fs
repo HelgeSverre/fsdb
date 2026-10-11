@@ -1137,6 +1137,37 @@ let tests =
                     | ResultSet(_, [ [ Some "E9"; Some "80"; Some "3F"; Some "CFF0E8E2E5F2" ] ]) -> ()
                     | other -> failtestf "expected target charset bytes from nested text conversion, got %A" other
 
+                testCase "CAST AS CHAR CHARACTER SET retains charset bytes and metadata"
+                <| fun _ ->
+                    let store = newStore ()
+                    let sql =
+                        "SELECT HEX(CAST('é' AS CHAR CHARACTER SET latin1)), HEX(CONVERT(CAST('é' AS CHAR CHARACTER SET latin1) USING binary)), CHARSET(CAST('é' AS CHAR CHARACTER SET latin1)), COLLATION(CAST('é' AS CHAR CHARACTER SET latin1)), HEX(CAST(0xE9 AS CHAR CHARACTER SET latin1)), HEX(CAST('Привет' AS CHAR CHARACTER SET cp1251))"
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "E9"; Some "E9"; Some "latin1"; Some "latin1_swedish_ci"; Some "E9"; Some "CFF0E8E2E5F2" ] ]) -> ()
+                    | other -> failtestf "expected MySQL CAST charset identity, got %A" other
+
+                    let invalid, invalidWarnings =
+                        Fsdb.Diagnostics.capture (fun () ->
+                            runDefault store "SELECT HEX(CAST(0xFF AS CHAR CHARACTER SET utf8mb4))")
+                    match invalid with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected invalid UTF-8 CAST to return NULL, got %A" other
+                    Expect.equal
+                        (invalidWarnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1300, "Invalid utf8mb4 character string: 'FF'" ]
+                        "invalid raw bytes warn once"
+
+                    let truncated, truncatedWarnings =
+                        Fsdb.Diagnostics.capture (fun () ->
+                            runDefault store "SELECT HEX(CAST('éx' AS CHAR(1) CHARACTER SET latin1))")
+                    match truncated with
+                    | ResultSet(_, [ [ Some "E9" ] ]) -> ()
+                    | other -> failtestf "expected one-character CAST result, got %A" other
+                    Expect.equal
+                        (truncatedWarnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1292, "Truncated incorrect CHAR(1) value: 'éx'" ]
+                        "explicit CHAR width warns on truncation"
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

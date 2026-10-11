@@ -217,6 +217,7 @@ let private inferParameters
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
             | Cast(_, TTime _) -> Some(ColumnWire.parameterMetadataOfType(TDateTime 6))
             | Cast(_, ty) -> Some(ColumnWire.parameterMetadataOfType ty)
+            | CastCharset(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))
             | BinaryCast inner
             | Collate(inner, _)
             | Distinct inner
@@ -301,6 +302,8 @@ let private inferParameters
             inferExpected (Some generic) pattern
         | Cast(inner, TTime _) -> inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TDateTime 6))) InheritType inner
         | Cast(inner, ty) -> inferExpression scope (Some(ColumnWire.parameterMetadataOfType ty)) InheritType inner
+        | CastCharset(inner, length, _) ->
+            inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))) InheritType inner
         | FuncCall(name, values) when
             (name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
              || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase)
