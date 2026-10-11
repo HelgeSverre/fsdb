@@ -3456,6 +3456,29 @@ let tests =
                       "mixed textual expressions remain non-null"
               | Error error -> failtestf "expected builtin statement to prepare, got %A" error
 
+          testCase "interval arithmetic keeps temporal result metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE interval_metadata (d DATE, dt DATETIME)"
+              let session, _ = handle session "INSERT INTO interval_metadata VALUES ('2031-12-14','1983-10-09 21:59:01')"
+              let sql =
+                  "SELECT d + INTERVAL 1 YEAR AS date_plus_year, "
+                  + "d + INTERVAL 90 MINUTE AS date_plus_minutes, "
+                  + "dt - INTERVAL 2 DAY AS datetime_minus_days FROM interval_metadata"
+              let session, result = handle session sql
+              Expect.equal result
+                  (ResultSet(
+                      [ "date_plus_year"; "date_plus_minutes"; "datetime_minus_days" ],
+                      [ [ Some "2032-12-14"; Some "2031-12-14 01:30:00"; Some "1983-10-07 21:59:01" ] ]))
+                  "interval arithmetic values"
+              let expectedTypes = [ TypeDate; TypeDateTime; TypeDateTime ]
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) expectedTypes "text result types"
+              match prepareStatementForSession session sql with
+              | Ok(statement, parameterCount) ->
+                  let _, columns = preparedMetadata session statement parameterCount
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId)) expectedTypes "prepared result types"
+              | Error error -> failtestf "expected interval statement to prepare, got %A" error
+
           testCase "typed geometry constructors share prepared metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

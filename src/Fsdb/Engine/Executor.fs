@@ -6480,6 +6480,8 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                     { metadata with
                         TypeId = if promoted then TypeNewDecimal else TypeLongLong
                         ColumnLength = max 2u length })
+    | BinOp((Add | Sub | SignedSub), left, (NamedFunction "INTERVAL" _ as interval)) ->
+        dateArithmetic expr left interval
     | BinOp((Add | Sub | SignedSub as operator), left, right) ->
         numeric arithmeticUnsignedResult (fun left right ->
             let shape = combinedDecimalShape left right

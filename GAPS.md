@@ -655,8 +655,10 @@ generic state-change tracker and transaction state/characteristics when enabled.
 Physical result columns report primary, unique, composite, and non-unique key
 membership consistently across queries, prepared statements, `COM_FIELD_LIST`,
 and `HANDLER`. Prepared descriptors derive schema, operator, aggregate,
-overloaded scalar, temporal, JSON, spatial, and registered-extension result
-families without evaluating the statement. Typed numeric builtin and cast
+overloaded scalar, temporal (including
+[interval arithmetic operators](torture/findings/2026-10-11-interval-arithmetic-metadata.md)),
+JSON, spatial, and registered-extension result families without evaluating the
+statement. Typed numeric builtin and cast
 arguments are coerced before expression evaluation for both protocol and SQL
 prepared statements. `LIMIT` and `OFFSET` retain MySQL's distinct binary-
 protocol and SQL user-variable validation rules.
