@@ -6,6 +6,7 @@ open NetTopologySuite.IO
 open NetTopologySuite.Operation.Buffer
 open NetTopologySuite.Operation.Overlay
 open NetTopologySuite.Operation.OverlayNG
+open NetTopologySuite.Operation.RelateNG
 open Fsdb.SpatialReferenceSystems
 open Fsdb.Value
 
@@ -567,13 +568,13 @@ let internal geometryCrossesPlanar first second =
     if first.IsEmpty || second.IsEmpty then None
     else
         match int first.Dimension, int second.Dimension with
-        | 0, 1 | 0, 2 | 1, 1 | 1, 2 -> Some(first.Crosses second)
+        | 0, 1 | 0, 2 | 1, 1 | 1, 2 -> Some(RelateNG.Relate(first, second, RelatePredicate.Crosses()))
         | _ -> None
 
 let internal geometryOverlapsPlanar first second =
     let first, second = toNts first, toNts second
     if first.IsEmpty || second.IsEmpty || first.Dimension <> second.Dimension then None
-    else Some(first.Overlaps second)
+    else Some(RelateNG.Relate(first, second, RelatePredicate.Overlaps()))
 
 let private fromNts srid (geometry: NetTopologySuite.Geometries.Geometry) =
     if geometry.IsEmpty then

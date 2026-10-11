@@ -3053,6 +3053,10 @@ module ContractCatalog =
                    "SELECT ST_Crosses(ST_GeomFromText('LINESTRING(0 0,0 2)'), ST_GeomFromText('LINESTRING(-1 1,1 1)')), ST_Overlaps(ST_GeomFromText('LINESTRING(0 0,0 2)'), ST_GeomFromText('LINESTRING(0 1,0 3)')), ST_Crosses(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))'), ST_GeomFromText('POLYGON((2 2,2 6,6 6,6 2,2 2))')), ST_Overlaps(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))'), ST_GeomFromText('POLYGON((2 2,2 6,6 6,6 2,2 2))'))"
                |> Contract.comparingValues
                Contract.query
+                   "planar-collection-crosses"
+                   "SELECT ST_Crosses(ST_GeomFromText('GEOMETRYCOLLECTION(POINT(0 1),LINESTRING(2 0,2 2))'), ST_GeomFromText('LINESTRING(0 0,0 2)')), ST_Overlaps(ST_GeomFromText('GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(-1 1,4 1))'), ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0))')), ST_Crosses(ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), ST_GeomFromText('LINESTRING(0 0,0 2)'))"
+               |> Contract.comparingValues
+               Contract.query
                    "geographic-line-near-miss"
                    "SELECT ROUND(ST_Distance(ST_GeomFromText('LINESTRING(50 0,50 10)',4326), ST_GeomFromText('LINESTRING(50.10784 5,51 5)',4326)), 2)"
                |> Contract.comparingValues

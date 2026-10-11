@@ -14780,7 +14780,10 @@ let tests =
                           "LINESTRING(0 0,0 2)", "LINESTRING(0 1,0 3)", [ Some "0"; Some "0"; Some "1"; Some "1" ]
                           "LINESTRING(-1 1,4 1)", "POLYGON((0 0,0 3,3 3,3 0,0 0))", [ Some "1"; None; None; None ]
                           "POLYGON((0 0,0 4,4 4,4 0,0 0))", "POLYGON((2 2,2 6,6 6,6 2,2 2))", [ None; None; Some "1"; Some "1" ]
-                          "MULTIPOINT((0 0),(1 1))", "MULTIPOINT((1 1),(2 2))", [ None; None; Some "1"; Some "1" ] ]
+                          "MULTIPOINT((0 0),(1 1))", "MULTIPOINT((1 1),(2 2))", [ None; None; Some "1"; Some "1" ]
+                          "GEOMETRYCOLLECTION EMPTY", "LINESTRING(0 0,0 2)", [ None; None; None; None ]
+                          "GEOMETRYCOLLECTION(POINT(0 1),LINESTRING(2 0,2 2))", "LINESTRING(0 0,0 2)", [ Some "1"; Some "1"; Some "0"; Some "0" ]
+                          "GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(-1 1,4 1))", "POLYGON((0 0,0 3,3 3,3 0,0 0))", [ Some "1"; None; None; None ] ]
                     for firstText, secondText, expected in cases do
                         let first = sprintf "ST_GeomFromText('%s')" firstText
                         let second = sprintf "ST_GeomFromText('%s')" secondText
