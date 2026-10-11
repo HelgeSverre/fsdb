@@ -41,6 +41,11 @@ instead produce DATETIME values based on the current date. Composite
 For those day-or-larger intervals, TIME is an offset from today's date:
 `25:30:00 + INTERVAL 1 DAY` is 49 hours after `CURDATE()`, and
 `-01:00:00 + INTERVAL 1 DAY` is 23 hours after it. Both return DATETIME.
+MySQL takes that date from the session time zone. With `time_zone='-12:00'`,
+`12:00:00 + INTERVAL 1 DAY` is 36 hours after that session's `CURDATE()`;
+the same rule holds for `DATE_ADD`. Fsdb now uses the session date for both
+forms, rather than the host's local date. Tests cover both `-12:00` and
+`+14:00`, so a host-local implementation fails regardless of the host zone.
 
 Fsdb previously converted all of those TIME operands through today's
 DATETIME. It now preserves the original TIME for subday units and carries

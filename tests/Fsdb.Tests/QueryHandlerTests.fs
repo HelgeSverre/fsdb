@@ -3524,6 +3524,16 @@ let tests =
                   (ResultSet([ "over_day_hours"; "negative_hours" ], [ [ Some "49"; Some "23" ] ]))
                   "extended TIME values carry into DATETIME arithmetic"
 
+              for zone in [ "-12:00"; "+14:00" ] do
+                  let zonedSession, _ = handle session (sprintf "SET time_zone='%s'" zone)
+                  let _, zoned =
+                      handle zonedSession
+                          ("SELECT TIMESTAMPDIFF(HOUR,CURDATE(),CAST('12:00:00' AS TIME)+INTERVAL 1 DAY) AS op_hours, "
+                           + "TIMESTAMPDIFF(HOUR,CURDATE(),DATE_ADD(CAST('12:00:00' AS TIME), INTERVAL 1 DAY)) AS fn_hours")
+                  Expect.equal zoned
+                      (ResultSet([ "op_hours"; "fn_hours" ], [ [ Some "36"; Some "36" ] ]))
+                      (sprintf "TIME day arithmetic follows session time zone %s" zone)
+
               let session, microseconds =
                   handle session "SELECT CAST('12:34:56.123456' AS TIME(6)) + INTERVAL 1 MICROSECOND AS result"
               Expect.equal microseconds (ResultSet([ "result" ], [ [ Some "12:34:56.123457" ] ])) "microsecond arithmetic"

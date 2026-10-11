@@ -428,7 +428,11 @@ let private expressionVariablesFor (session: Session) (userVariables: Map<string
                 match lookupAtRef session "@@" scope name with
                 | Some value -> Ok(systemVariableValue name value)
                 | None -> Error(1193, sprintf "Unknown system variable '%s'" name)
-      MaxUserVariables = maxUserVariables }
+      MaxUserVariables = maxUserVariables
+      TimeZone =
+        sessionValue session "time_zone"
+        |> Option.bind (TimeZones.resolve session.Store)
+        |> Option.defaultValue Temporal.SystemTimeZone }
 
 let private expressionVariables (session: Session) = expressionVariablesFor session session.UserVariables
 

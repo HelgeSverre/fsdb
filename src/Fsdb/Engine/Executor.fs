@@ -84,7 +84,8 @@ type private EvalError = int * string
 type VariableContext =
     { UserVariables: Map<string, Value> ref
       ReadSystemVariable: string -> string -> Result<Value option, int * string>
-      MaxUserVariables: int }
+      MaxUserVariables: int
+      TimeZone: SqlTimeZone }
 
 type RoutineVariable =
     { Column: ColumnDef
@@ -718,7 +719,8 @@ let private cacheExaminedRows rows =
     | Some _ -> rows |> trackExaminedRows |> Seq.cache
 
 let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
-    DynamicScope.withValue variableContext (Some variables) body
+    DynamicScope.withValue variableContext (Some variables) (fun () ->
+        Functions.withIntervalTimeZone variables.TimeZone body)
 
 let withRoutineVariables (variables: Map<string, RoutineVariable>) (body: unit -> 'a) : 'a =
     DynamicScope.withValue routineVariables (Some(ref variables)) body

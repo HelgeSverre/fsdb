@@ -12,6 +12,7 @@ open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Text.RegularExpressions
+open System.Threading
 open NJsonSchema
 open NJsonSchema.Validation
 open Fsdb.Ast
@@ -26,6 +27,11 @@ type Scalar = Value list -> Value
 
 /// An extension-function failure with an explicit MySQL error code.
 exception SqlError of code: int * message: string
+
+let private intervalTimeZone = AsyncLocal<SqlTimeZone option>()
+
+let withIntervalTimeZone zone body =
+    DynamicScope.withValue intervalTimeZone (Some zone) body
 
 /// Statement context supplied to registered scalar functions.
 /// `Cancellation` is signalled when the client disconnects or is killed.
@@ -2326,7 +2332,9 @@ let private applyDateInterval (sign: float) (dateV: Value) (amount: float) (unit
         let dateTime =
             match dateV with
             | VTime value ->
-                try Some(DateTime.Today.AddTicks(timeTicks value))
+                let zone = intervalTimeZone.Value |> Option.defaultValue SystemTimeZone
+                let today = (sqlTimeZoneFromUtc zone DateTime.UtcNow).Date
+                try Some(today.AddTicks(timeTicks value))
                 with :? ArgumentOutOfRangeException -> None
             | _ -> tryDateTimeValue dateV
         match dateTime |> Option.bind (fun dt -> tryAddInterval dt (sign * amount) unit) with
