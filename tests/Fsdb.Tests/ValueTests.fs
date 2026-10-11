@@ -3098,6 +3098,28 @@ let tests =
                           Expect.throws
                               (fun () -> call "REGEXP_LIKE" [ VString " "; VString "\\p{gc=White_Space}"; VString "c" ] |> ignore)
                               "White_Space is not a general category"
+                      testCase "REGEXP ASCII and Basic Latin property aliases match MySQL"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "\\p{ASCII}", "A", 1L
+                                "\\p{ASCII}", "é", 0L
+                                "\\P{ASCII}", "é", 1L
+                                "\\P{ASCII}", "😀", 1L
+                                "\\p{blk=Basic_Latin}", "A", 1L
+                                "\\p{Block=Basic_Latin}", "é", 0L
+                                "\\p{InBasicLatin}", "A", 1L
+                                "[\\p{ASCII}]", "A", 1L
+                                "[\\P{ASCII}]", "é", 1L
+                                "[A\\P{ASCII}]", "é", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+
+                          for pattern in [ "\\p{Basic_Latin}"; "\\p{IsBasicLatin}"; "\\p{gc=ASCII}" ] do
+                              Expect.throws
+                                  (fun () -> call "REGEXP_LIKE" [ VString "A"; VString pattern; VString "c" ] |> ignore)
+                                  (sprintf "%s is not an ICU property spelling" pattern)
                       testCase "REGEXP negated POSIX classes include line terminators"
                       <| fun _ ->
                           for pattern, value, expected in

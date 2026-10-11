@@ -121,7 +121,10 @@ let private unicodeCategoryAliases =
     |> List.collect (fun (name, category) -> [ name, category; category.ToUpperInvariant(), category ])
     |> Map.ofList
 
-let private unicodePropertyAt (pattern: string) index =
+let private basicLatinAliases =
+    set [ "ASCII"; "BLK=BASIC_LATIN"; "BLOCK=BASIC_LATIN"; "INBASICLATIN" ]
+
+let private unicodePropertyNameAt (pattern: string) index =
     if index + 3 >= pattern.Length
        || (pattern[index + 1] <> 'p' && pattern[index + 1] <> 'P')
        || pattern[index + 2] <> '{' then
@@ -129,19 +132,29 @@ let private unicodePropertyAt (pattern: string) index =
     else
         let closing = pattern.IndexOf('}', index + 3)
         if closing < 0 then None
-        else
-            let name = pattern.Substring(index + 3, closing - index - 3).ToUpperInvariant()
-            let categoryName =
-                if name.StartsWith("GC=", StringComparison.Ordinal) then name.Substring(3)
-                elif name.StartsWith("GENERAL_CATEGORY=", StringComparison.Ordinal) then name.Substring(17)
-                else name
-            let translated =
-                if name = "WHITE_SPACE" then
-                    Some(if pattern[index + 1] = 'p' then "\\s" else "\\S")
-                else
-                    Map.tryFind categoryName unicodeCategoryAliases
-                    |> Option.map (fun category -> "\\" + string pattern[index + 1] + "{" + category + "}")
-            translated |> Option.map (fun property -> closing + 1, property)
+        else Some(closing + 1, pattern.Substring(index + 3, closing - index - 3).ToUpperInvariant())
+
+let private rejectedUnicodePropertyAt pattern index =
+    unicodePropertyNameAt pattern index
+    |> Option.exists (fun (_, name) -> name = "ISBASICLATIN")
+
+let private unicodePropertyAt (pattern: string) index =
+    match unicodePropertyNameAt pattern index with
+    | None -> None
+    | Some(nextIndex, name) ->
+        let categoryName =
+            if name.StartsWith("GC=", StringComparison.Ordinal) then name.Substring(3)
+            elif name.StartsWith("GENERAL_CATEGORY=", StringComparison.Ordinal) then name.Substring(17)
+            else name
+        let translated =
+            if name = "WHITE_SPACE" then
+                Some(if pattern[index + 1] = 'p' then "\\s" else "\\S")
+            elif Set.contains name basicLatinAliases then
+                Some("\\" + string pattern[index + 1] + "{IsBasicLatin}")
+            else
+                Map.tryFind categoryName unicodeCategoryAliases
+                |> Option.map (fun category -> "\\" + string pattern[index + 1] + "{" + category + "}")
+        translated |> Option.map (fun property -> nextIndex, property)
 
 let private mixedNegatedClassAt (pattern: string) start =
     let outerNegated = start + 1 < pattern.Length && pattern[start + 1] = '^'
@@ -157,6 +170,7 @@ let private mixedNegatedClassAt (pattern: string) start =
             ordinary.Append literal |> ignore
             index <- nextIndex
         elif pattern[index] = '\\' && index + 1 < pattern.Length then
+            invalidMember <- invalidMember || rejectedUnicodePropertyAt pattern index
             match unicodePropertyAt pattern index with
             | Some(nextIndex, property) ->
                 if pattern[index + 1] = 'P' then alternatives.Add("[" + property + "]")
@@ -224,6 +238,7 @@ let private normalizePosixClasses (pattern: string) =
                 builder.Append 'E' |> ignore
                 index <- index + 2
             else
+                invalid <- invalid || rejectedUnicodePropertyAt pattern index
                 match unicodePropertyAt pattern index with
                 | Some(nextIndex, category) ->
                     builder.Append category |> ignore
