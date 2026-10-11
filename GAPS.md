@@ -847,6 +847,10 @@ same-process fixture; separate parser and pre-parsed executor actions take
 about 26 and 13 µs. The warmed text handler reuses a cached AST, so its
 per-call cost excludes standalone parsing. Statement handling and execution,
 plus a separate prepared-result profile, are the next measured targets.
+A [same-fixture reused prepared profile](benchmarks/results/2026-10-11-prepared-point-lookup.md)
+puts cached text and prepared handling near 50 and 47 µs per call, with about
+109 and 116 KiB allocated. The small latency difference is noisy; both paths
+need an allocation profile before a runtime change is justified.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes

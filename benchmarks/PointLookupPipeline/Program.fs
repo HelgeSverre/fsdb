@@ -4,6 +4,7 @@ open System
 open System.Diagnostics
 open Fsdb
 open Fsdb.Executor
+open Fsdb.Value
 
 [<EntryPoint>]
 let main _ =
@@ -58,7 +59,7 @@ let main _ =
 
     printfn "case,iterations,elapsed_ms,allocated_bytes"
 
-    let actions =
+    let textActions =
         [ for name, sql in cases do
             let statement =
                 match Parser.parse sql with
@@ -77,11 +78,24 @@ let main _ =
             yield name + "-executor", executor
             yield name + "-handler", handler ]
 
+    let preparedSql = "SELECT id FROM lookup_profile WHERE id=?"
+    let preparedSession, preparedResult = QueryHandler.prepareStatementWithDiagnostics session preparedSql
+    session <- preparedSession
+    let prepared =
+        match preparedResult with
+        | Ok(ast, count) -> QueryHandler.createPreparedStatement session preparedSql ast count
+        | Error(code, message) -> failwithf "prepare failed with %d: %s" code message
+    let preparedHandler () =
+        let next, result = QueryHandler.executePrepared session prepared [ VInt 3L ]
+        session <- next
+        result |> verify
+    let actions = textActions @ [ "fixed-prepared-handler", preparedHandler ]
+
     let measuredActions =
         actions |> List.filter (fun (name, _) ->
             match Environment.GetEnvironmentVariable "FSDB_PROFILE_ACTION" with
             | null -> true
-            | selected -> selected = name)
+            | selected -> selected.Split(',') |> Array.contains name)
 
     for _, action in measuredActions do
         for _ in 1 .. 1_000 do action ()
