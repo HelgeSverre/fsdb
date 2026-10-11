@@ -244,8 +244,10 @@ or locking retain the general SELECT pipeline.
 integer arguments as binary bytes instead of Unicode characters, including
 audited 32-bit wrap, half rounding, NULL skipping, and downstream high-byte
 TIME warnings. Audited text arguments use an integer prefix, preserve
-argument-order warnings, and clamp signed/unsigned overflow; byte-string
-high-byte diagnostics, `CHAR(... USING charset)`, and unusual source domains
+argument-order warnings, and clamp signed/unsigned overflow. `CHAR(... USING
+charset)` now interprets those bytes in the selected charset, retaining its
+coercibility and audited invalid-byte diagnostics; byte-string high-byte
+diagnostics and unusual source domains
 remain open.
 
 | Missing family | Functions | Impact |

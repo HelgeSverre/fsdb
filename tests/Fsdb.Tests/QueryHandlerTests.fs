@@ -3337,6 +3337,30 @@ let tests =
                       "CHAR text overflow warnings"
               | _, result -> failtestf "expected CHAR text-overflow results, got %A" result
 
+          testCase "CHAR USING interprets assembled bytes in the requested charset"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT HEX(CHAR(0xC3,0xA9 USING utf8mb4)),CHARSET(CHAR(0xC3,0xA9 USING utf8mb4)),COLLATION(CHAR(0xC3,0xA9 USING utf8mb4)),COERCIBILITY(CHAR(0xC3,0xA9 USING utf8mb4)),CHAR_LENGTH(CHAR(0xC3,0xA9 USING utf8mb4))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "C3A9"; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "4"; Some "1" ] "CHAR USING metadata and decoded length"
+                  Expect.isEmpty session.Diagnostics "valid bytes have no warnings"
+              | _, result -> failtestf "expected CHAR USING result, got %A" result
+              let sql = "SELECT HEX(CHAR(0x80 USING ascii)),HEX(CHAR(0xC3 USING utf8mb4)),HEX(CHAR(0xE9 USING latin1))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "80"; None; Some "E9" ] "invalid-byte policies"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1300, "Invalid ascii character string: '80'"
+                        1300, "Invalid utf8mb4 character string: 'C3'" ]
+                      "warnings follow expression order"
+              | _, result -> failtestf "expected CHAR USING invalid-byte result, got %A" result
+              match handle session "SELECT HEX(CHAR(65 USING 'utf8mb4')),HEX(CHAR(65,66 USING utf8mb4)),CHARSET(CHAR(NULL USING utf8mb4))" with
+              | _, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "41"; Some "4142"; Some "utf8mb4" ] "quoted charset, multiple arguments, and NULL"
+              | _, result -> failtestf "expected CHAR USING forms, got %A" result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

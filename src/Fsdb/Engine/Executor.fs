@@ -4059,6 +4059,10 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
         -> Ok(connection 3)
     | FuncCall(name, [ _; Lit(VString charset) ]) when name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase) ->
         named (Collation.defaultNameForCharset charset) 2
+    | FuncCall(name, arguments) when name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase) ->
+        match List.tryLast arguments with
+        | Some(Lit(VString charset)) -> named (Collation.defaultNameForCharset charset) 4
+        | _ -> Ok(connection 4)
     | FuncCall(name, arguments) ->
         match registeredResultCollation ctx name with
         | Some(Functions.InheritArgument index) ->

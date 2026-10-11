@@ -3779,6 +3779,13 @@ let private charFn: Scalar =
         |> Array.concat
         |> VBytes
 
+let private charUsingFn: Scalar =
+    fun args ->
+        match List.rev args with
+        | VString charset :: reversedValues ->
+            convertFn [ charFn (List.rev reversedValues); VString charset ]
+        | _ -> VNull
+
 let internal hexFn: Scalar =
     function
     | [ value ] ->
@@ -6932,6 +6939,7 @@ let private registerStringBuiltins registry =
     |> registerFunctionalByteText FirstByte
     |> registerFunctionalEncodedText FirstCharacterCode
     |> registerScalarResult "CHAR" binaryResult charFn
+    |> registerTextScalar "CHAR_USING" firstArgument charUsingFn
     |> registerByteScalar "HEX" firstArgument (exactArity "HEX" 1 hexFn)
     |> registerFunctionalBinaryString DecodedHex
     |> registerStringScalar "AES_ENCRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesEncrypt "aes-128-ecb")

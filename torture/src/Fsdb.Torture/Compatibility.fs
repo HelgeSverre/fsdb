@@ -1214,6 +1214,16 @@ module ContractCatalog =
                    "SELECT HEX(CHAR('4294967296')),HEX(CHAR('18446744073709551616')),HEX(CHAR('-9223372036854775809'))"
                    |> Contract.comparingValues
                yield Contract.query "char-text-overflow-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-using-valid"
+                   "SELECT HEX(CHAR(0xC3,0xA9 USING utf8mb4)),CHARSET(CHAR(0xC3,0xA9 USING utf8mb4)),COLLATION(CHAR(0xC3,0xA9 USING utf8mb4)),COERCIBILITY(CHAR(0xC3,0xA9 USING utf8mb4)),CHAR_LENGTH(CHAR(0xC3,0xA9 USING utf8mb4))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-using-invalid"
+                   "SELECT HEX(CHAR(0x80 USING ascii)),HEX(CHAR(0xC3 USING utf8mb4)),HEX(CHAR(0xE9 USING latin1))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-using-invalid-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-using-forms"
+                   "SELECT HEX(CHAR(65 USING 'utf8mb4')),HEX(CHAR(65,66 USING utf8mb4)),CHARSET(CHAR(NULL USING utf8mb4))"
+                   |> Contract.comparingValues
                for index, source in
                    [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
                    yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)

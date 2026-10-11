@@ -1424,17 +1424,32 @@ let private distinctArg: Parser<Expr, unit> =
 /// ahead of the generic call grammar (its argument list isn't comma-
 /// separated expressions). Desugars to a `FuncCall("CONVERT", [expr;
 /// charset-name])` that `Functions.convertFn` evaluates.
+let private usingCharsetName = identifier <|> (stringLit |>> (function VString name -> name | _ -> ""))
+
 let private convertUsingAtom: Parser<Expr, unit> =
     attempt (
         keyword "CONVERT"
         >>. between
             (sym "(")
             (sym ")")
-            (expr .>> keyword "USING" .>>. (identifier <|> (stringLit |>> (function VString s -> s | _ -> ""))))
+            (expr .>> keyword "USING" .>>. usingCharsetName)
     )
     >>= fun (e, charset) ->
         match Charset.tryFind charset with
         | Some _ -> preturn (FuncCall("CONVERT", [ e; Lit(VString charset) ]))
+        | None -> raise (SemanticParseError(sprintf "Unknown character set: '%s'" charset))
+
+let private charUsingAtom: Parser<Expr, unit> =
+    attempt (
+        keyword "CHAR"
+        >>. between
+            (sym "(")
+            (sym ")")
+            (sepBy1 expr (sym ",") .>> keyword "USING" .>>. usingCharsetName)
+    )
+    >>= fun (arguments, charset) ->
+        match Charset.tryFind charset with
+        | Some _ -> preturn (FuncCall("CHAR_USING", arguments @ [ Lit(VString charset) ]))
         | None -> raise (SemanticParseError(sprintf "Unknown character set: '%s'" charset))
 
 /// Carries the modifier as a cast node so stored expressions retain an
@@ -1526,7 +1541,7 @@ let private trimAtom: Parser<Expr, unit> =
     )
 
 let private funcCallAtom: Parser<Expr, unit> =
-    choice [ attempt convertUsingAtom; attempt weightStringAtom; trimAtom; rowConstructorAtom; positionAtom; genericFuncCall ]
+    choice [ attempt convertUsingAtom; attempt charUsingAtom; attempt weightStringAtom; trimAtom; rowConstructorAtom; positionAtom; genericFuncCall ]
 
 /// `GROUP_CONCAT([DISTINCT] expr [ORDER BY key [ASC|DESC], ...] [SEPARATOR
 /// 'str'])` — parsed separately from `funcCallAtom` rather than folding

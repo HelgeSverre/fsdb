@@ -22,5 +22,14 @@ unsigned 64-bit maximum, negative overflow to signed 64-bit minimum, each
 with one warning before 32-bit byte assembly. Fsdb now matches those values
 and conditions in focused and differential tests.
 
-Byte-string high-byte diagnostics, `CHAR(... USING charset)`, and the
-remaining unusual numeric source domains are outside this audit.
+`CHAR(... USING charset)` interprets the assembled bytes in that charset.
+For valid UTF-8, `CHAR(0xC3,0xA9 USING utf8mb4)` retains bytes `C3A9`,
+reports `utf8mb4_0900_ai_ci`, has one character, and has coercibility 4.
+Invalid ASCII byte `80` survives with warning 1300; incomplete UTF-8 byte
+`C3` yields NULL with warning 1300. The focused regression and native
+differential contract cover those cases, quoted charset names, multiple
+arguments, and NULL. The implementation shares `CONVERT`'s byte decoding but
+retains CHAR's different coercibility.
+
+Byte-string high-byte diagnostics and the remaining unusual numeric source
+domains are outside this audit.
