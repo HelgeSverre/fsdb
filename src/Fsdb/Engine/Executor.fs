@@ -3102,7 +3102,7 @@ let private decimalCastMaximum precision scale =
     if precision > 28 then None
     else Some(pown 10m (precision - scale) - 1m / pown 10m scale)
 
-let private truncatedDecimalCastInput text =
+let private truncatedNumericCastInput text =
     let prefix = leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue ""
     prefix = "" || not (text.Trim().Equals(prefix, System.StringComparison.Ordinal))
 
@@ -5990,7 +5990,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     Ok VNull
             | TDecimal(precision, scale, _), _ ->
                 match source with
-                | VString text when truncatedDecimalCastInput text ->
+                | VString text when truncatedNumericCastInput text ->
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" text)
                 | _ -> ()
                 coerce castMode v
@@ -6004,6 +6004,21 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | _ -> result
                     | result -> result)
                 |> Result.mapError Storage.toMySqlError
+            | (TDouble _ | TFloat _), _ ->
+                match source with
+                | VString text when truncatedNumericCastInput text ->
+                    Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
+                | _ -> ()
+                coerce castMode v
+                |> Result.mapError Storage.toMySqlError
+                |> Result.bind (function
+                    | VDouble value when System.Double.IsInfinity value ->
+                        match ty, source with
+                        | TDouble _, VString text ->
+                            Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
+                            Ok(VDouble(if value < 0.0 then -System.Double.MaxValue else System.Double.MaxValue))
+                        | _ -> Error(1690, sprintf "DOUBLE value is out of range in '%s'" (SqlText.expression expr))
+                    | result -> Ok result)
             | _, _ ->
                 coerce castMode v
                 |> Result.mapError Storage.toMySqlError)

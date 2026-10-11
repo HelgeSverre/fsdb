@@ -1169,6 +1169,16 @@ module ContractCatalog =
                      |> Contract.comparingValues
                yield Contract.query "decimal-cast-overflow-prepared-warnings" "SHOW WARNINGS"
                      |> Contract.comparingValues
+               for index, text in [ "abc"; "12x"; "1e309"; "-1e309"; "nan" ] |> List.indexed do
+                   yield Contract.query (sprintf "double-cast-value-%d" index) (sprintf "SELECT CAST('%s' AS DOUBLE)" text)
+                         |> Contract.comparingValues
+                   yield Contract.query (sprintf "double-cast-warning-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
+               yield Contract.query "float-cast-invalid-text" "SELECT CAST('abc' AS FLOAT)" |> Contract.comparingValues
+               yield Contract.query "float-cast-invalid-warning" "SHOW WARNINGS" |> Contract.comparingValues
+               for index, text in [ "1e39"; "-1e39" ] |> List.indexed do
+                   yield Contract.query (sprintf "float-cast-overflow-%d" index) (sprintf "SELECT CAST('%s' AS FLOAT)" text)
+                         |> Contract.fails 1690 "22003"
                yield
                    Contract.query
                        "cast-national-spellings"

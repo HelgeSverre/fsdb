@@ -2950,6 +2950,41 @@ let tests =
                       Expect.equal (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message)) warnings sql
                   | _, result -> failtestf "expected DECIMAL cast result for %s, got %A" sql result
 
+          testCase "DOUBLE casts retain MySQL text conversion warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, value, warning in
+                  [ "SELECT CAST('abc' AS DOUBLE)", "0", "abc"
+                    "SELECT CAST('12x' AS DOUBLE)", "12", "12x"
+                    "SELECT CAST('1e309' AS DOUBLE)", "1.7976931348623157e308", "1e309"
+                    "SELECT CAST('-1e309' AS DOUBLE)", "-1.7976931348623157e308", "-1e309"
+                    "SELECT CAST('nan' AS DOUBLE)", "0", "nan" ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual value sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ 1292, sprintf "Truncated incorrect DOUBLE value: '%s'" warning ]
+                          sql
+                  | _, result -> failtestf "expected DOUBLE cast result for %s, got %A" sql result
+
+          testCase "FLOAT casts distinguish invalid text from range overflow"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              match handle session "SELECT CAST('abc' AS FLOAT)" with
+              | session, ResultSet(_, [ [ Some "0" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect DOUBLE value: 'abc'" ]
+                      "invalid FLOAT text"
+              | _, result -> failtestf "expected FLOAT text fallback, got %A" result
+              for source in [ "1e39"; "-1e39" ] do
+                  let sql = sprintf "SELECT CAST('%s' AS FLOAT)" source
+                  match handle session sql with
+                  | _, Err(1690, message) ->
+                      Expect.equal message (sprintf "DOUBLE value is out of range in 'cast('%s' as float)'" source) sql
+                  | _, result -> failtestf "expected FLOAT range error for %s, got %A" sql result
+
           testCase "national ASCII and UNICODE casts retain syntax warnings and charset bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -728,6 +728,10 @@ both CAST and typed CONVERT. Audited DECIMAL CAST values now warn on invalid
 or partially consumed text and clamp rounded overflow to the target precision,
 using the projection's source label or alias in the range warning; larger
 numeric domains beyond .NET decimal precision remain open.
+Audited DOUBLE and FLOAT CAST text inputs now retain MySQL's numeric-prefix
+warnings; overflowing DOUBLE text clamps to the signed maximum with warning
+1292, while overflowing FLOAT text raises 1690. Other source types and numeric
+conversion contexts remain open.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common

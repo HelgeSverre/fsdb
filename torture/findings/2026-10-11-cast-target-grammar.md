@@ -60,3 +60,13 @@ its alias. Fsdb previously suppressed the conversion warning and let storage
 coercion return a DECIMAL wider than the CAST target. The focused regression
 and differential contract now cover these audited values and diagnostics.
 DECIMAL values beyond .NET's `decimal` precision remain a separate boundary.
+
+DOUBLE and FLOAT CAST text conversion now follows the same audited numeric-prefix
+warning rule. MySQL returns zero with warning 1292 for `abc` and `nan`, and the
+parsed prefix with that warning for `12x`. For a string beyond DOUBLE's range,
+such as `1e309`, it returns signed `Double.MaxValue` with warning 1292. A
+single-precision `FLOAT` overflow such as `1e39` instead raises error 1690,
+SQLSTATE 22003. Fsdb previously omitted the text warnings and did not apply
+these distinct overflow outcomes. Focused tests and differential contract
+steps cover the values and diagnostics. Other source types and numeric
+conversion contexts remain open.
