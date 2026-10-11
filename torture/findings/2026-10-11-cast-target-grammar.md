@@ -59,7 +59,11 @@ original text. Overflow warnings name the projection's source expression or
 its alias. Fsdb previously suppressed the conversion warning and let storage
 coercion return a DECIMAL wider than the CAST target. The focused regression
 and differential contract now cover these audited values and diagnostics.
-DECIMAL values beyond .NET's `decimal` precision remain a separate boundary.
+Finite DECIMAL text that exceeds .NET's `decimal` range but remains within the
+audited MySQL conversion range, such as `1e29`, now clamps to a smaller target
+with warning 1264; partial text also retains its 1292 warning. Larger values
+such as `1e81` have additional MySQL conversion warnings that remain open,
+along with general DECIMAL values beyond .NET's `decimal` precision.
 
 DOUBLE and FLOAT CAST text conversion now follows the same audited numeric-prefix
 warning rule. MySQL returns zero with warning 1292 for `abc` and `nan`, and the

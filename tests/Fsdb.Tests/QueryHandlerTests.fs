@@ -2970,6 +2970,21 @@ let tests =
                           sql
                   | _, result -> failtestf "expected DOUBLE cast result for %s, got %A" sql result
 
+          testCase "DECIMAL casts clamp finite text outside System.Decimal range"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for source, expected, warningCount in
+                  [ "1e29", "99999999.99", 1
+                    "-1e29", "-99999999.99", 1
+                    "1e29x", "99999999.99", 2 ] do
+                  let sql = sprintf "SELECT CAST('%s' AS DECIMAL(10,2))" source
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal session.Diagnostics.Length warningCount sql
+                      Expect.equal (session.Diagnostics |> List.last |> fun condition -> condition.Code) 1264 sql
+                  | _, result -> failtestf "expected bounded DECIMAL result for %s, got %A" sql result
+
           testCase "FLOAT casts distinguish invalid text from range overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

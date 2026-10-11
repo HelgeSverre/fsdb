@@ -5993,17 +5993,38 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | VString text when truncatedNumericCastInput text ->
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" text)
                 | _ -> ()
-                coerce castMode v
-                |> Result.map (function
-                    | VDecimal value as result ->
-                        match decimalCastMaximum precision scale with
-                        | Some maximum when abs value > maximum ->
-                            let label = ctx.ProjectionLabel |> Option.defaultValue (SqlText.expression expr)
-                            Diagnostics.warning 1264 (sprintf "Out of range value for column '%s' at row %d" label (Diagnostics.currentRowNumber ()))
-                            VDecimal(if value < 0m then -maximum else maximum)
-                        | _ -> result
-                    | result -> result)
-                |> Result.mapError Storage.toMySqlError
+                let warnOutOfRange () =
+                    let label = ctx.ProjectionLabel |> Option.defaultValue (SqlText.expression expr)
+                    Diagnostics.warning 1264 (sprintf "Out of range value for column '%s' at row %d" label (Diagnostics.currentRowNumber ()))
+                let maximum = decimalCastMaximum precision scale
+                // Storage's decimal parser falls back to zero above System.Decimal's range.
+                // A bounded CAST can still return its exact target maximum in that case.
+                let overflowingText =
+                    match v, maximum with
+                    | VString prefix, Some limit ->
+                        match System.Decimal.TryParse(prefix, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
+                        | true, _ -> None
+                        | false, _ ->
+                            match System.Double.TryParse(prefix, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
+                            | true, number when System.Double.IsFinite number && abs number > float limit ->
+                                Some(if number < 0.0 then -limit else limit)
+                            | _ -> None
+                    | _ -> None
+                match overflowingText with
+                | Some bound ->
+                    warnOutOfRange ()
+                    Ok(VDecimal bound)
+                | None ->
+                    coerce castMode v
+                    |> Result.map (function
+                        | VDecimal value as result ->
+                            match maximum with
+                            | Some limit when abs value > limit ->
+                                warnOutOfRange ()
+                                VDecimal(if value < 0m then -limit else limit)
+                            | _ -> result
+                        | result -> result)
+                    |> Result.mapError Storage.toMySqlError
             | (TDouble _ | TFloat _), _ ->
                 let truncatedText =
                     match source with
