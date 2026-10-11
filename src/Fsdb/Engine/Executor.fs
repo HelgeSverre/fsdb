@@ -9850,17 +9850,18 @@ and private applyResolvedJoin
         match join.Kind, join.Table with
         | (LeftJoin | NaturalLeftJoin), FromTable tableRef ->
             let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
-            if Map.containsKey (qualifier.ToLowerInvariant()) sourceOverrides then sourcePredicates
+            let qualifierKey = qualifier.ToLowerInvariant()
+            if Map.containsKey qualifierKey sourceOverrides then sourcePredicates
             else
                 let local, _ = splitJoinWhere [ qualifier ] (Some join.On)
-                match Map.tryFind (qualifier.ToLowerInvariant()) local with
+                match Map.tryFind qualifierKey local with
                 | Some predicate ->
                     match tryPhysicalTableRef store dbName tableRef with
                     | Ok(Some table) when
                         tryPhysicalReadCandidatesInTable store registry table tableRef (Some predicate)
                         |> Option.isSome ->
                         sourcePredicates
-                        |> Map.change (qualifier.ToLowerInvariant()) (function
+                        |> Map.change qualifierKey (function
                             | Some existing -> Some(BinOp(And, existing, predicate))
                             | None -> Some predicate)
                     | _ -> sourcePredicates
@@ -10004,16 +10005,19 @@ and private applyPreparedJoin
                 && probe.ProbeIndices.Length = equiKeys.Length
                 && (residualConjuncts |> List.forall safeLeftFilter))
 
+        let hashKeyDomain =
+            lazy
+                (not equiKeys.IsEmpty
+                 && storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
+                 && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys)
+
         let hashCompatible =
             lazy
                 (match keyClasses with
-                 | Some classes ->
-                     storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
-                     && not equiKeys.IsEmpty
-                     && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
-                     && rowsMatchKeyClasses classes (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
+                 | Some classes when hashKeyDomain.Value ->
+                     rowsMatchKeyClasses classes (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
                      && rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
-                 | None -> false)
+                 | _ -> false)
 
         let indexedJoinProbe =
             if preservedRightIndexProbe.IsSome then None
@@ -10036,9 +10040,7 @@ and private applyPreparedJoin
                 && (join.Kind = LeftJoin || join.Kind = NaturalLeftJoin)
                 && preservedRightIndexProbe.IsNone
                 && indexedJoinProbe.IsNone
-                && not equiKeys.IsEmpty
-                && storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
-                && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys ->
+                && hashKeyDomain.Value ->
                 if rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows then Some classes else None
             | _ -> None
 
