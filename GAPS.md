@@ -794,6 +794,11 @@ compares the recent spatial functions with a simple-query control on native
 fsdb and MySQL 8.4.11. Fixed overhead dominates the short cases, but the
 control's variation prevents a precise relative-performance claim.
 
+The [spatial topology wire snapshot](benchmarks/results/2026-10-11-spatial-topology-latency.md)
+compares `ST_Crosses` and `ST_Overlaps` with matching `ST_Intersects` controls
+on native servers. After warmup, the new predicates are near their controls;
+large early drift and no pre-change baseline prevent a regression claim.
+
 The [BIT/binary foreign-key update snapshot](benchmarks/results/2026-10-09-foreign-key-bit-binary.md)
 adds a same-type control for the recently corrected byte-key path. Its short
 run is too noisy to identify a lookup penalty; a durability-matched scaling
