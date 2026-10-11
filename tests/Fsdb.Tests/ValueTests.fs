@@ -918,7 +918,7 @@ let tests =
                                   (VInt 1L)
                                   (sprintf "valid end=%d join=%d buffer" endResolution joinResolution)) ]
 
-                testCase "planar intersections reject nonzero and mismatched SRIDs"
+                testCase "geographic point predicates retain SRID and planar-operation boundaries"
                 <| fun _ ->
                     let expectError code invoke =
                         Expect.throwsC
@@ -931,12 +931,12 @@ let tests =
                     let geographic = call "ST_GeomFromText" [ VString "POINT(0 0)"; VInt 4326L ]
 
                     expectError 3033 (fun () -> call "ST_Intersects" [ planar; geographic ])
-                    expectError 1235 (fun () -> call "ST_Disjoint" [ geographic; geographic ])
+                    Expect.equal (call "ST_Disjoint" [ geographic; geographic ]) (VInt 0L) "same point is not disjoint"
                     expectError 3033 (fun () -> call "ST_Contains" [ planar; geographic ])
-                    expectError 1235 (fun () -> call "ST_Within" [ geographic; geographic ])
-                    expectError 1235 (fun () -> call "ST_Touches" [ geographic; geographic ])
+                    Expect.equal (call "ST_Within" [ geographic; geographic ]) (VInt 1L) "point is within itself"
+                    Expect.equal (call "ST_Touches" [ geographic; geographic ]) VNull "point-only touches is NULL"
                     expectError 3033 (fun () -> call "ST_Equals" [ planar; geographic ])
-                    expectError 1235 (fun () -> call "ST_Equals" [ geographic; geographic ])
+                    Expect.equal (call "ST_Equals" [ geographic; geographic ]) (VInt 1L) "point equals itself"
                     expectError 1235 (fun () -> call "ST_ConvexHull" [ geographic ])
                     expectError 3033 (fun () -> call "ST_Intersection" [ planar; geographic ])
                     expectError 1235 (fun () -> call "ST_Union" [ geographic; geographic ])

@@ -5685,10 +5685,14 @@ let private requirePlanar (functionName: string) (geometry: Geometry) =
 
     geometry
 
-let private requireSamePlanarSrid (functionName: string) (first: Geometry) (second: Geometry) =
+let private requireSameSrid (functionName: string) (first: Geometry) (second: Geometry) =
     if first.Srid <> second.Srid then
         raise (SqlError(3033, sprintf "Binary geometry function %s given two geometries of different SRIDs: %d and %d, which should have been identical." (functionName.ToLowerInvariant()) first.Srid second.Srid))
 
+    first, second
+
+let private requireSamePlanarSrid (functionName: string) (first: Geometry) (second: Geometry) =
+    let first, second = requireSameSrid functionName first second
     requirePlanar functionName first |> ignore
     first, second
 
@@ -6353,10 +6357,25 @@ let private geometryBufferFn: Scalar =
     | _ -> nativeParameterCountError "st_buffer"
 
 let private geometryPredicateFn functionName predicate =
-    binaryGeometryFn functionName (fun first second ->
+    let pointSet = function
+        | GPoint _ | GMultiPoint _ -> true
+        | _ -> false
+
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ firstValue; secondValue ] ->
+        let first, second =
+            requireSameSrid functionName (geometryArgument functionName firstValue) (geometryArgument functionName secondValue)
+
+        let referenceSystem = spatialReferenceSystem functionName first.Srid
+        if referenceSystem.SemiMajorAxis.IsSome && not (pointSet first.Shape && pointSet second.Shape) then
+            requirePlanar functionName first |> ignore
+
         predicate first second
         |> Option.map (fun value -> VInt(if value then 1L else 0L))
-        |> Option.defaultValue VNull)
+        |> Option.defaultValue VNull
+    | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
 
 let private mbrContains first second =
     match geometryBounds first, geometryBounds second with

@@ -14606,6 +14606,25 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected nearest-point geographic distances, got %A" result
 
+                testCase "geographic point-set topology follows coordinate membership"
+                <| fun _ ->
+                    let store = newStore ()
+                    let present = "ST_GeomFromText('POINT(1 0)',4326)"
+                    let missing = "ST_GeomFromText('POINT(2 0)',4326)"
+                    let points = "ST_GeomFromText('MULTIPOINT((0 0),(1 0))',4326)"
+                    let reordered = "ST_GeomFromText('MULTIPOINT((1 0),(0 0))',4326)"
+                    let expressions =
+                        [ sprintf "ST_Intersects(%s,%s)" present points
+                          sprintf "ST_Contains(%s,%s)" points present
+                          sprintf "ST_Within(%s,%s)" present points
+                          sprintf "ST_Disjoint(%s,%s)" missing points
+                          sprintf "ST_Equals(%s,%s)" points reordered
+                          sprintf "ST_Intersects(%s,%s)" missing points
+                          sprintf "ST_Touches(%s,%s)" present points ]
+                    match runDefault store ("SELECT " + String.concat "," expressions) with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "0"; None ] ]) -> ()
+                    | result -> failtestf "expected MySQL point-set topology, got %A" result
+
                 testCase "EPSG 3857 uses planar metric operations"
                 <| fun _ ->
                     let store = newStore ()
