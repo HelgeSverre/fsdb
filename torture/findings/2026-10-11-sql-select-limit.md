@@ -56,5 +56,7 @@ places an uncorrelated scalar subquery under its owning branch's
 `cacheable: true`. A correlated projection subquery appears under the
 owning table's `select_list_subqueries` array with `dependent: true` and
 `cacheable: false`. Both retain the child `query_block.select_id` and access
-description. Fsdb's general renderer still flattens these rows; the probe
-clarifies the remaining hierarchy gap but does not close it.
+description. Fsdb now nests these audited projection cases under their
+owning UNION branch, including a scalar in a later branch. Other expression
+positions, nested scalar blocks, mixed derived/scalar plans, and broader
+optimizer placement still use the general renderer.

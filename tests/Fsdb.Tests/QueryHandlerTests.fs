@@ -4075,6 +4075,37 @@ let tests =
               let nestedTable = derivedSource.GetProperty("query_block").GetProperty("table")
               Expect.equal (nestedTable.GetProperty("table_name").GetString()) "select_limit_plan" "derived access remains under its owning branch"
 
+              let scalarJson =
+                  unionJson
+                      "EXPLAIN FORMAT=JSON SELECT (SELECT id FROM select_limit_plan WHERE id=1 LIMIT 1) AS x UNION SELECT 1"
+              let scalarBranch = scalarJson.GetProperty("query_specifications").EnumerateArray() |> Seq.head
+              let optimized = scalarBranch.GetProperty("query_block").GetProperty("optimized_away_subqueries").EnumerateArray() |> Seq.head
+              Expect.isFalse (optimized.GetProperty("dependent").GetBoolean()) "uncorrelated projection is independent"
+              Expect.equal (optimized.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "the scalar block belongs to its branch"
+
+              let laterScalarJson =
+                  unionJson
+                      "EXPLAIN FORMAT=JSON SELECT 1 UNION SELECT (SELECT id FROM select_limit_plan WHERE id=2 LIMIT 1)"
+              let laterBranches = laterScalarJson.GetProperty("query_specifications").EnumerateArray() |> Seq.toList
+              let mutable firstSubqueries = Unchecked.defaultof<System.Text.Json.JsonElement>
+              Expect.isFalse
+                  (laterBranches.[0].GetProperty("query_block").TryGetProperty("optimized_away_subqueries", &firstSubqueries))
+                  "the first branch does not own the later scalar"
+              Expect.equal
+                  (laterBranches.[1].GetProperty("query_block").GetProperty("optimized_away_subqueries").GetArrayLength())
+                  1
+                  "the scalar is nested under the second branch"
+
+              let correlatedJson =
+                  unionJson
+                      "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM select_limit_plan b WHERE b.id=a.id) AS x FROM select_limit_plan a UNION SELECT 1"
+              let correlatedBranch = correlatedJson.GetProperty("query_specifications").EnumerateArray() |> Seq.head
+              let parentTable = correlatedBranch.GetProperty("query_block").GetProperty("table")
+              let selected = parentTable.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+              Expect.isTrue (selected.GetProperty("dependent").GetBoolean()) "correlated projection depends on the parent row"
+              Expect.isFalse (selected.GetProperty("cacheable").GetBoolean()) "correlated projection is not cacheable"
+              Expect.equal (selected.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "child access stays nested"
+
               match handle session "EXPLAIN SELECT 1 UNION ALL SELECT 2" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows.Length 2 "UNION ALL has no materialized result row"
               | other -> failtestf "expected UNION ALL branch plans, got %A" other
