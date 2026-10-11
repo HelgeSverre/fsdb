@@ -358,6 +358,12 @@ let private malformedCommandError command =
 let private isDelimiterOnlyQuery (sql: string) =
     sql |> Seq.forall (fun value -> Char.IsWhiteSpace value || value = ';')
 
+let private hasCommentAfterEmptyDelimiter options (sql: string) =
+    // MySQL accepts a comment followed by delimiters, but rejects another
+    // comment after the final delimiter when there was no statement to run.
+    let withoutComments = Parser.stripVersionCommentsWithOptions options sql
+    withoutComments.Contains(';') && not (sql.TrimEnd().EndsWith(';'))
+
 let private isShutdownStatement (sql: string) : bool =
     let text = sql.Trim()
     let text = if text.EndsWith ';' then text.[..text.Length - 2].TrimEnd() else text
@@ -1921,7 +1927,11 @@ let private handleConnection
                                             |> Async.Ignore
 
                                         return! loop session
-                                    | Result.Ok [] when sql.TrimStart().StartsWith ';' ->
+                                    | Result.Ok [] when
+                                        sql.TrimStart().StartsWith ';'
+                                        || hasCommentAfterEmptyDelimiter
+                                            (Fsdb.Sql.SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText)
+                                            sql ->
                                         do!
                                             writePacketAsync
                                                 stream

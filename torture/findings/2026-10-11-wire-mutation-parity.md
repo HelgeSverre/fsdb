@@ -26,5 +26,22 @@ The command parser, database-selection check, and shared 1044 SQLSTATE mapping
 now match these observations. The focused integration and protocol assertions
 cover them. The final wire run passed all 70 cases with zero differences.
 
-This is evidence for this fixed corpus and seed, not proof of complete wire
-compatibility. Broader mutation counts and other command families remain open.
+This first run was evidence for one fixed corpus and seed, not proof of
+complete wire compatibility.
+
+The corpus was then widened to 128 mutations on each of seeds 1 and 2. Seed 2
+found that `/* comment */;;#` returned OK on fsdb while MySQL returned syntax
+error 1064 (`42000`). MySQL accepts a trailing delimiter after a comment, but
+rejects another comment after that delimiter when no statement exists. The
+empty-statement wire path now distinguishes these forms; a focused raw-packet
+regression covers line and block comments after delimiters. Both widened runs
+now pass all 166 cases with zero differences:
+
+```sh
+bash torture/scripts/run.sh wire --seed 1 --wire-cases 128
+bash torture/scripts/run.sh wire --seed 2 --wire-cases 128
+```
+
+Passing manifests are under local ignored artifact runs
+`20261011T001127266-77576/wire` and `20261011T001112193-77520/wire`,
+respectively. Other seeds and protocol families remain unproven.

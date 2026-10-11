@@ -3476,6 +3476,8 @@ let tests =
                           Expect.equal (Text.Encoding.ASCII.GetString(reader.ReadBytes 5)) expectedState "SQLSTATE"
                       }
 
+                  let queryPacket (sql: string) = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+
                   do! expectError [||] 1047 "08S01"
                   do! expectError [| 0x03uy |] 1065 "42000"
                   do! expectError [| 0x03uy; byte ';' |] 1065 "42000"
@@ -3483,6 +3485,8 @@ let tests =
                   do! expectError [| 0x02uy |] 1046 "3D000"
                   do! expectError [| 0x02uy; byte ' ' |] 1102 "42000"
                   do! expectError [| 0x02uy; byte ' '; byte 'h'; byte ' ' |] 1102 "42000"
+                  do! expectError (queryPacket "/* comment */;;#") 1064 "42000"
+                  do! expectError (queryPacket "/* comment */;/* more */") 1064 "42000"
                   do! expectError [| 0x04uy |] 1835 "HY000"
                   do! expectError [| 0x04uy; byte 't' |] 1835 "HY000"
                   do! expectError [| 0x19uy |] 1835 "HY000"
