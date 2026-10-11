@@ -1,6 +1,6 @@
 # Table-size metadata uses InnoDB page accounting
 
-Status: open. MySQL 8.4.11 oracle measured on the digest-pinned image in
+Status: partial. MySQL 8.4.11 oracle measured on the digest-pinned image in
 `torture/compose.yaml`; fsdb's current reporting paths are identified below.
 
 With `information_schema_stats_expiry=0`, MySQL reports the same `DATA_LENGTH`
@@ -20,15 +20,21 @@ The narrow and large tables used `InnoDB` with `ROW_FORMAT=Dynamic`. The
 the other readings used session expiry zero without an explicit analyze.
 `INDEX_LENGTH` was zero in these primary-key-only fixtures.
 
-Fsdb currently disagrees with itself: `InformationSchema.tablesRows` returns
-16,384 for every base table, while `SHOW TABLE STATUS` sums in-memory text
-payload bytes and derives average length from that sum. The latter is zero
-for an empty table and only a few bytes for a one-row table. Replacing the
-constant with a simple rounded payload size would still miss the 1,000-row
-and 10,000-row cases, as well as the layout of long `TEXT` values. Closing
-this gap needs a shared, tested page-allocation estimate or an explicit
-policy for approximate physical metadata, with both reporting paths using
-the same value.
+Fsdb now uses one page-rounded payload estimate in both reporting paths, with
+a 16 KiB minimum and an average derived from the reported row estimate.
+That matches the audited empty and small-table cases, but it still cannot
+reproduce InnoDB's page splits and long-`TEXT` layout: the 10,000-row and
+three-long-row values above remain divergent. Closing the remaining gap needs
+a more faithful allocation model or a deliberately approximate physical
+metadata policy.
+
+The same MySQL image retained `DATA_LENGTH=16384` through `ALTER TABLE ts ADD
+COLUMN extra VARCHAR(20)` and `DELETE FROM ts` on a three-row narrow table.
+With the default statistics cache, deletion still reported `TABLE_ROWS=3` and
+`AVG_ROW_LENGTH=5461`; setting `information_schema_stats_expiry=0` changed
+those to zero while `DATA_LENGTH` stayed 16 KiB. Fsdb matches that audited
+small-table lifecycle; larger deleted tables can retain allocated pages that
+its payload estimate forgets.
 
 Oracle setup and measurements:
 

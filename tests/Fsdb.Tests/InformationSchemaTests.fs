@@ -520,13 +520,13 @@ let tests =
                   Expect.equal (get "Rows") (Some "1") "actual row count"
                   Expect.equal (get "Auto_increment") (Some "2") "next id after one insert"
                   Expect.equal (get "Collation") (Some "utf8mb4_0900_ai_ci") "table collation"
-                  Expect.isTrue ((get "Data_length" |> Option.defaultValue "0") <> "0") "in-memory payload size, not a constant"
+                  Expect.equal (get "Data_length") (Some "16384") "one small row occupies one reported page"
                   // One row, so the average must equal the total — pins
                   // Avg_row_length to Data_length / Rows, not a constant.
                   Expect.equal (get "Avg_row_length") (get "Data_length") "avg row length is data_length / rows"
               | other -> failtestf "expected one status row, got %A" other
 
-          testCase "SHOW TABLE STATUS on an empty table reports zeros, not an error"
+          testCase "SHOW TABLE STATUS on an empty table reports its allocated page"
           <| fun _ ->
               let store = setup ()
               run store "CREATE TABLE empties (id INT)" |> ignore
@@ -537,8 +537,13 @@ let tests =
                   let get name = List.item (List.findIndex ((=) name) cols) row
                   Expect.equal (get "Rows") (Some "0") "no rows"
                   Expect.equal (get "Avg_row_length") (Some "0") "no division-by-zero"
-                  Expect.equal (get "Data_length") (Some "0") "no payload bytes"
+                  Expect.equal (get "Data_length") (Some "16384") "InnoDB allocates a clustered-index page"
               | other -> failtestf "expected one status row, got %A" other
+
+              match run store "SELECT TABLE_ROWS,AVG_ROW_LENGTH,DATA_LENGTH FROM information_schema.TABLES WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='empties'" with
+              | ResultSet(_, [ [ rows; average; length ] ]) ->
+                  Expect.equal (rows, average, length) (Some "0", Some "0", Some "16384") "both metadata surfaces agree"
+              | other -> failtestf "expected one information-schema row, got %A" other
 
           testCase "SHOW TABLE STATUS on a table with no AUTO_INCREMENT column reports Auto_increment NULL"
           <| fun _ ->
@@ -552,10 +557,10 @@ let tests =
                   Expect.equal (get "Auto_increment") None "no AUTO_INCREMENT column, no next value"
               | other -> failtestf "expected one status row, got %A" other
 
-          testCase "SHOW TABLE STATUS keeps cached Rows while Data_length tracks live payload"
+          testCase "SHOW TABLE STATUS keeps cached row estimates and page lengths"
           <| fun _ ->
-              // Rows now follows MySQL's stale metadata cache; Data_length
-              // remains fsdb's live payload size rather than an InnoDB page estimate.
+              // MySQL retains both the row estimate and its page allocation
+              // until a fresh statistics read; the average uses that estimate.
               let store = setup ()
               run store "CREATE TABLE ts (id INT)" |> ignore
               run store "INSERT INTO ts VALUES (1), (2), (3)" |> ignore
@@ -569,24 +574,26 @@ let tests =
               let before = status ()
               Expect.equal (before "Rows") (Some "3") "live row count"
               let dataBefore = before "Data_length" |> Option.defaultValue "0" |> int
-              Expect.isTrue (dataBefore > 0) "payload bytes for three rows"
+              Expect.equal dataBefore 16384 "small table uses one reported page"
 
               run store "ALTER TABLE ts ADD COLUMN extra VARCHAR(20)" |> ignore
               let widened = status ()
               let dataAfter = widened "Data_length" |> Option.defaultValue "0" |> int
-              Expect.isTrue (dataAfter > dataBefore) "ADD COLUMN grows the live payload (NULL fill per row)"
+              Expect.equal dataAfter dataBefore "metadata-only widening does not allocate another page"
 
               run store "DELETE FROM ts" |> ignore
               let emptied = status ()
               Expect.equal (emptied "Rows") (Some "3") "cached row estimate survives DELETE"
-              Expect.equal (emptied "Avg_row_length") (Some "0") "no division-by-zero"
+              Expect.equal (emptied "Avg_row_length") (Some "5461") "cached row estimate determines average length"
               let liveSession, _ = Fsdb.QueryHandler.handle session "SET SESSION information_schema_stats_expiry=0"
               match Fsdb.QueryHandler.handle liveSession "SHOW TABLE STATUS LIKE 'ts'" |> snd with
               | ResultSet(cols, [ row ]) ->
                   Expect.equal (List.item (List.findIndex ((=) "Rows") cols) row) (Some "0") "zero expiry bypasses the cache"
+                  Expect.equal (List.item (List.findIndex ((=) "Avg_row_length") cols) row) (Some "0") "live zero rows have zero average"
+                  Expect.equal (List.item (List.findIndex ((=) "Data_length") cols) row) (Some "16384") "allocated page remains after delete"
               | other -> failtestf "expected one live status row, got %A" other
 
-          testCase "SHOW TABLE STATUS Data_length stays 0 when ADD COLUMN hits an empty table"
+          testCase "SHOW TABLE STATUS Data_length retains its page when ADD COLUMN hits an empty table"
           <| fun _ ->
               let store = setup ()
               run store "CREATE TABLE bare (id INT)" |> ignore
@@ -596,7 +603,7 @@ let tests =
               match Fsdb.QueryHandler.handle session "SHOW TABLE STATUS LIKE 'bare'" |> snd with
               | ResultSet(cols, [ row ]) ->
                   let get name = List.item (List.findIndex ((=) name) cols) row
-                  Expect.equal (get "Data_length") (Some "0") "no rows, no payload"
+                  Expect.equal (get "Data_length") (Some "16384") "empty table keeps its allocated page"
               | other -> failtestf "expected one status row, got %A" other
 
           testCase "COLUMNS projects declared columns with type/nullability/key metadata"

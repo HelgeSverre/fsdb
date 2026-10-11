@@ -304,6 +304,17 @@ let private tableRowEstimate expirySeconds (table: Table) =
         statistics.RowEstimate
     | _ -> table.RowsArray.Length
 
+let private estimatedTableDataLength (table: Table) =
+    let payloadLength =
+        table.RowsArray
+        |> Seq.sumBy (fun row ->
+            row
+            |> Array.sumBy (fun value ->
+                int64 (Value.toText value |> Option.map String.length |> Option.defaultValue 0) + 1L))
+
+    // Approximate InnoDB's 16 KiB page allocation, including the empty table's page.
+    max 1L ((payloadLength + 16383L) / 16384L) * 16384L
+
 let private tablesRows expirySeconds (catalog: Catalog) : Value[] list =
     let baseTables =
         allTables catalog
@@ -314,6 +325,9 @@ let private tablesRows expirySeconds (catalog: Catalog) : Value[] list =
             // has one.
             let autoIncrement =
                 if t.Columns |> List.exists (fun c -> c.AutoIncrement) then VInt t.NextAutoId else VNull
+            let rowEstimate = tableRowEstimate expirySeconds t
+            let dataLength = estimatedTableDataLength t
+            let avgRowLength = if rowEstimate = 0 then 0L else dataLength / int64 rowEstimate
 
             [| vs "def"
                vs dbName
@@ -322,9 +336,9 @@ let private tablesRows expirySeconds (catalog: Catalog) : Value[] list =
                vs "InnoDB"
                vi 10
                vs "Dynamic"
-               vi (tableRowEstimate expirySeconds t)
-               vi 0
-               vi 16384
+               vi rowEstimate
+               VInt avgRowLength
+               VInt dataLength
                vi 0
                vi 0
                vi 0
@@ -4119,20 +4133,15 @@ let showTableStatusWithStatisticsExpiry
             |> List.filter (fun t -> likeFilter likeOpt t.OriginalName)
             |> List.sortBy (fun t -> t.OriginalName)
             |> List.map (fun t ->
-                // `Data_length`/`Avg_row_length` are the rows' actual
-                // in-memory text payload size — this engine has no 16 KiB
-                // pages, so real bytes beat InnoDB's page-count fiction.
-                let dataLength =
-                    t.RowsArray
-                    |> Seq.sumBy (fun r -> r |> Array.sumBy (fun v -> (Value.toText v |> Option.map String.length |> Option.defaultValue 0) + 1))
-
-                let avgRowLength = if t.RowsArray.Length = 0 then 0 else dataLength / t.RowsArray.Length
+                let dataLength = estimatedTableDataLength t
+                let rowEstimate = tableRowEstimate expirySeconds t
+                let avgRowLength = if rowEstimate = 0 then 0L else dataLength / int64 rowEstimate
 
                 [ Some t.OriginalName
                   Some "InnoDB"
                   Some "10"
                   Some "Dynamic"
-                  Some(string (tableRowEstimate expirySeconds t))
+                  Some(string rowEstimate)
                   Some(string avgRowLength)
                   Some(string dataLength)
                   Some "0"
