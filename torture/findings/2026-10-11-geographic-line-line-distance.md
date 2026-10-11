@@ -15,10 +15,13 @@ inverse approximations differ. The distance search first checks azimuth
 projections and uses the original endpoint when the nearest position lies
 outside the segment. Fsdb checks crossings on sampled geographic arcs and
 uses endpoint-to-segment distances when they do not cross. Crossings within
-the sampling error of a tangent boundary remain unverified. MySQL also
-distinguishes a curved-line near miss of
-1.617217236128797 metres from a crossing when a second line starts at
-latitude 50.10784 versus 50.1078 at longitude 5.
+the sampling error of a tangent boundary can diverge. For example, with
+`LINESTRING(50 0,50 10)` and `LINESTRING(50.1078252 5,51 5)`, MySQL returns
+0.8933272242439613 metres while fsdb's sampled arcs report a crossing and
+return zero. MySQL returns zero when the second line starts at latitude
+50.107824 and 1.617217236128797 metres when it starts at 50.10784. This
+near-tangent boundary reflects differences between MySQL's approximate
+geographic distance strategy and fsdb's sampled crossing test.
 
 Oracle examples:
 
