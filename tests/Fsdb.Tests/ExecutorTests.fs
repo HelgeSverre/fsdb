@@ -14643,12 +14643,37 @@ let tests =
                           sprintf "ST_Distance(%s,%s,'kilometre')" point line, 99.24614802240916, 0.001
                           "ST_Distance(ST_GeomFromText('POINT(80 15)',4326),ST_GeomFromText('LINESTRING(78 0,78 30)',4326))", 178899.1317582399, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(10 180)',4326),ST_GeomFromText('LINESTRING(10 170,10 -170)',4326))", 16821.245675958886, 0.01
-                          "ST_Distance(ST_GeomFromText('POINT(-20 100)',4326),ST_GeomFromText('LINESTRING(-10 90,-30 110)',4326))", 71223.12145876266, 0.01 ]
+                          "ST_Distance(ST_GeomFromText('POINT(-20 100)',4326),ST_GeomFromText('LINESTRING(-10 90,-30 110)',4326))", 71223.12145876266, 0.01
+                          "ST_Distance(ST_GeomFromText('POINT(0 150)',4326),ST_GeomFromText('LINESTRING(10 20,10 150)',4326))", 1105843.247087976, 0.01 ]
                     for expression, expected, tolerance in cases do
                         let sql = sprintf "SELECT ABS(%s-%.14f)<%g" expression expected tolerance
                         match runDefault store sql with
                         | ResultSet(_, [ [ Some "1" ] ]) -> ()
                         | result -> failtestf "expected MySQL geographic point-line distance for %s, got %A" expression result
+
+                testCase "geographic line-to-line distance covers crossing and disjoint segments"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "LINESTRING(0 0,0 2)", "LINESTRING(-1 1,1 1)", 0.0
+                          "LINESTRING(0 0,2 0)", "LINESTRING(0 1,2 1)", 111252.13055897616
+                          "LINESTRING(0 0,1 0)", "LINESTRING(2 2,3 2)", 248514.0792268882
+                          "LINESTRING(50 0,50 10)", "LINESTRING(50.10784 5,51 5)", 1.617217236128797
+                          "LINESTRING(50.10784 5,51 5)", "LINESTRING(50 0,50 10)", 1.617217236128797
+                          "LINESTRING(50 0,50 10)", "LINESTRING(50.1078 5,51 5)", 0.0
+                          "LINESTRING(0 0,0 170)", "LINESTRING(10 20,10 150)", 1105843.247087976
+                          "LINESTRING(10 20,10 150)", "LINESTRING(0 0,0 170)", 1105843.247087976
+                          "LINESTRING(70 -80,70 80)", "LINESTRING(80 -40,80 40)", 452514.82347642106
+                          "LINESTRING(-30 -160,20 150)", "LINESTRING(-10 170,25 -170)", 0.0
+                          "LINESTRING(10 170,10 -170)", "LINESTRING(0 180,20 180)", 0.0
+                          "LINESTRING(0 0,0 2)", "LINESTRING(0 1,0 3)", 0.0
+                          "MULTILINESTRING((0 0,0 2),(10 10,10 12))", "LINESTRING(-1 1,1 1)", 0.0 ]
+                    for first, second, expected in cases do
+                        let expression = sprintf "ST_Distance(ST_GeomFromText('%s',4326),ST_GeomFromText('%s',4326))" first second
+                        let sql = sprintf "SELECT ABS(%s-%.14f)<0.01" expression expected
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL line-to-line distance for %s and %s, got %A" first second result
 
                 testCase "ETRS89 and NAD83 retain their geographic definitions"
                 <| fun _ ->

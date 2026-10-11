@@ -206,48 +206,134 @@ let internal geographicPointAlong referenceSystem first second distance =
         latitude * 180.0 / Math.PI, longitude * 180.0 / Math.PI
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
 
+let private minimumOnSegment iterations length distanceAt =
+    let ratio = (sqrt 5.0 - 1.0) / 2.0
+    let mutable lower, upper = 0.0, length
+    let mutable left = upper - ratio * (upper - lower)
+    let mutable right = lower + ratio * (upper - lower)
+    let mutable leftDistance = distanceAt left
+    let mutable rightDistance = distanceAt right
+
+    for _ in 1 .. iterations do
+        if leftDistance <= rightDistance then
+            upper <- right
+            right <- left
+            rightDistance <- leftDistance
+            left <- upper - ratio * (upper - lower)
+            leftDistance <- distanceAt left
+        else
+            lower <- left
+            left <- right
+            leftDistance <- rightDistance
+            right <- lower + ratio * (upper - lower)
+            rightDistance <- distanceAt right
+
+    min leftDistance rightDistance
+
+let private geographicPointsAwayFrom flattening origin toward query =
+    let segmentAzimuth = geographicSegmentAzimuth flattening origin toward
+    let queryAzimuth = geographicSegmentAzimuth flattening origin query
+    cos (queryAzimuth - segmentAzimuth) < 0.0
+
+let private geographicPointOnSegment referenceSystem flattening start endpoint position =
+    let point = geographicPointAlong referenceSystem start endpoint position
+    if geographicPointsAwayFrom flattening start endpoint point then start
+    elif geographicPointsAwayFrom flattening endpoint start point then endpoint
+    else point
+
 let private geographicPointSegmentDistance referenceSystem point start endpoint =
     let pointDistance = geographicPointDistance referenceSystem
     let length = pointDistance start endpoint
-    let endpointDistance = min (pointDistance point start) (pointDistance point endpoint)
+    let startDistance = pointDistance point start
+    let endDistance = pointDistance point endpoint
+    let endpointDistance = min startDistance endDistance
 
-    if length = 0.0 then endpointDistance
+    if length = 0.0 || endpointDistance = 0.0 then endpointDistance
     else
-        let distanceAt position =
-            geographicPointAlong referenceSystem start endpoint position
-            |> pointDistance point
+        let flattening = 1.0 / referenceSystem.InverseFlattening.Value
+        if geographicPointsAwayFrom flattening start endpoint point then startDistance
+        elif geographicPointsAwayFrom flattening endpoint start point then endDistance
+        else
+            let distanceAt position =
+                geographicPointOnSegment referenceSystem flattening start endpoint position
+                |> pointDistance point
 
-        let ratio = (sqrt 5.0 - 1.0) / 2.0
-        let mutable lower, upper = 0.0, length
-        let mutable left = upper - ratio * (upper - lower)
-        let mutable right = lower + ratio * (upper - lower)
-        let mutable leftDistance = distanceAt left
-        let mutable rightDistance = distanceAt right
-
-        // A half-earth segment shrinks below 2 mm after 48 golden-section steps.
-        for _ in 1 .. 48 do
-            if leftDistance <= rightDistance then
-                upper <- right
-                right <- left
-                rightDistance <- leftDistance
-                left <- upper - ratio * (upper - lower)
-                leftDistance <- distanceAt left
-            else
-                lower <- left
-                left <- right
-                leftDistance <- rightDistance
-                right <- lower + ratio * (upper - lower)
-                rightDistance <- distanceAt right
-
-        min endpointDistance (min leftDistance rightDistance)
+            // A half-earth segment shrinks below 2 mm after 48 golden-section steps.
+            min endpointDistance (minimumOnSegment 48 length distanceAt)
 
 let internal geographicPointLineDistance referenceSystem point lines =
-
     lines
     |> List.collect List.pairwise
     |> List.fold (fun minimum (start, endpoint) ->
         let distance = geographicPointSegmentDistance referenceSystem point start endpoint
         Some(match minimum with None -> distance | Some current -> min current distance)) None
+
+let private geographicArcsIntersect (firstStart: float * float) firstEnd secondStart secondEnd =
+    let unitVector (latitude, longitude) =
+        let latitude, longitude = radians latitude, radians longitude
+        cos latitude * cos longitude, cos latitude * sin longitude, sin latitude
+    let cross (firstX, firstY, firstZ) (secondX, secondY, secondZ) =
+        firstY * secondZ - firstZ * secondY,
+        firstZ * secondX - firstX * secondZ,
+        firstX * secondY - firstY * secondX
+    let dot (firstX, firstY, firstZ) (secondX, secondY, secondZ) =
+        firstX * secondX + firstY * secondY + firstZ * secondZ
+    let magnitude (x, y, z) = sqrt (x * x + y * y + z * z)
+    let angle first second = atan2 (magnitude (cross first second)) (dot first second)
+    let firstStart, firstEnd = unitVector firstStart, unitVector firstEnd
+    let secondStart, secondEnd = unitVector secondStart, unitVector secondEnd
+    let intersection = cross (cross firstStart firstEnd) (cross secondStart secondEnd)
+    let size = magnitude intersection
+
+    if size < 1e-15 then false
+    else
+        let x, y, z = intersection
+        let candidate = x / size, y / size, z / size
+        let onArc start endpoint point =
+            abs (angle start point + angle point endpoint - angle start endpoint) < 1e-9
+        let crosses point = onArc firstStart firstEnd point && onArc secondStart secondEnd point
+        crosses candidate || crosses (-x / size, -y / size, -z / size)
+
+let internal geographicLineLineDistance referenceSystem firstLines secondLines =
+    let pointDistance = geographicPointDistance referenceSystem
+    let sampleSpacingMetres = 25000.0
+    let maxSampledArcs = 256
+    let sample (start, endpoint) =
+        let length = pointDistance start endpoint
+        let steps = max 1 (min maxSampledArcs (int (ceil (length / sampleSpacingMetres))))
+        let points =
+            Array.init (steps + 1) (fun index ->
+                if index = 0 then start
+                elif index = steps then endpoint
+                else geographicPointAlong referenceSystem start endpoint (length * float index / float steps))
+        start, endpoint, Array.pairwise points
+    let firstSegments = firstLines |> List.collect List.pairwise |> List.map sample
+    let secondSegments = secondLines |> List.collect List.pairwise |> List.map sample
+
+    let segmentDistance (firstStart, firstEnd, firstArcs) (secondStart, secondEnd, secondArcs) =
+        let nearestEndpoint =
+            [ geographicPointSegmentDistance referenceSystem firstStart secondStart secondEnd
+              geographicPointSegmentDistance referenceSystem firstEnd secondStart secondEnd
+              geographicPointSegmentDistance referenceSystem secondStart firstStart firstEnd
+              geographicPointSegmentDistance referenceSystem secondEnd firstStart firstEnd ]
+            |> List.min
+
+        if nearestEndpoint = 0.0 then 0.0
+        else
+            let intersects =
+                firstArcs
+                |> Array.exists (fun (firstArcStart, firstArcEnd) ->
+                    secondArcs
+                    |> Array.exists (fun (secondArcStart, secondArcEnd) ->
+                        geographicArcsIntersect firstArcStart firstArcEnd secondArcStart secondArcEnd))
+            if intersects then 0.0 else nearestEndpoint
+
+    firstSegments
+    |> List.fold (fun minimum first ->
+        secondSegments
+        |> List.fold (fun minimum second ->
+            let distance = segmentDistance first second
+            Some(match minimum with None -> distance | Some current -> min current distance)) minimum) None
 
 let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
     let length (points: (float * float) list) =

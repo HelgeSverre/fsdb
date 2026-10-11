@@ -963,7 +963,7 @@ let tests =
                     Expect.equal (call "MBRIntersects" [ rectangle; geometry "POINT(5 4)" ]) (VInt 0L) "disjoint bounds"
                     Expect.equal (call "MBRContains" [ rectangle; geometry "POLYGON((0 1,2 1,2 3,0 3,0 1))" ]) (VInt 1L) "area may touch a boundary"
 
-                testCase "unsupported geographic operations reject nonzero and mismatched SRIDs"
+                testCase "geographic distance and unsupported operations retain SRID boundaries"
                 <| fun _ ->
                     let expectError code invoke =
                         Expect.throwsC
@@ -975,9 +975,11 @@ let tests =
                     let planar = call "ST_GeomFromText" [ VString "POINT(0 0)" ]
                     let geographic = call "ST_GeomFromText" [ VString "POINT(0 0)"; VInt 4326L ]
                     let geographicLine = call "ST_GeomFromText" [ VString "LINESTRING(0 0,1 1)"; VInt 4326L ]
+                    let geographicPolygon = call "ST_GeomFromText" [ VString "POLYGON((0 0,0 2,2 2,0 0))"; VInt 4326L ]
 
                     expectError 3033 (fun () -> call "ST_Distance" [ planar; geographic ])
-                    expectError 1235 (fun () -> call "ST_Distance" [ geographicLine; geographicLine ])
+                    Expect.equal (call "ST_Distance" [ geographicLine; geographicLine ]) (VDouble 0.0) "identical geographic lines have zero distance"
+                    expectError 1235 (fun () -> call "ST_Distance" [ geographicPolygon; geographicLine ])
                     expectError 1235 (fun () -> call "ST_Envelope" [ geographic ])
                     expectError 1235 (fun () -> call "ST_IsValid" [ geographic ])
 

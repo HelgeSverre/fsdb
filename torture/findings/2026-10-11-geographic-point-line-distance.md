@@ -15,7 +15,8 @@ also cover a high-latitude arc and a segment crossing the antimeridian.
 
 Fsdb minimizes its MySQL-compatible ellipsoidal point distance along each
 segment using the same geographic interpolation as `ST_LineInterpolatePoint`.
-Endpoint distances are retained so a nearest endpoint remains exact.
+Azimuth projection checks keep the search inside the segment, and endpoint
+distances use the original coordinates so a nearest endpoint remains exact.
 
 Oracle example:
 

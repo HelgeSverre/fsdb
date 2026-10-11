@@ -3029,6 +3029,18 @@ module ContractCatalog =
                    [| box "MULTIPOINT((51 5),(60 0))"; box "MULTILINESTRING((50 0,50 10),(70 0,70 10))"; box "kilometre" |]
                |> Contract.comparingValues
                Contract.query
+                   "geographic-crossing-lines"
+                   "SELECT ST_Distance(ST_GeomFromText('LINESTRING(0 0,0 2)',4326), ST_GeomFromText('LINESTRING(-1 1,1 1)',4326))"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-line-near-miss"
+                   "SELECT ROUND(ST_Distance(ST_GeomFromText('LINESTRING(50 0,50 10)',4326), ST_GeomFromText('LINESTRING(50.10784 5,51 5)',4326)), 2)"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-line-long-arc-endpoint"
+                   "SELECT ROUND(ST_Distance(ST_GeomFromText('LINESTRING(0 0,0 170)',4326), ST_GeomFromText('LINESTRING(10 20,10 150)',4326)), 2)"
+               |> Contract.comparingValues
+               Contract.query
                    "geographic-longitude-latitude-input"
                    "SELECT ST_AsText(ST_GeomFromText('POINT(10.7522 59.9139)', 4326, 'axis-order=long-lat'))"
                |> Contract.comparingValues
