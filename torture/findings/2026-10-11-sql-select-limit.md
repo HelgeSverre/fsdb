@@ -86,7 +86,11 @@ an independent scalar ORDER BY key belongs to the ordering operation's
 `optimized_away_subqueries` array, with `dependent: false`, `cacheable: true`,
 and `using_filesort: false`. An independent HAVING scalar stays in the grouping
 operation's `having_subqueries` array with the same dependence flags. Fsdb now
-matches these audited placements and retains the child table access. Other
-independent HAVING/ORDER BY shapes, DISTINCT/ordering combinations, subqueries
-in more than one clause, nested scalar blocks, mixed derived/scalar plans,
-and broader optimizer placement remain open.
+matches these audited placements and retains the child table access. Further
+native indexed-group probes show that an independent HAVING scalar remains under
+the inner grouping operation when an outer ORDER BY is present, and that an
+independent ORDER BY scalar moves to the inner grouping operation's
+`optimized_away_subqueries`, with no filesort in either wrapper. Fsdb now
+matches both audited cases. Independent DISTINCT/ordering, other
+HAVING/ORDER BY shapes, subqueries in more than one clause, nested scalar
+blocks, mixed derived/scalar plans, and broader optimizer placement remain open.

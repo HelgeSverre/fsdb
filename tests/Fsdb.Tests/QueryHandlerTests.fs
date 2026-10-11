@@ -4213,6 +4213,22 @@ let tests =
               Expect.isFalse (independentHavingChild.GetProperty("dependent").GetBoolean()) "independent HAVING scalar remains under grouping"
               Expect.equal (independentHavingChild.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "independent HAVING child retains its access"
 
+              let independentHavingOrdered =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a GROUP BY a.id HAVING a.id=(SELECT b.id FROM scalar_plan b WHERE b.id=1) ORDER BY a.id DESC"
+              let orderedIndependentGrouping =
+                  independentHavingOrdered.GetProperty("ordering_operation").GetProperty("grouping_operation")
+              Expect.equal (orderedIndependentGrouping.GetProperty("having_subqueries").GetArrayLength()) 1 "independent HAVING scalar stays with ordered grouping"
+
+              let independentGroupOrder =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a GROUP BY a.id ORDER BY (SELECT b.id FROM scalar_plan b WHERE b.id=1)"
+              let independentOuterOrder = independentGroupOrder.GetProperty("ordering_operation")
+              let independentInnerGroup = independentOuterOrder.GetProperty("grouping_operation")
+              Expect.isFalse (independentOuterOrder.GetProperty("using_filesort").GetBoolean()) "constant group ordering needs no filesort"
+              Expect.isFalse (independentInnerGroup.GetProperty("using_filesort").GetBoolean()) "indexed grouping needs no filesort"
+              Expect.equal (independentInnerGroup.GetProperty("optimized_away_subqueries").GetArrayLength()) 1 "constant order scalar belongs to grouping"
+              let mutable outerOptimized = Unchecked.defaultof<System.Text.Json.JsonElement>
+              Expect.isFalse (independentOuterOrder.TryGetProperty("optimized_away_subqueries", &outerOptimized)) "outer ordering does not own the constant scalar"
+
               let projectionSql tail =
                   "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a " + tail
 

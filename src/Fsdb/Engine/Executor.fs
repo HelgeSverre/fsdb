@@ -20404,16 +20404,19 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                 attachSubqueries table ExplainWhere subqueries
             | ExplainProjection, [] -> attachSubqueries block ExplainProjection subqueries
             | clause, operations ->
+                let hasDependentSubquery = subqueries |> List.exists fst
                 let targetOperation =
                     match clause with
                     | ExplainProjection -> List.last operations
                     | ExplainHaving -> GroupingOperation
+                    | ExplainOrderBy
+                        when operations = [ OrderingOperation; GroupingOperation ]
+                             && not hasDependentSubquery -> GroupingOperation
                     | ExplainOrderBy -> OrderingOperation
                     | ExplainWhere -> invalidOp "WHERE subqueries belong to the source table"
 
                 let hasFilesort = blockRows |> List.exists (fun row -> List.contains "Using filesort" row.Extra)
                 let hasTemporary = blockRows |> List.exists (fun row -> List.contains "Using temporary" row.Extra)
-                let hasDependentSubquery = subqueries |> List.exists fst
                 let source = JsonObject()
                 source["table"] <- block["table"].DeepClone()
                 block.Remove("table") |> ignore
@@ -20434,6 +20437,8 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                             | [ OrderingOperation; DistinctOperation ], DistinctOperation -> hasFilesort
                             | [ OrderingOperation; DistinctOperation ], OrderingOperation -> false
                             | [ OrderingOperation ], OrderingOperation
+                                when clause = ExplainOrderBy && not hasDependentSubquery -> false
+                            | [ OrderingOperation; GroupingOperation ], OrderingOperation
                                 when clause = ExplainOrderBy && not hasDependentSubquery -> false
                             | _ ->
                                 (operationKind = OrderingOperation
@@ -20532,7 +20537,9 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
             && (match placement with
                 | Some { Clause = ExplainProjection; Operations = [] } -> true
                 | Some { Clause = ExplainOrderBy; Operations = [ OrderingOperation ] }
-                | Some { Clause = ExplainHaving; Operations = [ GroupingOperation ] } ->
+                | Some { Clause = ExplainOrderBy; Operations = [ OrderingOperation; GroupingOperation ] }
+                | Some { Clause = ExplainHaving; Operations = [ GroupingOperation ] }
+                | Some { Clause = ExplainHaving; Operations = [ OrderingOperation; GroupingOperation ] } ->
                     branchRows.Length = 1 && branchRows.Head.Table.IsSome
                 | Some _ ->
                     branchRows.Length = 1
@@ -20739,7 +20746,7 @@ let private selectJsonSubqueryPlacement (select: SelectStmt) =
                 | ExplainHaving, [ GroupingOperation ]
                 | ExplainOrderBy, [ OrderingOperation ] -> tableSource
                 | ExplainHaving, [ OrderingOperation; GroupingOperation ]
-                | ExplainOrderBy, [ OrderingOperation; GroupingOperation ] -> tableSource && dependent
+                | ExplainOrderBy, [ OrderingOperation; GroupingOperation ] -> tableSource
                 | _ -> false
 
             if supported then Some { Clause = clause; Operations = operations } else None
