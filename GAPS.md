@@ -841,6 +841,12 @@ from about 95 to 68 µs and from about 322 to 132 KB per call while preserving
 changing session function values. The remaining allocation and wire-path
 overhead still need profiling; this does not close the broader point-lookup
 performance gap.
+A [current project-backed stage profile](benchmarks/results/2026-10-11-point-lookup-pipeline.md)
+puts the fixed text-handler lookup near 50 µs and 109 KiB per call on its
+same-process fixture; separate parser and pre-parsed executor actions take
+about 26 and 13 µs. These stages are not additive, but they narrow the next
+investigation toward parser/executor setup and a separate prepared-result
+profile rather than another unmeasured session shortcut.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes

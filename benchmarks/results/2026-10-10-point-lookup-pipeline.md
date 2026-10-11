@@ -14,6 +14,11 @@ dotnet build src/Fsdb/Fsdb.fsproj -c Release
 dotnet fsi --nologo benchmarks/scripts/point-lookup-pipeline.fsx
 ```
 
+The FSI script used for this historical run has since been replaced by the
+project-backed `benchmarks/PointLookupPipeline` runner so its transitive
+dependencies resolve on current .NET installations. The original script remains
+available at this report's Git revision.
+
 | Predicate | Parse | Pre-parsed executor | Text handler |
 |---|---:|---:|---:|
 | `id=3` | 24.37 µs / 70.0 KB | 11.75 µs / 39.1 KB | 84.67 µs / 254.2 KB |
