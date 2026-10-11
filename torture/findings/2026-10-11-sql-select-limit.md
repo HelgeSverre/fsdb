@@ -48,3 +48,13 @@ and lateral derived sources, derived set operations, and expression
 subqueries still use the general JSON renderer until their ownership and
 dependence are audited. MySQL cost details and exact ANALYZE timing
 presentation also remain open.
+
+A follow-up native 8.4.11 probe used a disposable table and a zero session
+limit to inspect scalar projection subqueries inside UNION branches. MySQL
+places an uncorrelated scalar subquery under its owning branch's
+`optimized_away_subqueries` array with `dependent: false` and
+`cacheable: true`. A correlated projection subquery appears under the
+owning table's `select_list_subqueries` array with `dependent: true` and
+`cacheable: false`. Both retain the child `query_block.select_id` and access
+description. Fsdb's general renderer still flattens these rows; the probe
+clarifies the remaining hierarchy gap but does not close it.
