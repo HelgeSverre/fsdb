@@ -2323,7 +2323,13 @@ let private applyDateInterval (sign: float) (dateV: Value) (amount: float) (unit
                 if ticks < -maxTimeTicks || ticks > maxTimeTicks then overflow ()
                 else VTime(timeValueOrClamp ticks)
     | _ ->
-        match tryDateTimeValue dateV |> Option.bind (fun dt -> tryAddInterval dt (sign * amount) unit) with
+        let dateTime =
+            match dateV with
+            | VTime value ->
+                try Some(DateTime.Today.AddTicks(timeTicks value))
+                with :? ArgumentOutOfRangeException -> None
+            | _ -> tryDateTimeValue dateV
+        match dateTime |> Option.bind (fun dt -> tryAddInterval dt (sign * amount) unit) with
         | None -> VNull // out of range — MySQL yields NULL
         | Some result ->
             if looksDateOnly dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then

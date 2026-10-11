@@ -3516,6 +3516,14 @@ let tests =
                   [ TypeTime; TypeDateTime ]
                   "composite TIME interval result types"
 
+              let _, extendedTime =
+                  handle session
+                      ("SELECT TIMESTAMPDIFF(HOUR,CURDATE(),CAST('25:30:00' AS TIME)+INTERVAL 1 DAY) AS over_day_hours, "
+                       + "TIMESTAMPDIFF(HOUR,CURDATE(),CAST('-01:00:00' AS TIME)+INTERVAL 1 DAY) AS negative_hours")
+              Expect.equal extendedTime
+                  (ResultSet([ "over_day_hours"; "negative_hours" ], [ [ Some "49"; Some "23" ] ]))
+                  "extended TIME values carry into DATETIME arithmetic"
+
               let session, microseconds =
                   handle session "SELECT CAST('12:34:56.123456' AS TIME(6)) + INTERVAL 1 MICROSECOND AS result"
               Expect.equal microseconds (ResultSet([ "result" ], [ [ Some "12:34:56.123457" ] ])) "microsecond arithmetic"

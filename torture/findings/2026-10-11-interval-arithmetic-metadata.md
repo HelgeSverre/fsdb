@@ -38,6 +38,10 @@ greater-than-24-hour results: `12:34:56 + INTERVAL 2 HOUR` gives `14:34:56`,
 instead produce DATETIME values based on the current date. Composite
 `HOUR_MINUTE` remains TIME, while `DAY_HOUR` is DATETIME.
 
+For those day-or-larger intervals, TIME is an offset from today's date:
+`25:30:00 + INTERVAL 1 DAY` is 49 hours after `CURDATE()`, and
+`-01:00:00 + INTERVAL 1 DAY` is 23 hours after it. Both return DATETIME.
+
 Fsdb previously converted all of those TIME operands through today's
 DATETIME. It now preserves the original TIME for subday units and carries
 the source unit through composite-interval parsing. A microsecond interval
