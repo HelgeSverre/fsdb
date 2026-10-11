@@ -626,6 +626,37 @@ let tests =
                   | ResultSet(_, rows) -> Expect.equal rows expected sql
                   | other -> failtestf "expected composite correlated results, got %A" other
 
+          testCase "composite materialized probes avoid evaluating unrelated rows"
+          <| fun _ ->
+              let mutable touches = 0
+
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_key (a INT, b INT)" |> ignore
+              runDefault store "CREATE TABLE inner_keys (a INT, b INT, active INT)" |> ignore
+              runDefault store "INSERT INTO outer_key VALUES (1, 99)" |> ignore
+
+              [ 0 .. 99 ]
+              |> List.map (fun b -> sprintf "(1, %d, 1)" b)
+              |> String.concat ", "
+              |> fun values -> runDefault store ("INSERT INTO inner_keys VALUES " + values)
+              |> ignore
+
+              let sql =
+                  "SELECT EXISTS (SELECT 1 FROM "
+                  + "(SELECT a, b, MAX(active) AS active FROM inner_keys GROUP BY a, b) d "
+                  + "WHERE TOUCH(d.active) = 1 AND d.a = o.a AND d.b = o.b) FROM outer_key o"
+
+              match run store registry sql with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the matching pair, got %A" other
+
+              Expect.isLessThan touches 10 "the residual predicate avoids the other 99 materialized rows"
+
           testCase "scalar subquery returning more than one row is MySQL error 1242"
           <| fun _ ->
               let store = newStore ()
