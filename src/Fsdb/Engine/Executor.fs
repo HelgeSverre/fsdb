@@ -18098,6 +18098,7 @@ and private runFullTextSelect
 
                 function
                 | Star None -> true
+                | LiteralValue value -> value <> VNull
                 | Col name -> nonNullColumn name
                 | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier source.Qualifier -> nonNullColumn name
                 | _ -> false

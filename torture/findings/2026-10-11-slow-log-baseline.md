@@ -62,6 +62,10 @@ shape without fetching every matched row, and retains the normal aggregate
 metadata. `COUNT(owner_id)` on a nullable column and `COUNT(*)` with an
 additional owner filter each examined three rows in MySQL; fsdb leaves
 those on the row-evaluation path.
+`COUNT(1)` and `COUNT('x')` also reported one examined row and now use the
+posting count. `COUNT(NULL)` reported one examined row per matching document
+and stays on the ordinary aggregate path; `COUNT(DISTINCT id)` likewise
+examined each match.
 
 The count shortcut also bypasses unrelated virtual generated columns. On
 MySQL 8.4.11, a two-row full-text table with virtual

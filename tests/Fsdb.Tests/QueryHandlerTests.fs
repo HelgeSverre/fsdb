@@ -9695,6 +9695,12 @@ let tests =
               for sql, examined, expected in
                   [ "SELECT COUNT(*)" + source, "1",
                     ResultSet([ "COUNT(*)" ], [ [ Some "3" ] ])
+                    "SELECT COUNT(1)" + source, "1",
+                    ResultSet([ "COUNT(1)" ], [ [ Some "3" ] ])
+                    "SELECT COUNT('x')" + source, "1",
+                    ResultSet([ "COUNT('x')" ], [ [ Some "3" ] ])
+                    "SELECT COUNT(NULL)" + source, "3",
+                    ResultSet([ "COUNT(NULL)" ], [ [ Some "0" ] ])
                     "SELECT COUNT(*) AS n" + source, "1",
                     ResultSet([ "n" ], [ [ Some "3" ] ])
                     "SELECT COUNT(*)" + source.Replace("'alpha'", "'missing'"), "1",
