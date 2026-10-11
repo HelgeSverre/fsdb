@@ -657,6 +657,68 @@ let tests =
 
               Expect.isLessThan touches 10 "the residual predicate avoids the other 99 materialized rows"
 
+          testCase "correlated numeric range narrows a grouped materialized source"
+          <| fun _ ->
+              let mutable touches = 0
+
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_bound (min_b INT)" |> ignore
+              runDefault store "CREATE TABLE inner_values (b INT, active INT)" |> ignore
+              runDefault store "INSERT INTO outer_bound VALUES (99)" |> ignore
+
+              [ 0 .. 99 ]
+              |> List.map (fun b -> sprintf "(%d, 1)" b)
+              |> String.concat ", "
+              |> fun values -> runDefault store ("INSERT INTO inner_values VALUES " + values)
+              |> ignore
+
+              for prefix, source in
+                  [ "", "(SELECT b, MAX(active) AS active FROM inner_values GROUP BY b) d"
+                    "WITH grouped AS (SELECT b, MAX(active) AS active FROM inner_values GROUP BY b) ", "grouped d" ] do
+                  touches <- 0
+
+                  let sql =
+                      prefix + "SELECT EXISTS (SELECT 1 FROM " + source
+                      + " WHERE TOUCH(d.active) = 1 AND d.b >= o.min_b) FROM outer_bound o"
+
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected the matching numeric bound, got %A" other
+
+                  Expect.isLessThan touches 10 "the residual predicate avoids lower materialized keys"
+
+          testCase "materialized correlated ranges preserve strict bounds and NULLs"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_bounds (id INT, b INT)" |> ignore
+              runDefault store "CREATE TABLE inner_values (b INT)" |> ignore
+              runDefault store "INSERT INTO outer_bounds VALUES (1, 1), (2, NULL)" |> ignore
+              runDefault store "INSERT INTO inner_values VALUES (0), (1), (2), (NULL)" |> ignore
+
+              let sql =
+                  "WITH grouped AS (SELECT b, COUNT(*) AS n FROM inner_values GROUP BY b) "
+                  + "SELECT o.id, "
+                  + "(SELECT COUNT(*) FROM grouped d WHERE d.b > o.b), "
+                  + "(SELECT COUNT(*) FROM grouped d WHERE d.b >= o.b), "
+                  + "(SELECT COUNT(*) FROM grouped d WHERE d.b < o.b), "
+                  + "(SELECT COUNT(*) FROM grouped d WHERE d.b <= o.b), "
+                  + "(SELECT COUNT(*) FROM grouped d WHERE d.b BETWEEN o.b AND 2) "
+                  + "FROM outer_bounds o ORDER BY o.id"
+
+              match runDefault store sql with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "1"; Some "1"; Some "2"; Some "1"; Some "2"; Some "2" ]
+                        [ Some "2"; Some "0"; Some "0"; Some "0"; Some "0"; Some "0" ] ]
+                      "MySQL 8.4 range counts"
+              | other -> failtestf "expected correlated range counts, got %A" other
+
           testCase "scalar subquery returning more than one row is MySQL error 1242"
           <| fun _ ->
               let store = newStore ()

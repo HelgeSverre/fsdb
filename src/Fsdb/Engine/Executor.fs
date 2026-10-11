@@ -410,6 +410,10 @@ type private MaterializedEqualityLookup =
     { Columns: ColumnDef list
       FindRows: Value list -> Value[] list option }
 
+type private MaterializedRangeLookup =
+    { Columns: ColumnDef list
+      FindRows: (Value * bool) option -> (Value * bool) option -> Value[] list option }
+
 type private PhysicalProjectionStep =
     { InputColumns: ColumnDef list
       InputQualifier: string
@@ -570,6 +574,94 @@ let private materializedEqualityLookup
 
                 Some { Columns = columns; FindRows = findRows }))
 
+let private isNumericIndexType = function
+    | TTinyInt _
+    | TBool
+    | TSmallInt _
+    | TMediumInt _
+    | TInt _
+    | TBigInt _
+    | TBit _
+    | TDecimal _
+    | TDouble _
+    | TFloat _
+    | TYear -> true
+    | _ -> false
+
+let private isNumericIndexValue = function
+    | VInt _
+    | VUInt _
+    | VBit _
+    | VDecimal _
+    | VDouble _ -> true
+    | _ -> false
+
+let private materializedRangeLookup
+    (columns: ColumnDef list)
+    (rows: Value[] list)
+    (columnName: string)
+    : MaterializedRangeLookup option =
+    resolveColumn columns columnName
+    |> Result.toOption
+    |> Option.filter (fun index -> isNumericIndexType columns.[index].Type)
+    |> Option.bind (fun columnIndex ->
+        let sourceRows = List.toArray rows
+        let entries =
+            sourceRows
+            |> Array.mapi (fun index row -> row.[columnIndex], index)
+            |> Array.filter (fun (value, _) -> value <> VNull)
+
+        if entries |> Array.exists (fst >> isNumericIndexValue >> not) then
+            None
+        else
+            Array.sortInPlaceWith (fun (left, _) (right, _) -> Value.compare left right) entries
+
+            let firstMatching bound inclusive =
+                let mutable lower = 0
+                let mutable upper = entries.Length
+
+                while lower < upper do
+                    let middle = lower + (upper - lower) / 2
+                    let comparison = Value.compare (fst entries.[middle]) bound
+
+                    if comparison < 0 || (comparison = 0 && not inclusive) then
+                        lower <- middle + 1
+                    else
+                        upper <- middle
+
+                lower
+
+            let findRows lower upper =
+                let compatible bound =
+                    bound
+                    |> Option.forall (fun (value, _) -> value = VNull || isNumericIndexValue value)
+
+                if not (compatible lower && compatible upper) then
+                    None
+                elif lower |> Option.exists (fst >> (=) VNull)
+                     || upper |> Option.exists (fst >> (=) VNull) then
+                    Some []
+                else
+                    let first =
+                        lower
+                        |> Option.map (fun (value, inclusive) -> firstMatching value inclusive)
+                        |> Option.defaultValue 0
+                    let afterLast =
+                        upper
+                        |> Option.map (fun (value, inclusive) -> firstMatching value (not inclusive))
+                        |> Option.defaultValue entries.Length
+
+                    // A range is selected in key order, but the query still sees
+                    // candidates in the materialized source's original order.
+                    entries.[first .. afterLast - 1]
+                    |> Array.map snd
+                    |> Array.sort
+                    |> Array.map (fun index -> sourceRows.[index])
+                    |> Array.toList
+                    |> Some
+
+            Some { Columns = columns; FindRows = findRows })
+
 let private tryLiteralValues expressions =
     let rec collect values =
         function
@@ -600,6 +692,7 @@ type private StatementMemo =
       Regexes: Dictionary<Expr, MemoizedRegex>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
@@ -613,6 +706,8 @@ let private freshStatementMemo () =
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
       MaterializedCorrelatedEqualities =
         Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedRanges =
+        Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>(HashIdentity.Reference)
       PhysicalProjections = Dictionary<FromItem, PhysicalProjection>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
@@ -12149,28 +12244,6 @@ and private literalPointLookupEqualities (registry: Registry) (tref: TableRef) (
                       Value = value })
             | _ -> None)
 
-and private isNumericIndexType = function
-    | TTinyInt _
-    | TBool
-    | TSmallInt _
-    | TMediumInt _
-    | TInt _
-    | TBigInt _
-    | TBit _
-    | TDecimal _
-    | TDouble _
-    | TFloat _
-    | TYear -> true
-    | _ -> false
-
-and private isNumericIndexValue = function
-    | VInt _
-    | VUInt _
-    | VBit _
-    | VDecimal _
-    | VDouble _ -> true
-    | _ -> false
-
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let foldableBuiltins =
         set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST"
@@ -13436,6 +13509,16 @@ and private tryProjectedPhysicalLiteralLookup
                     collectRangeBounds (tryCorrelatedInnerColumn probeSource) literalValue whereExpr
                     |> List.tryPick (tryProjectedPhysicalRangeRows store registry dbName projection))))
 
+and private isStableMaterializedSource source =
+    match source with
+    | FromSubquery _ -> true
+    | FromTable table ->
+        table.Database.IsNone
+        && (currentCteScope ()
+            |> Map.tryFind (table.Table.ToLowerInvariant())
+            |> Option.exists _.StatementStable)
+    | _ -> false
+
 and private tryMaterializedCorrelatedEqualityLookup
     (store: Store)
     (registry: Registry)
@@ -13446,17 +13529,7 @@ and private tryMaterializedCorrelatedEqualityLookup
     : (ColumnDef list * Value[] list) option =
     FromItem.tryQualifier source
     |> Option.bind (fun qualifier ->
-        let eligible =
-            match source with
-            | FromSubquery _ -> true
-            | FromTable table ->
-                table.Database.IsNone
-                && currentCteScope ()
-                   |> Map.tryFind (table.Table.ToLowerInvariant())
-                   |> Option.exists _.StatementStable
-            | _ -> false
-
-        if not eligible then
+        if not (isStableMaterializedSource source) then
             None
         else
             outer
@@ -13491,6 +13564,40 @@ and private tryMaterializedCorrelatedEqualityLookup
                                 lookup.FindRows values
                                 |> Option.map (fun rows -> lookup.Columns, rows))))))
 
+and private tryMaterializedCorrelatedRangeLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (source: FromItem)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * Value[] list) option =
+    FromItem.tryQualifier source
+    |> Option.filter (fun _ -> isStableMaterializedSource source)
+    |> Option.bind (fun qualifier ->
+        outer
+        |> Option.bind (fun context ->
+            resolveFromItem store registry dbName source
+            |> Result.toOption
+            |> Option.bind (fun (columns, rows) ->
+                let bounds =
+                    correlatedRangeBounds (correlatedProbeSource qualifier columns) whereExpr (Some context)
+
+                let bySource = (currentStatementMemo ()).MaterializedCorrelatedRanges
+                let sourceLookups =
+                    getMemoized bySource source (fun () ->
+                        Dictionary<string, MaterializedRangeLookup option>(System.StringComparer.OrdinalIgnoreCase))
+
+                bounds
+                |> List.choose (fun bound ->
+                    getMemoized sourceLookups bound.Column (fun () -> materializedRangeLookup columns rows bound.Column)
+                    |> Option.bind (fun lookup ->
+                        lookup.FindRows bound.Lower bound.Upper
+                        |> Option.map (fun matches -> lookup.Columns, matches)))
+                |> function
+                    | [] -> None
+                    | candidates -> Some(List.minBy (snd >> List.length) candidates))))
+
 and private tryCorrelatedSourceLookup
     (store: Store)
     (registry: Registry)
@@ -13516,6 +13623,7 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () -> tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
+        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedRangeLookup store registry dbName source whereExpr outer)
     | FromSubquery _ ->
         [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
           tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
@@ -13523,7 +13631,10 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () -> tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
-    | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
+        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedRangeLookup store registry dbName source whereExpr outer)
+    | _ ->
+        tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
+        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedRangeLookup store registry dbName source whereExpr outer)
 
 and private tryCorrelatedCountEqualityPredicate source context =
     let boundValue expression =
