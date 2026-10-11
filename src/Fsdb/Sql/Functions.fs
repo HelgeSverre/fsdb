@@ -6390,16 +6390,17 @@ let private geometryPredicateFn functionName predicate =
         | GPoint _ | GMultiPoint _ -> true
         | _ -> false
 
+    let linework = function
+        | GLineString members -> Some [ members ]
+        | GMultiLineString members when not members.IsEmpty -> Some members
+        | _ -> None
+
     let pointLineShapes first second =
         let point = function GPoint(x, y) -> Some(x, y) | _ -> None
-        let lines = function
-            | GLineString members -> Some [ members ]
-            | GMultiLineString members when not members.IsEmpty -> Some members
-            | _ -> None
-        match point first, lines second with
+        match point first, linework second with
         | Some memberPoint, Some linework -> Some(false, memberPoint, linework)
         | _ ->
-            match lines first, point second with
+            match linework first, point second with
             | Some linework, Some memberPoint -> Some(true, memberPoint, linework)
             | _ -> None
 
@@ -6415,6 +6416,11 @@ let private geometryPredicateFn functionName predicate =
         | "ST_TOUCHES" -> position = GeographicPointLinePosition.Boundary
         | "ST_EQUALS" -> false
         | _ -> invalidArg (nameof functionName) "unsupported geographic topology predicate"
+
+    let lineShapes first second =
+        match linework first, linework second with
+        | Some firstLines, Some secondLines -> Some(firstLines, secondLines)
+        | _ -> None
 
     let pointPolygonShapes first second =
         let points = function
@@ -6470,8 +6476,13 @@ let private geometryPredicateFn functionName predicate =
                     | Some(lineFirst, point, lines) ->
                         Some(pointLinePredicate referenceSystem lineFirst point lines)
                     | None ->
-                        requirePlanar functionName first |> ignore
-                        predicate first second
+                        match functionName, lineShapes first.Shape second.Shape with
+                        | ("ST_INTERSECTS" | "ST_DISJOINT"), Some(firstLines, secondLines) ->
+                            let intersects = geographicLineLineDistance referenceSystem firstLines secondLines = Some 0.0
+                            Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
+                        | _ ->
+                            requirePlanar functionName first |> ignore
+                            predicate first second
             else predicate first second
 
         result

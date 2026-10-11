@@ -14745,6 +14745,22 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "0"; Some "0"; Some "0"; Some "1"; Some "0" ] ]) -> ()
                     | result -> failtestf "expected MySQL reverse geographic point-line topology, got %A" result
 
+                testCase "geographic line intersections follow geodesic segments"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "LINESTRING(0 0,0 2)", "LINESTRING(-1 1,1 1)", [ Some "1"; Some "0" ]
+                          "LINESTRING(0 0,0 2)", "LINESTRING(2 0,2 2)", [ Some "0"; Some "1" ]
+                          "LINESTRING(0 0,0 2)", "LINESTRING(0 2,1 2)", [ Some "1"; Some "0" ]
+                          "LINESTRING(0 170,0 -170)", "LINESTRING(-1 180,1 180)", [ Some "1"; Some "0" ] ]
+                    for firstText, secondText, expected in cases do
+                        let first = sprintf "ST_GeomFromText('%s',4326)" firstText
+                        let second = sprintf "ST_GeomFromText('%s',4326)" secondText
+                        let sql = sprintf "SELECT ST_Intersects(%s,%s),ST_Disjoint(%s,%s)" first second first second
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = expected -> ()
+                        | result -> failtestf "expected MySQL geographic line intersections for %s and %s, got %A" firstText secondText result
+
                 testCase "geographic point-to-line distance follows geodesic segments"
                 <| fun _ ->
                     let store = newStore ()
