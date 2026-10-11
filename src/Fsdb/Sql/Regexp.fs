@@ -46,6 +46,13 @@ let private negateClass (target: string) =
     if target[1] = '^' then "[" + target.Substring(2)
     else "[^" + target.Substring(1)
 
+let private scalarAtom = @"(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[\s\S])"
+
+let private scalarNegatedClass (target: string) =
+    // A .NET negated class can match only the high surrogate of a scalar.
+    // Test the positive class first, then consume the complete scalar.
+    "(?:(?!" + negateClass target + ")" + scalarAtom + ")"
+
 let private characterEscape = function
     | 'h' -> Some horizontalClass
     | 'H' -> Some(negateClass horizontalClass)
@@ -178,7 +185,7 @@ let private mixedNegatedClassAt (pattern: string) start =
                 index <- nextIndex
             | None ->
                 match characterEscape pattern[index + 1] with
-                | Some target when target[1] = '^' -> alternatives.Add target
+                | Some target when target[1] = '^' -> alternatives.Add(scalarNegatedClass target)
                 | Some target -> ordinary.Append(target, 1, target.Length - 2) |> ignore
                 | None when pattern[index + 1] = 'b' || pattern[index + 1] = 'B' ->
                     ordinary.Append pattern[index + 1] |> ignore
@@ -195,7 +202,7 @@ let private mixedNegatedClassAt (pattern: string) start =
                 else None
             match posixMember with
             | Some(syntax, target) ->
-                if target[1] = '^' then alternatives.Add target
+                if target[1] = '^' then alternatives.Add(scalarNegatedClass target)
                 else ordinary.Append(target, 1, target.Length - 2) |> ignore
                 index <- index + syntax.Length
             | None ->
@@ -213,7 +220,7 @@ let private mixedNegatedClassAt (pattern: string) start =
         // A bracket expression is one atom, so keep quantifiers attached to
         // the whole union. The outer ^ complements that one-character union.
         let rewritten =
-            if outerNegated then "(?:(?!(?:" + union + "))[\\s\\S])"
+            if outerNegated then "(?:(?!(?:" + union + "))" + scalarAtom + ")"
             else "(?:" + union + ")"
         Some(Ok(index - start, rewritten))
 
@@ -264,7 +271,7 @@ let private normalizePosixClasses (pattern: string) =
         else
             match posixClassAt inClass pattern index with
             | Some(source, target) ->
-                builder.Append target |> ignore
+                builder.Append(if target[1] = '^' then scalarNegatedClass target else target) |> ignore
                 index <- index + source.Length
             | None ->
                 match if not inClass && pattern[index] = '[' then mixedNegatedClassAt pattern index else None with

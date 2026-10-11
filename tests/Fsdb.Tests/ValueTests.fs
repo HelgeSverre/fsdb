@@ -3137,6 +3137,26 @@ let tests =
                                   (VInt expected)
                                   (sprintf "%s matches %A" pattern value)
 
+                      testCase "REGEXP negated POSIX classes return whole supplementary symbols"
+                      <| fun _ ->
+                          for pattern in [ "[[:^alpha:]]"; "[x[:^alpha:]]" ] do
+                              Expect.equal
+                                  (call "REGEXP_SUBSTR" [ VString "😀"; VString pattern; VInt 1L; VInt 1L; VString "c" ])
+                                  (VString "😀")
+                                  (sprintf "%s returns one Unicode scalar" pattern)
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "😀"; VString "[^x[:^alpha:]]" ])
+                              VNull
+                              "an outer complement excludes the nonletter scalar"
+                          Expect.equal
+                              (call "REGEXP_INSTR" [ VString "a😀b"; VString "[x[:^alpha:]]"; VInt 1L; VInt 1L; VInt 1L; VString "c" ])
+                              (VInt 3L)
+                              "the end position counts Unicode scalars"
+                          Expect.equal
+                              (call "REGEXP_REPLACE" [ VString "a😀b"; VString "[x[:^alpha:]]"; VString "_" ])
+                              (VString "a_b")
+                              "replacement consumes the whole scalar"
+
                       testCase "REGEXP combines POSIX members with literals and other classes"
                       <| fun _ ->
                           for pattern, value, expected in

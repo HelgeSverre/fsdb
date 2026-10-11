@@ -10120,6 +10120,9 @@ module ContractCatalog =
                Contract.query "mixed-negated-members"
                    "SELECT REGEXP_LIKE('x','[x[:^alpha:]]','c'),REGEXP_LIKE('7','[x[:^alpha:]]','c'),REGEXP_LIKE('A','[x[:^alpha:]]','c'),REGEXP_LIKE('\\n','[x[:^alpha:]]','c'),REGEXP_LIKE('x7','^[x[:^alpha:]]+$','c'),REGEXP_LIKE('7','[[:^alpha:][:digit:]]','c'),REGEXP_LIKE('A','[[:^alpha:][:digit:]]','c'),REGEXP_LIKE('7','[^x[:^alpha:]]','c'),REGEXP_LIKE('A','[^x[:^alpha:]]','c')"
                    |> Contract.comparingValues
+               Contract.query "supplementary-negated-class"
+                   "SELECT REGEXP_SUBSTR('😀','[[:^alpha:]]',1,1,'c'),REGEXP_SUBSTR('😀','[x[:^alpha:]]',1,1,'c'),REGEXP_INSTR('a😀b','[x[:^alpha:]]',1,1,1,'c'),REGEXP_REPLACE('a😀b','[x[:^alpha:]]','_')"
+                   |> Contract.comparingValues
                Contract.query "whitespace-escapes"
                    "SELECT REGEXP_LIKE(' ','\\\\h','c'),REGEXP_LIKE('\\n','\\\\h','c'),REGEXP_LIKE(' ','\\\\H','c'),REGEXP_LIKE('\\n','\\\\v','c'),REGEXP_LIKE(' ','\\\\v','c'),REGEXP_LIKE('A','\\\\V','c'),REGEXP_LIKE('\\n','[a\\\\H]','c'),REGEXP_LIKE(' ','[a\\\\H]','c')"
                    |> Contract.comparingValues

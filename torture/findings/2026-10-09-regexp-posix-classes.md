@@ -104,15 +104,18 @@ and `^.{2}$` matches two. The shared compiler now makes an unescaped dot
 outside a bracket class prefer a valid UTF-16 surrogate pair before falling
 back to the ordinary .NET dot. The noncapturing atom retains quantifier and
 capture numbering and inherits the usual newline and `n` match-mode rules.
-Supplementary scalars in bracket classes and Unicode properties remain open.
+Supplementary scalars in general bracket classes and Unicode properties remain open.
 
 All fourteen standard POSIX class names now have translations. The translations
 are bounded approximations of ICU properties: for example, MySQL counts the
 Roman numeral `Ⅳ` as `upper` and `ⅳ` as `lower`, while .NET's `Lu`/`Ll`
-categories do not. Supplementary Unicode scalars are another open boundary:
-MySQL `REGEXP_SUBSTR('😀','[x[:^alpha:]]')` returns the complete emoji, while
-the underlying .NET regex matches only its high UTF-16 surrogate. The same
-problem exists for a standalone negated POSIX class. Other ICU-only grammar
+categories do not. MySQL 8.4.11 returns the complete emoji for both
+`REGEXP_SUBSTR('😀','[x[:^alpha:]]')` and the standalone `[[:^alpha:]]` form;
+`REGEXP_INSTR` reports the scalar end position and `REGEXP_REPLACE` removes
+the complete emoji. Fsdb's negated POSIX translation now tests the positive
+class and consumes a surrogate pair as one atom, covering these audited forms.
+Supplementary letters still expose the difference between .NET UTF-16
+categories and ICU scalar properties. Other ICU-only grammar
 and error-code distinctions remain open. MySQL 8.4.11 matches Greek `α` with
 both `\p{Greek}` and `\p{Script=Greek}` when the probe client's character set
 is explicitly `utf8mb4`. The default `mysql` client character set on the pinned
