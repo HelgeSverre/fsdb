@@ -18166,6 +18166,11 @@ and private runFullTextSelect
                 let synthetic = preparedSources |> List.collect _.Synthetic
                 let baseKey = baseQualifier.ToLowerInvariant()
 
+                let explicitRelevanceOrder =
+                    match select.OrderBy with
+                    | [ node, Desc ] when select.Joins.IsEmpty && List.contains node whereNodes -> Some node
+                    | _ -> None
+
                 let streamedScoreColumn =
                     let projectionsAreScalar =
                         select.Projections
@@ -18179,17 +18184,21 @@ and private runFullTextSelect
 
                     if
                         select.Limit.IsSome
-                        && select.OrderBy.IsEmpty
+                        && (select.OrderBy.IsEmpty || explicitRelevanceOrder.IsSome)
                         && select.GroupBy.IsEmpty
                         && select.Having.IsNone
                         && select.Locking.IsEmpty
                         && not select.Distinct
                         && projectionsAreScalar
                         && onlyBasePredicate
-                        && innerJoinChainPreservesLeftOrder store sources fromItem select.Joins
+                        && (select.Joins.IsEmpty
+                            || innerJoinChainPreservesLeftOrder store sources fromItem select.Joins)
                     then
                         match computed with
-                        | [ node, mode, _ ] when mode <> BooleanMode && List.contains node whereNodes ->
+                        | [ node, mode, _ ]
+                            when List.contains node whereNodes
+                                 && (explicitRelevanceOrder = Some node
+                                     || (explicitRelevanceOrder.IsNone && mode <> BooleanMode)) ->
                             preparedSources
                             |> List.tryFind (fun plan ->
                                 plan.Source.Qualifier.Equals(baseQualifier, System.StringComparison.OrdinalIgnoreCase)
@@ -18331,19 +18340,31 @@ and private runFullTextSelect
                                     Having = select.Having |> Option.map sub
                                     GroupBy = select.GroupBy |> List.map sub
                                     OrderBy =
-                                        if implicitOrder.IsEmpty then select.OrderBy |> List.map (fun (expression, direction) -> sub expression, direction)
+                                        if streamedScoreColumn.IsSome && explicitRelevanceOrder.IsSome then []
+                                        elif implicitOrder.IsEmpty then select.OrderBy |> List.map (fun (expression, direction) -> sub expression, direction)
                                         else implicitOrder }
 
-                            runSelect
-                                store
-                                registry
-                                dbName
-                                (resolvedSources |> List.collect snd)
-                                (qualifierRanges resolvedSources)
-                                rows
-                                ArbitraryGroupRows
-                                rewritten
-                                outer
+                            let result, metadata, outputRows =
+                                runSelect
+                                    store
+                                    registry
+                                    dbName
+                                    (resolvedSources |> List.collect snd)
+                                    (qualifierRanges resolvedSources)
+                                    rows
+                                    ArbitraryGroupRows
+                                    rewritten
+                                    outer
+
+                            if
+                                select.Joins.IsEmpty
+                                && not select.OrderBy.IsEmpty
+                                && explicitRelevanceOrder.IsNone
+                            then
+                                examinedRows.Value
+                                |> Option.iter (fun count -> count.Value <- count.Value + int64 outputRows.Length)
+
+                            result, metadata, outputRows
 
 and private runSelect
     (store: Store)

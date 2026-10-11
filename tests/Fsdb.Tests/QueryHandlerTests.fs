@@ -9627,14 +9627,28 @@ let tests =
               let session, _ = handle session "SET GLOBAL slow_query_log=ON"
               let session, _ = handle session "SET SESSION long_query_time=0"
               let session, _ = handle session "CREATE TABLE slow_fulltext_probe (id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body))"
-              let session, _ = handle session "INSERT INTO slow_fulltext_probe VALUES (1,'alpha beta'),(2,'alpha gamma'),(3,'delta epsilon'),(4,'alpha delta')"
+              let session, _ = handle session "INSERT INTO slow_fulltext_probe VALUES (1,'alpha beta'),(2,'alpha gamma'),(3,'delta epsilon'),(4,'alpha alpha delta')"
+
+              let boolean = "MATCH(body) AGAINST('alpha' IN BOOLEAN MODE)"
+              let natural = "MATCH(body) AGAINST('alpha' IN NATURAL LANGUAGE MODE)"
+              let query predicate suffix = sprintf "SELECT id FROM slow_fulltext_probe WHERE %s%s" predicate suffix
 
               for query, examined in
-                  [ "SELECT id FROM slow_fulltext_probe WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE)", "3"
-                    "SELECT id FROM slow_fulltext_probe WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE) LIMIT 1", "1"
-                    "SELECT id FROM slow_fulltext_probe WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE) AND id>1", "3"
-                    "SELECT id FROM slow_fulltext_probe WHERE MATCH(body) AGAINST('missing' IN BOOLEAN MODE)", "0" ] do
-                  let session, _ = handle session query
+                  [ query boolean "", "3"
+                    query boolean " LIMIT 1", "1"
+                    query boolean " AND id>1", "3"
+                    query boolean " ORDER BY id", "6"
+                    query boolean " ORDER BY id LIMIT 1", "4"
+                    query boolean " ORDER BY body", "6"
+                    query boolean " ORDER BY body LIMIT 1", "4"
+                    query boolean (" ORDER BY " + boolean + " DESC"), "3"
+                    query boolean (" ORDER BY " + boolean + " DESC LIMIT 1"), "1"
+                    query natural (" ORDER BY " + natural + " DESC"), "3"
+                    query natural (" ORDER BY " + natural + " DESC LIMIT 1"), "1"
+                    query "MATCH(body) AGAINST('missing' IN BOOLEAN MODE)" "", "0" ] do
+                  let session, result = handle session query
+                  if query.Contains("ORDER BY MATCH") && query.EndsWith("LIMIT 1") then
+                      Expect.equal result (ResultSet([ "id" ], [ [ Some "4" ] ])) "highest relevance comes first"
                   let _, logged = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" (query.Replace("'", "''")))
                   Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) (sprintf "full-text examined rows: %s" query)
 

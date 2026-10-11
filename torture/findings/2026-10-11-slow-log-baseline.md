@@ -26,8 +26,15 @@ A four-row FULLTEXT fixture with three `alpha` posting matches showed
 with `LIMIT 1`, and `3` when an additional `id>1` condition rejected one
 candidate. A missing term examined zero rows. Fsdb now counts the consumed
 full-text candidates for these single-table reads. MySQL reported six for
-the same three matches with `ORDER BY id`, and four for `ORDER BY id LIMIT 1`;
-that extra sorting pass remains outside this regression.
+the same three matches with `ORDER BY id` or `ORDER BY body`, and four when
+either sort uses `LIMIT 1`. Fsdb now also counts the emitted rows of that
+extra sorting pass. With no explicit sort, `LIMIT` still stops consuming
+posting candidates early.
+Descending `ORDER BY MATCH(body) AGAINST('alpha')` is different: MySQL
+uses relevance order without a separate sort, reporting three examined rows
+without a limit and one with `LIMIT 1`. Fsdb now streams that exact
+single-source order and retains the early limit, for both natural-language
+and Boolean search.
 
 An `INSERT … SELECT` that read three source rows and inserted two reported
 `rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives
