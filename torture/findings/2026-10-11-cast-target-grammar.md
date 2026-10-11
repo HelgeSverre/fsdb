@@ -87,3 +87,11 @@ zero with that warning. Fsdb's shared floating-prefix regex previously used
 Unicode `\d`, consumed the entire text, and returned zero without the
 proper prefix warning. The audited cases now share the integer cast's ASCII
 digit rule.
+
+Binary string sources now use the numeric text prefix for DOUBLE and DECIMAL
+CASTs. An introduced `_binary'12x'` value returns 12 and retains MySQL's
+truncation warning for both targets. A value produced by `CAST('12x' AS
+BINARY)` also returns 12, but MySQL suppresses the DECIMAL truncation warning;
+an entirely invalid binary result instead emits error-class warning 1366.
+The bounded range and high-exponent paths also accept audited binary text.
+Bare hex/bit literals retain their separate numeric interpretation.

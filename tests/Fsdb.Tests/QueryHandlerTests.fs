@@ -3033,6 +3033,24 @@ let tests =
                           sql
                   | _, result -> failtestf "expected numeric CAST result for %s, got %A" sql result
 
+          testCase "numeric CASTs distinguish introduced and cast binary strings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expected, warnings in
+                  [ "SELECT CAST(_binary'12x' AS DOUBLE)", "12", [ 1292, "Truncated incorrect DOUBLE value: '12x'" ]
+                    "SELECT CAST(_binary'12x' AS DECIMAL(10,2))", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "SELECT CAST(CAST('12x' AS BINARY) AS DOUBLE)", "12", [ 1292, "Truncated incorrect DOUBLE value: '12x'" ]
+                    "SELECT CAST(CAST('12x' AS BINARY) AS DECIMAL(10,2))", "12.00", []
+                    "SELECT CAST(CAST('abc' AS BINARY) AS DECIMAL(10,2))", "0.00", [ 1366, "Incorrect DECIMAL value: '0' for column '' at row -1" ] ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected binary-source numeric CAST for %s, got %A" sql result
+
           testCase "FLOAT casts distinguish invalid text from range overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

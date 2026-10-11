@@ -5961,9 +5961,16 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     castIntegerText false (toText v |> Option.defaultValue "")
                 | VString s, (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
                     VString(leadingNumericPrefix leadingIntegerPrefixRegex s |> Option.defaultValue "")
-                | VString s, (TDouble _ | TFloat _ | TDecimal _) ->
-                    VString(leadingNumericPrefix leadingFloatPrefixRegex s |> Option.defaultValue "")
+                | (VString _ | VEncodedString _ | VBytes _) as textValue, (TDouble _ | TFloat _ | TDecimal _) ->
+                    let text = toText textValue |> Option.defaultValue ""
+                    VString(leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue "")
                 | _ -> v
+
+            let numericSourceText =
+                match source with
+                | VString text -> Some text
+                | VEncodedString _ | VBytes _ -> toText source
+                | _ -> None
 
             let coerce mode value =
                 let castCol: ColumnDef =
@@ -6011,12 +6018,21 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | TDecimal(precision, scale, _), _ ->
                 let warnTruncated text =
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" text)
-                match source, v with
-                | VString text, VString prefix ->
+                let castBinaryString =
+                    match e, source with
+                    | CastAsBinary(_, _), VBytes _ -> true
+                    | _ -> false
+                match numericSourceText, v with
+                | Some text, VString prefix ->
                     match oversizedDecimalExponentMantissa prefix with
+                    | Some mantissa when castBinaryString ->
+                        warnTruncated mantissa
                     | Some mantissa ->
                         warnTruncated mantissa
                         warnTruncated text
+                    | None when prefix = "" && castBinaryString ->
+                        Diagnostics.warning 1366 "Incorrect DECIMAL value: '0' for column '' at row -1"
+                    | None when castBinaryString -> ()
                     | None when truncatedNumericCastInput text -> warnTruncated text
                     | None -> ()
                 | _ -> ()
@@ -6054,19 +6070,17 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     |> Result.mapError Storage.toMySqlError
             | (TDouble _ | TFloat _), _ ->
                 let truncatedText =
-                    match source with
-                    | VString text -> truncatedNumericCastInput text
-                    | _ -> false
-                match source with
-                | VString text when truncatedText ->
+                    numericSourceText |> Option.exists truncatedNumericCastInput
+                match numericSourceText with
+                | Some text when truncatedText ->
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
                 | _ -> ()
                 coerce castMode v
                 |> Result.mapError Storage.toMySqlError
                 |> Result.bind (function
                     | VDouble value when System.Double.IsInfinity value ->
-                        match ty, source with
-                        | TDouble _, VString text ->
+                        match ty, numericSourceText with
+                        | TDouble _, Some text ->
                             if not truncatedText then
                                 Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
                             Ok(VDouble(if value < 0.0 then -System.Double.MaxValue else System.Double.MaxValue))

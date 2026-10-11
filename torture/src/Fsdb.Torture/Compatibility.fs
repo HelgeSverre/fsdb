@@ -1184,6 +1184,17 @@ module ContractCatalog =
                          |> Contract.comparingValues
                    yield Contract.query (sprintf "numeric-cast-ascii-prefix-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               for index, sql in
+                   [ "SELECT CAST(_binary'12x' AS DOUBLE)"
+                     "SELECT CAST(_binary'12x' AS DECIMAL(10,2))"
+                     "SELECT CAST(CAST('12x' AS BINARY) AS DOUBLE)"
+                     "SELECT CAST(CAST('12x' AS BINARY) AS DECIMAL(10,2))"
+                     "SELECT CAST(CAST('abc' AS BINARY) AS DECIMAL(10,2))"
+                     "SELECT CAST(_binary'1e29' AS DECIMAL(10,2))"
+                     "SELECT CAST(CAST('1e81' AS BINARY) AS DECIMAL(10,2))" ] |> List.indexed do
+                   yield Contract.query (sprintf "numeric-cast-binary-source-%d" index) sql |> Contract.comparingValues
+                   yield Contract.query (sprintf "numeric-cast-binary-source-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                for index, text in [ "abc"; "12x"; "1e309"; "-1e309"; "1e309x"; "-1e309x"; "nan" ] |> List.indexed do
                    yield Contract.query (sprintf "double-cast-value-%d" index) (sprintf "SELECT CAST('%s' AS DOUBLE)" text)
                          |> Contract.comparingValues
