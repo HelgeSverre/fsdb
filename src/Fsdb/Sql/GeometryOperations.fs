@@ -324,13 +324,11 @@ let internal geographicPointPolygonDistance referenceSystem point polygons =
         | distances -> Some(List.min distances)
 
 let private geographicArcsIntersect (firstStart: float * float) firstEnd secondStart secondEnd =
-    let cross = cross3
-    let dot = dot3
     let magnitude (x, y, z) = sqrt (x * x + y * y + z * z)
-    let angle first second = atan2 (magnitude (cross first second)) (dot first second)
+    let angle first second = atan2 (magnitude (cross3 first second)) (dot3 first second)
     let firstStart, firstEnd = geographicUnitVector firstStart, geographicUnitVector firstEnd
     let secondStart, secondEnd = geographicUnitVector secondStart, geographicUnitVector secondEnd
-    let intersection = cross (cross firstStart firstEnd) (cross secondStart secondEnd)
+    let intersection = cross3 (cross3 firstStart firstEnd) (cross3 secondStart secondEnd)
     let size = magnitude intersection
 
     if size < 1e-15 then false
