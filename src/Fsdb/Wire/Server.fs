@@ -1471,6 +1471,7 @@ let private handleConnection
         let mutable capabilities = offeredCapabilities
         let mutable activeSession: Session option = None
         let mutable accountLease: IDisposable option = None
+        let mutable handshakeCompleted = false
 
         let releaseAccountLease () =
             accountLease |> Option.iter _.Dispose()
@@ -1511,6 +1512,7 @@ let private handleConnection
                 match handshakeResp with
                 | None ->
                     closeTls ()
+                    InformationSchema.recordAbortedConnection ()
                     return ()
                 | Some _ -> ()
 
@@ -1676,6 +1678,7 @@ let private handleConnection
                                 { SeqId = okSeq
                                   Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
                             |> Async.Ignore
+                        handshakeCompleted <- true
 
                         match compression with
                         | Some algorithm ->
@@ -2680,12 +2683,16 @@ let private handleConnection
                 |> Async.Catch
                 |> Async.Ignore
         | error ->
+            if not handshakeCompleted then
+                InformationSchema.recordAbortedConnection ()
             closeTls ()
             releaseAccountLease ()
             InformationSchema.unregisterProcess (int64 connectionId)
             activeSession |> Option.iter QueryHandler.closeSession
             return raise error
 
+        if not handshakeCompleted then
+            InformationSchema.recordAbortedConnection ()
         closeTls ()
         releaseAccountLease ()
         InformationSchema.unregisterProcess (int64 connectionId)

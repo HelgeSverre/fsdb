@@ -3467,6 +3467,19 @@ let tests =
                   Expect.isGreaterThan connections 1L "two wire connections increment the attempt count"
                   Expect.isGreaterThan maxUsed 1L "the concurrent connection high-water mark is live"
 
+                  let! abortedBefore = status observer "GLOBAL" "Aborted_connects"
+                  use rejected = new MySqlConnector.MySqlConnection(connectionString + ";Database=_fsdb_missing_database")
+                  let! rejectedResult = rejected.OpenAsync() |> Async.AwaitTask |> Async.Catch
+                  match rejectedResult with
+                  | Choice2Of2 error ->
+                      match error.GetBaseException() with
+                      | :? MySqlConnector.MySqlException as mysqlError ->
+                          Expect.equal mysqlError.Number 1049 "MySQL reports an unknown initial database"
+                      | unexpected -> failtestf "expected a MySQL rejection, got %A" unexpected
+                  | other -> failtestf "expected a rejected initial database, got %A" other
+                  let! abortedAfter = status observer "SESSION" "Aborted_connects"
+                  Expect.isGreaterThan abortedAfter abortedBefore "failed connection setup increments Aborted_connects"
+
                   let! receivedBefore = status observer "GLOBAL" "Bytes_received"
                   let! sentBefore = status observer "GLOBAL" "Bytes_sent"
                   use payload = sender.CreateCommand()

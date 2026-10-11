@@ -16,6 +16,13 @@ the uptime baseline. The counters are process-wide in both status scopes.
 
 The wire integration test opens two connections, checks the live attempt and
 high-water counters, and checks that the status uptime restarts after a flush.
+MySQL also increments `Aborted_connects` for a rejected password, a peer that
+closes after receiving the server handshake, and an unknown initial database.
+The observed value rose from 0 to 1, 2, and 3 across those cases, and a
+subsequent `FLUSH STATUS` left it at 3. Fsdb now counts unsuccessful initial
+handshakes, including authentication and database-selection failures, while
+normal disconnections after a completed handshake do not change this status.
+The wire regression checks the unknown-database case through a real client.
 `Threads_created` remains absent because Fsdb does not create one worker
 thread per client connection; exposing a fabricated value would obscure that
 difference in execution model.
