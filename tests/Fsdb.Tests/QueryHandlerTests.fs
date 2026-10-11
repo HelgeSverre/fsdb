@@ -3017,6 +3017,22 @@ let tests =
                   Expect.isEmpty session.Diagnostics "zero mantissa has no conversion warning"
               | _, result -> failtestf "expected zero DECIMAL result, got %A" result
 
+          testCase "numeric CAST text prefixes use ASCII digits"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expected, code, message in
+                  [ "SELECT CAST('1٢3' AS DOUBLE)", "1", 1292, "Truncated incorrect DOUBLE value: '1٢3'"
+                    "SELECT CAST('1٢3' AS DECIMAL(10,2))", "1.00", 1292, "Truncated incorrect DECIMAL value: '1٢3'"
+                    "SELECT CAST('１2' AS DOUBLE)", "0", 1292, "Truncated incorrect DOUBLE value: '１2'" ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ code, message ]
+                          sql
+                  | _, result -> failtestf "expected numeric CAST result for %s, got %A" sql result
+
           testCase "FLOAT casts distinguish invalid text from range overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

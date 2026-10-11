@@ -736,6 +736,8 @@ Audited DOUBLE and FLOAT CAST text inputs now retain MySQL's numeric-prefix
 warnings; overflowing DOUBLE text clamps to the signed maximum with warning
 1292, while overflowing FLOAT text raises 1690. Other source types and numeric
 conversion contexts remain open.
+Audited numeric CAST text prefixes now use ASCII digits, matching MySQL for
+mixed Unicode-digit and fullwidth-digit input.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common

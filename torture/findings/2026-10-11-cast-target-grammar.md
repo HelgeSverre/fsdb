@@ -80,3 +80,10 @@ SQLSTATE 22003. Fsdb previously omitted the text warnings and did not apply
 these distinct overflow outcomes. Focused tests and differential contract
 steps cover the values and diagnostics. Other source types and numeric
 conversion contexts remain open.
+
+Numeric text prefixes use ASCII digits. MySQL reads `1٢3` as `1` for DOUBLE
+and DECIMAL casts with warning 1292, and a fullwidth leading digit produces
+zero with that warning. Fsdb's shared floating-prefix regex previously used
+Unicode `\d`, consumed the entire text, and returned zero without the
+proper prefix warning. The audited cases now share the integer cast's ASCII
+digit rule.

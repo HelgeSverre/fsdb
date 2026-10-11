@@ -2005,7 +2005,7 @@ let private validateCreateDirectories (store: Store) tableName (table: CreateTab
 /// (`CAST('1e3' AS DECIMAL(10,2))` is `1000`), so the two targets need
 /// different grammars rather than one regex serving both.
 let private leadingIntegerPrefixRegex = Regex(@"^[\t-\r ]*[+-]?[0-9]+")
-let private leadingFloatPrefixRegex = Regex(@"^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
+let private leadingFloatPrefixRegex = Regex(@"^[\t-\r ]*[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
 
 let private leadingNumericPrefix (regex: Regex) (s: string) : string option =
     let m = regex.Match s
