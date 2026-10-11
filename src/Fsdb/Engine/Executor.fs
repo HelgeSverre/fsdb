@@ -2756,6 +2756,8 @@ type private EvalContext =
       RollupKeys: Expr list
       /// Only ordering subqueries may fall back to already-projected aliases.
       ProjectionAliases: Map<string, Result<Expr * Value, EvalError>>
+      /// MySQL uses the projected column name in expression range warnings.
+      ProjectionLabel: string option
       Store: Store
       DbName: string
       /// The enclosing query's own context, if this one belongs to a
@@ -2838,6 +2840,7 @@ let private contextFactory
           EvaluatedExpressions = []
           RollupKeys = []
           ProjectionAliases = Map.empty
+          ProjectionLabel = None
           Store = store
           DbName = dbName
           Outer = outer
@@ -3093,6 +3096,15 @@ let private oversizedCastResult binary =
         1301
         (sprintf "Result of %s() was larger than max_allowed_packet (%d) - truncated" name Limits.maxAllowedPacket)
     Ok VNull
+
+let private decimalCastMaximum precision scale =
+    // Exact maxima above 28 digits need a wider decimal representation.
+    if precision > 28 then None
+    else Some(pown 10m (precision - scale) - 1m / pown 10m scale)
+
+let private truncatedDecimalCastInput text =
+    let prefix = leadingNumericPrefix leadingFloatPrefixRegex text |> Option.defaultValue ""
+    prefix = "" || not (text.Trim().Equals(prefix, System.StringComparison.Ordinal))
 
 let private castIntegerText unsigned (text: string) =
     let matched = leadingIntegerPrefixRegex.Match text
@@ -5920,6 +5932,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             // Storage owns general coercion rules. Calendar casts use strict validation
             // to distinguish invalid input from an allowed zero-component date;
             // rejection becomes a warning and NULL rather than a statement error.
+            let source = v
             let v =
                 match v, ty with
                 | VBinaryLiteral bytes, TBigInt false -> VInt(int64 (Value.binaryLiteralNumber bytes))
@@ -5950,6 +5963,13 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                       ExpressionCollation = None
                       Srid = None }
                 Diagnostics.suppress (fun () -> Storage.coerceValueWithMode mode castCol value)
+            let castMode =
+                { Strict = false
+                  NoZeroDate = true
+                  NoZeroInDate = true
+                  AllowInvalidDates = ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates
+                  TruncateFractional = ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional
+                  TimeZone = ctx.Store.ExecutionSettings.TimeZone }
             match ty, v with
             | TChar _, (VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
                 // A numeric CHAR cast needs no charset conversion or storage warnings.
@@ -5968,15 +5988,24 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | Error _ ->
                     Diagnostics.warning 1292 (sprintf "Incorrect datetime value: '%s'" (Value.toText v |> Option.defaultValue "NULL"))
                     Ok VNull
+            | TDecimal(precision, scale, _), _ ->
+                match source with
+                | VString text when truncatedDecimalCastInput text ->
+                    Diagnostics.warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" text)
+                | _ -> ()
+                coerce castMode v
+                |> Result.map (function
+                    | VDecimal value as result ->
+                        match decimalCastMaximum precision scale with
+                        | Some maximum when abs value > maximum ->
+                            let label = ctx.ProjectionLabel |> Option.defaultValue (SqlText.expression expr)
+                            Diagnostics.warning 1264 (sprintf "Out of range value for column '%s' at row %d" label (Diagnostics.currentRowNumber ()))
+                            VDecimal(if value < 0m then -maximum else maximum)
+                        | _ -> result
+                    | result -> result)
+                |> Result.mapError Storage.toMySqlError
             | _, _ ->
-                coerce
-                    { Strict = false
-                      NoZeroDate = true
-                      NoZeroInDate = true
-                      AllowInvalidDates = ctx.Store.ExecutionSettings.SqlMode.AllowInvalidDates
-                      TruncateFractional = ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional
-                      TimeZone = ctx.Store.ExecutionSettings.TimeZone }
-                    v
+                coerce castMode v
                 |> Result.mapError Storage.toMySqlError)
     | Exists select ->
         match (runExpressionSubquery ctx select (existsEarlyExitSelect select)).Result with
@@ -15133,7 +15162,7 @@ and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
     | { Expression = Star None } -> Ok(columns |> List.mapi (fun i column -> column.Name, readColumnValue ctx.Store column ctx.Row.[i]))
     | { Expression = Star(Some qualifier) } -> resolveStarQualifier ctx qualifier
     | { Expression = expr } ->
-        evalExpr ctx expr
+        evalExpr { ctx with ProjectionLabel = Some(projectionLabel proj) } expr
         |> Result.map (fun v -> [ projectionLabel proj, v ])
 
 /// An all-NULL row that surfaces schema errors even when no data row matches.
@@ -16306,7 +16335,7 @@ and private runGroupedSelect
             | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
             | _ ->
                 rewriteGroupAggregates groupRows (rollup expr)
-                |> Result.bind (evalExpr { ctxFor representative with RollupKeys = rolledKeys })
+                |> Result.bind (evalExpr { ctxFor representative with RollupKeys = rolledKeys; ProjectionLabel = Some(projectionLabel projection) })
                 |> Result.map (fun v -> [ projectionLabel projection, v ]))
         |> Result.map List.concat
 

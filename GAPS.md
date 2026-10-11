@@ -724,7 +724,10 @@ precision ceilings now return MySQL's early 1426 diagnostic in both forms;
 audited DECIMAL precision/scale limits follow MySQL's validation order and
 source-expression labels, including the zero-precision default. Negative
 FLOAT, TIME, DATETIME, and DECIMAL target precisions now fail as syntax in
-both CAST and typed CONVERT.
+both CAST and typed CONVERT. Audited DECIMAL CAST values now warn on invalid
+or partially consumed text and clamp rounded overflow to the target precision,
+using the projection's source label or alias in the range warning; larger
+numeric domains beyond .NET decimal precision remain open.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common

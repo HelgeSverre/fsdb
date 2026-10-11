@@ -2925,6 +2925,31 @@ let tests =
                   Expect.equal session.LastResultColumnMetadata.Head.ColumnLength 11u "zero precision uses DECIMAL(10,0)"
               | _, result -> failtestf "expected DECIMAL(0) to use default precision, got %A" result
 
+          testCase "DECIMAL casts retain MySQL values and conversion warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, value, warnings in
+                  [ "SELECT CAST('abc' AS DECIMAL(5,2))", "0.00",
+                    [ 1292, "Truncated incorrect DECIMAL value: 'abc'" ]
+                    "SELECT CAST('1.239' AS DECIMAL(5,2))", "1.24", []
+                    "SELECT CAST('12x' AS DECIMAL(5,2))", "12.00",
+                    [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "SELECT CAST(_latin1 'abc' AS DECIMAL(5,2))", "0.00",
+                    [ 1292, "Truncated incorrect DECIMAL value: 'abc'" ]
+                    "SELECT CAST(999.995 AS DECIMAL(5,2))", "999.99",
+                    [ 1264, "Out of range value for column 'CAST(999.995 AS DECIMAL(5,2))' at row 1" ]
+                    "SELECT CAST('12345' AS DECIMAL(5,2)) AS x", "999.99",
+                    [ 1264, "Out of range value for column 'x' at row 1" ]
+                    "SELECT CAST(-999.995 AS DECIMAL(5,2))", "-999.99",
+                    [ 1264, "Out of range value for column 'CAST(-999.995 AS DECIMAL(5,2))' at row 1" ]
+                    "SELECT CAST(0x616263 AS DECIMAL(5,2))", "999.99",
+                    [ 1264, "Out of range value for column 'CAST(0x616263 AS DECIMAL(5,2))' at row 1" ] ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual value sql
+                      Expect.equal (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message)) warnings sql
+                  | _, result -> failtestf "expected DECIMAL cast result for %s, got %A" sql result
+
           testCase "national ASCII and UNICODE casts retain syntax warnings and charset bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

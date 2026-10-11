@@ -1153,6 +1153,22 @@ module ContractCatalog =
                      |> Contract.fails 1427 "42000"
                yield Contract.query "decimal-zero-precision" "SELECT CAST('1' AS DECIMAL(0))"
                      |> Contract.comparingValues
+               for index, sql in
+                   [ "SELECT CAST('abc' AS DECIMAL(5,2))"
+                     "SELECT CAST('1.239' AS DECIMAL(5,2))"
+                     "SELECT CAST('12x' AS DECIMAL(5,2))"
+                     "SELECT CAST(_latin1 'abc' AS DECIMAL(5,2))"
+                     "SELECT CAST(999.995 AS DECIMAL(5,2))"
+                     "SELECT CAST('12345' AS DECIMAL(5,2)) AS x"
+                     "SELECT CAST(-999.995 AS DECIMAL(5,2))"
+                     "SELECT CAST(0x616263 AS DECIMAL(5,2))" ]
+                   |> List.indexed do
+                   yield Contract.query (sprintf "decimal-cast-value-%d" index) sql |> Contract.comparingValues
+                   yield Contract.query (sprintf "decimal-cast-warning-%d" index) "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.preparedQuery "decimal-cast-overflow-prepared" "SELECT CAST(999.995 AS DECIMAL(5,2))" [||]
+                     |> Contract.comparingValues
+               yield Contract.query "decimal-cast-overflow-prepared-warnings" "SHOW WARNINGS"
+                     |> Contract.comparingValues
                yield
                    Contract.query
                        "cast-national-spellings"

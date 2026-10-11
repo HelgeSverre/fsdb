@@ -49,3 +49,14 @@ CONVERT. Fsdb previously accepted negative FLOAT precision, treating it as
 single-precision FLOAT; the shared CAST precision check now rejects it and
 the temporal cases. DECIMAL already rejected negative precision and scale.
 The focused regression and differential contract cover both conversion forms.
+
+DECIMAL CAST values use their declared precision as a result bound. MySQL
+8.4.11 rounds `CAST('1.239' AS DECIMAL(5,2))` to `1.24` without a condition,
+but clamps `CAST(999.995 AS DECIMAL(5,2))` to `999.99` with warning 1264.
+Negative overflow clamps symmetrically. Invalid or partially consumed text
+returns the parsed value (zero for `abc`) with warning 1292 naming the
+original text. Overflow warnings name the projection's source expression or
+its alias. Fsdb previously suppressed the conversion warning and let storage
+coercion return a DECIMAL wider than the CAST target. The focused regression
+and differential contract now cover these audited values and diagnostics.
+DECIMAL values beyond .NET's `decimal` precision remain a separate boundary.
