@@ -1109,7 +1109,9 @@ module ContractCatalog =
                for index, target in
                    [ "VARCHAR(2)"; "VARBINARY(2)"; "TEXT"; "BLOB"; "INT"; "BIGINT";
                      "BIT(3)"; "TIMESTAMP(3)"; "NUMERIC(5,2)"; "FLOAT UNSIGNED";
-                     "DECIMAL(5,2) UNSIGNED"; "YEAR(4)"; "FLOAT(5,2)" ]
+                     "DECIMAL(5,2) UNSIGNED"; "YEAR(4)"; "FLOAT(5,2)";
+                     "FLOAT(-1)"; "TIME(-1)"; "DATETIME(-1)";
+                     "DECIMAL(-1)"; "DECIMAL(5,-1)" ]
                    |> List.indexed do
                    yield Contract.query (sprintf "invalid-cast-target-%d" index) (sprintf "SELECT CAST('1' AS %s)" target)
                          |> Contract.fails 1064 "42000"

@@ -41,3 +41,11 @@ normalizes zero precision after validation. The focused regression checks
 exact codes and messages. The differential contract also exposed that Fsdb's
 1425 and 1427 errors carried generic SQLSTATE `HY000`; both now use MySQL's
 `42000`. Other conversion shapes remain open.
+
+Negative target precision is syntax, not a valid small precision. MySQL 8.4.11
+rejects `FLOAT(-1)`, `TIME(-1)`, `DATETIME(-1)`, `DECIMAL(-1)`, and
+`DECIMAL(5,-1)` with error 1064 and SQLSTATE 42000 in both CAST and typed
+CONVERT. Fsdb previously accepted negative FLOAT precision, treating it as
+single-precision FLOAT; the shared CAST precision check now rejects it and
+the temporal cases. DECIMAL already rejected negative precision and scale.
+The focused regression and differential contract cover both conversion forms.

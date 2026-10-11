@@ -2871,7 +2871,9 @@ let tests =
               for target in
                   [ "VARCHAR(2)"; "VARBINARY(2)"; "TEXT"; "BLOB"; "INT"; "BIGINT";
                     "BIT(3)"; "TIMESTAMP(3)"; "NUMERIC(5,2)"; "FLOAT UNSIGNED";
-                    "DECIMAL(5,2) UNSIGNED"; "YEAR(4)"; "FLOAT(5,2)" ] do
+                    "DECIMAL(5,2) UNSIGNED"; "YEAR(4)"; "FLOAT(5,2)";
+                    "FLOAT(-1)"; "TIME(-1)"; "DATETIME(-1)";
+                    "DECIMAL(-1)"; "DECIMAL(5,-1)" ] do
                   for sql in
                       [ sprintf "SELECT CAST('1' AS %s)" target
                         sprintf "SELECT CONVERT('1', %s)" target ] do

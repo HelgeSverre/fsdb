@@ -1671,7 +1671,9 @@ type private CastTarget =
     | AliasedCharCast of CharCastAlias * int option
 
 let private validateCastPrecision maximum precision =
-    if precision > maximum then
+    if precision < 0 then
+        raise (SemanticParseError "Invalid CAST precision")
+    elif precision > maximum then
         raise (SemanticParseError(sprintf "Too-big precision %d specified for 'CAST'. Maximum is %d." precision maximum))
 
 let private castWidth target: Parser<int option, unit> =
