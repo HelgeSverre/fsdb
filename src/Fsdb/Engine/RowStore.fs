@@ -110,6 +110,10 @@ type RowStore<'T> internal (
 
     member _.TryFind(rowId: RowId) = RowLookup.tryFind rowId positions slots.Count (fun index -> slots.[index])
 
+    /// Read a bounded prefix of live row identities without traversing tombstones.
+    member this.FirstValues(count: int) =
+        positions.Keys |> Seq.truncate count |> Seq.choose this.TryFind
+
     member this.Item
         with get (rowId: RowId) : 'T =
             match this.TryFind rowId with

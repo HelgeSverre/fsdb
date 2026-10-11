@@ -21,7 +21,13 @@ the other readings used session expiry zero without an explicit analyze.
 `INDEX_LENGTH` was zero in these primary-key-only fixtures.
 
 Fsdb now uses one page-rounded payload estimate in both reporting paths, with
-a 16 KiB minimum and an average derived from the reported row estimate.
+a 16 KiB minimum and an average derived from the reported row estimate. It
+samples at most 256 live row identities per table, so metadata reads do not
+walk an entire large row store or a long run of deleted slots.
+A diagnostic same-host run of ten repeated metadata queries on 10,000 rows
+with 100-character text measured 32.7 ms before sampling and 9.0 ms after.
+These are single-run Debug timings, useful for detecting the scan cost rather
+than a stable performance claim.
 That matches the audited empty and small-table cases, but it still cannot
 reproduce InnoDB's page splits and long-`TEXT` layout: the 10,000-row and
 three-long-row values above remain divergent. Closing the remaining gap needs

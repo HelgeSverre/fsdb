@@ -4262,6 +4262,7 @@ let tests =
 
                     Expect.sequenceEqual original [ "a"; "b"; "c" ] "the original snapshot remains visible"
                     Expect.sequenceEqual updated [ "a"; "c"; "d" ] "tombstones are absent from scans"
+                    Expect.sequenceEqual (updated.FirstValues 2) [ "a"; "c" ] "bounded reads skip deleted identities"
                     Expect.equal updated.[aId] "a" "the first row keeps its identity"
                     Expect.equal updated.[cId] "c" "the last surviving row keeps its identity"
                     Expect.notEqual dId bId "deleted identities are not reused"

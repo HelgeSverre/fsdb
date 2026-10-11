@@ -305,14 +305,22 @@ let private tableRowEstimate expirySeconds (table: Table) =
     | _ -> table.RowsArray.Length
 
 let private estimatedTableDataLength (table: Table) =
-    let payloadLength =
-        table.RowsArray
-        |> Seq.sumBy (fun row ->
-            row
-            |> Array.sumBy (fun value ->
-                int64 (Value.toText value |> Option.map String.length |> Option.defaultValue 0) + 1L))
+    let sampledRows, sampledLength =
+        table.RowsArray.FirstValues 256
+        |> Seq.fold
+            (fun (count, length) row ->
+                let rowLength =
+                    row
+                    |> Array.sumBy (fun value ->
+                        int64 (Value.toText value |> Option.map String.length |> Option.defaultValue 0) + 1L)
+                count + 1, length + rowLength)
+            (0, 0L)
 
-    // Approximate InnoDB's 16 KiB page allocation, including the empty table's page.
+    let payloadLength =
+        if sampledRows = 0 then 0L
+        else sampledLength * int64 table.RowsArray.Length / int64 sampledRows
+
+    // Bound metadata work while approximating InnoDB's 16 KiB page allocation.
     max 1L ((payloadLength + 16383L) / 16384L) * 16384L
 
 let private tablesRows expirySeconds (catalog: Catalog) : Value[] list =
