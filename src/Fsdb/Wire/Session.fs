@@ -291,6 +291,16 @@ type TransportMetrics =
     { mutable BytesReceived: int64
       mutable BytesSent: int64 }
 
+let private liveTransportMetrics = ConditionalWeakTable<TransportMetrics, obj>()
+
+let internal registerTransportMetrics metrics =
+    liveTransportMetrics.GetValue(metrics, fun _ -> obj()) |> ignore
+
+let internal resetTransportMetrics () =
+    for KeyValue(metrics, _) in liveTransportMetrics do
+        Threading.Interlocked.Exchange(&metrics.BytesReceived, 0L) |> ignore
+        Threading.Interlocked.Exchange(&metrics.BytesSent, 0L) |> ignore
+
 type TransactionTrackingKind =
     | NoTrackedTransaction
     | ExplicitTrackedTransaction
@@ -458,6 +468,11 @@ let create (connectionId: int) (store: Store) : Session =
     |> Option.bind (TimeZones.resolve store)
     |> Option.iter (setTimeZone sessionStore)
 
+    let metrics =
+        { BytesReceived = 0L
+          BytesSent = 0L }
+    registerTransportMetrics metrics
+
     { ConnectionId = connectionId
       User = "root"
       AccountHost = "%"
@@ -505,9 +520,7 @@ let create (connectionId: int) (store: Store) : Session =
       AuthenticationRsaPublicKeys = Map.empty
       SecureFiles = ServerOptions.SecureFilePolicy.Disabled
       CloseAfterReply = false
-      TransportMetrics =
-        { BytesReceived = 0L
-          BytesSent = 0L } }
+      TransportMetrics = metrics }
 
 /// Applies immutable listener settings to the state visible from SQL.
 let withServerOptions (options: ServerOptions.Settings) (session: Session) =

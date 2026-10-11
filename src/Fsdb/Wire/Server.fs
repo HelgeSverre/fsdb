@@ -163,13 +163,13 @@ type private CountingStream(inner: IO.Stream, metrics: TransportMetrics, progres
     inherit IO.Stream()
 
     let recordRead count =
-        metrics.BytesReceived <- metrics.BytesReceived + int64 count
         if count > 0 then
+            Interlocked.Add(&metrics.BytesReceived, int64 count) |> ignore
             InformationSchema.recordWireBytesReceived (int64 count)
             progress.Notify()
 
     let recordWrite count =
-        metrics.BytesSent <- metrics.BytesSent + int64 count
+        Interlocked.Add(&metrics.BytesSent, int64 count) |> ignore
         InformationSchema.recordWireBytesSent (int64 count)
 
     override _.CanRead = inner.CanRead
@@ -1383,6 +1383,7 @@ let private handleConnection
         let metrics =
             { BytesReceived = 0L
               BytesSent = 0L }
+        Session.registerTransportMetrics metrics
 
         use readProgress = new ReadProgress()
         let countedStream = new CountingStream(networkStream, metrics, readProgress)

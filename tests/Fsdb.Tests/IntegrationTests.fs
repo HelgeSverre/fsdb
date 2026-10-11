@@ -3482,6 +3482,16 @@ let tests =
                   let! receivedAfterFlush = status observer "SESSION" "Bytes_received"
                   Expect.isGreaterThan sentAfterFlush sentAfter "FLUSH STATUS does not reset global wire bytes"
                   Expect.isLessThan receivedAfterFlush observerReceived "FLUSH STATUS resets the issuing session's byte count"
+
+                  use observerPayload = observer.CreateCommand()
+                  observerPayload.CommandText <- "SELECT 1 /* " + String.replicate 4096 "o" + " */"
+                  let! _ = observerPayload.ExecuteScalarAsync() |> Async.AwaitTask
+                  let! observerBeforeOtherFlush = status observer "SESSION" "Bytes_received"
+                  use otherFlush = sender.CreateCommand()
+                  otherFlush.CommandText <- "FLUSH STATUS"
+                  do! otherFlush.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                  let! observerAfterOtherFlush = status observer "SESSION" "Bytes_received"
+                  Expect.isLessThan observerAfterOtherFlush observerBeforeOtherFlush "FLUSH STATUS also resets other active sessions"
               }
               |> Async.RunSynchronously
 

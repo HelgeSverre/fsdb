@@ -14,8 +14,15 @@ status reads that total; session status still reads its own connection.
 `FLUSH STATUS` resets the issuing session's byte metrics without clearing
 the global total.
 
+A two-connection MySQL probe established the wider reset rule. Connection A
+first reported 324 received bytes; connection B issued `FLUSH STATUS` while
+A remained open. A's next session read reported 48, while global received
+bytes continued to 789. Fsdb now weakly tracks live transport metrics and
+resets every registered session on `FLUSH STATUS`. Atomic add/exchange keeps
+that reset safe against concurrent network reads and writes.
+
 The integration regression opens two real wire connections, exchanges an
 8 KiB query and result on the second, and checks that the first connection's
 global received and sent totals include those bytes while its session total
-does not. It also checks the two `FLUSH STATUS` lifetimes. Other active
-connections' session-byte reset behavior remains unaudited.
+does not. It checks that a flush on either connection resets the other's
+session bytes while global bytes keep accumulating.

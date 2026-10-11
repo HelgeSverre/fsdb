@@ -4732,8 +4732,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let connectionStatus: InformationSchema.ConnectionStatus =
             { CompressionAlgorithm = session.Compression |> Option.map Compression.Algorithm.name
               CompressionLevel = session.Compression |> Option.map Compression.Algorithm.level |> Option.defaultValue 0
-              BytesReceived = session.TransportMetrics.BytesReceived
-              BytesSent = session.TransportMetrics.BytesSent
+              BytesReceived = Threading.Interlocked.Read(&session.TransportMetrics.BytesReceived)
+              BytesSent = Threading.Interlocked.Read(&session.TransportMetrics.BytesSent)
               SslCipher = session.TlsCipher
               SslVersion = session.TlsVersion
               AuthenticationRsaPublicKeys = session.AuthenticationRsaPublicKeys }
@@ -5323,8 +5323,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Error(code, message) -> session, Err(code, message)
         | Ok() ->
             InformationSchema.resetSessionStatuses ()
-            session.TransportMetrics.BytesReceived <- 0L
-            session.TransportMetrics.BytesSent <- 0L
+            Session.resetTransportMetrics ()
             session, Affected 0UL
     | FlushTables ->
         match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_TABLES" [ "RELOAD"; "FLUSH_TABLES" ] with
