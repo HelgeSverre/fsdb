@@ -240,6 +240,12 @@ or locking retain the general SELECT pipeline.
   polygon rings, multi-geometry members, closure checks, and planar
   `ST_Crosses`/`ST_Overlaps` with MySQL's dimension-dependent NULL results.
 
+[`CHAR()`](torture/findings/2026-10-12-char-byte-assembly.md) now assembles
+integer arguments as binary bytes instead of Unicode characters, including
+audited 32-bit wrap, half rounding, NULL skipping, and downstream high-byte
+TIME warnings; string-argument diagnostics and `CHAR(... USING charset)`
+remain open.
+
 | Missing family | Functions | Impact |
 |---|---|---|
 | Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |

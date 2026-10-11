@@ -3726,18 +3726,38 @@ let private spaceFn: Scalar =
         if k > Limits.maxAllowedPacket then VNull else VString(String(' ', k))
     | _ -> VNull
 
-/// Minimal `CHAR(n1, n2, ...)`: builds a string from Unicode code points
-/// rather than MySQL's charset-aware byte assembly. Per MySQL, NULL
-/// arguments are skipped rather than nulling the whole result.
+/// CHAR() assembles each integer as its shortest big-endian byte sequence.
+/// NULL arguments contribute no bytes.
 let private charFn: Scalar =
     fun args ->
+        let integerBytes value =
+            let word =
+                match value with
+                | VInt number -> uint32 (uint64 number &&& 0xFFFFFFFFUL)
+                | VUInt number -> uint32 (number &&& 0xFFFFFFFFUL)
+                | VDecimal number ->
+                    let rounded = Decimal.Round(number, 0, MidpointRounding.AwayFromZero)
+                    let remainder = rounded % 4294967296M
+                    uint32 (if remainder < 0M then remainder + 4294967296M else remainder)
+                | other ->
+                    let rounded = Math.Round(toDouble other, MidpointRounding.AwayFromZero)
+                    if Double.IsFinite rounded then
+                        let remainder = rounded % 4294967296.0
+                        uint32 (if remainder < 0.0 then remainder + 4294967296.0 else remainder)
+                    else 0u
+            let bytes =
+                [| byte (word >>> 24)
+                   byte (word >>> 16)
+                   byte (word >>> 8)
+                   byte word |]
+            let first = bytes |> Array.tryFindIndex ((<>) 0uy) |> Option.defaultValue 3
+            bytes[first..]
         args
         |> List.choose (function
             | VNull -> None
-            | v -> Some(char (int (toDouble v))))
-        |> Array.ofList
-        |> String
-        |> VString
+            | value -> Some(integerBytes value))
+        |> Array.concat
+        |> VBytes
 
 let internal hexFn: Scalar =
     function

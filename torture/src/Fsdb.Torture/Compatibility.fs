@@ -1200,6 +1200,18 @@ module ContractCatalog =
                          |> Contract.comparingValues
                    yield Contract.query (sprintf "time-cast-nul-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               yield Contract.query "char-byte-assembly"
+                   "SELECT HEX(CHAR(0)),HEX(CHAR(128)),HEX(CHAR(256)),HEX(CHAR(4660)),HEX(CHAR(-1)),HEX(CHAR(4294967296)),HEX(CHAR(1.5)),HEX(CHAR(NULL,49,256))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-byte-assembly-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-byte-direct" "SELECT CHAR(0),CHAR(128),CHAR(256),CHAR(4660)"
+                   |> Contract.comparingValues
+               for index, source in
+                   [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
+                   yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)
+                         |> Contract.comparingValues
+                   yield Contract.query (sprintf "char-byte-time-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                for index, sql in
                    [ "SELECT CAST('abc' AS DECIMAL(5,2))"
                      "SELECT CAST('1.239' AS DECIMAL(5,2))"

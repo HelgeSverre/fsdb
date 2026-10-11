@@ -174,5 +174,7 @@ NUL in text results, whether literal or computed, but escape NUL and other
 control bytes in binary results. `CONCAT` can produce either charset: its
 binary result from `CHAR(0)` warns with `12\x00x`, while an explicitly
 `utf8mb4` input yields a text result whose warning stops at `12`. Fsdb now
-matches these audited cases. Binary high-byte previews and other source
-expressions remain open.
+matches these audited cases. `CHAR()` now emits binary bytes, so audited
+high-byte warnings through binary `CONCAT` also use MySQL's `\xHH` preview
+([byte-assembly finding](2026-10-12-char-byte-assembly.md)). Other
+binary-producing expressions remain open.

@@ -3293,6 +3293,22 @@ let tests =
                           sql
                   | _, result -> failtestf "expected NUL-containing TIME CAST for %s, got %A" sql result
 
+          testCase "CHAR assembles integer arguments as binary bytes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT HEX(CHAR(0)),HEX(CHAR(128)),HEX(CHAR(256)),HEX(CHAR(4660)),HEX(CHAR(-1)),HEX(CHAR(4294967296)),HEX(CHAR(1.5)),HEX(CHAR(NULL,49,256))"
+              match handle session sql with
+              | _, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "00"; Some "80"; Some "0100"; Some "1234"; Some "FFFFFFFF"; Some "00"; Some "02"; Some "310100" ] "CHAR byte assembly"
+              | _, result -> failtestf "expected CHAR byte results, got %A" result
+              match handle session "SELECT CAST(CONCAT('12',CHAR(128),'x') AS TIME)" with
+              | session, ResultSet(_, [ [ Some "00:00:12" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect time value: '12\\x80x'" ]
+                      "binary CHAR result retains its byte in TIME diagnostics"
+              | _, result -> failtestf "expected CHAR byte TIME CAST result, got %A" result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
