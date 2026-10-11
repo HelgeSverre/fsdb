@@ -29,6 +29,9 @@ type internal SpatialReferenceSystem =
 let private wgs84Definition =
     "GEOGCS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]"
 
+let private unspecifiedWgs84DatumDefinition =
+    "GEOGCS[\"Unknown datum based upon the WGS 84 ellipsoid\",DATUM[\"Not specified (based on WGS 84 ellipsoid)\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6030\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4030\"]]"
+
 let private etrs89Definition =
     "GEOGCS[\"ETRS89\",DATUM[\"European Terrestrial Reference System 1989\",SPHEROID[\"GRS 1980\",6378137,298.257222101,AUTHORITY[\"EPSG\",\"7019\"]],TOWGS84[0,0,0,0,0,0,0],AUTHORITY[\"EPSG\",\"6258\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4258\"]]"
 
@@ -79,6 +82,16 @@ let internal all =
         SemiMajorAxis = Some 6378137.0
         InverseFlattening = Some 298.257223563
         LinearUnitInMetres = None }
+      { Name = "Unknown datum based upon the WGS 84 ellipsoid"
+        Srid = 4030
+        Organization = Some "EPSG"
+        OrganizationCoordinateSystemId = Some 4030
+        Definition = unspecifiedWgs84DatumDefinition
+        Description = None
+        AxisOrder = LatitudeLongitude
+        SemiMajorAxis = Some 6378137.0
+        InverseFlattening = Some 298.257223563
+        LinearUnitInMetres = None }
       { Name = "ETRS89"
         Srid = 4258
         Organization = Some "EPSG"
@@ -121,6 +134,8 @@ let internal all =
         LinearUnitInMetres = Some 1.0 } ]
 
 let internal tryFind srid = all |> List.tryFind (fun referenceSystem -> referenceSystem.Srid = srid)
+
+let internal lacksTowgs84 srid = srid = 4030
 
 let private earthRadius = 6378137.0
 let private antimeridianRoundoff = 1e-9

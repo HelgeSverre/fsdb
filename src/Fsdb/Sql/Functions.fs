@@ -5865,6 +5865,10 @@ let private geometryTransformFn: Scalar =
                 raise (SqlError(3742, "Transformation to SRID 0 is not supported."))
             spatialReferenceSystem "ST_Transform" sourceSrid |> ignore
             let targetReferenceSystem = spatialReferenceSystem "ST_Transform" targetSrid
+            if SpatialReferenceSystems.lacksTowgs84 sourceSrid then
+                raise (SqlError(3743, sprintf "Transformation from SRID %d is not supported. The spatial reference system has no TOWGS84 clause." sourceSrid))
+            if SpatialReferenceSystems.lacksTowgs84 targetSrid then
+                raise (SqlError(3744, sprintf "Transformation to SRID %d is not supported. The spatial reference system has no TOWGS84 clause." targetSrid))
             let transform =
                 SpatialReferenceSystems.tryCoordinateTransform sourceSrid targetSrid
                 |> Option.defaultWith (fun () -> geometryError "ST_Transform" "the coordinate transformation is not supported")

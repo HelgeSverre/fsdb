@@ -15012,6 +15012,29 @@ let tests =
                     | ResultSet(_, [ [ Some "4258"; Some "ETRS89" ]; [ Some "4269"; Some "NAD83" ] ]) -> ()
                     | result -> failtestf "expected MySQL geographic SRS catalog rows, got %A" result
 
+                testCase "unspecified WGS84 datum supports distance but not transformation"
+                <| fun _ ->
+                    let store = newStore ()
+                    let point = "ST_GeomFromText('POINT(40 -75)',4030)"
+                    let nextPoint = "ST_GeomFromText('POINT(41 -75)',4030)"
+                    let sql = sprintf "SELECT ST_AsText(%s),ABS(ST_Distance(%s,%s)-111045.29885331448)<0.01" point point nextPoint
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "POINT(40 -75)"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected MySQL EPSG 4030 geography and distance, got %A" result
+                    match runDefault store "SELECT SRS_NAME FROM INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=4030" with
+                    | ResultSet(_, [ [ Some "Unknown datum based upon the WGS 84 ellipsoid" ] ]) -> ()
+                    | result -> failtestf "expected MySQL EPSG 4030 catalog row, got %A" result
+                    match runDefault store (sprintf "SELECT ST_AsText(ST_Transform(%s,4030))" point) with
+                    | ResultSet(_, [ [ Some "POINT(40 -75)" ] ]) -> ()
+                    | result -> failtestf "expected same-SRID transform to retain EPSG 4030 point, got %A" result
+                    for source, target, code in [ 4030, 4326, 3743; 4326, 4030, 3744 ] do
+                        let sql = sprintf "SELECT ST_Transform(ST_GeomFromText('POINT(40 -75)',%d),%d)" source target
+                        try
+                            let result = runDefault store sql
+                            failtestf "expected MySQL unsupported %d to %d transform error %d, got %A" source target code result
+                        with
+                        | SqlError(actual, _) when actual = code -> ()
+
                 testCase "GRS 1980 geographic transforms apply MySQL datum shifts"
                 <| fun _ ->
                     let store = newStore ()

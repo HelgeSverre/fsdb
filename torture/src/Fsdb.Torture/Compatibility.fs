@@ -3255,6 +3255,27 @@ module ContractCatalog =
                    "SELECT SRS_NAME, SRS_ID, ORGANIZATION, ORGANIZATION_COORDSYS_ID, DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID = 4326"
                |> Contract.comparingValues
                Contract.query
+                   "unspecified-wgs84-srs-catalog"
+                   "SELECT SRS_NAME,SRS_ID,ORGANIZATION,ORGANIZATION_COORDSYS_ID,DEFINITION,DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=4030"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "unspecified-wgs84-distance-prepared"
+                   "SELECT ROUND(ST_Distance(ST_GeomFromText(?,4030),ST_GeomFromText(?,4030)),3)"
+                   [| box "POINT(40 -75)"; box "POINT(41 -75)" |]
+               |> Contract.comparingValues
+               Contract.query
+                   "unspecified-wgs84-same-srid-transform"
+                   "SELECT ST_AsText(ST_Transform(ST_GeomFromText('POINT(40 -75)',4030),4030))"
+               |> Contract.comparingValues
+               Contract.query
+                   "unspecified-wgs84-transform-from-refusal"
+                   "SELECT ST_Transform(ST_GeomFromText('POINT(40 -75)',4030),4326)"
+               |> Contract.fails 3743 "22S00"
+               Contract.query
+                   "unspecified-wgs84-transform-to-refusal"
+                   "SELECT ST_Transform(ST_GeomFromText('POINT(40 -75)',4326),4030)"
+               |> Contract.fails 3744 "22S00"
+               Contract.query
                    "projected-srs-catalog"
                    "SELECT SRS_NAME,SRS_ID,ORGANIZATION,ORGANIZATION_COORDSYS_ID,DEFINITION,DESCRIPTION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID=3857"
                |> Contract.comparingValues
