@@ -3178,7 +3178,12 @@ let private numericCastTextInput ctx expr source =
                 | Some _ -> StoredBinary, true
                 | None ->
                     match expr with
-                    | Lit(VBytes _) -> RegularText, true
+                    | Lit(VBytes _)
+                    | Case _
+                    | Subquery _ -> RegularText, true
+                    | FuncCall(name, _) when
+                        name.Equals("IF", System.StringComparison.OrdinalIgnoreCase)
+                        || name.Equals("NULLIF", System.StringComparison.OrdinalIgnoreCase) -> RegularText, true
                     | _ -> QuietBinary, true
             | _ -> RegularText, true
         { Prefix = prefix

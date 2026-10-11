@@ -3108,6 +3108,29 @@ let tests =
                           sql
                   | _, result -> failtestf "expected computed binary CAST result for %s, got %A" sql result
 
+          testCase "binary conditional CASTs keep MySQL DECIMAL warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for source, result, warnings in
+                  [ "IF(1,_binary'12x',_binary'abc')", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "CASE WHEN 1 THEN _binary'12x' ELSE _binary'abc' END", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "NULLIF(_binary'12x',_binary'abc')", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "(SELECT _binary'12x')", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "IF(1,_binary'abc',_binary'12x')", "0.00", [ 1292, "Truncated incorrect DECIMAL value: 'abc'" ]
+                    "COALESCE(_binary'12x',_binary'abc')", "12.00", []
+                    "COALESCE(_binary'abc',_binary'12x')", "0.00", [ 1366, "Incorrect DECIMAL value: '0' for column '' at row -1" ]
+                    "IFNULL(_binary'12x',_binary'abc')", "12.00", []
+                    "LEFT(_binary'12x',3)", "12.00", [] ] do
+                  let sql = sprintf "SELECT CAST(%s AS DECIMAL(10,2))" source
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual result sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected binary conditional CAST result for %s, got %A" sql result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

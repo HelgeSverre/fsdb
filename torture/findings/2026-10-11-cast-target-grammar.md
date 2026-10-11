@@ -107,6 +107,12 @@ Audited computed binary results from `CONCAT`, `CONCAT_WS`, `SUBSTRING`, and
 binary CAST, including warning 1366 for an entirely invalid value. The
 classification uses the binary value's origin rather than a function-name
 exception; other expression producers remain to be audited.
+Binary values returned by `IF`, `CASE`, `NULLIF`, and a scalar subquery use
+regular DECIMAL truncation warning 1292, including wholly invalid text.
+`COALESCE`, `IFNULL`, and audited byte-string functions instead keep quiet
+truncation and report 1366 for wholly invalid text. The numeric CAST source
+classification now distinguishes these conditional and scalar-subquery
+shapes; further expression families remain open.
 Text-string numeric CAST warning previews stop at the first NUL byte, as in
 MySQL, while binary-source warnings keep the escaped `\x00` representation.
 The result still uses the numeric prefix preceding the NUL.

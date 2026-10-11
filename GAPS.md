@@ -747,6 +747,9 @@ Numeric CAST warning text from audited fixed-width BINARY padding and high
 bytes now uses MySQL's `\xHH` byte escapes.
 Audited computed binary strings now share the quiet DECIMAL truncation policy
 seen with explicit binary casts; other expression producers remain open.
+Audited binary `IF`, `CASE`, `NULLIF`, and scalar-subquery DECIMAL casts now
+retain regular truncation warnings, distinct from quiet `COALESCE`, `IFNULL`,
+and byte-string functions; broader expression families remain open.
 Audited NUL-containing text casts stop warning previews at the NUL; binary
 casts retain the distinct `\x00` representation.
 Audited numeric CAST warning arguments now stop after 128 encoded bytes,

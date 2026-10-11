@@ -1205,6 +1205,22 @@ module ContractCatalog =
                    yield Contract.query (sprintf "numeric-cast-computed-binary-%d" index) sql |> Contract.comparingValues
                    yield Contract.query (sprintf "numeric-cast-computed-binary-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               for index, source in
+                   [ "IF(1,_binary'12x',_binary'abc')"
+                     "CASE WHEN 1 THEN _binary'12x' ELSE _binary'abc' END"
+                     "NULLIF(_binary'12x',_binary'abc')"
+                     "(SELECT _binary'12x')"
+                     "IF(1,_binary'abc',_binary'12x')"
+                     "COALESCE(_binary'12x',_binary'abc')"
+                     "COALESCE(_binary'abc',_binary'12x')"
+                     "IFNULL(_binary'12x',_binary'abc')"
+                     "LEFT(_binary'12x',3)" ] |> List.indexed do
+                   yield Contract.query
+                             (sprintf "numeric-cast-binary-conditional-%d" index)
+                             (sprintf "SELECT CAST(%s AS DECIMAL(10,2))" source)
+                         |> Contract.comparingValues
+                   yield Contract.query (sprintf "numeric-cast-binary-conditional-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                yield Contract.query "numeric-cast-binary-columns-create" "CREATE TEMPORARY TABLE cast_numeric_binary_columns(v VARBINARY(20), b BLOB)"
                      |> Contract.comparingValues
                yield Contract.query "numeric-cast-binary-columns-insert" "INSERT INTO cast_numeric_binary_columns VALUES ('abc', 'abc')"
