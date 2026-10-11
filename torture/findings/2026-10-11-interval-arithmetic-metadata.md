@@ -29,3 +29,17 @@ Interval `+` and `-` now use the existing `DATE_ADD`/`DATE_SUB` result-type
 rule. A focused regression checks both text-query and prepared-statement
 metadata alongside the row values. The original scalar differential seed
 passes after the change with no differences.
+
+A follow-up MySQL 8.4.11 probe found that TIME operands retain TIME values
+for hour, minute, second, and microsecond intervals, including signed or
+greater-than-24-hour results: `12:34:56 + INTERVAL 2 HOUR` gives `14:34:56`,
+`23:30:00 + INTERVAL 2 HOUR` gives `25:30:00`, and
+`01:00:00 - INTERVAL 2 HOUR` gives `-01:00:00`. DAY and MONTH intervals
+instead produce DATETIME values based on the current date. Composite
+`HOUR_MINUTE` remains TIME, while `DAY_HOUR` is DATETIME.
+
+Fsdb previously converted all of those TIME operands through today's
+DATETIME. It now preserves the original TIME for subday units and carries
+the source unit through composite-interval parsing. A microsecond interval
+reports six fractional digits. An overflowing TIME returns NULL with
+MySQL's warning 1441, rather than a clamped value.

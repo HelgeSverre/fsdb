@@ -6279,19 +6279,29 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         |> List.fold max 0
         |> fun fsp -> Some(ColumnWire.metadataOfType(TDateTime fsp))
 
-    let dateArithmetic expression first interval =
-        let timeUnit =
+    let dateArithmetic first interval =
+        let intervalUnit =
             match interval with
-            | NamedFunction "INTERVAL" [ _; Lit(VString unit) ] ->
-                not (dateOnlyIntervalUnits.Contains(unit.ToUpperInvariant()))
-            | _ -> true
+            | NamedFunction "INTERVAL" [ _; Lit(VString unit) ] -> Some unit
+            | _ -> None
+        let timeUnit =
+            intervalUnit
+            |> Option.map (fun unit -> not (dateOnlyIntervalUnits.Contains(unit.ToUpperInvariant())))
+            |> Option.defaultValue true
+        let resultFsp =
+            max
+                (fspOfExpr ctx first |> Option.defaultValue 0)
+                (intervalUnit
+                 |> Option.filter (fun unit -> unit.ToUpperInvariant().Contains("MICROSECOND"))
+                 |> Option.map (fun _ -> 6)
+                 |> Option.defaultValue 0)
 
         match metadataOfExpr ctx first with
         | Some metadata when metadata.TypeId = TypeDate && not timeUnit -> Some(ColumnWire.metadataOfType TDate)
-        | Some metadata when metadata.TypeId = TypeTime ->
-            Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expression |> Option.defaultValue 0)))
-        | Some metadata when metadata.TypeId = TypeDate || metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp ->
-            datetimeOf [ first ]
+        | Some metadata when metadata.TypeId = TypeTime && (intervalUnit |> Option.exists isTimeOnlyIntervalUnit) ->
+            Some(ColumnWire.metadataOfType(TTime resultFsp))
+        | Some metadata when metadata.TypeId = TypeDate || metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp || metadata.TypeId = TypeTime ->
+            datetimeWithFsp resultFsp
         | _ -> text 16383
 
     let strToDate format =
@@ -6481,7 +6491,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                         TypeId = if promoted then TypeNewDecimal else TypeLongLong
                         ColumnLength = max 2u length })
     | BinOp((Add | Sub | SignedSub), left, (NamedFunction "INTERVAL" _ as interval)) ->
-        dateArithmetic expr left interval
+        dateArithmetic left interval
     | BinOp((Add | Sub | SignedSub as operator), left, right) ->
         numeric arithmeticUnsignedResult (fun left right ->
             let shape = combinedDecimalShape left right
@@ -6689,16 +6699,16 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
         | "TIMESTAMP", arguments -> datetimeOf arguments
         | ("DATE_ADD" | "DATE_SUB"), first :: interval :: _ ->
-            dateArithmetic expr first interval
+            dateArithmetic first interval
         | ("ADDDATE" | "SUBDATE"), first :: interval :: _ ->
             let interval =
                 match interval with
                 | FuncCall(name, _) when name.Equals("INTERVAL", System.StringComparison.OrdinalIgnoreCase) -> interval
                 | value -> FuncCall("INTERVAL", [ value; Lit(VString "DAY") ])
 
-            dateArithmetic expr first interval
+            dateArithmetic first interval
         | "TIMESTAMPADD", [ unit; amount; value ] ->
-            dateArithmetic expr value (FuncCall("INTERVAL", [ amount; unit ]))
+            dateArithmetic value (FuncCall("INTERVAL", [ amount; unit ]))
         | ("NOW" | "CURRENT_TIMESTAMP" | "LOCALTIME" | "LOCALTIMESTAMP" | "SYSDATE"), _ ->
             Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "UTC_TIMESTAMP", _ -> Some(ColumnWire.metadataOfType(TDateTime 0))

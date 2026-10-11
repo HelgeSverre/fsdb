@@ -3479,6 +3479,55 @@ let tests =
                   Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId)) expectedTypes "prepared result types"
               | Error error -> failtestf "expected interval statement to prepare, got %A" error
 
+          testCase "TIME interval arithmetic follows subday and overflow rules"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let timeSql =
+                  "SELECT CAST('12:34:56' AS TIME) + INTERVAL 2 HOUR AS plus_hour, "
+                  + "CAST('23:30:00' AS TIME) + INTERVAL 2 HOUR AS over_day, "
+                  + "CAST('01:00:00' AS TIME) - INTERVAL 2 HOUR AS negative_hour, "
+                  + "CAST('12:34:56' AS TIME) + INTERVAL 1 DAY AS plus_day"
+              let session, timeResult = handle session timeSql
+              match timeResult with
+              | ResultSet(_, [ [ Some "14:34:56"; Some "25:30:00"; Some "-01:00:00"; Some _ ] ]) -> ()
+              | other -> failtestf "unexpected TIME interval result: %A" other
+              Expect.equal
+                  (session.LastResultColumnMetadata |> List.map _.TypeId)
+                  [ TypeTime; TypeTime; TypeTime; TypeDateTime ]
+                  "TIME interval result types"
+              match prepareStatementForSession session timeSql with
+              | Ok(statement, parameterCount) ->
+                  let _, columns = preparedMetadata session statement parameterCount
+                  Expect.equal
+                      (columns |> List.map (fun column -> column.Metadata.TypeId))
+                      [ TypeTime; TypeTime; TypeTime; TypeDateTime ]
+                      "prepared TIME interval result types"
+              | Error error -> failtestf "expected TIME interval statement to prepare, got %A" error
+
+              let compositeSql =
+                  "SELECT DATE_ADD(CAST('12:34:56' AS TIME), INTERVAL '1:30' HOUR_MINUTE) AS hm, "
+                  + "DATE_ADD(CAST('12:34:56' AS TIME), INTERVAL '1 2' DAY_HOUR) AS dh"
+              let session, compositeResult = handle session compositeSql
+              match compositeResult with
+              | ResultSet(_, [ [ Some "14:04:56"; Some _ ] ]) -> ()
+              | other -> failtestf "unexpected composite TIME interval result: %A" other
+              Expect.equal
+                  (session.LastResultColumnMetadata |> List.map _.TypeId)
+                  [ TypeTime; TypeDateTime ]
+                  "composite TIME interval result types"
+
+              let session, microseconds =
+                  handle session "SELECT CAST('12:34:56.123456' AS TIME(6)) + INTERVAL 1 MICROSECOND AS result"
+              Expect.equal microseconds (ResultSet([ "result" ], [ [ Some "12:34:56.123457" ] ])) "microsecond arithmetic"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.Decimals) [ 6uy ] "TIME microsecond precision"
+
+              let session, overflow =
+                  handle session "SELECT CAST('838:00:00' AS TIME) + INTERVAL 2 HOUR AS result"
+              Expect.equal overflow (ResultSet([ "result" ], [ [ None ] ])) "TIME overflow result"
+              Expect.equal (handle session "SHOW WARNINGS" |> snd)
+                  (ResultSet([ "Level"; "Code"; "Message" ], [ [ Some "Warning"; Some "1441"; Some "Datetime function: time field overflow" ] ]))
+                  "TIME overflow warning"
+
           testCase "typed geometry constructors share prepared metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

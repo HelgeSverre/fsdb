@@ -2167,6 +2167,13 @@ let tryDateTimeValue (v: Value) : DateTime option =
 let private asDateOnly (v: Value) : DateOnly option = tryDateTimeValue v |> Option.map DateOnly.FromDateTime
 
 let private dateOnlyUnits = set [ "DAY"; "WEEK"; "MONTH"; "QUARTER"; "YEAR" ]
+let private timeOnlyIntervalUnits =
+    set [ "HOUR"; "MINUTE"; "SECOND"; "MICROSECOND"
+          "HOUR_MINUTE"; "HOUR_SECOND"; "MINUTE_SECOND"
+          "SECOND_MICROSECOND"; "MINUTE_MICROSECOND"; "HOUR_MICROSECOND" ]
+
+let isTimeOnlyIntervalUnit (unit: string) =
+    timeOnlyIntervalUnits.Contains(unit.ToUpperInvariant())
 
 /// Adds an interval, returning `None` when the result falls outside
 /// `DateTime`'s range — MySQL yields NULL for an out-of-range temporal
@@ -2190,7 +2197,9 @@ let tryAddInterval (dt: DateTime) (amount: float) (unit: string) : DateTime opti
         | "MICROSECOND" -> Some(dt.AddTicks(int64 (amount * 10.0)))
         // Composite units are normalized into this vocabulary before use.
         | _ -> None
-    with :? ArgumentOutOfRangeException ->
+    with
+    | :? ArgumentOutOfRangeException
+    | :? OverflowException ->
         None
 
 /// MySQL's composite `INTERVAL` units take a *string* of several components
@@ -2267,20 +2276,25 @@ let tryIntervalParts (amount: string) (unit: string) : (float * string) option =
         | true, value -> Some(value, unit)
         | false, _ -> None
 
-let tryIntervalArgument (v: Value) : (float * string) option =
+let private tryIntervalDetails (v: Value) : (float * string * string) option =
     match v with
     | VString s when s.StartsWith intervalMarker ->
         match s.Substring(intervalMarker.Length).Split('\x01') with
         | [| n; u |] ->
             tryIntervalParts n u
+            |> Option.map (fun (amount, unit) -> amount, unit, u)
         | _ -> None
     | VString s ->
         let m = Regex.Match(s.Trim(), @"^(-?\d+(?:\.\d+)?)\s+([A-Za-z]+)$")
         if m.Success then
-            Some(Double.Parse(m.Groups.[1].Value, CultureInfo.InvariantCulture), m.Groups.[2].Value.ToUpperInvariant())
+            let unit = m.Groups.[2].Value.ToUpperInvariant()
+            Some(Double.Parse(m.Groups.[1].Value, CultureInfo.InvariantCulture), unit, unit)
         else
             None
     | _ -> None
+
+let tryIntervalArgument value =
+    tryIntervalDetails value |> Option.map (fun (amount, unit, _) -> amount, unit)
 
 /// Whether `v` names a date with no time-of-day component — a real `VDate`,
 /// or (MySQL doesn't type its string literals, so `DATE_ADD('2024-01-15',
@@ -2294,25 +2308,37 @@ let private looksDateOnly (v: Value) : bool =
     | VString s -> not (s.Contains ':')
     | _ -> false
 
-let private applyDateInterval (sign: float) (dateV: Value) (dt: DateTime) (amount: float) (unit: string) : Value =
-    match tryAddInterval dt (sign * amount) unit with
-    | None -> VNull // out of range — MySQL yields NULL
-    | Some result ->
-        if looksDateOnly dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then
-            VDate(DateOnly.FromDateTime result)
-        else
-            VDateTime result
+let private applyDateInterval (sign: float) (dateV: Value) (amount: float) (unit: string) (rawUnit: string) : Value =
+    match dateV with
+    | VTime value when isTimeOnlyIntervalUnit rawUnit ->
+        let anchor = DateTime(2000, 1, 1)
+        let overflow () =
+            Diagnostics.warning 1441 "Datetime function: time field overflow"
+            VNull
+        tryAddInterval anchor (sign * amount) unit
+        |> function
+            | None -> overflow ()
+            | Some result ->
+                let ticks = timeTicks value + result.Ticks - anchor.Ticks
+                if ticks < -maxTimeTicks || ticks > maxTimeTicks then overflow ()
+                else VTime(timeValueOrClamp ticks)
+    | _ ->
+        match tryDateTimeValue dateV |> Option.bind (fun dt -> tryAddInterval dt (sign * amount) unit) with
+        | None -> VNull // out of range — MySQL yields NULL
+        | Some result ->
+            if looksDateOnly dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then
+                VDate(DateOnly.FromDateTime result)
+            else
+                VDateTime result
 
 let private dateAddCore (sign: float) : Scalar =
     function
     | [ dateV; intervalV ] when not (anyNull [ dateV; intervalV ]) ->
-        match tryDateTimeValue dateV, tryIntervalArgument intervalV with
-        | Some dt, Some(n, unit) -> applyDateInterval sign dateV dt n unit
-        | _ -> VNull
-    | [ dateV; amtV; VString unit ] when not (anyNull [ dateV; amtV ]) ->
-        match tryDateTimeValue dateV with
-        | Some dt -> applyDateInterval sign dateV dt (toDouble amtV) unit
+        match tryIntervalDetails intervalV with
+        | Some(n, unit, rawUnit) -> applyDateInterval sign dateV n unit rawUnit
         | None -> VNull
+    | [ dateV; amtV; VString unit ] when not (anyNull [ dateV; amtV ]) ->
+        applyDateInterval sign dateV (toDouble amtV) unit unit
     | _ -> VNull
 
 /// `TIMESTAMPADD(unit, n, expr)` — the same arithmetic `DATE_ADD(expr,
@@ -2331,12 +2357,9 @@ let private timestampAddFn: Scalar =
 let private addSubDateCore (sign: float) : Scalar =
     function
     | [ dateV; amtV ] when not (anyNull [ dateV; amtV ]) ->
-        match tryDateTimeValue dateV with
-        | None -> VNull
-        | Some dt ->
-            match tryIntervalArgument amtV with
-            | Some(n, unit) -> applyDateInterval sign dateV dt n unit
-            | None -> applyDateInterval sign dateV dt (toDouble amtV) "DAY"
+        match tryIntervalDetails amtV with
+        | Some(n, unit, rawUnit) -> applyDateInterval sign dateV n unit rawUnit
+        | None -> applyDateInterval sign dateV (toDouble amtV) "DAY" "DAY"
     | args -> dateAddCore sign args
 
 /// Whether `v` is the encoded result of an `INTERVAL n unit` expression
@@ -2351,12 +2374,12 @@ let isIntervalValue (v: Value) : bool =
 
 /// Real date/time arithmetic for that binary-operator form — same encoding
 /// and unit handling as `dateAddCore`, just entered through `+`/`-` on an
-/// `INTERVAL n unit` operand instead of a `DATE_ADD`/`DATE_SUB` call. `None`
-/// when `dateV` isn't a recognizable date/time, so the caller can fall back
-/// to `Value.add`/`Value.sub` and get MySQL's usual type-error/NULL there.
+/// `INTERVAL n unit` operand instead of a `DATE_ADD`/`DATE_SUB` call. A valid
+/// interval with an invalid date returns SQL NULL; only a non-interval operand
+/// leaves this path for ordinary arithmetic.
 let tryDateIntervalBinOp (sign: float) (dateV: Value) (intervalV: Value) : Value option =
-    match tryIntervalArgument intervalV, tryDateTimeValue dateV with
-    | Some(n, unit), Some dt -> Some(applyDateInterval sign dateV dt n unit)
+    match tryIntervalDetails intervalV with
+    | Some(n, unit, rawUnit) -> Some(applyDateInterval sign dateV n unit rawUnit)
     // A real `INTERVAL n unit` operand never degrades into numeric addition:
     // MySQL answers NULL when the left side isn't a date ('abc' + INTERVAL 1
     // DAY) or the interval value is malformed ('1:2:3' HOUR_MINUTE), whereas

@@ -242,6 +242,9 @@ or locking retain the general SELECT pipeline.
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.
+[Interval arithmetic on TIME](torture/findings/2026-10-11-interval-arithmetic-metadata.md)
+retains signed, greater-than-24-hour TIME results for subday units and uses
+DATETIME for day-or-larger units, with MySQL's overflow warning.
 HEX preserves audited decimal rounding and [expression-sensitive DOUBLE
 conversion](torture/findings/2026-10-09-hex-expression.md), including selected
 conditional branches, stored-column warnings, and the declared text or binary
