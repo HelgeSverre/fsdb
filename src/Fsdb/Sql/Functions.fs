@@ -6511,16 +6511,24 @@ let private geometryPredicateFn functionName predicate =
                         | Some(lineFirst, points, lines) ->
                             pointLinePredicate referenceSystem lineFirst points lines
                         | None ->
-                            let intersects =
+                            match linework first.Shape, linework second.Shape, functionName with
+                            | Some firstLines, Some secondLines, ("ST_CROSSES" | "ST_TOUCHES" | "ST_OVERLAPS") ->
+                                let topology = geographicLineLineTopology referenceSystem firstLines secondLines
                                 match functionName with
-                                | "ST_INTERSECTS" | "ST_DISJOINT" ->
-                                    lineOrPolygonIntersects referenceSystem first.Shape second.Shape
-                                | _ -> None
-                            match intersects with
-                            | Some value -> Some(if functionName = "ST_INTERSECTS" then value else not value)
-                            | None ->
-                                requirePlanar functionName first |> ignore
-                                predicate first second
+                                | "ST_CROSSES" -> Some topology.Crosses
+                                | "ST_TOUCHES" -> Some topology.Touches
+                                | _ -> Some topology.Overlaps
+                            | _ ->
+                                let intersects =
+                                    match functionName with
+                                    | "ST_INTERSECTS" | "ST_DISJOINT" ->
+                                        lineOrPolygonIntersects referenceSystem first.Shape second.Shape
+                                    | _ -> None
+                                match intersects with
+                                | Some value -> Some(if functionName = "ST_INTERSECTS" then value else not value)
+                                | None ->
+                                    requirePlanar functionName first |> ignore
+                                    predicate first second
             else predicate first second
 
         result

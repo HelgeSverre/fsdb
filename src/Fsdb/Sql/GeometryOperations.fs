@@ -405,7 +405,7 @@ let internal geographicPointPolygonDistance referenceSystem point polygons =
     | GeographicPointPolygonPosition.Outside distance -> distance
     | _ -> Some 0.0
 
-let private geographicArcsIntersect (firstStart: float * float) firstEnd secondStart secondEnd =
+let private geographicArcIntersection (firstStart: float * float) firstEnd secondStart secondEnd =
     let magnitude (x, y, z) = sqrt (x * x + y * y + z * z)
     let angle first second = atan2 (magnitude (cross3 first second)) (dot3 first second)
     let firstStart, firstEnd = geographicUnitVector firstStart, geographicUnitVector firstEnd
@@ -413,14 +413,90 @@ let private geographicArcsIntersect (firstStart: float * float) firstEnd secondS
     let intersection = cross3 (cross3 firstStart firstEnd) (cross3 secondStart secondEnd)
     let size = magnitude intersection
 
-    if size < 1e-15 then false
+    if size < 1e-15 then None
     else
         let x, y, z = intersection
         let candidate = x / size, y / size, z / size
         let onArc start endpoint point =
             abs (angle start point + angle point endpoint - angle start endpoint) < 1e-9
         let crosses point = onArc firstStart firstEnd point && onArc secondStart secondEnd point
-        crosses candidate || crosses (-x / size, -y / size, -z / size)
+        if crosses candidate then Some candidate
+        else
+            let opposite = -x / size, -y / size, -z / size
+            if crosses opposite then Some opposite else None
+
+let private geographicArcsIntersect firstStart firstEnd secondStart secondEnd =
+    geographicArcIntersection firstStart firstEnd secondStart secondEnd |> Option.isSome
+
+type internal GeographicLineTopology =
+    { Crosses: bool
+      Touches: bool
+      Overlaps: bool }
+
+let internal geographicLineLineTopology referenceSystem firstLines secondLines =
+    let firstSegments = firstLines |> List.collect List.pairwise
+    let secondSegments = secondLines |> List.collect List.pairwise
+    let onSegment point (start, endpoint) =
+        geographicPointLinePosition referenceSystem point [ [ start; endpoint ] ]
+        <> GeographicPointLinePosition.Outside
+    let sharedEndpoints (firstStart, firstEnd) (secondStart, secondEnd) =
+        [ firstStart; firstEnd; secondStart; secondEnd ]
+        |> List.distinct
+        |> List.filter (fun point ->
+            onSegment point (firstStart, firstEnd)
+            && onSegment point (secondStart, secondEnd))
+    let near point other =
+        let x, y, z = point
+        let otherX, otherY, otherZ = geographicUnitVector other
+        (x - otherX) ** 2.0 + (y - otherY) ** 2.0 + (z - otherZ) ** 2.0 < 1e-18
+    let properCrossing (firstStart, firstEnd) (secondStart, secondEnd) =
+        let firstArcs = sampleGeographicSegment referenceSystem firstStart firstEnd |> Array.pairwise
+        let secondArcs = sampleGeographicSegment referenceSystem secondStart secondEnd |> Array.pairwise
+        firstArcs
+        |> Array.exists (fun (firstArcStart, firstArcEnd) ->
+            secondArcs
+            |> Array.exists (fun (secondArcStart, secondArcEnd) ->
+                geographicArcIntersection firstArcStart firstArcEnd secondArcStart secondArcEnd
+                |> Option.exists (fun intersection ->
+                    not (near intersection firstStart || near intersection firstEnd
+                         || near intersection secondStart || near intersection secondEnd))))
+    let pairs =
+        [ for first in firstSegments do
+            for second in secondSegments do
+                first, second ]
+    let position point lines = geographicPointLinePosition referenceSystem point lines
+    // Two distinct points shared by the same geodesic segments form an interval,
+    // which changes the relation from a point crossing or touch.
+    let commonInterval =
+        pairs |> List.exists (fun (first, second) -> List.length (sharedEndpoints first second) >= 2)
+    let covers covering covered =
+        covered
+        |> List.collect id
+        |> List.forall (fun point ->
+            covering |> List.exists (fun line ->
+                line |> List.pairwise |> List.exists (onSegment point)))
+    let overlaps = commonInterval && not (covers firstLines secondLines || covers secondLines firstLines)
+    // A shared vertex can lie in the interior of both complete lines.
+    let crosses =
+        pairs
+        |> List.exists (fun (first, second) ->
+            let contacts = sharedEndpoints first second
+            properCrossing first second
+            || (List.length contacts < 2
+                && (contacts
+                    |> List.exists (fun point ->
+                        position point firstLines = GeographicPointLinePosition.Interior
+                        && position point secondLines = GeographicPointLinePosition.Interior))))
+    let hasBoundaryContact =
+        pairs
+        |> List.exists (fun (first, second) ->
+            sharedEndpoints first second
+            |> List.exists (fun point ->
+                position point firstLines = GeographicPointLinePosition.Boundary
+                || position point secondLines = GeographicPointLinePosition.Boundary))
+    { Crosses = crosses
+      Touches = hasBoundaryContact && not crosses && not commonInterval
+      Overlaps = overlaps && not crosses }
 
 let internal geographicLineLineDistance referenceSystem firstLines secondLines =
     let sample (start, endpoint) =

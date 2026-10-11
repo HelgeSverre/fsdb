@@ -14808,6 +14808,31 @@ let tests =
                         | ResultSet(_, [ row ]) when row = expected -> ()
                         | result -> failtestf "expected MySQL geographic line intersections for %s and %s, got %A" firstText secondText result
 
+                testCase "geographic line topology distinguishes crossing, contact, and overlap"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "LINESTRING(0 -1,0 1)", "LINESTRING(-1 0,1 0)", [ Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(0 -1,0 0)", "LINESTRING(0 0,1 0)", [ Some "0"; Some "1"; Some "0" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(-1 0,0 0)", [ Some "0"; Some "1"; Some "0" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(0 0,0 2)", [ Some "0"; Some "0"; Some "1" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(0 -1,0 1)", [ Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(0 -2,0 2)", "LINESTRING(0 -1,0 1)", [ Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(0 -1,0 1)", "LINESTRING(2 -1,2 1)", [ Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 0,0 0)", "LINESTRING(0 -1,0 1)", [ Some "0"; Some "1"; Some "0" ]
+                          "LINESTRING(-1 0,0 0,0 1)", "LINESTRING(0 -1,0 0,1 0)", [ Some "1"; Some "0"; Some "0" ]
+                          "MULTILINESTRING((0 -1,0 1),(5 5,6 6))", "LINESTRING(-1 0,1 0)", [ Some "1"; Some "0"; Some "0" ]
+                          "MULTILINESTRING((0 -1,0 0),(5 5,6 6))", "LINESTRING(0 0,1 0)", [ Some "0"; Some "1"; Some "0" ]
+                          "MULTILINESTRING((0 -1,0 1),(2 -1,2 1))", "MULTILINESTRING((-1 0,1 0),(2 0,2 2))", [ Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 179,1 -179)", "LINESTRING(-1 -179,1 179)", [ Some "1"; Some "0"; Some "0" ] ]
+                    for firstText, secondText, expected in cases do
+                        let first = sprintf "ST_GeomFromText('%s',4326)" firstText
+                        let second = sprintf "ST_GeomFromText('%s',4326)" secondText
+                        let sql = sprintf "SELECT ST_Crosses(%s,%s),ST_Touches(%s,%s),ST_Overlaps(%s,%s)" first second first second first second
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = expected -> ()
+                        | result -> failtestf "expected MySQL geographic line topology for %s and %s, got %A" firstText secondText result
+
                 testCase "geographic line-polygon intersections include containment and boundaries"
                 <| fun _ ->
                     let store = newStore ()

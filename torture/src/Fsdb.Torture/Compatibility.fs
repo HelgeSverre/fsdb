@@ -3037,6 +3037,22 @@ module ContractCatalog =
                    "SELECT ST_Intersects(ST_GeomFromText('LINESTRING(0 0,0 2)',4326), ST_GeomFromText('LINESTRING(-1 1,1 1)',4326)), ST_Disjoint(ST_GeomFromText('LINESTRING(0 0,0 2)',4326), ST_GeomFromText('LINESTRING(2 0,2 2)',4326)), ST_Intersects(ST_GeomFromText('LINESTRING(0 170,0 -170)',4326), ST_GeomFromText('LINESTRING(-1 180,1 180)',4326))"
                |> Contract.comparingValues
                Contract.query
+                   "geographic-line-crosses"
+                   "SELECT ST_Crosses(ST_GeomFromText('LINESTRING(0 -1,0 1)',4326),ST_GeomFromText('LINESTRING(-1 0,1 0)',4326)),ST_Crosses(ST_GeomFromText('LINESTRING(-1 179,1 -179)',4326),ST_GeomFromText('LINESTRING(-1 -179,1 179)',4326))"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-line-touches"
+                   "SELECT ST_Touches(ST_GeomFromText('LINESTRING(0 -1,0 0)',4326),ST_GeomFromText('LINESTRING(0 0,1 0)',4326)),ST_Touches(ST_GeomFromText('LINESTRING(0 -1,0 1)',4326),ST_GeomFromText('LINESTRING(-1 0,0 0)',4326))"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-line-overlaps"
+                   "SELECT ST_Overlaps(ST_GeomFromText('LINESTRING(0 -1,0 1)',4326),ST_GeomFromText('LINESTRING(0 0,0 2)',4326)),ST_Overlaps(ST_GeomFromText('LINESTRING(0 -1,0 1)',4326),ST_GeomFromText('LINESTRING(0 -1,0 1)',4326))"
+               |> Contract.comparingValues
+               Contract.query
+                   "geographic-line-internal-vertex-crosses"
+                   "SELECT ST_Crosses(ST_GeomFromText('LINESTRING(-1 0,0 0,0 1)',4326),ST_GeomFromText('LINESTRING(0 -1,0 0,1 0)',4326)),ST_Touches(ST_GeomFromText('LINESTRING(-1 0,0 0,0 1)',4326),ST_GeomFromText('LINESTRING(0 -1,0 0,1 0)',4326))"
+               |> Contract.comparingValues
+               Contract.query
                    "geographic-line-polygon-intersections"
                    "SELECT ST_Intersects(ST_GeomFromText('LINESTRING(-1 1,4 1)',4326), ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0))',4326)), ST_Disjoint(ST_GeomFromText('LINESTRING(1 1,2 2)',4326), ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0),(0.5 0.5,3.5 0.5,3.5 3.5,0.5 3.5,0.5 0.5))',4326))"
                |> Contract.comparingValues

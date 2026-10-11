@@ -21,9 +21,14 @@ horizontal line. MySQL also reports an interior crossing for the two
 antimeridian-spanning lines `LINESTRING(-1 179,1 -179)` and
 `LINESTRING(-1 -179,1 179)`.
 
-Fsdb currently computes line/line geographic `ST_Intersects` and
-`ST_Disjoint` through its distance path, but returns `NULL` for these
-other defined predicates. A topology implementation needs to distinguish
-the interior/boundary relationship of the original geodesic members,
-including multipart linework and longitude wrap. Planar longitude-latitude
-segments alone are insufficient for the antimeridian example.
+Fsdb computes line/line geographic `ST_Intersects` and `ST_Disjoint`
+through its distance path. It now distinguishes crossing, touching, and
+partial overlap with sampled geodesic arc intersections and whole-line
+boundary positions. The focused regression covers the table above,
+contained segments, reversed T-junctions, multipart linework, an
+internal-vertex crossing, and longitude wrap. Differential contracts
+compare crossing, touching, and overlap with MySQL. Planar
+longitude-latitude segments alone would misclassify the antimeridian case.
+
+Broader line/line `ST_Contains`, `ST_Within`, and `ST_Equals` behavior,
+as well as near-tangent numerical boundaries, remains open.
