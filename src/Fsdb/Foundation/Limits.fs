@@ -417,17 +417,22 @@ let applySetting (name: string) (value: string) : Result<unit, string> =
     validatedSetting name value
     |> Result.map (fun (knob, value) -> knob.Set value)
 
+let private variableValue knob =
+    if booleanSettings.Contains knob.Name then
+        if knob.Get() <> 0L then "ON" else "OFF"
+    else
+        string (knob.Get())
+
+/// Reads one reportable knob without constructing the complete variable list.
+let internal tryVariable name : string option =
+    knobs
+    |> List.tryFind (fun knob -> knob.Reportable && knob.Name = name)
+    |> Option.map variableValue
+
 /// Every reportable knob's live value, for SHOW VARIABLES and `SELECT @@x`.
 let variables () : (string * string) list =
     [ for knob in knobs do
-          if knob.Reportable then
-              let value =
-                  if booleanSettings.Contains knob.Name then
-                      if knob.Get() <> 0L then "ON" else "OFF"
-                  else
-                      string (knob.Get())
-
-              knob.Name, value ]
+          if knob.Reportable then knob.Name, variableValue knob ]
 
 /// Applies `settings` for the duration of `f`, restoring every knob
 /// afterwards. The process-wide knobs need one gate so independent tests

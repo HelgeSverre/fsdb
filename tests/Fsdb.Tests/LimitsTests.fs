@@ -32,6 +32,22 @@ let tests =
                       | Ok() -> Expect.equal maxAllowedPacket expected (sprintf "'%s' parsed" value)
                       | Error e -> failtestf "expected '%s' to parse, got %s" value e)
 
+          testCase "single global reads agree with snapshots as limits and overrides change"
+          <| fun _ ->
+              withSettings [ "max_connections", "7" ] (fun () ->
+                  let store = Fsdb.Storage.create ()
+                  let assertSnapshot () =
+                      for KeyValue(name, value) in globalVariablesSnapshot store do
+                          Expect.equal (tryGlobalVariable store name) (Some value) (sprintf "global %s" name)
+
+                      Expect.equal (tryGlobalVariable store "unknown_fsdb_variable") None "unknown variables stay absent"
+
+                  assertSnapshot ()
+                  Expect.equal (applySetting "max_connections" "9") (Ok()) "live limit changes"
+                  assertSnapshot ()
+                  setGlobalVariable store "max_connections" (Some "11")
+                  assertSnapshot ())
+
           testCase "REGEXP_REPLACE refuses expanded output beyond max_allowed_packet"
           <| fun _ ->
               withSettings [ "max_allowed_packet", "1024" ] (fun () ->

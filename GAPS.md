@@ -856,6 +856,11 @@ removed warning-suppressed coercion for already in-range signed `INT` and
 `BIGINT` equality probes. It saves about 3.4 KiB per call on the shared
 fixture; the separate-run latency comparison is inconclusive. The larger
 statement and execution allocation gap remains open.
+A [single-value global-variable lookup follow-up](benchmarks/results/2026-10-11-global-variable-lookup.md)
+avoids rebuilding all live defaults for each missing GLOBAL override. It
+removes about 10.4 KiB per lookup call on the same fixture while preserving
+live limits, store defaults, and explicit overrides. The residual allocation
+and cross-process latency gap remain open.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes

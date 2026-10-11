@@ -120,13 +120,27 @@ let defaultVariables: Map<string, string option> =
         |> Map.add "innodb_ft_user_stopword_table" None
         |> Map.add "innodb_ft_server_stopword_table" None
 
+let private storeDefaults: (string * (Store -> string)) list =
+    [ "innodb_ft_min_token_size", fun store -> string store.FullTextWordLengths.Minimum
+      "innodb_ft_max_token_size", fun store -> string store.FullTextWordLengths.Maximum
+      "ngram_token_size", fun store -> string store.NgramTokenSize ]
+
 /// Recomputes defaults so configured limits and reported values cannot drift.
 let private liveDefaults (store: Store) : Map<string, string option> =
-    Limits.variables ()
-    |> List.fold (fun m (name, value) -> Map.add name (Some value) m) defaultVariables
-    |> Map.add "innodb_ft_min_token_size" (Some(string store.FullTextWordLengths.Minimum))
-    |> Map.add "innodb_ft_max_token_size" (Some(string store.FullTextWordLengths.Maximum))
-    |> Map.add "ngram_token_size" (Some(string store.NgramTokenSize))
+    let withLimits =
+        Limits.variables ()
+        |> List.fold (fun m (name, value) -> Map.add name (Some value) m) defaultVariables
+
+    storeDefaults
+    |> List.fold (fun m (name, value) -> Map.add name (Some(value store)) m) withLimits
+
+let private tryLiveDefault (store: Store) name : string option option =
+    storeDefaults
+    |> List.tryPick (fun (variable, value) -> if variable = name then Some(Some(value store)) else None)
+    |> Option.orElseWith (fun () ->
+        Limits.tryVariable name
+        |> Option.map Some
+        |> Option.orElseWith (fun () -> Map.tryFind name defaultVariables))
 
 /// GLOBAL overrides share Store.Lock identity and expire with the store.
 let private globalVariablesByStore =
@@ -190,7 +204,7 @@ let tryGlobalVariable (store: Store) (name: string) : string option option =
 
     match (globalVariablesOf store).TryGetValue name with
     | true, v -> Some v
-    | false, _ -> liveDefaults store |> Map.tryFind name
+    | false, _ -> tryLiveDefault store name
 
 let eventSchedulerEnabled store =
     tryGlobalVariable store "event_scheduler"
