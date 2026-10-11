@@ -73,7 +73,7 @@ let children =
     | Cast(expression, _)
     | CastCharset(expression, _, _)
     | CastCharAlias(expression, _, _)
-    | CastCharModifiers(expression, _, _)
+    | CastCharTarget(expression, _, _)
     | CastAsBinary(expression, _)
     | BinaryCast expression
     | Collate(expression, _) -> [ expression ]
@@ -242,7 +242,7 @@ let mapChildren (mapper: Expr -> Expr) =
     | Cast(expression, columnType) -> Cast(mapper expression, columnType)
     | CastCharset(expression, length, charset) -> CastCharset(mapper expression, length, charset)
     | CastCharAlias(expression, length, alias) -> CastCharAlias(mapper expression, length, alias)
-    | CastCharModifiers(expression, length, modifiers) -> CastCharModifiers(mapper expression, length, modifiers)
+    | CastCharTarget(expression, length, modifiers) -> CastCharTarget(mapper expression, length, modifiers)
     | CastAsBinary(expression, length) -> CastAsBinary(mapper expression, length)
     | BinaryCast expression -> BinaryCast(mapper expression)
     | Collate(expression, collation) -> Collate(mapper expression, collation)
@@ -480,7 +480,7 @@ let private knownLiteralCharset = function
     | IntroducedLiteral(_, charset, _) -> Some charset
     | CastCharset(_, _, charset) -> Some charset
     | CastCharAlias(_, _, alias) -> Some(CharCastAlias.charset alias)
-    | CastCharModifiers(_, _, modifiers) -> CharCastModifier.tryCharset modifiers
+    | CastCharTarget(_, _, modifiers) -> CharCastModifier.tryCharset modifiers
     | CastAsBinary _ -> Some "binary"
     | ConnectionLiteral(_, collation) -> Some(Fsdb.Collation.charsetOfCollation collation)
     | Lit(Fsdb.Value.VNull | Fsdb.Value.VBytes _ | Fsdb.Value.VBinaryLiteral _ | Fsdb.Value.VBit _)

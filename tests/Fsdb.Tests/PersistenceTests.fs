@@ -3465,7 +3465,7 @@ let tests =
               let store = load dir
               attach dir store
               let expression =
-                  CastCharModifiers(
+                  CastCharTarget(
                       Lit(VString "éx"),
                       Some 1,
                       [ CastBinaryAttribute; CastCharsetName "latin1" ])

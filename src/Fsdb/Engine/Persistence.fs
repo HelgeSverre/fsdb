@@ -545,7 +545,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
             | NationalChar -> 0uy
             | AsciiChar -> 1uy
             | UnicodeChar -> 2uy)
-    | CastCharModifiers(e, length, modifiers) ->
+    | CastCharTarget(e, length, modifiers) ->
         w.WriteByte 0x20uy
         encodeExpr w e
         match length with
@@ -662,7 +662,7 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
                 | 3uy -> CastLegacyAlias NationalChar
                 | 4uy -> CastBinaryAttribute
                 | _ -> failwith "Unknown character cast modifier")
-        CastCharModifiers(source, length, modifiers)
+        CastCharTarget(source, length, modifiers)
     | 0x1Euy ->
         let source = nested ()
         let length = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())

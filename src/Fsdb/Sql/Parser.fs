@@ -962,7 +962,7 @@ let private literalValue: Parser<Value, unit> =
 
 // ---------------------------------------------------------------------------
 // CREATE TABLE column types and definitions — parsed ahead of expressions
-// since `CAST(expr AS type)` reuses `columnType`.
+// Column declarations and CAST targets have distinct MySQL grammars.
 // ---------------------------------------------------------------------------
 
 let private numericWidth: Parser<int * int option, unit> =
@@ -1658,13 +1658,33 @@ let private castTargetType: Parser<CastTarget, unit> =
           keyword "NCHAR" >>. opt widthLen |>> (fun width -> AliasedCharCast(NationalChar, width))
           attempt (keyword "NATIONAL" >>. (keyword "CHARACTER" <|> keyword "CHAR"))
           >>. opt widthLen |>> (fun width -> AliasedCharCast(NationalChar, width))
-          keyword "CHAR" >>. opt widthLen |>> (fun width -> TypedCast(TChar(defaultArg width 1), width))
+          (keyword "CHAR" <|> keyword "CHARACTER") >>. opt widthLen
+          |>> (fun width -> TypedCast(TChar(defaultArg width 1), width))
           (keyword "BINARY" >>. optWidthLen
            |>> fun width ->
                if width |> Option.exists (fun value -> value < 0) then
                    raise (SemanticParseError "Invalid BINARY cast width")
                TypedCast(TBinary(defaultArg width 1), width))
-          columnType |>> (fun target -> TypedCast(target, None)) ]
+          keyword "DECIMAL" >>. opt numericWidth
+          |>> (fun size ->
+              let precision, scale = size |> Option.defaultValue (10, None)
+              TypedCast(TDecimal(precision, Option.defaultValue 0 scale, false), None))
+          keyword "FLOAT" >>. opt numericWidth
+          >>= (fun size ->
+              match size with
+              | Some(_, Some _) -> fail "FLOAT CAST target does not accept a scale"
+              | Some(precision, None) when precision > 53 -> fail "FLOAT precision must be between 0 and 53"
+              | Some(precision, None) when precision > 24 -> preturn (TypedCast(TDouble false, None))
+              | _ -> preturn (TypedCast(TFloat false, None)))
+          (keyword "DOUBLE" >>. optional (keyword "PRECISION")) >>% TypedCast(TDouble false, None)
+          keyword "REAL"
+          >>= (fun _ ->
+              preturn (TypedCast((if (activeOptions ()).RealAsFloat then TFloat false else TDouble false), None)))
+          keyword "DATETIME" >>. optFsp |>> (fun fsp -> TypedCast(TDateTime fsp, None))
+          keyword "DATE" >>% TypedCast(TDate, None)
+          keyword "TIME" >>. optFsp |>> (fun fsp -> TypedCast(TTime fsp, None))
+          keyword "YEAR" >>% TypedCast(TYear, None)
+          keyword "JSON" >>% TypedCast(TJson, None) ]
 
 /// `CAST(x AS CHAR CHARACTER SET cs)` retains the requested charset through
 /// the same conversion path as `CONVERT(x USING cs)`.
@@ -1689,12 +1709,13 @@ let private castConversion e target modifiers =
         validateCharset (CastCharsetName cs)
         CastCharset(e, explicitLength, cs)
     | TypedCast(TChar _, explicitLength), [ CastLegacyAlias alias ] -> CastCharAlias(e, explicitLength, alias)
+    | TypedCast(TChar _, explicitLength), [] -> CastCharTarget(e, explicitLength, [])
     | TypedCast(TChar _, explicitLength), [ CastBinaryAttribute ] ->
-        CastCharModifiers(e, explicitLength, modifiers)
+        CastCharTarget(e, explicitLength, modifiers)
     | TypedCast(TChar _, explicitLength), [ first; second ]
         when (isBinary first && isCharset second) || (isCharset first && isBinary second) ->
         modifiers |> List.iter validateCharset
-        CastCharModifiers(e, explicitLength, modifiers)
+        CastCharTarget(e, explicitLength, modifiers)
     | AliasedCharCast(alias, explicitLength), [] -> CastCharAlias(e, explicitLength, alias)
     | TypedCast(TBinary _, explicitLength), [] -> CastAsBinary(e, explicitLength)
     | TypedCast(columnType, _), [] -> Cast(e, columnType)
@@ -1710,11 +1731,12 @@ let private castExpr: Parser<Expr, unit> =
 
 /// The comma form of CONVERT uses the same target grammar and result as CAST.
 let private convertTypeExpr: Parser<Expr, unit> =
-    attempt (
-        functionKeyword "CONVERT" >>. expr .>> sym "," .>>. castTargetType
-        .>>. many castCharModifier
-        .>> sym ")"
-    )
+    // Commit after the comma: a malformed typed target is syntax, not a
+    // user-defined CONVERT function call. The USING form has no comma.
+    attempt (functionKeyword "CONVERT" >>. expr .>> sym ",")
+    .>>. castTargetType
+    .>>. many castCharModifier
+    .>> sym ")"
     |>> fun ((e, target), charset) -> castConversion e target charset
 
 let private existsExpr: Parser<Expr, unit> =

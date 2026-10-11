@@ -219,7 +219,7 @@ let private inferParameters
             | Cast(_, ty) -> Some(ColumnWire.parameterMetadataOfType ty)
             | CastCharset(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))
             | CastCharAlias(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))
-            | CastCharModifiers(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))
+            | CastCharTarget(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))
             | CastAsBinary(_, length) -> Some(ColumnWire.parameterMetadataOfType(TBinary(defaultArg length 1)))
             | BinaryCast inner
             | Collate(inner, _)
@@ -309,7 +309,7 @@ let private inferParameters
             inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))) InheritType inner
         | CastCharAlias(inner, length, _) ->
             inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))) InheritType inner
-        | CastCharModifiers(inner, length, _) ->
+        | CastCharTarget(inner, length, _) ->
             inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TChar(defaultArg length 1)))) InheritType inner
         | CastAsBinary(inner, length) ->
             inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBinary(defaultArg length 1)))) InheritType inner

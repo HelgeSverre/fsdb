@@ -251,10 +251,9 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
         sprintf "cast(%s as char%s character set %s)" (render value) width charset
     | CastCharAlias(value, length, alias) ->
         sprintf "cast(%s as %s)" (render value) (CharCastAlias.target length alias)
-    | CastCharModifiers(value, length, modifiers) ->
+    | CastCharTarget(value, length, modifiers) ->
         let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
-        let attributes = modifiers |> List.map CharCastModifier.render |> String.concat " "
-        sprintf "cast(%s as char%s %s)" (render value) width attributes
+        sprintf "cast(%s as char%s%s)" (render value) width (CharCastModifier.renderSuffix modifiers)
     | CastAsBinary(value, length) ->
         let width = length |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
         sprintf "cast(%s as binary%s)" (render value) width

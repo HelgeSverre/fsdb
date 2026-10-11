@@ -2865,6 +2865,23 @@ let tests =
               | _, ResultSet(_, [ [ Some "latin1" ] ]) -> ()
               | _, result -> failtestf "expected CHARSET spelling to remain valid, got %A" result
 
+          testCase "CAST target grammar excludes column-only types"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for target in
+                  [ "VARCHAR(2)"; "VARBINARY(2)"; "TEXT"; "BLOB"; "INT"; "BIGINT";
+                    "BIT(3)"; "TIMESTAMP(3)"; "NUMERIC(5,2)"; "FLOAT UNSIGNED";
+                    "DECIMAL(5,2) UNSIGNED"; "YEAR(4)"; "FLOAT(5,2)" ] do
+                  for sql in
+                      [ sprintf "SELECT CAST('1' AS %s)" target
+                        sprintf "SELECT CONVERT('1', %s)" target ] do
+                      match handle session sql with
+                      | _, Err(1064, _) -> ()
+                      | _, result -> failtestf "expected MySQL syntax error for %s, got %A" sql result
+              match handle session "SELECT CAST('abc' AS CHARACTER(2))" with
+              | _, ResultSet(_, [ [ Some "ab" ] ]) -> ()
+              | _, result -> failtestf "expected CHARACTER cast to work, got %A" result
+
           testCase "national ASCII and UNICODE casts retain syntax warnings and charset bytes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -3932,7 +3949,7 @@ let tests =
               | session, ResultSet(_, [ _ ]) ->
                   Expect.equal
                       (session.LastResultColumnMetadata |> List.map _.TypeId)
-                      [ TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeNewDecimal; TypeString ]
+                      [ TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeNewDecimal; TypeVarString ]
                       "literal, arithmetic, predicate, division, and cast types"
 
                   let charMetadata = List.last session.LastResultColumnMetadata

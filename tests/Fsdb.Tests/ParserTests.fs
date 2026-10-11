@@ -140,13 +140,15 @@ let tests =
                   | other -> failtestf "expected character alias cast for %s, got %A" sql other
 
               for sql in
-                  [ "CAST(value AS CHAR BINARY)"
+                  [ "CAST(value AS CHAR)"
+                    "CAST(value AS CHARACTER(2))"
+                    "CAST(value AS CHAR BINARY)"
                     "CAST(value AS CHAR(2) ASCII BINARY)"
                     "CAST(value AS CHAR BINARY UNICODE)"
                     "CONVERT(value, CHAR CHARACTER SET latin1 BINARY)"
                     "CAST(value AS CHAR BINARY CHARACTER SET latin1)" ] do
                   match Fsdb.Parser.parseExpression sql with
-                  | Ok(CastCharModifiers(Col "value", _, _) as expression) ->
+                  | Ok(CastCharTarget(Col "value", _, _) as expression) ->
                       Expect.equal (Fsdb.Parser.parseExpression (SqlText.expression expression)) (Ok expression) sql
                   | other -> failtestf "expected a character modifier cast for %s, got %A" sql other
 
@@ -2597,7 +2599,7 @@ let tests =
                         (mkSelect(
                             [ Cast(col "a", TBigInt true), None
                               Cast(Lit(VString "1"), TBigInt false), None
-                              Cast(col "a", TChar 1), None ],
+                              CastCharTarget(col "a", None, []), None ],
                             None,
                             None,
                             [],

@@ -13651,9 +13651,9 @@ let tests =
                     | ResultSet(_, [ [ None ] ]) -> ()
                     | other -> failtestf "expected an oversized compressed frame to return NULL, got %A" other
 
-                    match runDefault (newStore ()) "SELECT CAST(1 AS BIT(1000000000))" with
+                    match runDefault (newStore ()) "CREATE TABLE bit_huge (b BIT(1000000000))" with
                     | Err(1439, _) -> ()
-                    | other -> failtestf "expected an oversized BIT cast to fail with 1439, got %A" other
+                    | other -> failtestf "expected an oversized BIT column to fail with 1439, got %A" other
 
                     match runDefault (newStore ()) "SELECT CAST('' AS BINARY(1000000000))" with
                     | ResultSet(_, [ [ None ] ]) -> ()

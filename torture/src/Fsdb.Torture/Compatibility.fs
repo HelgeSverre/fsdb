@@ -1082,6 +1082,19 @@ module ContractCatalog =
                    |> List.indexed do
                    yield Contract.query (sprintf "invalid-char-modifiers-%d" index) sql
                          |> Contract.fails 1064 "42000"
+               yield Contract.query "cast-character-width" "SELECT CAST('abc' AS CHARACTER(2))"
+                     |> Contract.comparingValues
+               yield Contract.query "cast-character-width-warnings" "SHOW WARNINGS"
+                     |> Contract.comparingValues
+               for index, target in
+                   [ "VARCHAR(2)"; "VARBINARY(2)"; "TEXT"; "BLOB"; "INT"; "BIGINT";
+                     "BIT(3)"; "TIMESTAMP(3)"; "NUMERIC(5,2)"; "FLOAT UNSIGNED";
+                     "DECIMAL(5,2) UNSIGNED"; "YEAR(4)"; "FLOAT(5,2)" ]
+                   |> List.indexed do
+                   yield Contract.query (sprintf "invalid-cast-target-%d" index) (sprintf "SELECT CAST('1' AS %s)" target)
+                         |> Contract.fails 1064 "42000"
+                   yield Contract.query (sprintf "invalid-convert-target-%d" index) (sprintf "SELECT CONVERT('1', %s)" target)
+                         |> Contract.fails 1064 "42000"
                yield
                    Contract.query
                        "cast-national-spellings"

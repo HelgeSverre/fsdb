@@ -62,7 +62,7 @@ let reportParsedSyntax statement =
         | IntroducedLiteral(_, _, CharsetIntroducer spelling) ->
             reportCharsetDeprecation spelling
         | CastCharAlias(_, _, alias) -> reportCharAlias alias
-        | CastCharModifiers(_, _, modifiers) -> modifiers |> List.iter reportCharModifier
+        | CastCharTarget(_, _, modifiers) -> modifiers |> List.iter reportCharModifier
         | _ -> ()
 
     let rec report expression =
