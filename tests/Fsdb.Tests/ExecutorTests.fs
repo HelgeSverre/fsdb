@@ -15096,6 +15096,29 @@ let tests =
                     | ResultSet(_, [ [ Some "ETRS89 / UTM zone 33N" ] ]) -> ()
                     | result -> failtestf "expected ETRS89 UTM 33N catalog row, got %A" result
 
+                testCase "WGS 84 UTM northern and southern zones follow MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    match runDefault store "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID BETWEEN 32601 AND 32660 OR SRS_ID BETWEEN 32701 AND 32760" with
+                    | ResultSet(_, [ [ Some "120" ] ]) -> ()
+                    | result -> failtestf "expected all 120 WGS 84 UTM catalog rows, got %A" result
+                    let cases =
+                        [ 32601, 0.0, -177.0, 500000.0, 0.0
+                          32660, 0.0, 177.0, 500000.0, 0.0
+                          32734, -33.9249, 18.4241, 261881.59852399188, 6243182.3545178175
+                          32760, -45.0, 177.0, 500000.0, 5017049.599773454 ]
+                    for srid, latitude, longitude, easting, northing in cases do
+                        let transformed = sprintf "ST_Transform(ST_GeomFromText('POINT(%g %g)',4326),%d)" latitude longitude srid
+                        let sql = sprintf "SELECT ABS(ST_X(%s)-%.12f)<0.001,ABS(ST_Y(%s)-%.12f)<0.001" transformed easting transformed northing
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL UTM SRID %d coordinates, got %A" srid result
+                        let reverse = sprintf "ST_Transform(ST_GeomFromText('POINT(%.12f %.12f)',%d),4326)" easting northing srid
+                        let reverseSql = sprintf "SELECT ABS(ST_X(%s)-%.10f)<0.00000001,ABS(ST_Y(%s)-%.10f)<0.00000001" reverse latitude reverse longitude
+                        match runDefault store reverseSql with
+                        | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL inverse UTM SRID %d coordinates, got %A" srid result
+
                 testCase "projected transforms wrap geographic longitude"
                 <| fun _ ->
                     let store = newStore ()

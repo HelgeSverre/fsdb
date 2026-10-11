@@ -3312,6 +3312,22 @@ module ContractCatalog =
                    "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(262560.48218418856 6649443.584095765)',25833),4326)),8),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(262560.48218418856 6649443.584095765)',25833),4326)),8)"
                |> Contract.comparingValues
                Contract.query
+                   "wgs84-utm-zone-count"
+                   "SELECT COUNT(*) FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID BETWEEN 32601 AND 32660 OR SRS_ID BETWEEN 32701 AND 32760"
+               |> Contract.comparingValues
+               Contract.query
+                   "wgs84-utm-zone-catalog"
+                   "SELECT SRS_ID,SRS_NAME,DEFINITION FROM information_schema.ST_SPATIAL_REFERENCE_SYSTEMS WHERE SRS_ID BETWEEN 32601 AND 32660 OR SRS_ID BETWEEN 32701 AND 32760 ORDER BY SRS_ID"
+               |> Contract.comparingValues
+               Contract.query
+                   "wgs84-utm-south-forward"
+                   "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(-33.9249 18.4241)',4326),32734)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(-33.9249 18.4241)',4326),32734)),3),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(-33.9249 18.4241)',4326),32734)),3)"
+               |> Contract.comparingValues
+               Contract.query
+                   "wgs84-utm-south-reverse"
+                   "SELECT ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(261881.59852399188 6243182.3545178175)',32734),4326)),8),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(261881.59852399188 6243182.3545178175)',32734),4326)),8)"
+               |> Contract.comparingValues
+               Contract.query
                    "world-mercator-forward"
                    "SELECT ST_SRID(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),ROUND(ST_X(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5),ROUND(ST_Y(ST_Transform(ST_GeomFromText('POINT(59.9139 10.7522)',4326),3395)),5)"
                |> Contract.comparingValues
