@@ -149,6 +149,8 @@ let private rejectedEscapeAt (pattern: string) index =
 let private unicodePropertyAt (pattern: string) index =
     match unicodePropertyNameAt pattern index with
     | None -> None
+    | Some(nextIndex, "ANY") ->
+        Some(nextIndex, if pattern[index + 1] = 'P' then "(?!)" else scalarAtom)
     | Some(nextIndex, name) ->
         let categoryName =
             if name.StartsWith("GC=", StringComparison.Ordinal) then name.Substring(3)
@@ -185,7 +187,7 @@ let private mixedNegatedClassAt (pattern: string) start =
             invalidMember <- invalidMember || rejectedEscapeAt pattern index
             match unicodePropertyAt pattern index with
             | Some(nextIndex, property) ->
-                if pattern[index + 1] = 'P' then alternatives.Add property
+                if pattern[index + 1] = 'P' || property = scalarAtom then alternatives.Add property
                 else ordinary.Append property |> ignore
                 index <- nextIndex
             | None ->

@@ -10157,6 +10157,22 @@ module ContractCatalog =
                Contract.query "unsupported-N-escape" "SELECT REGEXP_LIKE('a', CONVERT(0x5C4E USING utf8mb4), 'c')"
                |> Contract.fails 3685 "HY000"
                for name, pattern in
+                   [ "any-property", "\\p{Any}"
+                     "any-property-class", "[\\p{Any}]"
+                     "any-property-mixed-class", "[a\\p{Any}]"
+                     "any-property-complement", "[^\\P{Any}]"
+                     "negative-any-property", "\\P{Any}"
+                     "negative-any-property-class", "[\\P{Any}]"
+                     "negative-any-property-complement", "[^\\p{Any}]" ] do
+                   let hex = Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes pattern)
+                   Contract.query
+                       name
+                       (sprintf "SELECT HEX(REGEXP_SUBSTR('😀', CONVERT(0x%s USING utf8mb4), 1, 1, 'c'))" hex)
+                   |> Contract.comparingValues
+               Contract.query "any-is-not-general-category"
+                   "SELECT REGEXP_LIKE('a', CONVERT(0x5C707B67633D416E797D USING utf8mb4), 'c')"
+               |> Contract.fails 3685 "HY000"
+               for name, pattern in
                    [ "repeated-possessive-plus", "a+++"
                      "lazy-possessive-plus", "a+?+"
                      "repeated-possessive-interval", "a{1,2}++" ] do

@@ -3142,6 +3142,32 @@ let tests =
                               Expect.throws
                                   (fun () -> call "REGEXP_LIKE" [ VString "A"; VString pattern; VString "c" ] |> ignore)
                                   (sprintf "%s is not an ICU property spelling" pattern)
+                      testCase "REGEXP Any property consumes one Unicode scalar"
+                      <| fun _ ->
+                          for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do
+                              for value in [ "😀"; "\n" ] do
+                                  Expect.equal
+                                      (call "REGEXP_SUBSTR" [ VString value; VString pattern; VInt 1L; VInt 1L; VString "c" ])
+                                      (VString value)
+                                      (sprintf "%s consumes %A" pattern value)
+
+                          for pattern in [ "\\P{Any}"; "[\\P{Any}]"; "[^\\p{Any}]" ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString "😀"; VString pattern; VString "c" ])
+                                  (VInt 0L)
+                                  (sprintf "%s cannot match a scalar" pattern)
+
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "😀a"; VString "\\p{ANY}+" ])
+                              (VString "😀a")
+                              "quantifier repeats whole scalars"
+
+                          Expect.throwsC
+                              (fun () -> call "REGEXP_LIKE" [ VString "a"; VString "\\p{gc=Any}"; VString "c" ] |> ignore)
+                              (fun e ->
+                                  match e with
+                                  | Fsdb.Functions.SqlError(3685, _) -> ()
+                                  | other -> failtestf "expected 3685, got %A" other)
                       testCase "REGEXP negative properties consume whole supplementary symbols"
                       <| fun _ ->
                           for pattern in [ "\\P{ASCII}"; "\\W"; "\\H"; "\\V"; "[\\P{ASCII}]" ] do
