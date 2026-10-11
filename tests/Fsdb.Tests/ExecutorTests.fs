@@ -14784,6 +14784,25 @@ let tests =
                         | ResultSet(_, [ row ]) when row = ([ intersects; disjoint; intersects; disjoint ] |> List.map Some) -> ()
                         | result -> failtestf "expected MySQL geographic line-polygon intersections for %s and %s, got %A" lineText polygonText result
 
+                testCase "geographic polygon intersections distinguish overlap and holes"
+                <| fun _ ->
+                    let store = newStore ()
+                    let outer = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
+                    let cases =
+                        [ outer, "POLYGON((2 2,2 6,6 6,6 2,2 2))", "1", "0"
+                          outer, "POLYGON((1 1,1 2,2 2,2 1,1 1))", "1", "0"
+                          outer, "POLYGON((4 1,4 3,6 3,6 1,4 1))", "1", "0"
+                          outer, "POLYGON((6 6,6 7,7 7,7 6,6 6))", "0", "1"
+                          "POLYGON((0 0,0 5,5 5,5 0,0 0),(1 1,4 1,4 4,1 4,1 1))", "POLYGON((2 2,2 3,3 3,3 2,2 2))", "0", "1" ]
+                    for firstText, secondText, intersects, disjoint in cases do
+                        let first = sprintf "ST_GeomFromText('%s',4326)" firstText
+                        let second = sprintf "ST_GeomFromText('%s',4326)" secondText
+                        let sql =
+                            sprintf "SELECT ST_Intersects(%s,%s),ST_Disjoint(%s,%s),ST_Intersects(%s,%s),ST_Disjoint(%s,%s)" first second first second second first second first
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = ([ intersects; disjoint; intersects; disjoint ] |> List.map Some) -> ()
+                        | result -> failtestf "expected MySQL geographic polygon intersections for %s and %s, got %A" firstText secondText result
+
                 testCase "geographic point-to-line distance follows geodesic segments"
                 <| fun _ ->
                     let store = newStore ()

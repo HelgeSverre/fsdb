@@ -3041,6 +3041,10 @@ module ContractCatalog =
                    "SELECT ST_Intersects(ST_GeomFromText('LINESTRING(-1 1,4 1)',4326), ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0))',4326)), ST_Disjoint(ST_GeomFromText('LINESTRING(1 1,2 2)',4326), ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0),(0.5 0.5,3.5 0.5,3.5 3.5,0.5 3.5,0.5 0.5))',4326))"
                |> Contract.comparingValues
                Contract.query
+                   "geographic-polygon-intersections"
+                   "SELECT ST_Intersects(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326), ST_GeomFromText('POLYGON((1 1,1 2,2 2,2 1,1 1))',4326)), ST_Disjoint(ST_GeomFromText('POLYGON((0 0,0 5,5 5,5 0,0 0),(1 1,4 1,4 4,1 4,1 1))',4326), ST_GeomFromText('POLYGON((2 2,2 3,3 3,3 2,2 2))',4326))"
+               |> Contract.comparingValues
+               Contract.query
                    "geographic-line-near-miss"
                    "SELECT ROUND(ST_Distance(ST_GeomFromText('LINESTRING(50 0,50 10)',4326), ST_GeomFromText('LINESTRING(50.10784 5,51 5)',4326)), 2)"
                |> Contract.comparingValues

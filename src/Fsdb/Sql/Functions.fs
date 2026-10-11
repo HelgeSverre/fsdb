@@ -6435,6 +6435,11 @@ let private geometryPredicateFn functionName predicate =
             | Some areas, Some lines -> Some(lines, areas)
             | _ -> None
 
+    let polygonShapes first second =
+        match polygons first, polygons second with
+        | Some firstAreas, Some secondAreas -> Some(firstAreas, secondAreas)
+        | _ -> None
+
     let pointPolygonShapes first second =
         let points = function
             | GPoint(x, y) -> Some [ (x, y) ]
@@ -6485,12 +6490,15 @@ let private geometryPredicateFn functionName predicate =
                     | Some(lineFirst, point, lines) ->
                         Some(pointLinePredicate referenceSystem lineFirst point lines)
                     | None ->
-                        match functionName, lineShapes first.Shape second.Shape, linePolygonShapes first.Shape second.Shape with
-                        | ("ST_INTERSECTS" | "ST_DISJOINT"), Some(firstLines, secondLines), _ ->
+                        match functionName, lineShapes first.Shape second.Shape, linePolygonShapes first.Shape second.Shape, polygonShapes first.Shape second.Shape with
+                        | ("ST_INTERSECTS" | "ST_DISJOINT"), Some(firstLines, secondLines), _, _ ->
                             let intersects = geographicLineLineDistance referenceSystem firstLines secondLines = Some 0.0
                             Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
-                        | ("ST_INTERSECTS" | "ST_DISJOINT"), _, Some(lines, areas) ->
+                        | ("ST_INTERSECTS" | "ST_DISJOINT"), _, Some(lines, areas), _ ->
                             let intersects = geographicLinePolygonDistance referenceSystem lines areas = Some 0.0
+                            Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
+                        | ("ST_INTERSECTS" | "ST_DISJOINT"), _, _, Some(firstAreas, secondAreas) ->
+                            let intersects = geographicPolygonPolygonDistance referenceSystem firstAreas secondAreas = Some 0.0
                             Some(if functionName = "ST_INTERSECTS" then intersects else not intersects)
                         | _ ->
                             requirePlanar functionName first |> ignore
