@@ -5999,6 +5999,11 @@ let private linearUnitMetres = function
             raise (SqlError(3902, sprintf "There's no unit of measure named '%s'." (req value))))
 
 let private geometryDistanceFn: Scalar =
+    let geographicPoints = function
+        | GPoint(x, y) -> Some [ (x, y) ]
+        | GMultiPoint points when not points.IsEmpty -> Some points
+        | _ -> None
+
     let distance firstValue secondValue unit =
         let first = geometryArgument "ST_DISTANCE" firstValue
         let second = geometryArgument "ST_DISTANCE" secondValue
@@ -6029,9 +6034,16 @@ let private geometryDistanceFn: Scalar =
                 geometryDistancePlanar first second
                 |> Option.map (fun distance -> VDouble(distance * coordinateUnit / factor))
                 |> Option.defaultValue VNull
-            | Some _, GPoint(firstX, firstY), GPoint(secondX, secondY) ->
-                geographicPointDistance referenceSystem (firstX, firstY) (secondX, secondY) / factor |> VDouble
-            | _ -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_DISTANCE for non-point geographic geometries'"))
+            | Some _, _, _ ->
+                match geographicPoints firstShape, geographicPoints secondShape with
+                | Some firstPoints, Some secondPoints ->
+                    firstPoints
+                    |> Seq.collect (fun firstPoint ->
+                        secondPoints
+                        |> Seq.map (geographicPointDistance referenceSystem firstPoint))
+                    |> Seq.min
+                    |> fun metres -> VDouble(metres / factor)
+                | _ -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_DISTANCE for non-point geographic geometries'"))
 
     function
     | [ VNull; _ ]

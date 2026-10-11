@@ -14582,7 +14582,31 @@ let tests =
 
           testList
               "spatial values"
-              [ testCase "EPSG 3857 uses planar metric operations"
+              [ testCase "geographic multipoint distance uses the nearest point pair"
+                <| fun _ ->
+                    let store = newStore ()
+                    let point = "ST_GeomFromText('POINT(2 0)',4326)"
+                    let nearest = "ST_GeomFromText('POINT(1 0)',4326)"
+                    let multipoint = "ST_GeomFromText('MULTIPOINT((0 0),(1 0))',4326)"
+                    let other = "ST_GeomFromText('MULTIPOINT((2 0),(4 0))',4326)"
+                    let sameDistance left right =
+                        sprintf "ABS(ST_Distance(%s,%s)-ST_Distance(%s,%s))<0.00001" left right nearest point
+                    let sameKilometres =
+                        sprintf
+                            "ABS(ST_Distance(%s,%s,'kilometre')-ST_Distance(%s,%s,'kilometre'))<0.00001"
+                            multipoint point nearest point
+                    let sql =
+                        sprintf
+                            "SELECT %s,%s,%s,%s"
+                            (sameDistance multipoint point)
+                            (sameDistance point multipoint)
+                            (sameDistance multipoint other)
+                            sameKilometres
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected nearest-point geographic distances, got %A" result
+
+                testCase "EPSG 3857 uses planar metric operations"
                 <| fun _ ->
                     let store = newStore ()
                     let sql =
