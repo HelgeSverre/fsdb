@@ -1005,6 +1005,34 @@ let tests =
                     | ResultSet(_, [ [ Some "F09F9880"; Some "1"; Some "E9"; Some "F09F9880" ] ]) -> ()
                     | other -> failtestf "expected charset-specific raw-byte decoding, got %A" other
 
+                testCase "CONVERT invalid binary literals follows charset-specific diagnostics"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    let utf8Result, utf8Warnings =
+                        Fsdb.Diagnostics.capture (fun () -> runDefault store "SELECT HEX(CONVERT(0xFF USING utf8mb4))")
+                    match utf8Result with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected invalid UTF-8 conversion to return NULL, got %A" other
+                    Expect.equal
+                        (utf8Warnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1300, "Invalid utf8mb4 character string: 'FF'" ]
+                        "invalid UTF-8 warning"
+
+                    let asciiResult, asciiWarnings =
+                        Fsdb.Diagnostics.capture (fun () -> runDefault store "SELECT HEX(CONVERT(0x80 USING ascii))")
+                    match asciiResult with
+                    | ResultSet(_, [ [ Some "80" ] ]) -> ()
+                    | other -> failtestf "expected invalid ASCII byte to survive conversion, got %A" other
+                    Expect.equal
+                        (asciiWarnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1300, "Invalid ascii character string: '80'" ]
+                        "invalid ASCII warning"
+
+                    match runDefault store "SELECT HEX(CONVERT(0xD800 USING ucs2)), CHAR_LENGTH(CONVERT(0xD800 USING ucs2))" with
+                    | ResultSet(_, [ [ Some "D800"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected UCS-2 code unit bytes to survive, got %A" other
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

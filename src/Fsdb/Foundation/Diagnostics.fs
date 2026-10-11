@@ -92,6 +92,11 @@ let deprecatedUtf8mb3 () =
         1287
         "'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
 
+let deprecatedUcs2 () =
+    warning
+        1287
+        "'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
+
 let fromErrorWithLevel level (error: SqlState.Error) =
     { Level = level
       Code = error.Code

@@ -941,6 +941,17 @@ module ContractCatalog =
                      "convert-hex-binary", "SELECT HEX(CONVERT(0xF09F9880 USING binary)),CHAR_LENGTH(CONVERT(0xF09F9880 USING binary))" ] do
                    yield Contract.query name sql |> Contract.comparingValues
                    yield Contract.preparedQuery (name + "-prepared") sql [||] |> Contract.comparingValues
+               for name, expression in
+                   [ "convert-invalid-utf8mb4", "CONVERT(0xFF USING utf8mb4)"
+                     "convert-invalid-utf8mb4-middle", "CONVERT(0x41FF42 USING utf8mb4)"
+                     "convert-invalid-utf8mb3", "CONVERT(0xF09F9880 USING utf8mb3)"
+                     "convert-invalid-ascii", "CONVERT(0x80 USING ascii)"
+                     "convert-invalid-ascii-long", "CONVERT(0xF09F9880 USING ascii)"
+                     "convert-ucs2-surrogate", "CONVERT(0xD800 USING ucs2)"
+                     "convert-invalid-utf16", "CONVERT(0xD800 USING utf16)"
+                     "convert-invalid-utf32", "CONVERT(0x00110000 USING utf32)" ] do
+                   yield Contract.query name (sprintf "SELECT HEX(%s)" expression) |> Contract.comparingValues
+                   yield Contract.query (name + "-warnings") "SHOW WARNINGS" |> Contract.comparingValues
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

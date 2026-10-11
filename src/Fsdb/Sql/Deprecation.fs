@@ -23,6 +23,7 @@ let private reportCharsetConversions statement =
             match charset.ToLowerInvariant() with
             | "utf8" -> Diagnostics.deprecatedUtf8Alias ()
             | "utf8mb3" -> Diagnostics.deprecatedUtf8mb3 ()
+            | "ucs2" -> Diagnostics.deprecatedUcs2 ()
             | _ -> ()
         | _ -> ())
 
@@ -36,9 +37,7 @@ let reportParsedSyntax statement =
             match spelling.ToLowerInvariant() with
             | "utf8" -> Diagnostics.deprecatedUtf8Alias ()
             | "utf8mb3" -> Diagnostics.deprecatedUtf8mb3 ()
-            | "ucs2" ->
-                Diagnostics.warning 1287
-                    "'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
+            | "ucs2" -> Diagnostics.deprecatedUcs2 ()
             | _ -> ()
         | _ -> ()
 

@@ -2126,7 +2126,16 @@ let private convertFn: Scalar =
     | [ (VBinaryLiteral bytes | VBytes bytes); VString charset ] ->
         match Charset.canonicalName charset with
         | "binary" -> VBytes bytes
-        | charset when Charset.tryFind charset |> Option.isSome -> VString(Charset.decodeBytes charset bytes)
+        | charset when Charset.tryFind charset |> Option.isSome ->
+            match charset, Charset.tryInvalidTextByteOffset charset bytes with
+            | "ascii", Some offset ->
+                Diagnostics.warning 1300 (Charset.invalidCharacterMessage charset bytes offset)
+                VEncodedString(charset, bytes)
+            | ("utf8mb3" | "utf8mb4" | "utf16" | "utf16le" | "utf32"), Some offset ->
+                Diagnostics.warning 1300 (Charset.invalidCharacterMessage charset bytes offset)
+                VNull
+            | "ucs2", _ -> VEncodedString(charset, bytes)
+            | _ -> VString(Charset.decodeBytes charset bytes)
         | _ -> VNull
     | [ v; VString charset ] ->
         let text = v |> toText |> Option.defaultValue ""

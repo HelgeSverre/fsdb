@@ -14,6 +14,12 @@ the target codec, or retains them unchanged for `binary`. Text input keeps
 its existing transcode path. A focused executor regression and the
 `introduced-literal-encoding` differential contract cover valid byte cases.
 
-Invalid byte sequences are a separate boundary. MySQL returns NULL with a
-1300 warning for invalid UTF-8 input, but can preserve invalid ASCII bytes
-with a warning. Those cases need their own conversion and warning audit.
+An additional MySQL matrix distinguishes invalid byte handling. Invalid
+UTF-8MB3/4, UTF-16, and UTF-32 sequences return NULL with warning 1300;
+the message quotes at most three bytes starting at the invalid sequence.
+Invalid ASCII bytes remain available with their original byte values and
+warning 1300. UCS-2 retains an isolated surrogate code unit and emits only
+its deprecation warning. Fsdb now follows these audited outcomes; focused
+regressions pin invalid UTF-8, ASCII, and UCS-2 behavior, while the
+differential contract checks the broader value-and-warning matrix. Other
+legacy codecs and invalid-input contexts remain open.
