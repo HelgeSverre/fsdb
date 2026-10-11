@@ -417,6 +417,9 @@ The post-index [10k-article](results/8e904fd-fulltext-index.md) and
 [100k-article](results/8e904fd-fulltext-index-scale.md) comparisons, followed
 by the [posting-candidate comparison](results/ef4b4ab-fulltext-postings.md),
 cover natural, boolean, accent-aware, and boolean-prefix queries.
+The [single-table relevance-order comparison](results/e6735c5f-fulltext-relevance-comparison.md)
+measures the later `MATCH ... LIMIT` streaming change against its immediate
+predecessor on the same host.
 
 Against the pre-index 10k baseline, natural search fell from 53.7 ms to 2.76
 ms, accent-aware search from 51.2 ms to 1.62 ms, boolean search from 50.7 ms
