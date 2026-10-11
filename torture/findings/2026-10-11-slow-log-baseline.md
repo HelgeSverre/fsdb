@@ -36,6 +36,12 @@ without a limit and one with `LIMIT 1`. Fsdb now streams that exact
 single-source order and retains the early limit, for both natural-language
 and Boolean search.
 
+For a forced inner join from the full-text table to a primary-key owner,
+three matching postings and three owner probes produced six examined rows.
+`LIMIT 1` produced two, and a missing term produced zero. Fsdb now counts
+the consumed full-text base candidates once even when join planning rereads
+the source; the indexed owner probes already contributed their own counts.
+
 An `INSERT … SELECT` that read three source rows and inserted two reported
 `rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives
 the same result in a regression.
