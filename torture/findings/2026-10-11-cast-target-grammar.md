@@ -99,3 +99,6 @@ Stored VARBINARY and BLOB columns both parse numeric prefixes, but BLOB
 suppresses DOUBLE truncation warnings. Invalid DECIMAL text in either column
 produces warning 1366; VARBINARY also retains warning 1292 for the original
 text. These column distinctions are covered by focused and differential tests.
+Fixed-width BINARY padding and high bytes in numeric CAST diagnostics now use
+MySQL's uppercase `\xHH` escapes for bytes outside printable ASCII, while
+the numeric prefix still parses the underlying bytes.

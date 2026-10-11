@@ -3111,6 +3111,16 @@ let private numericCastSourceText = function
     | (VEncodedString _ | VBytes _) as value -> toText value
     | _ -> None
 
+let private numericCastDiagnosticText source text =
+    match source with
+    | VBytes bytes ->
+        bytes
+        |> Array.map (fun value ->
+            if value >= 0x20uy && value <= 0x7Euy then string (char value)
+            else sprintf "\\x%02X" value)
+        |> String.concat ""
+    | _ -> text
+
 let private numericCastBinaryColumnType ctx expr =
     tryColumnDefForExpr ctx expr
     |> Option.bind (fun column ->
@@ -6038,17 +6048,18 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let quietBinarySource = castBinaryString || blobColumnSource
                 match numericSourceText, v with
                 | Some text, VString prefix ->
+                    let warningText = numericCastDiagnosticText source text
                     match oversizedDecimalExponentMantissa prefix with
                     | Some mantissa when quietBinarySource ->
                         warnTruncated mantissa
                     | Some mantissa ->
                         warnTruncated mantissa
-                        warnTruncated text
+                        warnTruncated warningText
                     | None when prefix = "" && (castBinaryString || Option.isSome binaryColumnType) ->
                         Diagnostics.warning 1366 "Incorrect DECIMAL value: '0' for column '' at row -1"
-                        if not quietBinarySource then warnTruncated text
+                        if not quietBinarySource then warnTruncated warningText
                     | None when quietBinarySource -> ()
-                    | None when truncatedNumericCastInput text -> warnTruncated text
+                    | None when truncatedNumericCastInput text -> warnTruncated warningText
                     | None -> ()
                 | _ -> ()
                 let warnOutOfRange () =
@@ -6090,7 +6101,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     not blobColumnSource && (numericSourceText |> Option.exists truncatedNumericCastInput)
                 match numericSourceText with
                 | Some text when truncatedText ->
-                    Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
+                    Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" (numericCastDiagnosticText source text))
                 | _ -> ()
                 coerce castMode v
                 |> Result.mapError Storage.toMySqlError
@@ -6099,7 +6110,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         match ty, numericSourceText with
                         | TDouble _, Some text when not blobColumnSource ->
                             if not truncatedText then
-                                Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text)
+                                Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" (numericCastDiagnosticText source text))
                             Ok(VDouble(if value < 0.0 then -System.Double.MaxValue else System.Double.MaxValue))
                         | _ -> Error(1690, sprintf "DOUBLE value is out of range in '%s'" (SqlText.expression expr))
                     | result -> Ok result)
