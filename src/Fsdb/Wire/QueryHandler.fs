@@ -76,6 +76,11 @@ let private lookupVar (session: Session) (name: string) : string option option =
 let private sessionValue session name =
     lookupVar session name |> Option.flatten
 
+let private sessionTimeZone (session: Session) =
+    sessionValue session "time_zone"
+    |> Option.bind (TimeZones.resolve session.Store)
+    |> Option.defaultValue Temporal.SystemTimeZone
+
 let private tryInt32 (value: string) =
     match Int32.TryParse value with
     | true, parsed -> Some parsed
@@ -429,10 +434,7 @@ let private expressionVariablesFor (session: Session) (userVariables: Map<string
                 | Some value -> Ok(systemVariableValue name value)
                 | None -> Error(1193, sprintf "Unknown system variable '%s'" name)
       MaxUserVariables = maxUserVariables
-      TimeZone =
-        sessionValue session "time_zone"
-        |> Option.bind (TimeZones.resolve session.Store)
-        |> Option.defaultValue Temporal.SystemTimeZone }
+      TimeZone = sessionTimeZone session }
 
 let private expressionVariables (session: Session) = expressionVariablesFor session session.UserVariables
 
@@ -752,10 +754,7 @@ let private buildRegistryFor (session: Session) : Functions.Registry =
         sessionValue session "lc_time_names"
         |> Option.bind Functions.tryTimeLocale
         |> Option.defaultValue Functions.defaultTimeLocale
-    let timeZone =
-        sessionValue session "time_zone"
-        |> Option.bind (TimeZones.resolve store)
-        |> Option.defaultValue Temporal.SystemTimeZone
+    let timeZone = sessionTimeZone session
     let defaultWeekFormat =
         sessionValue session "default_week_format"
         |> Option.bind tryInt32
