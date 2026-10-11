@@ -3020,6 +3020,15 @@ module ContractCatalog =
                    [| box oslo; box london; box "kilometre" |]
                |> Contract.comparingValues
                Contract.query
+                   "geographic-point-line-distance"
+                   "SELECT ROUND(ST_Distance(ST_GeomFromText('POINT(51 5)',4326), ST_GeomFromText('LINESTRING(50 0,50 10)',4326)), 2)"
+               |> Contract.comparingValues
+               Contract.preparedQuery
+                   "geographic-multipoint-multiline-distance-prepared"
+                   "SELECT ROUND(ST_Distance(ST_GeomFromText(?,4326), ST_GeomFromText(?,4326), ?), 5)"
+                   [| box "MULTIPOINT((51 5),(60 0))"; box "MULTILINESTRING((50 0,50 10),(70 0,70 10))"; box "kilometre" |]
+               |> Contract.comparingValues
+               Contract.query
                    "geographic-longitude-latitude-input"
                    "SELECT ST_AsText(ST_GeomFromText('POINT(10.7522 59.9139)', 4326, 'axis-order=long-lat'))"
                |> Contract.comparingValues

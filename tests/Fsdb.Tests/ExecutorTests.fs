@@ -14625,6 +14625,31 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "0"; None ] ]) -> ()
                     | result -> failtestf "expected MySQL point-set topology, got %A" result
 
+                testCase "geographic point-to-line distance follows geodesic segments"
+                <| fun _ ->
+                    let store = newStore ()
+                    let point = "ST_GeomFromText('POINT(51 5)',4326)"
+                    let line = "ST_GeomFromText('LINESTRING(50 0,50 10)',4326)"
+                    let multiline = "ST_GeomFromText('MULTILINESTRING((50 0,50 10),(60 0,60 10))',4326)"
+                    let multipoint = "ST_GeomFromText('MULTIPOINT((51 5),(60 0))',4326)"
+                    let onLine = "ST_GeomFromText('POINT(0 1)',4326)"
+                    let meridian = "ST_GeomFromText('LINESTRING(0 0,0 2)',4326)"
+                    let cases =
+                        [ sprintf "ST_Distance(%s,%s)" point line, 99246.14802240916, 0.01
+                          sprintf "ST_Distance(%s,%s)" line point, 99246.14802240916, 0.01
+                          sprintf "ST_Distance(%s,%s)" point multiline, 99246.14802240916, 0.01
+                          sprintf "ST_Distance(%s,%s)" multipoint line, 99246.14802240916, 0.01
+                          sprintf "ST_Distance(%s,%s)" onLine meridian, 0.0, 0.01
+                          sprintf "ST_Distance(%s,%s,'kilometre')" point line, 99.24614802240916, 0.001
+                          "ST_Distance(ST_GeomFromText('POINT(80 15)',4326),ST_GeomFromText('LINESTRING(78 0,78 30)',4326))", 178899.1317582399, 0.01
+                          "ST_Distance(ST_GeomFromText('POINT(10 180)',4326),ST_GeomFromText('LINESTRING(10 170,10 -170)',4326))", 16821.245675958886, 0.01
+                          "ST_Distance(ST_GeomFromText('POINT(-20 100)',4326),ST_GeomFromText('LINESTRING(-10 90,-30 110)',4326))", 71223.12145876266, 0.01 ]
+                    for expression, expected, tolerance in cases do
+                        let sql = sprintf "SELECT ABS(%s-%.14f)<%g" expression expected tolerance
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL geographic point-line distance for %s, got %A" expression result
+
                 testCase "ETRS89 and NAD83 retain their geographic definitions"
                 <| fun _ ->
                     let store = newStore ()
