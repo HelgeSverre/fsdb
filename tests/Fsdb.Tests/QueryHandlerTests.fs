@@ -9682,6 +9682,31 @@ let tests =
                   let _, logged = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" escaped)
                   Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) (sprintf "full-text join examined rows: %s" sql)
 
+          testCase "slow log counts grouped full-text reads"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET GLOBAL log_output='TABLE'"
+              let session, _ = handle session "SET GLOBAL slow_query_log=ON"
+              let session, _ = handle session "SET SESSION long_query_time=0"
+              let session, _ = handle session "CREATE TABLE slow_fulltext_group_probe (id INT PRIMARY KEY, owner_id INT, body TEXT, FULLTEXT KEY ft(body))"
+              let session, _ = handle session "INSERT INTO slow_fulltext_group_probe VALUES (1,1,'alpha beta'),(2,1,'alpha gamma'),(3,2,'delta epsilon'),(4,2,'alpha delta')"
+              let source = " FROM slow_fulltext_group_probe WHERE MATCH(body) AGAINST('alpha' IN BOOLEAN MODE)"
+
+              for sql, examined, expected in
+                  [ "SELECT SUM(owner_id)" + source, "3",
+                    ResultSet([ "SUM(owner_id)" ], [ [ Some "4" ] ])
+                    "SELECT owner_id,COUNT(*)" + source + " GROUP BY owner_id", "3",
+                    ResultSet([ "owner_id"; "COUNT(*)" ], [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ])
+                    "SELECT owner_id,COUNT(*)" + source + " GROUP BY owner_id ORDER BY owner_id", "5",
+                    ResultSet([ "owner_id"; "COUNT(*)" ], [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ])
+                    "SELECT owner_id,COUNT(*)" + source + " GROUP BY owner_id LIMIT 1", "3",
+                    ResultSet([ "owner_id"; "COUNT(*)" ], [ [ Some "1"; Some "2" ] ]) ] do
+                  let session, result = handle session sql
+                  Expect.equal result expected (sprintf "grouped full-text result: %s" sql)
+                  let escaped = sql.Replace("'", "''")
+                  let _, logged = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" escaped)
+                  Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) (sprintf "grouped full-text examined rows: %s" sql)
+
           testCase "slow log counts indexed and scan join candidates"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

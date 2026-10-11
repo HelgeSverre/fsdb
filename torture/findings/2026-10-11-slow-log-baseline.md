@@ -51,6 +51,15 @@ scores during execution. Under `LIMIT 1`, MySQL examines two; fsdb's
 full-text-first indexed-probe rule also examines two. More complex reversed
 predicates and multi-source cost choices remain open.
 
+Grouped full-text reads use the same posting candidates. On a four-document
+fixture with three `alpha` matches, MySQL reported three examined rows for
+`SUM(owner_id)` and for `GROUP BY owner_id`, five for that grouping plus
+`ORDER BY owner_id`, and three for grouped `LIMIT 1`; fsdb matches those
+counts and results. A sole `COUNT(*)` or `COUNT(id)` is different: MySQL's
+full-text count path reported one examined row, even when a missing term
+returned zero. Fsdb still fetches and counts matching rows (three for the
+`alpha` case), so the index-only aggregate remains open.
+
 An `INSERT … SELECT` that read three source rows and inserted two reported
 `rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives
 the same result in a regression.
