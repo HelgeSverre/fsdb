@@ -77,24 +77,25 @@ let private sessionValue session name =
     lookupVar session name |> Option.flatten
 
 let private sqlSelectLimit session =
-    sessionValue session "sql_select_limit"
-    |> Option.bind (fun value ->
+    match session.Variables |> Map.tryFind "sql_select_limit" with
+    | Some(Some value) ->
         match UInt64.TryParse value with
         | true, limit when limit < UInt64.MaxValue -> Some limit
-        | _ -> None)
+        | _ -> None
+    | _ -> None
 
-let private withSqlSelectLimit session statement =
-    let implicitLimit explicitLimit =
-        explicitLimit |> Option.orElseWith (fun () -> sqlSelectLimit session |> Option.map (VUInt >> Lit))
-
-    let rec limitQuery = function
-        | Select select -> Select { select with Limit = implicitLimit select.Limit }
-        | Union(first, rest, orderBy, limit, offset) ->
-            Union(first, rest, orderBy, implicitLimit limit, offset)
-        | Explain(format, query) -> Explain(format, limitQuery query)
-        | other -> other
-
-    limitQuery statement
+let rec private withSqlSelectLimit session statement =
+    match statement with
+    | Select select when select.Limit.IsNone ->
+        match sqlSelectLimit session with
+        | Some limit -> Select { select with Limit = Some(Lit(VUInt limit)) }
+        | None -> statement
+    | Union(first, rest, orderBy, None, offset) ->
+        match sqlSelectLimit session with
+        | Some limit -> Union(first, rest, orderBy, Some(Lit(VUInt limit)), offset)
+        | None -> statement
+    | Explain(format, query) -> Explain(format, withSqlSelectLimit session query)
+    | _ -> statement
 
 let private sessionTimeZone (session: Session) =
     sessionValue session "time_zone"

@@ -873,6 +873,11 @@ A [view-dependency lookup follow-up](benchmarks/results/2026-10-11-view-dependen
 avoids rebuilding the stored-view map for ordinary physical-table reads. It
 saves about 1.2 KiB per cached text lookup and 1.8 KiB per prepared lookup
 on the same fixture; view lock dependencies retain their tested behavior.
+A [default `sql_select_limit` hot-path comparison](benchmarks/results/2026-10-11-select-limit-hotpath.md)
+found that the first helper added about 152 B per cached text lookup and
+120 B per reused prepared lookup on warmed process medians. A direct,
+allocation-light helper reduced the measured excess to about 36 B and
+52 B respectively; the short process runs do not establish a latency change.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes
