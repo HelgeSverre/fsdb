@@ -69,6 +69,13 @@ audited indexed case now becomes an inner join driven from `b`, then probes
 `a`; `SELECT *` keeps the written table-column order and `WHERE b.id IS NULL`
 still retains the outer join.
 
+With `WHERE b.id=1 OR b.id=2`, MySQL 8.4.11 returned the two matching rows
+and examined four candidates, or two with `LIMIT 1`. Fsdb previously examined
+seven for the full query. Both OR branches reject a null-padded `b`, so the
+same inner-join conversion now carries the two-row indexed union into the
+join plan. `WHERE b.id=1 OR b.id IS NULL` remains an outer join and returns
+the unmatched left row, as MySQL does.
+
 The symmetric null-rejected `RIGHT JOIN ... WHERE a.id<2` already matches
 MySQL's observed counts: with an index on `b.left_id`, two result rows examine
 three candidates, or two with `LIMIT 1`; without that index, the full query

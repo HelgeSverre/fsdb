@@ -11666,9 +11666,11 @@ and private reorderNullRejectedLeftJoin
     (registry: Registry)
     (dbName: string)
     (select: SelectStmt)
-    : SelectStmt =
-    let rejectsNull (qualifier: string) =
+    : SelectStmt * Value[] list option =
+    let rec rejectsNull (qualifier: string) =
         function
+        | BinOp(And, left, right) -> rejectsNull qualifier left || rejectsNull qualifier right
+        | BinOp(Or, left, right) -> rejectsNull qualifier left && rejectsNull qualifier right
         | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, _), LiteralValue _)
         | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue _, QualifiedCol(owner, _)) ->
             equalsIgnoreCase owner qualifier
@@ -11686,7 +11688,7 @@ and private reorderNullRejectedLeftJoin
         | FromTable rightRef ->
             let leftQualifier = leftRef.Alias |> Option.defaultValue leftRef.Table
             let rightQualifier = rightRef.Alias |> Option.defaultValue rightRef.Table
-            let indexedFilter =
+            let indexedRows =
                 match tryPhysicalTableRef store dbName leftRef with
                 | Ok(Some _) ->
                     select.Where
@@ -11697,11 +11699,13 @@ and private reorderNullRejectedLeftJoin
                         |> Result.toOption
                         |> Option.flatten
                         |> Option.bind (fun table ->
-                            tryPhysicalReadCandidatesInTable store registry table rightRef (Some predicate)))
+                            tryPhysicalCandidatesInTable store registry table rightRef (Some predicate)
+                            |> Option.map (snd >> List.map snd)
+                            |> Option.filter (fun rows -> rows.Length < table.RowsArray.Count)))
                 | _ -> None
 
-            match indexedFilter with
-            | Some _ ->
+            match indexedRows with
+            | Some rows ->
                 let projections =
                     select.Projections
                     |> List.collect (fun projection ->
@@ -11713,10 +11717,10 @@ and private reorderNullRejectedLeftJoin
                 { select with
                     From = Some join.Table
                     Joins = [ { join with Kind = InnerJoin; Table = leftSource } ]
-                    Projections = projections }
-            | None -> select
-        | _ -> select
-    | _ -> select
+                    Projections = projections }, Some rows
+            | None -> select, None
+        | _ -> select, None
+    | _ -> select, None
 
 /// MySQL attaches a multi-value IN condition on equal text keys to the first
 /// source chosen for the join. Numeric members expose that placement because
@@ -11828,7 +11832,7 @@ and private runUnlockedSelectStmt
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
     let select = transferNumericJoinIn store dbName select
-    let select = reorderNullRejectedLeftJoin store registry dbName select
+    let select, preferredBaseRows = reorderNullRejectedLeftJoin store registry dbName select
     let matchNodes =
         (select.Projections |> List.collect (_.Expression >> collectMatchAgainst))
         @ (select.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
@@ -11858,7 +11862,10 @@ and private runUnlockedSelectStmt
                 sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
 
             let basePredicate = Map.tryFind (baseQualifier.ToLowerInvariant()) pushedWhere
-            let baseRows = narrowPhysicalSourceRows store registry fromItem basePhysicalTable basePredicate baseRows
+            let baseRows =
+                match preferredBaseRows with
+                | Some _ -> baseRows
+                | None -> narrowPhysicalSourceRows store registry fromItem basePhysicalTable basePredicate baseRows
             let baseRows =
                 if select.Joins.IsEmpty then trackExaminedRows baseRows
                 else cacheExaminedRows baseRows
@@ -11924,7 +11931,12 @@ and private runUnlockedSelectStmt
             | FromTable tableRef ->
                 tryPhysicalTableRef store dbName tableRef
                 |> Result.bind (function
-                    | Some table -> Ok(table.Columns, table.RowsArray :> Value[] seq, Some table)
+                    | Some table ->
+                        let rows =
+                            preferredBaseRows
+                            |> Option.map (fun rows -> rows :> Value[] seq)
+                            |> Option.defaultValue (table.RowsArray :> Value[] seq)
+                        Ok(table.Columns, rows, Some table)
                     | None ->
                         resolveFromItem store registry dbName fromItem
                         |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None))

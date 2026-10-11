@@ -9620,7 +9620,7 @@ let tests =
                   handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" rightWithUnmatchedLeft)
               Expect.equal extraLeftLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "unused left rows are not scanned by the index probe"
 
-          testCase "slow log counts scan-shaped left joins across LIMIT and ON filters"
+          testCase "slow log counts left join candidates across ON and WHERE filters"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               let run sql =
@@ -9694,6 +9694,20 @@ let tests =
                   let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
                   Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "null-rejected left join uses both indexes"
 
+              let orMatches = [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ] ]
+              for suffix, examined in [ "", "4"; " LIMIT 1", "2" ] do
+                  let query =
+                      "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id=1 OR b.id=2"
+                      + suffix
+                  match suffix, run query with
+                  | "", ResultSet([ "id"; "id" ], rows) ->
+                      Expect.equal (List.sort rows) (List.sort orMatches) "null-rejected OR result"
+                  | _, ResultSet([ "id"; "id" ], [ row ]) ->
+                      Expect.isTrue (List.contains row orMatches) "limited null-rejected OR result"
+                  | _, other -> failtestf "unexpected null-rejected OR result: %A" other
+                  let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
+                  Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) "null-rejected OR index probes"
+
               Expect.equal
                   (run "SELECT * FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id<2")
                   (ResultSet([ "id"; "id"; "left_id" ], [ [ Some "1"; Some "1"; Some "1" ] ]))
@@ -9702,6 +9716,11 @@ let tests =
                   (run "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id IS NULL")
                   (ResultSet([ "id"; "id" ], [ [ Some "3"; None ] ]))
                   "null-accepting WHERE retains the outer join"
+              match run "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id=1 OR b.id IS NULL" with
+              | ResultSet([ "id"; "id" ], rows) ->
+                  Expect.equal (List.sort rows) (List.sort [ [ Some "1"; Some "1" ]; [ Some "3"; None ] ])
+                      "an OR branch accepting NULL retains the outer join"
+              | other -> failtestf "unexpected mixed-OR outer join result: %A" other
 
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
