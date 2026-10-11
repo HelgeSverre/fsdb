@@ -26,5 +26,11 @@ sessions without changing the current one. Fsdb uses the existing bounded
 unsigned-variable normalization and applies the implicit cap only where the
 native oracle observed it. The focused QueryHandler regression covers the
 query forms, metadata commands, assignment diagnostics, and scope reset.
-MySQL also shows an implicit zero limit in `EXPLAIN` and `EXPLAIN FORMAT=TREE`;
-fsdb's EXPLAIN planner does not yet include session limits.
+MySQL also shows a zero-limit synthetic plan for `EXPLAIN SELECT` in
+traditional, JSON, and TREE formats. A nonzero implicit limit is visible as
+a `Limit` node in TREE (or `Limit/Offset` when an offset is present), while
+traditional and JSON plans keep the underlying table access. An explicit
+`LIMIT` overrides the session value. MySQL still validates missing tables
+under a zero limit. Fsdb now matches these SELECT plan distinctions and
+keeps the table validation. UNION's zero-limit result node and exact
+ANALYZE timing/cost presentation remain outside this focused change.

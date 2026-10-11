@@ -4013,6 +4013,43 @@ let tests =
               expectRows session "SELECT id FROM select_limit_source ORDER BY id" [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
               expectRows session "EXECUTE select_limit_stmt" [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
 
+          testCase "EXPLAIN reflects a zero session select limit and explicit override"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE select_limit_plan (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO select_limit_plan VALUES (1),(2)"
+              let session, _ = handle session "SET SESSION sql_select_limit=0"
+
+              match handle session "EXPLAIN SELECT id FROM select_limit_plan" |> snd with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row.[2] None "zero limit eliminates the table access"
+                  Expect.equal row.[11] (Some "Zero limit") "traditional EXPLAIN names the limit"
+              | other -> failtestf "expected zero-limit traditional plan, got %A" other
+
+              match handle session "EXPLAIN FORMAT=JSON SELECT id FROM select_limit_plan" |> snd with
+              | ResultSet(_, [ [ Some plan ] ]) -> Expect.stringContains plan "\"message\": \"Zero limit\"" "JSON names the limit"
+              | other -> failtestf "expected zero-limit JSON plan, got %A" other
+
+              match handle session "EXPLAIN FORMAT=TREE SELECT id FROM select_limit_plan" |> snd with
+              | ResultSet(_, [ [ Some plan ] ]) -> Expect.stringContains plan "Zero rows (Zero limit)" "TREE names the limit"
+              | other -> failtestf "expected zero-limit TREE plan, got %A" other
+
+              match handle session "EXPLAIN SELECT id FROM select_limit_plan LIMIT 1" |> snd with
+              | ResultSet(_, [ row ]) -> Expect.equal row.[2] (Some "select_limit_plan") "explicit LIMIT overrides session zero"
+              | other -> failtestf "expected normal explicit-limit plan, got %A" other
+
+              match handle session "EXPLAIN SELECT id FROM missing_select_limit_plan" |> snd with
+              | Err(1146, _) -> ()
+              | other -> failtestf "EXPLAIN still validates missing tables, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_select_limit=1"
+              match handle session "EXPLAIN FORMAT=TREE SELECT id FROM select_limit_plan" |> snd with
+              | ResultSet(_, [ [ Some limit ]; [ Some access ] ]) ->
+                  Expect.stringContains limit "Limit: 1 row(s)" "TREE shows the implicit limit"
+                  Expect.stringContains access "select_limit_plan" "TREE keeps the access path"
+              | other -> failtestf "expected a limit above the access path, got %A" other
+
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
               let unsafeMessage =

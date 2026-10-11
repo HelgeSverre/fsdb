@@ -87,10 +87,11 @@ let private withSqlSelectLimit session statement =
     let implicitLimit explicitLimit =
         explicitLimit |> Option.orElseWith (fun () -> sqlSelectLimit session |> Option.map (VUInt >> Lit))
 
-    let limitQuery = function
+    let rec limitQuery = function
         | Select select -> Select { select with Limit = implicitLimit select.Limit }
         | Union(first, rest, orderBy, limit, offset) ->
             Union(first, rest, orderBy, implicitLimit limit, offset)
+        | Explain(format, query) -> Explain(format, limitQuery query)
         | other -> other
 
     limitQuery statement

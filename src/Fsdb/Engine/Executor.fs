@@ -20319,7 +20319,7 @@ let private renderExplainAnalyze (rows: ExplainRow list) (elapsedMilliseconds: f
 
     ResultSet([ "EXPLAIN" ], (root :: planRows) |> List.map (fun line -> [ Some line ]))
 
-let private renderExplainTree (rows: ExplainRow list) : QueryResult =
+let private renderExplainTree (limit: Expr option) (offset: Expr option) (rows: ExplainRow list) : QueryResult =
     let lines =
         rows
         |> List.sortBy (fun row -> row.Id |> Option.defaultValue System.Int32.MaxValue)
@@ -20330,7 +20330,37 @@ let private renderExplainTree (rows: ExplainRow list) : QueryResult =
             let details = if row.Extra.IsEmpty then "" else sprintf " (%s)" (String.concat "; " row.Extra)
             sprintf "-> %s on %s  (rows=%s)%s" access source estimate details)
 
+    let lines =
+        match limit with
+        | Some expression ->
+            let count = rowCount expression
+            let label =
+                match offset with
+                | Some skipped -> sprintf "-> Limit/Offset: %d/%d row(s)" count (rowCount skipped)
+                | None -> sprintf "-> Limit: %d row(s)" count
+            label :: (lines |> List.map (fun line -> "    " + line))
+        | None -> lines
+
     ResultSet([ "EXPLAIN" ], lines |> List.map (fun line -> [ Some line ]))
+
+let private renderExplainZeroLimit format : QueryResult =
+    let row =
+        { Id = Some 1
+          SelectType = "SIMPLE"
+          Table = None
+          Type = None
+          Key = None
+          Ref = None
+          Rows = None
+          Extra = [ "Zero limit" ] }
+
+    match format with
+    | ExplainTraditional -> renderExplainRows [ row ]
+    | ExplainJson ->
+        ResultSet([ "EXPLAIN" ], [ [ Some "{\n  \"query_block\": {\n    \"select_id\": 1,\n    \"message\": \"Zero limit\"\n  }\n}" ] ])
+    | ExplainTree -> ResultSet([ "EXPLAIN" ], [ [ Some "-> Zero rows (Zero limit)  (cost=0..0 rows=0)" ] ])
+    | ExplainAnalyze ->
+        ResultSet([ "EXPLAIN" ], [ [ Some "-> Zero rows (Zero limit)  (actual rows=0 loops=1)" ] ])
 
 let private checksumTables (store: Store) (dbName: string) (tables: string list) (quick: bool) : QueryResult =
     let checksum tableName =
@@ -20398,7 +20428,11 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             match format with
             | ExplainTraditional -> renderExplainRows rows
             | ExplainJson -> renderExplainJson rows
-            | ExplainTree -> renderExplainTree rows
+            | ExplainTree ->
+                match stmt with
+                | Select select -> renderExplainTree select.Limit select.Offset rows
+                | Union(_, _, _, limit, offset) -> renderExplainTree limit offset rows
+                | _ -> renderExplainTree None None rows
             | ExplainAnalyze when analyzedStatements = 1 -> renderExplainAnalyze rows analyzedMilliseconds analyzedRows
             | ExplainAnalyze -> Err(1235, "EXPLAIN ANALYZE currently supports one SELECT")
         | Error e -> e
@@ -20451,7 +20485,12 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             let isDerived = match select.From with Some(FromSubquery _) -> true | _ -> false
             if (selectSubqueryExprs select |> List.exists containsSubqueryExpr) || isDerived then "PRIMARY" else "SIMPLE"
 
-        finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc id selectType select))
+        if select.Limit |> Option.exists (fun limit -> rowCount limit = 0) then
+            match checkSelect select with
+            | Error error -> error
+            | Ok() -> renderExplainZeroLimit format
+        else
+            finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc id selectType select))
     | Union(first, rest, _, _, _) ->
         let id1 = nextId ()
 
