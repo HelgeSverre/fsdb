@@ -65,8 +65,13 @@ Further native clause probes showed that a correlated scalar in a single-table
 uses that placement for audited dependent scalar predicates. MySQL can instead
 fold an uncorrelated `WHERE` scalar into `optimized_away_subqueries`, and can
 eliminate `EXISTS` and `IN` subquery blocks through semijoin planning, so those
-cases remain outside this renderer path. A `HAVING` scalar appears under
-`grouping_operation.having_subqueries`, while an `ORDER BY` scalar appears
-under `ordering_operation.order_by_subqueries` or its
-`optimized_away_subqueries`. Those clause wrappers, nested scalar blocks,
-mixed derived/scalar plans, and broader optimizer placement remain open.
+cases remain outside this renderer path. A dependent `HAVING` scalar appears
+under `grouping_operation.having_subqueries`, and a dependent `ORDER BY` scalar
+under `ordering_operation.order_by_subqueries`; fsdb now renders both for
+audited single-table plans. A projected scalar moves into the corresponding
+grouping or ordering operation, or into `duplicates_removal` for `DISTINCT`;
+fsdb also retains that ownership in the audited simple cases. Independent
+ORDER BY scalars can appear under the operation's
+`optimized_away_subqueries`, while independent HAVING scalars can have an
+optimized-away child block. Combined operations, nested scalar blocks, mixed
+derived/scalar plans, and broader optimizer placement remain open.

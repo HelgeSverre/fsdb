@@ -4180,6 +4180,44 @@ let tests =
               Expect.isTrue (attached.GetProperty("dependent").GetBoolean()) "the WHERE scalar depends on the scanned row"
               Expect.equal (attached.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "the WHERE child stays attached to its table"
 
+              let grouped =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a GROUP BY a.id HAVING a.id=(SELECT b.id FROM scalar_plan b WHERE b.id=a.id)"
+              let grouping = grouped.GetProperty("grouping_operation")
+              Expect.isFalse (grouping.GetProperty("using_filesort").GetBoolean()) "indexed grouping needs no filesort"
+              let mutable temporary = Unchecked.defaultof<System.Text.Json.JsonElement>
+              Expect.isFalse (grouping.TryGetProperty("using_temporary_table", &temporary)) "indexed grouping needs no temporary table"
+              let having = grouping.GetProperty("having_subqueries").EnumerateArray() |> Seq.head
+              Expect.isTrue (having.GetProperty("dependent").GetBoolean()) "HAVING scalar depends on the group key"
+              Expect.equal (having.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "HAVING child stays under grouping"
+
+              let ordered =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a ORDER BY (SELECT b.id FROM scalar_plan b WHERE b.id=a.id)"
+              let ordering = ordered.GetProperty("ordering_operation")
+              Expect.isTrue (ordering.GetProperty("using_filesort").GetBoolean()) "correlated scalar ordering filesorts"
+              let orderedChild = ordering.GetProperty("order_by_subqueries").EnumerateArray() |> Seq.head
+              Expect.isTrue (orderedChild.GetProperty("dependent").GetBoolean()) "ORDER BY scalar depends on the source row"
+              Expect.equal (orderedChild.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "ORDER BY child stays under ordering"
+
+              let projectionSql tail =
+                  "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a " + tail
+
+              for clause, operation in
+                  [ "GROUP BY a.id", "grouping_operation"
+                    "ORDER BY a.id DESC", "ordering_operation" ] do
+                  let wrapped = plan (projectionSql clause)
+                  let parent = wrapped.GetProperty(operation)
+                  Expect.isFalse (parent.GetProperty("using_filesort").GetBoolean()) "the indexed parent operation needs no filesort"
+                  if operation = "grouping_operation" then
+                      Expect.isFalse (parent.TryGetProperty("using_temporary_table", &temporary)) "indexed projection grouping needs no temporary table"
+                  let selected = parent.GetProperty("select_list_subqueries")
+                  Expect.equal (selected.GetArrayLength()) 1 "the projected scalar stays under the clause operation"
+
+              let distinctProjection =
+                  plan "EXPLAIN FORMAT=JSON SELECT DISTINCT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a"
+              let deduplicated = distinctProjection.GetProperty("duplicates_removal")
+              Expect.isTrue (deduplicated.GetProperty("using_temporary_table").GetBoolean()) "DISTINCT materializes its result"
+              Expect.equal (deduplicated.GetProperty("select_list_subqueries").GetArrayLength()) 1 "projected scalar stays under duplicate removal"
+
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
               let unsafeMessage =

@@ -20253,7 +20253,12 @@ type private ExplainUnionJsonShape =
 
 type private ExplainSubqueryPlacement =
     | ProjectionSubqueries
+    | GroupedProjectionSubqueries
+    | OrderedProjectionSubqueries
+    | DistinctProjectionSubqueries
     | AttachedWhereSubqueries
+    | HavingSubqueries
+    | OrderBySubqueries
 
 type private ExplainJsonShape =
     | FlatJson
@@ -20370,6 +20375,37 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
             let table = block["table"] :?> JsonObject
             table["attached_subqueries"] <- subqueries |> List.map subqueryNode |> jsonArray
         | NestedSubqueries(AttachedWhereSubqueries, _) -> ()
+        | NestedSubqueries(
+            (HavingSubqueries
+            | OrderBySubqueries
+            | GroupedProjectionSubqueries
+            | OrderedProjectionSubqueries
+            | DistinctProjectionSubqueries) as placement,
+            subqueries
+          ) ->
+            let operationName, subqueryName =
+                match placement with
+                | HavingSubqueries -> "grouping_operation", "having_subqueries"
+                | OrderBySubqueries -> "ordering_operation", "order_by_subqueries"
+                | GroupedProjectionSubqueries -> "grouping_operation", "select_list_subqueries"
+                | OrderedProjectionSubqueries -> "ordering_operation", "select_list_subqueries"
+                | DistinctProjectionSubqueries -> "duplicates_removal", "select_list_subqueries"
+                | _ -> invalidOp "Unexpected nested subquery placement"
+
+            let operation = JsonObject()
+            operation["using_filesort"] <-
+                JsonValue.Create(blockRows |> List.exists (fun row -> List.contains "Using filesort" row.Extra))
+
+            if
+                operationName <> "ordering_operation"
+                && (blockRows |> List.exists (fun row -> List.contains "Using temporary" row.Extra))
+            then
+                operation["using_temporary_table"] <- JsonValue.Create(true)
+
+            operation["table"] <- block["table"].DeepClone()
+            block.Remove("table") |> ignore
+            operation[subqueryName] <- subqueries |> List.map subqueryNode |> jsonArray
+            block[operationName] <- operation
 
         block
 
@@ -20438,7 +20474,7 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                     || row.SelectType = "SUBQUERY"
                     || row.SelectType = "DEPENDENT SUBQUERY"))
             && (match placement with
-                | Some AttachedWhereSubqueries ->
+                | Some(AttachedWhereSubqueries | HavingSubqueries | OrderBySubqueries | GroupedProjectionSubqueries | OrderedProjectionSubqueries | DistinctProjectionSubqueries) ->
                     branchRows.Length = 1
                     && branchRows.Head.Table.IsSome
                     && (subqueryBlocks
@@ -20587,45 +20623,61 @@ let private onlyScalarSubqueries expression =
             expression
     )
 
-let private selectSupportsJsonProjectionSubqueries (select: SelectStmt) =
-    let otherExpressions =
-        Option.toList select.Where
-        @ Option.toList select.Having
-        @ select.GroupBy
-        @ (select.OrderBy |> List.map fst)
-
-    simpleJsonSubqueryParent select
-    && (otherExpressions |> List.forall (collectSubqueries >> List.isEmpty))
-    && (select.Projections |> List.forall (fun projection -> onlyScalarSubqueries projection.Expression))
-    && (select.Projections
-        |> List.collect (fun projection -> collectSubqueries projection.Expression)
-        |> List.forall simpleJsonSubquery)
-
-let private selectSupportsJsonAttachedWhereSubqueries (select: SelectStmt) =
-    let otherExpressions =
-        (select.Projections |> List.map _.Expression)
-        @ Option.toList select.Having
-        @ select.GroupBy
-        @ (select.OrderBy |> List.map fst)
-
-    let whereSubqueries = select.Where |> Option.toList |> List.collect collectSubqueries
-
-    simpleJsonSubqueryParent select
-    && (match select.From with Some(FromTable _) -> true | _ -> false)
-    && not whereSubqueries.IsEmpty
-    && (otherExpressions |> List.forall (collectSubqueries >> List.isEmpty))
-    && (select.Where |> Option.forall onlyScalarSubqueries)
-    && (whereSubqueries
-        |> List.forall (fun subquery ->
-            Expression.hasQualifiedOuterReference subquery && simpleJsonSubquery subquery))
-
 let private selectJsonSubqueryPlacement (select: SelectStmt) =
-    if selectSupportsJsonProjectionSubqueries select then
-        Some ProjectionSubqueries
-    elif selectSupportsJsonAttachedWhereSubqueries select then
-        Some AttachedWhereSubqueries
-    else
+    // EXPLAIN rows carry block IDs but no expression-clause origin. Render a
+    // nested block only when the AST identifies one unambiguous owning clause.
+    let clauses =
+        [ ProjectionSubqueries, (select.Projections |> List.map _.Expression)
+          AttachedWhereSubqueries, Option.toList select.Where
+          HavingSubqueries, Option.toList select.Having
+          OrderBySubqueries, (select.OrderBy |> List.map fst) ]
+
+    let activeClauses =
+        clauses
+        |> List.choose (fun (placement, expressions) ->
+            let subqueries = expressions |> List.collect collectSubqueries
+            if subqueries.IsEmpty then None else Some(placement, expressions, subqueries))
+
+    if
+        not (simpleJsonSubqueryParent select)
+        || (select.GroupBy |> List.exists containsSubqueryExpr)
+        || (clauses |> List.exists (fun (_, expressions) -> expressions |> List.exists (onlyScalarSubqueries >> not)))
+    then
         None
+    else
+        match activeClauses with
+        | [] -> Some ProjectionSubqueries
+        | [ (placement, _, subqueries) ]
+            when subqueries |> List.forall simpleJsonSubquery ->
+            let dependent = subqueries |> List.forall Expression.hasQualifiedOuterReference
+            let grouping = not select.GroupBy.IsEmpty
+            let ordering = not select.OrderBy.IsEmpty
+            let distinct = select.Distinct
+
+            match placement, select.From with
+            | ProjectionSubqueries, _ when not grouping && not ordering && not distinct -> Some ProjectionSubqueries
+            | ProjectionSubqueries, Some(FromTable _) when dependent && grouping && not ordering && not distinct ->
+                Some GroupedProjectionSubqueries
+            | ProjectionSubqueries, Some(FromTable _) when dependent && ordering && not grouping && not distinct ->
+                Some OrderedProjectionSubqueries
+            | ProjectionSubqueries, Some(FromTable _) when dependent && distinct && not grouping && not ordering ->
+                Some DistinctProjectionSubqueries
+            | AttachedWhereSubqueries, Some(FromTable _)
+                when dependent && not grouping && not ordering && not distinct ->
+                Some AttachedWhereSubqueries
+            | HavingSubqueries, Some(FromTable _)
+                when dependent && grouping && not ordering && not distinct ->
+                Some HavingSubqueries
+            | OrderBySubqueries, Some(FromTable _)
+                when dependent && not grouping && not distinct ->
+                Some OrderBySubqueries
+            | _ -> None
+        | _ -> None
+
+let private selectSupportsJsonProjectionSubqueries (select: SelectStmt) =
+    match selectJsonSubqueryPlacement select with
+    | Some ProjectionSubqueries -> true
+    | _ -> false
 
 let private checksumTables (store: Store) (dbName: string) (tables: string list) (quick: bool) : QueryResult =
     let checksum tableName =
