@@ -935,6 +935,12 @@ module ContractCatalog =
                    yield Contract.execute (sprintf "valid-prepare-%d" index) ("PREPARE valid_encoding FROM '" + sql.Replace("'", "''") + "'")
                    yield Contract.query (sprintf "valid-execute-%d" index) "EXECUTE valid_encoding"
                    yield Contract.execute (sprintf "valid-close-%d" index) "DEALLOCATE PREPARE valid_encoding"
+               for name, sql in
+                   [ "convert-hex-utf8mb4", "SELECT HEX(CONVERT(0xF09F9880 USING utf8mb4)),CHAR_LENGTH(CONVERT(0xF09F9880 USING utf8mb4))"
+                     "convert-hex-latin1", "SELECT HEX(CONVERT(0xE9 USING latin1)),CHAR_LENGTH(CONVERT(0xE9 USING latin1))"
+                     "convert-hex-binary", "SELECT HEX(CONVERT(0xF09F9880 USING binary)),CHAR_LENGTH(CONVERT(0xF09F9880 USING binary))" ] do
+                   yield Contract.query name sql |> Contract.comparingValues
+                   yield Contract.preparedQuery (name + "-prepared") sql [||] |> Contract.comparingValues
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

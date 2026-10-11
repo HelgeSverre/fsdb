@@ -993,6 +993,18 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected identical bytes to compare equal (1), got %A" other
 
+                testCase "CONVERT binary literals decodes bytes using the requested charset"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            "SELECT HEX(CONVERT(0xF09F9880 USING utf8mb4)), CHAR_LENGTH(CONVERT(0xF09F9880 USING utf8mb4)), HEX(CONVERT(0xE9 USING latin1)), HEX(CONVERT(0xF09F9880 USING binary))"
+                    with
+                    | ResultSet(_, [ [ Some "F09F9880"; Some "1"; Some "E9"; Some "F09F9880" ] ]) -> ()
+                    | other -> failtestf "expected charset-specific raw-byte decoding, got %A" other
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

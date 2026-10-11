@@ -2123,6 +2123,11 @@ let private weightStringFn: Scalar =
 let private convertFn: Scalar =
     function
     | [ VNull; _ ] -> VNull
+    | [ (VBinaryLiteral bytes | VBytes bytes); VString charset ] ->
+        match Charset.canonicalName charset with
+        | "binary" -> VBytes bytes
+        | charset when Charset.tryFind charset |> Option.isSome -> VString(Charset.decodeBytes charset bytes)
+        | _ -> VNull
     | [ v; VString charset ] ->
         let text = v |> toText |> Option.defaultValue ""
 
