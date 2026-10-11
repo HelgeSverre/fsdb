@@ -146,11 +146,15 @@ let private rejectedEscapeAt (pattern: string) index =
     || (unicodePropertyNameAt pattern index
         |> Option.exists (fun (_, name) -> name = "ISBASICLATIN"))
 
+type private UnicodePropertyReplacement =
+    | ClassMember of string
+    | ScalarAlternative of string
+
 let private unicodePropertyAt (pattern: string) index =
     match unicodePropertyNameAt pattern index with
     | None -> None
     | Some(nextIndex, "ANY") ->
-        Some(nextIndex, if pattern[index + 1] = 'P' then "(?!)" else scalarAtom)
+        Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then "(?!)" else scalarAtom))
     | Some(nextIndex, name) ->
         let categoryName =
             if name.StartsWith("GC=", StringComparison.Ordinal) then name.Substring(3)
@@ -167,8 +171,8 @@ let private unicodePropertyAt (pattern: string) index =
         positive
         |> Option.map (fun property ->
             nextIndex,
-            if pattern[index + 1] = 'P' then scalarNegatedClass ("[^" + property + "]")
-            else property)
+            if pattern[index + 1] = 'P' then ScalarAlternative(scalarNegatedClass ("[^" + property + "]"))
+            else ClassMember property)
 
 let private mixedNegatedClassAt (pattern: string) start =
     let outerNegated = start + 1 < pattern.Length && pattern[start + 1] = '^'
@@ -186,9 +190,11 @@ let private mixedNegatedClassAt (pattern: string) start =
         elif pattern[index] = '\\' && index + 1 < pattern.Length then
             invalidMember <- invalidMember || rejectedEscapeAt pattern index
             match unicodePropertyAt pattern index with
-            | Some(nextIndex, property) ->
-                if pattern[index + 1] = 'P' || property = scalarAtom then alternatives.Add property
-                else ordinary.Append property |> ignore
+            | Some(nextIndex, ClassMember property) ->
+                ordinary.Append property |> ignore
+                index <- nextIndex
+            | Some(nextIndex, ScalarAlternative property) ->
+                alternatives.Add property
                 index <- nextIndex
             | None ->
                 match characterEscape pattern[index + 1] with
@@ -256,8 +262,12 @@ let private normalizePosixClasses (pattern: string) =
             else
                 invalid <- invalid || rejectedEscapeAt pattern index
                 match unicodePropertyAt pattern index with
-                | Some(nextIndex, category) ->
-                    builder.Append category |> ignore
+                | Some(nextIndex, property) ->
+                    let replacement =
+                        match property with
+                        | ClassMember memberPattern
+                        | ScalarAlternative memberPattern -> memberPattern
+                    builder.Append replacement |> ignore
                     index <- nextIndex
                 | None when inClass && index + 1 < pattern.Length && (pattern[index + 1] = 'b' || pattern[index + 1] = 'B') ->
                     builder.Append pattern[index + 1] |> ignore

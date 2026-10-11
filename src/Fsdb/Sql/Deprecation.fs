@@ -15,16 +15,19 @@ let private repeatWarning count code message =
     for _ in 1..count do
         Diagnostics.warning code message
 
+let private reportCharsetDeprecation (spelling: string) =
+    match spelling.ToLowerInvariant() with
+    | "utf8" -> Diagnostics.deprecatedUtf8Alias ()
+    | "utf8mb3" -> Diagnostics.deprecatedUtf8mb3 ()
+    | "ucs2" -> Diagnostics.deprecatedUcs2 ()
+    | _ -> ()
+
 let private reportCharsetConversions statement =
     statement
     |> Expression.iterStatement (function
         | FuncCall(name, [ _; Lit(VString charset) ])
             when name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase) ->
-            match charset.ToLowerInvariant() with
-            | "utf8" -> Diagnostics.deprecatedUtf8Alias ()
-            | "utf8mb3" -> Diagnostics.deprecatedUtf8mb3 ()
-            | "ucs2" -> Diagnostics.deprecatedUcs2 ()
-            | _ -> ()
+            reportCharsetDeprecation charset
         | _ -> ())
 
 /// Syntax warnings belong to submission or preparation, not row evaluation.
@@ -34,11 +37,7 @@ let reportParsedSyntax statement =
             Diagnostics.warning 3720
                 "NATIONAL/NCHAR/NVARCHAR implies the character set UTF8MB3, which will be replaced by UTF8MB4 in a future release. Please consider using CHAR(x) CHARACTER SET UTF8MB4 in order to be unambiguous."
         | IntroducedLiteral(_, _, CharsetIntroducer spelling) ->
-            match spelling.ToLowerInvariant() with
-            | "utf8" -> Diagnostics.deprecatedUtf8Alias ()
-            | "utf8mb3" -> Diagnostics.deprecatedUtf8mb3 ()
-            | "ucs2" -> Diagnostics.deprecatedUcs2 ()
-            | _ -> ()
+            reportCharsetDeprecation spelling
         | _ -> ()
 
     let rec report expression =
