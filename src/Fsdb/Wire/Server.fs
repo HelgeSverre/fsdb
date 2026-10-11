@@ -1372,6 +1372,7 @@ let private handleConnection
     : Async<unit> =
     async {
         use client = client
+        InformationSchema.recordConnectionAttempt ()
         // Nagle's algorithm batches small writes to wait for more data or an
         // ACK before sending — exactly wrong for this protocol's
         // one-small-packet-request, one-small-packet-response pattern
@@ -2695,6 +2696,7 @@ let private handleConnection
 /// ephemeral port (used by the integration tests); read it back via `port`.
 let startListening (address: IPAddress) (port: int) : TcpListener =
     InformationSchema.serverStartedAt <- DateTime.Now
+    InformationSchema.resetStatusUptime ()
     let listener = new TcpListener(address, port)
     listener.Start()
     listener

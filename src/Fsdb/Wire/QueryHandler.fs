@@ -5324,6 +5324,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Ok() ->
             InformationSchema.resetSessionStatuses ()
             Session.resetTransportMetrics ()
+            InformationSchema.resetStatusUptime ()
             session, Affected 0UL
     | FlushTables ->
         match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_TABLES" [ "RELOAD"; "FLUSH_TABLES" ] with

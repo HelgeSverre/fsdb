@@ -952,6 +952,12 @@ type private AtomicCounter() =
     member _.Value = Threading.Interlocked.Read(&value)
     member _.Reset() = Threading.Interlocked.Exchange(&value, 0L) |> ignore
 
+    member _.RaiseTo candidate =
+        let mutable previous = Threading.Interlocked.Read(&value)
+        while previous < candidate do
+            let actual = Threading.Interlocked.CompareExchange(&value, candidate, previous)
+            previous <- if actual = previous then candidate else actual
+
 [<Struct>]
 type StatusCommand = private StatusCommand of string
 
@@ -1281,9 +1287,20 @@ type StatusCounters internal (id: int64) =
         slowQueryCount.Reset()
 
 let private processStatusCounters = StatusCounters 0L
+let private connectionAttempts = AtomicCounter()
+let private maxUsedConnections = AtomicCounter()
 let private wireBytesReceived = AtomicCounter()
 let private wireBytesSent = AtomicCounter()
 let private statusCounterId = ref 0L
+let mutable private lastStatusFlushTicks = DateTime.UtcNow.Ticks
+
+let internal recordConnectionAttempt () = connectionAttempts.Increment()
+let internal resetStatusUptime () =
+    Threading.Interlocked.Exchange(&lastStatusFlushTicks, DateTime.UtcNow.Ticks) |> ignore
+
+let private uptimeSinceStatusFlush () =
+    let elapsed = DateTime.UtcNow.Ticks - Threading.Interlocked.Read(&lastStatusFlushTicks)
+    max 0L (elapsed / TimeSpan.TicksPerSecond)
 
 let internal recordWireBytesReceived count = wireBytesReceived.Add count
 let internal recordWireBytesSent count = wireBytesSent.Add count
@@ -1341,6 +1358,7 @@ let registerProcessAs (id: int64) (account: Fsdb.Auth.Account) (user: string) (h
           CloseConnection = None }
 
     processes.[id] <- entry
+    maxUsedConnections.RaiseTo(int64 processes.Count)
     entry
 
 let registerProcess (id: int64) (user: string) (host: string) =
@@ -4302,9 +4320,12 @@ let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) schedulerEnabl
           |> Option.defaultValue ""
           "Questions", string statusCounters.Questions
           "Slow_queries", string statusCounters.SlowQueries
+          "Connections", string connectionAttempts.Value
+          "Max_used_connections", string maxUsedConnections.Value
           "Threads_connected", string (connectedThreads ())
           "Threads_running", string (runningThreads schedulerEnabled)
-          "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
+          "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds)
+          "Uptime_since_flush_status", string (uptimeSinceStatusFlush ()) ]
         @ compressionRows
         @ (reportedCommandNames |> List.map (fun name -> name, string (statusCounters.CommandCount name)))
         |> List.filter (fun (name, _) -> likeFilter likeOpt name)

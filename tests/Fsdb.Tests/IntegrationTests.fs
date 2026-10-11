@@ -3460,6 +3460,13 @@ let tests =
                           return Int64.Parse(reader.GetString 1)
                       }
 
+                  let! connections = status observer "GLOBAL" "Connections"
+                  let! sessionConnections = status observer "SESSION" "Connections"
+                  let! maxUsed = status observer "GLOBAL" "Max_used_connections"
+                  Expect.isTrue (sessionConnections >= connections) "Connections is server-wide and monotonic in both scopes"
+                  Expect.isGreaterThan connections 1L "two wire connections increment the attempt count"
+                  Expect.isGreaterThan maxUsed 1L "the concurrent connection high-water mark is live"
+
                   let! receivedBefore = status observer "GLOBAL" "Bytes_received"
                   let! sentBefore = status observer "GLOBAL" "Bytes_sent"
                   use payload = sender.CreateCommand()
@@ -3480,8 +3487,10 @@ let tests =
                   do! flush.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
                   let! sentAfterFlush = status observer "GLOBAL" "Bytes_sent"
                   let! receivedAfterFlush = status observer "SESSION" "Bytes_received"
+                  let! sinceFlush = status observer "GLOBAL" "Uptime_since_flush_status"
                   Expect.isGreaterThan sentAfterFlush sentAfter "FLUSH STATUS does not reset global wire bytes"
                   Expect.isLessThan receivedAfterFlush observerReceived "FLUSH STATUS resets the issuing session's byte count"
+                  Expect.isLessThan sinceFlush 5L "the status uptime restarts on FLUSH STATUS"
 
                   use observerPayload = observer.CreateCommand()
                   observerPayload.CommandText <- "SELECT 1 /* " + String.replicate 4096 "o" + " */"
