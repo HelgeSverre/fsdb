@@ -1128,6 +1128,15 @@ let tests =
                             Expect.equal transcoded utf8 (sprintf "%s UTF-8 bytes" charset)
                         | other -> failtestf "expected encoded source bytes for %s, got %A" sql other
 
+                testCase "CONVERT text results retain target charset bytes"
+                <| fun _ ->
+                    let store = newStore ()
+                    let sql =
+                        "SELECT HEX(CONVERT(CONVERT('é' USING latin1) USING binary)), HEX(CONVERT(CONVERT('€' USING latin1) USING binary)), HEX(CONVERT(CONVERT('☃' USING latin1) USING binary)), HEX(CONVERT(CONVERT('Привет' USING cp1251) USING binary))"
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "E9"; Some "80"; Some "3F"; Some "CFF0E8E2E5F2" ] ]) -> ()
+                    | other -> failtestf "expected target charset bytes from nested text conversion, got %A" other
+
                 testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()

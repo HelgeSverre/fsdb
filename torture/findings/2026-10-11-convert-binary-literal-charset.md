@@ -47,5 +47,11 @@ Valid encoded source values also retain their bytes. MySQL keeps SJIS `82A0`,
 GBK `C4E3`, Big5 `A440`, UTF-16 `0041`, and UTF-32 `00000041` when a second
 `CONVERT ... USING binary` is applied, while a second UTF-8 conversion emits
 their transcoded bytes. Fsdb now retains the validated source encoding instead
-of immediately discarding it into a plain Unicode string. Other conversion
-contexts remain open.
+of immediately discarding it into a plain Unicode string.
+
+The same source-byte rule applies to ordinary text input. With a UTF-8
+connection, MySQL encodes `é` as Latin1 `E9`, `€` as Latin1 `80`, and
+`Привет` as CP1251 `CFF0E8E2E5F2`; a later conversion to binary returns
+those target-charset bytes. Unencodable `☃` becomes byte `3F`. Fsdb now keeps
+the encoded result of text conversion, so nested binary conversion follows
+the same rule. Other text-conversion contexts still need auditing.

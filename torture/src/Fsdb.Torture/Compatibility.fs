@@ -1006,6 +1006,13 @@ module ContractCatalog =
                                hex charset hex charset)
                        |> Contract.comparingValues
                    yield Contract.query (name + "-warnings") "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.execute "convert-text-source-utf8mb4" "SET NAMES utf8mb4"
+               yield
+                   Contract.query
+                       "convert-text-source-binary-bytes"
+                       "SELECT HEX(CONVERT(CONVERT('é' USING latin1) USING binary)), HEX(CONVERT(CONVERT('€' USING latin1) USING binary)), HEX(CONVERT(CONVERT('☃' USING latin1) USING binary)), HEX(CONVERT(CONVERT('Привет' USING cp1251) USING binary))"
+                   |> Contract.comparingValues
+               yield Contract.query "convert-text-source-binary-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

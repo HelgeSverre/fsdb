@@ -2162,7 +2162,8 @@ let private convertFn: Scalar =
                     | VEncodedString(source, bytes) when Charset.isSingleByte source ->
                         Charset.decodeSingleByteConversionSource source bytes
                     | _ -> v |> toText |> Option.defaultValue ""
-                VString(Charset.transcodeText charset text)
+                let converted = Charset.transcodeText charset text
+                VEncodedString(charset, Charset.encode charset converted)
         | _ -> VNull
     | _ -> VNull
 
