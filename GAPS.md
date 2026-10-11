@@ -238,7 +238,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; near-tangent crossings, non-point geographic `ST_Crosses`/`ST_Overlaps` and other topology beyond intersects/disjoint, and reference systems beyond the audited EPSG subset remain | low |
+| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; near-tangent crossings, [non-point geographic topology](torture/findings/2026-10-11-geographic-line-topology-oracle.md) beyond intersects/disjoint, and reference systems beyond the audited EPSG subset remain | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
