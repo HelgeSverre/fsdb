@@ -11674,6 +11674,11 @@ and private reorderNullRejectedLeftJoin
         | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, _), LiteralValue _)
         | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue _, QualifiedCol(owner, _)) ->
             equalsIgnoreCase owner qualifier
+        | In(QualifiedCol(owner, _), candidates)
+            when candidates |> List.forall (function LiteralValue _ -> true | _ -> false) ->
+            equalsIgnoreCase owner qualifier
+        | Between(QualifiedCol(owner, _), LiteralValue _, LiteralValue _) ->
+            equalsIgnoreCase owner qualifier
         | IsNotNull(QualifiedCol(owner, _)) -> equalsIgnoreCase owner qualifier
         | _ -> false
 

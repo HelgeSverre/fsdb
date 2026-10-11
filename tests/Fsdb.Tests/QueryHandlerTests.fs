@@ -9694,19 +9694,19 @@ let tests =
                   let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
                   Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "null-rejected left join uses both indexes"
 
-              let orMatches = [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ] ]
-              for suffix, examined in [ "", "4"; " LIMIT 1", "2" ] do
-                  let query =
-                      "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id=1 OR b.id=2"
-                      + suffix
-                  match suffix, run query with
-                  | "", ResultSet([ "id"; "id" ], rows) ->
-                      Expect.equal (List.sort rows) (List.sort orMatches) "null-rejected OR result"
-                  | _, ResultSet([ "id"; "id" ], [ row ]) ->
-                      Expect.isTrue (List.contains row orMatches) "limited null-rejected OR result"
-                  | _, other -> failtestf "unexpected null-rejected OR result: %A" other
-                  let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
-                  Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) "null-rejected OR index probes"
+              let selectedMatches = [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ] ]
+              for predicate in [ "b.id=1 OR b.id=2"; "b.id IN (1,2)"; "b.id BETWEEN 1 AND 2" ] do
+                  for suffix, examined in [ "", "4"; " LIMIT 1", "2" ] do
+                      let query =
+                          sprintf "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE %s%s" predicate suffix
+                      match suffix, run query with
+                      | "", ResultSet([ "id"; "id" ], rows) ->
+                          Expect.equal (List.sort rows) (List.sort selectedMatches) "null-rejected indexed-filter result"
+                      | _, ResultSet([ "id"; "id" ], [ row ]) ->
+                          Expect.isTrue (List.contains row selectedMatches) "limited null-rejected indexed-filter result"
+                      | _, other -> failtestf "unexpected null-rejected indexed-filter result: %A" other
+                      let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
+                      Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some examined ] ])) "null-rejected indexed-filter probes"
 
               Expect.equal
                   (run "SELECT * FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id<2")

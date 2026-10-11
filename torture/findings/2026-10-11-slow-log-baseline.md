@@ -76,6 +76,11 @@ same inner-join conversion now carries the two-row indexed union into the
 join plan. `WHERE b.id=1 OR b.id IS NULL` remains an outer join and returns
 the unmatched left row, as MySQL does.
 
+The equivalent `WHERE b.id IN (1,2)` and `WHERE b.id BETWEEN 1 AND 2`
+predicates have the same MySQL 8.4.11 counts: four examined rows without a
+limit and two with `LIMIT 1`. Both are strict on a null-padded `b.id`, and
+fsdb now selects their indexed candidates for the same join conversion.
+
 The symmetric null-rejected `RIGHT JOIN ... WHERE a.id<2` already matches
 MySQL's observed counts: with an index on `b.left_id`, two result rows examine
 three candidates, or two with `LIMIT 1`; without that index, the full query
