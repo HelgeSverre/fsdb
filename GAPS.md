@@ -750,6 +750,9 @@ seen with explicit binary casts; other expression producers remain open.
 Audited binary `IF`, `CASE`, `NULLIF`, and scalar-subquery DECIMAL casts now
 retain regular truncation warnings, distinct from quiet `COALESCE`, `IFNULL`,
 and byte-string functions; broader expression families remain open.
+Derived-table and CTE columns now keep the distinct binary-column DECIMAL
+warnings for audited literal and computed sources, while projected stored
+BLOB values remain quiet; other source boundaries remain open.
 Audited NUL-containing text casts stop warning previews at the NUL; binary
 casts retain the distinct `\x00` representation.
 Audited numeric CAST warning arguments now stop after 128 encoded bytes,

@@ -1221,6 +1221,14 @@ module ContractCatalog =
                          |> Contract.comparingValues
                    yield Contract.query (sprintf "numeric-cast-binary-conditional-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               for index, sql in
+                   [ "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT _binary'12x' AS x) d"
+                     "WITH c AS (SELECT _binary'12x' x) SELECT CAST(x AS DECIMAL(10,2)) FROM c"
+                     "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT _binary'abc' AS x) d"
+                     "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT CONCAT(_binary'12',_binary'x') x) d" ] |> List.indexed do
+                   yield Contract.query (sprintf "numeric-cast-derived-binary-%d" index) sql |> Contract.comparingValues
+                   yield Contract.query (sprintf "numeric-cast-derived-binary-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                yield Contract.query "numeric-cast-binary-columns-create" "CREATE TEMPORARY TABLE cast_numeric_binary_columns(v VARBINARY(20), b BLOB)"
                      |> Contract.comparingValues
                yield Contract.query "numeric-cast-binary-columns-insert" "INSERT INTO cast_numeric_binary_columns VALUES ('abc', 'abc')"
@@ -1233,6 +1241,12 @@ module ContractCatalog =
                    yield Contract.query (sprintf "numeric-cast-binary-column-%d" index) sql |> Contract.comparingValues
                    yield Contract.query (sprintf "numeric-cast-binary-column-warnings-%d" index) "SHOW WARNINGS"
                          |> Contract.comparingValues
+               yield Contract.query
+                         "numeric-cast-derived-blob-column"
+                         "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT b AS x FROM cast_numeric_binary_columns) d"
+                     |> Contract.comparingValues
+               yield Contract.query "numeric-cast-derived-blob-column-warnings" "SHOW WARNINGS"
+                     |> Contract.comparingValues
                yield Contract.query "numeric-cast-padded-binary-create" "CREATE TEMPORARY TABLE cast_numeric_padded_binary(b BINARY(4))"
                      |> Contract.comparingValues
                yield Contract.query "numeric-cast-padded-binary-insert" "INSERT INTO cast_numeric_padded_binary VALUES ('12x')"

@@ -3131,6 +3131,27 @@ let tests =
                           sql
                   | _, result -> failtestf "expected binary conditional CAST result for %s, got %A" sql result
 
+          testCase "derived binary columns retain DECIMAL conversion warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE cast_derived_blob(b BLOB)"
+              let session, _ = handle session "INSERT INTO cast_derived_blob VALUES (_binary'12x')"
+              for sql, result, warnings in
+                  [ "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT _binary'12x' AS x) d", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "WITH c AS (SELECT _binary'12x' x) SELECT CAST(x AS DECIMAL(10,2)) FROM c", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT _binary'abc' AS x) d", "0.00", [ 1366, "Incorrect DECIMAL value: '0' for column '' at row -1"; 1292, "Truncated incorrect DECIMAL value: 'abc'" ]
+                    "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT CONCAT(_binary'12',_binary'x') x) d", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT b AS x FROM cast_derived_blob) d", "12.00", []
+                    "SELECT CAST(x AS DECIMAL(10,2)) FROM (SELECT CONCAT(b,_binary'') AS x FROM cast_derived_blob) d", "12.00", [] ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual result sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected derived binary CAST result for %s, got %A" sql result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

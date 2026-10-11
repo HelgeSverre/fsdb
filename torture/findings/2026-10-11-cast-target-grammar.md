@@ -113,6 +113,12 @@ regular DECIMAL truncation warning 1292, including wholly invalid text.
 truncation and report 1366 for wholly invalid text. The numeric CAST source
 classification now distinguishes these conditional and scalar-subquery
 shapes; further expression families remain open.
+When a binary literal or expression crosses a derived-table or CTE column,
+MySQL treats it like a binary column for invalid DECIMAL text: 1366 precedes
+1292. A valid numeric prefix still warns 1292. A projected stored BLOB stays
+quiet, including when a byte-string function uses it. Fsdb now uses the
+retained expression coercibility to distinguish synthetic binary columns
+from the stored-column case.
 Text-string numeric CAST warning previews stop at the first NUL byte, as in
 MySQL, while binary-source warnings keep the escaped `\x00` representation.
 The result still uses the numeric prefix preceding the NUL.

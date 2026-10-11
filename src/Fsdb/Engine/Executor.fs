@@ -3148,8 +3148,13 @@ let private numericCastDiagnosticText source (text: string) =
 let private numericCastBinaryColumnType ctx expr =
     tryColumnDefForExpr ctx expr
     |> Option.bind (fun column ->
-        match column.Type with
-        | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob -> Some column.Type
+        // Derived expressions can have a synthetic BLOB type; their retained
+        // coercibility still distinguishes them from stored binary columns.
+        let derivedExpression =
+            column.ExpressionCollation
+            |> Option.exists (fun (_, coercibility) -> coercibility > 2)
+        match column.Type, derivedExpression with
+        | (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob), false -> Some column.Type
         | _ -> None)
 
 type private DecimalCastTextWarnings =
@@ -3181,6 +3186,8 @@ let private numericCastTextInput ctx expr source =
                     | Lit(VBytes _)
                     | Case _
                     | Subquery _ -> RegularText, true
+                    | Col _
+                    | QualifiedCol _ -> StoredBinary, true
                     | FuncCall(name, _) when
                         name.Equals("IF", System.StringComparison.OrdinalIgnoreCase)
                         || name.Equals("NULLIF", System.StringComparison.OrdinalIgnoreCase) -> RegularText, true
