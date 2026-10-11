@@ -5080,6 +5080,12 @@ let private isSubstringSearchFunction (name: string) =
 let private metadataInferenceCache =
     System.Threading.AsyncLocal<Dictionary<EvalContext, Dictionary<Expr, ColumnMetadata option>>>()
 
+// The evaluator belongs to the recursive execution group below; its builtin
+// allowlist is fixed across statements and should not be rebuilt per probe.
+let private plannerFoldableBuiltins =
+    set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST"
+          "MOD"; "TRUNCATE"; "POW"; "POWER"; "BIT_COUNT"; "CRC32"; "PI" ]
+
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let evaluated =
         match ctx.EvaluatedExpressions with
@@ -12259,10 +12265,6 @@ and private literalPointLookupEqualities (registry: Registry) (tref: TableRef) (
             | _ -> None)
 
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
-    let foldableBuiltins =
-        set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST"
-              "MOD"; "TRUNCATE"; "POW"; "POWER"; "BIT_COUNT"; "CRC32"; "PI" ]
-
     let rec isSafe expression =
         let safeChildren () = Expression.children expression |> List.forall isSafe
 
@@ -12274,7 +12276,7 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
             safeChildren ()
         | FuncCall(name, _)
             when ((FunctionalIndex.tryBuiltin name |> Option.isSome)
-                  || Set.contains (name.ToUpperInvariant()) foldableBuiltins)
+                  || Set.contains (name.ToUpperInvariant()) plannerFoldableBuiltins)
                  && Functions.isUnmodifiedBuiltinScalar name registry ->
             safeChildren ()
         | _ -> false

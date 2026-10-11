@@ -865,6 +865,10 @@ An [unchanged SQL-mode follow-up](benchmarks/results/2026-10-11-sql-mode-reparse
 avoids parsing and rebuilding the current execution settings when a prepared
 statement reapplies identical mode text. It saves about 1.1 KiB per call on
 the shared fixture; separate-process timings do not establish a latency gain.
+An [immutable planner-set follow-up](benchmarks/results/2026-10-11-planner-foldable-set.md)
+shares the foldable builtin names across constant evaluators, removing about
+5.1 KiB per prepared lookup on that fixture. Residual allocations remain
+substantial, and separate-process timings do not establish a latency gain.
 
 A [same-host indexed-conjunction snapshot](benchmarks/results/6aaef020-quick.md)
 on 10,000 users measures fsdb at about 0.60 ms with either two usable indexes
