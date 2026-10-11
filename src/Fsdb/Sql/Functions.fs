@@ -3753,10 +3753,18 @@ let private charFn: Scalar =
                 match value with
                 | VInt number -> uint32 (uint64 number &&& 0xFFFFFFFFUL)
                 | VUInt number -> uint32 (number &&& 0xFFFFFFFFUL)
+                | VBit(_, number) -> uint32 (number &&& 0xFFFFFFFFUL)
                 | VDecimal number ->
                     let rounded = Decimal.Round(number, 0, MidpointRounding.AwayFromZero)
-                    let remainder = rounded % 4294967296M
-                    uint32 (if remainder < 0M then remainder + 4294967296M else remainder)
+                    if rounded > decimal UInt64.MaxValue then
+                        Diagnostics.numericConversion "DECIMAL" (toText value |> Option.defaultValue "")
+                        UInt32.MaxValue
+                    elif rounded < decimal Int64.MinValue then
+                        Diagnostics.numericConversion "DECIMAL" (toText value |> Option.defaultValue "")
+                        0u
+                    else
+                        let remainder = rounded % 4294967296M
+                        uint32 (if remainder < 0M then remainder + 4294967296M else remainder)
                 | (VString _ | VBytes _ | VEncodedString _) as source ->
                     let text = toText source |> Option.defaultValue ""
                     let diagnostic =
@@ -3769,10 +3777,12 @@ let private charFn: Scalar =
                     charTextWord text diagnostic
                 | other ->
                     let rounded = Math.Round(toDouble other, MidpointRounding.AwayFromZero)
-                    if Double.IsFinite rounded then
+                    if not (Double.IsFinite rounded) then 0u
+                    elif rounded >= 18446744073709551616.0 then UInt32.MaxValue
+                    elif rounded < -9223372036854775808.0 then 0u
+                    else
                         let remainder = rounded % 4294967296.0
                         uint32 (if remainder < 0.0 then remainder + 4294967296.0 else remainder)
-                    else 0u
             let bytes =
                 [| byte (word >>> 24)
                    byte (word >>> 16)

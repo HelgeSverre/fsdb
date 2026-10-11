@@ -3387,6 +3387,32 @@ let tests =
                       "binary warnings escape NUL and text warnings stop at NUL"
               | _, result -> failtestf "expected CHAR NUL-preview result, got %A" result
 
+          testCase "CHAR keeps full-width bit values and clamps oversized doubles"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT HEX(CHAR(b'1111111111111111111111111111111111111111111111111111111111111111')),HEX(CHAR(b'100000000000000000000000000000001')),HEX(CHAR(b'1000000000000000000000000000000000000000000000000000000000000000')),HEX(CHAR(1e30)),HEX(CHAR(4294967296e0))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "FFFFFFFF"; Some "01"; Some "00"; Some "FFFFFFFF"; Some "00" ] "bit and floating numeric words"
+                  Expect.isEmpty session.Diagnostics "numeric arguments produce no warnings"
+              | _, result -> failtestf "expected CHAR bit/double result, got %A" result
+              let sql = "SELECT HEX(CHAR(18446744073709551615)),HEX(CHAR(18446744073709551616)),HEX(CHAR(-9223372036854775809))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "FFFFFFFF"; Some "FFFFFFFF"; Some "00" ] "decimal values clamp to integer bounds"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect DECIMAL value: '18446744073709551616'"
+                        1292, "Truncated incorrect DECIMAL value: '-9223372036854775809'" ]
+                      "decimal overflow warnings"
+              | _, result -> failtestf "expected CHAR decimal-boundary result, got %A" result
+              let sql = "SELECT HEX(CHAR(CAST('2024-01-02' AS DATE))),HEX(CHAR(CAST('12:34:56' AS TIME))),HEX(CHAR(CAST('2024-01-02 03:04:05' AS DATETIME)))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "0134D6E6"; Some "01E240"; Some "84177C45" ] "temporal numeric arguments"
+                  Expect.isEmpty session.Diagnostics "valid temporal sources have no warnings"
+              | _, result -> failtestf "expected CHAR temporal result, got %A" result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

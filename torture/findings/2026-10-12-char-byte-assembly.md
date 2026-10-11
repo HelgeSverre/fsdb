@@ -39,4 +39,12 @@ stops its preview at NUL. The focused regression and native differential
 contract cover the values and warning order alongside a decoded `latin1`
 source. Numeric CAST and CHAR share the binary-preview renderer.
 
-The remaining unusual numeric source domains are outside this audit.
+A 64-bit BIT argument must not pass through `double`: its low 32 bits supply
+the word even when all 64 bits are set. MySQL also clamps positive floating
+values beyond the unsigned 64-bit range to `FFFFFFFF`; exact DECIMAL values
+outside unsigned or signed 64-bit bounds clamp to `FFFFFFFF` or `00` with
+warning 1292. Focused and differential cases cover those boundaries and
+ordinary DATE, TIME, and DATETIME numeric arguments.
+
+JSON argument diagnostics and floating overflow warnings that depend on
+whether the source is a literal or a stored column remain outside this audit.

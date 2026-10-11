@@ -248,7 +248,9 @@ argument-order warnings, and clamp signed/unsigned overflow. `CHAR(... USING
 charset)` now interprets those bytes in the selected charset, retaining its
 coercibility and audited invalid-byte diagnostics. Binary-string integer
 warnings now escape high bytes and NUL, while decoded text warnings stop at
-NUL; unusual source domains remain open.
+NUL. Audited 64-bit BIT, large floating and DECIMAL, and temporal arguments
+now preserve their MySQL byte values; JSON argument diagnostics and source-
+dependent floating overflow warnings remain open.
 
 | Missing family | Functions | Impact |
 |---|---|---|

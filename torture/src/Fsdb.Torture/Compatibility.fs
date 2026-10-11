@@ -1232,6 +1232,17 @@ module ContractCatalog =
                    "SELECT HEX(CHAR(UNHEX('310032'))),HEX(CHAR(CAST(0x310032 AS CHAR CHARACTER SET latin1)))"
                    |> Contract.comparingValues
                yield Contract.query "char-binary-nul-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-numeric-domain-values"
+                   "SELECT HEX(CHAR(b'1111111111111111111111111111111111111111111111111111111111111111')),HEX(CHAR(b'100000000000000000000000000000001')),HEX(CHAR(b'1000000000000000000000000000000000000000000000000000000000000000')),HEX(CHAR(1e30)),HEX(CHAR(4294967296e0))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-numeric-domain-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-decimal-boundaries"
+                   "SELECT HEX(CHAR(18446744073709551615)),HEX(CHAR(18446744073709551616)),HEX(CHAR(-9223372036854775809))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-decimal-boundary-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-temporal-arguments"
+                   "SELECT HEX(CHAR(CAST('2024-01-02' AS DATE))),HEX(CHAR(CAST('12:34:56' AS TIME))),HEX(CHAR(CAST('2024-01-02 03:04:05' AS DATETIME)))"
+                   |> Contract.comparingValues
                for index, source in
                    [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
                    yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)
