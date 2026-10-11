@@ -4151,6 +4151,8 @@ let tests =
               let session = create 1 store
               let session, _ = handle session "CREATE TABLE scalar_plan (id INT PRIMARY KEY)"
               let session, _ = handle session "INSERT INTO scalar_plan VALUES (1),(2)"
+              let session, _ = handle session "CREATE TABLE distinct_scalar_plan (id INT PRIMARY KEY, v INT)"
+              let session, _ = handle session "INSERT INTO distinct_scalar_plan VALUES (1,1),(2,1)"
 
               let plan sql =
                   match handle session sql |> snd with
@@ -4228,6 +4230,17 @@ let tests =
               Expect.equal (independentInnerGroup.GetProperty("optimized_away_subqueries").GetArrayLength()) 1 "constant order scalar belongs to grouping"
               let mutable outerOptimized = Unchecked.defaultof<System.Text.Json.JsonElement>
               Expect.isFalse (independentOuterOrder.TryGetProperty("optimized_away_subqueries", &outerOptimized)) "outer ordering does not own the constant scalar"
+
+              let independentDistinctOrder =
+                  plan "EXPLAIN FORMAT=JSON SELECT DISTINCT a.v FROM distinct_scalar_plan a ORDER BY (SELECT b.id FROM distinct_scalar_plan b WHERE b.id=1)"
+              let distinctOuterOrder = independentDistinctOrder.GetProperty("ordering_operation")
+              let distinctInnerRemoval = distinctOuterOrder.GetProperty("duplicates_removal")
+              Expect.isFalse (distinctOuterOrder.GetProperty("using_filesort").GetBoolean()) "constant order needs no outer sort"
+              Expect.isFalse (distinctInnerRemoval.GetProperty("using_filesort").GetBoolean()) "constant order needs no distinct sort"
+              Expect.isTrue (distinctInnerRemoval.GetProperty("using_temporary_table").GetBoolean()) "duplicate-prone value materializes"
+              let optimizedDistinct = distinctInnerRemoval.GetProperty("optimized_away_subqueries").EnumerateArray() |> Seq.head
+              Expect.isFalse (optimizedDistinct.GetProperty("dependent").GetBoolean()) "independent distinct order scalar is cacheable"
+              Expect.equal (optimizedDistinct.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "b" "distinct order scalar retains child access"
 
               let projectionSql tail =
                   "EXPLAIN FORMAT=JSON SELECT (SELECT b.id FROM scalar_plan b WHERE b.id=a.id) AS x FROM scalar_plan a " + tail

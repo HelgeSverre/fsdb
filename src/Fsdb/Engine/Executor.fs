@@ -20409,9 +20409,11 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                     match clause with
                     | ExplainProjection -> List.last operations
                     | ExplainHaving -> GroupingOperation
-                    | ExplainOrderBy
-                        when operations = [ OrderingOperation; GroupingOperation ]
-                             && not hasDependentSubquery -> GroupingOperation
+                    | ExplainOrderBy when not hasDependentSubquery ->
+                        match operations with
+                        | [ OrderingOperation; GroupingOperation ] -> GroupingOperation
+                        | [ OrderingOperation; DistinctOperation ] -> DistinctOperation
+                        | _ -> OrderingOperation
                     | ExplainOrderBy -> OrderingOperation
                     | ExplainWhere -> invalidOp "WHERE subqueries belong to the source table"
 
@@ -20434,6 +20436,8 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                         // traditional parent row omits that flag after grouping.
                         let filesort =
                             match operations, operationKind with
+                            | [ OrderingOperation; DistinctOperation ], DistinctOperation
+                                when clause = ExplainOrderBy && not hasDependentSubquery -> false
                             | [ OrderingOperation; DistinctOperation ], DistinctOperation -> hasFilesort
                             | [ OrderingOperation; DistinctOperation ], OrderingOperation -> false
                             | [ OrderingOperation ], OrderingOperation
@@ -20538,6 +20542,7 @@ let private renderExplainJson (shape: ExplainJsonShape) (rows: ExplainRow list) 
                 | Some { Clause = ExplainProjection; Operations = [] } -> true
                 | Some { Clause = ExplainOrderBy; Operations = [ OrderingOperation ] }
                 | Some { Clause = ExplainOrderBy; Operations = [ OrderingOperation; GroupingOperation ] }
+                | Some { Clause = ExplainOrderBy; Operations = [ OrderingOperation; DistinctOperation ] }
                 | Some { Clause = ExplainHaving; Operations = [ GroupingOperation ] }
                 | Some { Clause = ExplainHaving; Operations = [ OrderingOperation; GroupingOperation ] } ->
                     branchRows.Length = 1 && branchRows.Head.Table.IsSome
@@ -20722,7 +20727,8 @@ let private selectJsonSubqueryPlacement (select: SelectStmt) =
         | [] -> Some { Clause = ExplainProjection; Operations = [] }
         | [ (clause, subqueries) ]
             when subqueries |> List.forall simpleJsonSubquery ->
-            let dependent = subqueries |> List.forall Expression.hasQualifiedOuterReference
+            let allDependent = subqueries |> List.forall Expression.hasQualifiedOuterReference
+            let allIndependent = subqueries |> List.forall (Expression.hasQualifiedOuterReference >> not)
             let tableSource = match select.From with Some(FromTable _) -> true | _ -> false
 
             let supported =
@@ -20731,7 +20737,7 @@ let private selectJsonSubqueryPlacement (select: SelectStmt) =
                 | ExplainProjection, [ GroupingOperation ]
                 | ExplainProjection, [ OrderingOperation ]
                 | ExplainProjection, [ DistinctOperation ]
-                | ExplainProjection, [ OrderingOperation; GroupingOperation ] -> tableSource && dependent
+                | ExplainProjection, [ OrderingOperation; GroupingOperation ] -> tableSource && allDependent
                 | ExplainProjection, [ OrderingOperation; DistinctOperation ] ->
                     let ordersByProjectedValue =
                         match select.Projections, select.OrderBy with
@@ -20741,12 +20747,14 @@ let private selectJsonSubqueryPlacement (select: SelectStmt) =
                         | [ _ ], [ (Lit(VInt 1L), _) ] -> true
                         | _ -> false
 
-                    tableSource && dependent && ordersByProjectedValue
-                | ExplainWhere, [] -> tableSource && dependent
+                    tableSource && allDependent && ordersByProjectedValue
+                | ExplainWhere, [] -> tableSource && allDependent
                 | ExplainHaving, [ GroupingOperation ]
                 | ExplainOrderBy, [ OrderingOperation ] -> tableSource
                 | ExplainHaving, [ OrderingOperation; GroupingOperation ]
                 | ExplainOrderBy, [ OrderingOperation; GroupingOperation ] -> tableSource
+                | ExplainOrderBy, [ OrderingOperation; DistinctOperation ] ->
+                    tableSource && allIndependent && select.Projections.Length = 1
                 | _ -> false
 
             if supported then Some { Clause = clause; Operations = operations } else None

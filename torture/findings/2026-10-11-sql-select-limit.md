@@ -91,6 +91,14 @@ native indexed-group probes show that an independent HAVING scalar remains under
 the inner grouping operation when an outer ORDER BY is present, and that an
 independent ORDER BY scalar moves to the inner grouping operation's
 `optimized_away_subqueries`, with no filesort in either wrapper. Fsdb now
-matches both audited cases. Independent DISTINCT/ordering, other
+matches both audited cases. Other independent DISTINCT/ordering and
 HAVING/ORDER BY shapes, subqueries in more than one clause, nested scalar
 blocks, mixed derived/scalar plans, and broader optimizer placement remain open.
+
+A further native DISTINCT probe used both a primary-key projection and a
+duplicate-prone non-key value ordered by an independent scalar. MySQL puts
+`optimized_away_subqueries` under `duplicates_removal`, inside
+`ordering_operation`. Both wrappers report `using_filesort: false`; the
+non-key projection still reports `using_temporary_table: true`. Fsdb now
+matches the audited non-key case, including the child's independent/cacheable
+flags and table access. Other DISTINCT/ordering forms remain open.
