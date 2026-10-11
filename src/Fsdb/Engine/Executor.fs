@@ -6041,11 +6041,14 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let blobColumnSource = isBlobColumnType binaryColumnType
                 let warnTruncated text =
                     Diagnostics.warning 1292 (sprintf "Truncated incorrect DECIMAL value: '%s'" text)
-                let castBinaryString =
+                // A binary literal still carries string-conversion warnings; a
+                // materialized binary expression uses MySQL's quieter DECIMAL path.
+                let computedBinaryString =
                     match e, source with
-                    | CastAsBinary(_, _), VBytes _ -> true
+                    | Lit(VBytes _), _ -> false
+                    | _, VBytes _ when Option.isNone binaryColumnType -> true
                     | _ -> false
-                let quietBinarySource = castBinaryString || blobColumnSource
+                let quietBinarySource = computedBinaryString || blobColumnSource
                 match numericSourceText, v with
                 | Some text, VString prefix ->
                     let warningText = numericCastDiagnosticText source text
@@ -6055,7 +6058,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Some mantissa ->
                         warnTruncated mantissa
                         warnTruncated warningText
-                    | None when prefix = "" && (castBinaryString || Option.isSome binaryColumnType) ->
+                    | None when prefix = "" && (computedBinaryString || Option.isSome binaryColumnType) ->
                         Diagnostics.warning 1366 "Incorrect DECIMAL value: '0' for column '' at row -1"
                         if not quietBinarySource then warnTruncated warningText
                     | None when quietBinarySource -> ()

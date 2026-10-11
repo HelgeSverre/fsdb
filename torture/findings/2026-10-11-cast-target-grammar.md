@@ -102,3 +102,8 @@ text. These column distinctions are covered by focused and differential tests.
 Fixed-width BINARY padding and high bytes in numeric CAST diagnostics now use
 MySQL's uppercase `\xHH` escapes for bytes outside printable ASCII, while
 the numeric prefix still parses the underlying bytes.
+Audited computed binary results from `CONCAT`, `CONCAT_WS`, `SUBSTRING`, and
+`REPLACE` follow the same quiet DECIMAL truncation policy as an explicit
+binary CAST, including warning 1366 for an entirely invalid value. The
+classification uses the binary value's origin rather than a function-name
+exception; other expression producers remain to be audited.

@@ -3088,6 +3088,26 @@ let tests =
                           sql
                   | _, result -> failtestf "expected binary warning result for %s, got %A" sql result
 
+          testCase "computed binary strings use MySQL DECIMAL conversion diagnostics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expected, warnings in
+                  [ "SELECT CAST(CONCAT(_binary'12', _binary'x') AS DOUBLE)", "12", [ 1292, "Truncated incorrect DOUBLE value: '12x'" ]
+                    "SELECT CAST(CONCAT(_binary'12', _binary'x') AS DECIMAL(10,2))", "12.00", []
+                    "SELECT CAST(CONCAT(_binary'abc', _binary'') AS DOUBLE)", "0", [ 1292, "Truncated incorrect DOUBLE value: 'abc'" ]
+                    "SELECT CAST(CONCAT(_binary'abc', _binary'') AS DECIMAL(10,2))", "0.00", [ 1366, "Incorrect DECIMAL value: '0' for column '' at row -1" ]
+                    "SELECT CAST(CONCAT_WS(_binary'', _binary'12', _binary'x') AS DECIMAL(10,2))", "12.00", []
+                    "SELECT CAST(SUBSTRING(_binary'12x', 1) AS DECIMAL(10,2))", "12.00", []
+                    "SELECT CAST(REPLACE(_binary'12x', _binary'z', _binary'') AS DECIMAL(10,2))", "12.00", [] ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected computed binary CAST result for %s, got %A" sql result
+
           testCase "FLOAT casts distinguish invalid text from range overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
