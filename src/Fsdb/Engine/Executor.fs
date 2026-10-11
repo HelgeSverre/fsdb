@@ -787,12 +787,19 @@ let private joinHintDiagnostics = System.Threading.AsyncLocal<OptimizerHintResol
 // An unset scope keeps direct Executor callers' explicit schema. A scoped None
 // means a wire session has selected no database, even when table names are qualified.
 let private functionDatabase = System.Threading.AsyncLocal<string option option>()
+let private synchronousFunctionDatabase = new System.Threading.ThreadLocal<string option option>()
 
 let withFunctionDatabase database body =
-    DynamicScope.withValue functionDatabase (Some database) body
+    DynamicScope.withValue functionDatabase (Some database) (fun () ->
+        DynamicScope.withThreadValue synchronousFunctionDatabase (Some database) body)
+
+let internal withSynchronousFunctionDatabase database body =
+    DynamicScope.withThreadValue synchronousFunctionDatabase (Some database) body
 
 let private currentFunctionDatabase fallback =
-    functionDatabase.Value |> Option.defaultValue (Some fallback)
+    synchronousFunctionDatabase.Value
+    |> Option.orElse functionDatabase.Value
+    |> Option.defaultValue (Some fallback)
 
 let private lookupScopedFunction registry dbName (name: string) =
     match Functions.lookup name registry with

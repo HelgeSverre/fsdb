@@ -6122,6 +6122,57 @@ let tests =
               gate.SetResult(())
               Expect.equal pending.Result (Ok(VString "retained")) "the public scope retains async execution-context flow"
 
+          testCase "concurrent sessions resolve unqualified functions in their own schemas"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable setup = create 1 store
+
+              for sql in
+                  [ "CREATE DATABASE scoped_function_one"
+                    "CREATE DATABASE scoped_function_two"
+                    "CREATE FUNCTION scoped_function_one.marker() RETURNS INT DETERMINISTIC RETURN 11"
+                    "CREATE FUNCTION scoped_function_two.marker() RETURNS INT DETERMINISTIC RETURN 22" ] do
+                  let next, result = handle setup sql
+                  setup <- next
+                  match result with
+                  | Err _ -> failtestf "failed to set up scoped function: %A" result
+                  | _ -> ()
+
+              let first, _ = handle setup "USE scoped_function_one"
+              let second, _ = handle (create 2 store) "USE scoped_function_two"
+              use barrier = new System.Threading.Barrier(2)
+
+              let check expected initial =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      let mutable session = initial
+                      barrier.SignalAndWait() |> ignore
+
+                      for _ in 1 .. 40 do
+                          let next, result = handle session "SELECT marker()"
+                          session <- next
+                          match result with
+                          | ResultSet(_, [ [ Some value ] ]) -> Expect.equal value expected "function uses the session schema"
+                          | other -> failtestf "expected scoped function result, got %A" other)
+
+              System.Threading.Tasks.Task.WaitAll [| check "11" first; check "22" second |]
+
+          testCase "public function-database scope flows into a delayed task"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let registry =
+                  Fsdb.Functions.builtins
+                  |> Fsdb.Functions.registerScalar "scoped_function_one.marker" (fun _ -> VInt 11L)
+              let gate =
+                  System.Threading.Tasks.TaskCompletionSource<unit>(
+                      System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+              let pending =
+                  Fsdb.Executor.withFunctionDatabase (Some "scoped_function_one") (fun () ->
+                      System.Threading.Tasks.Task.Run(fun () ->
+                          gate.Task.Wait()
+                          Fsdb.Executor.evaluateExpression store registry "fsdb" (FuncCall("marker", []))))
+              gate.SetResult(())
+              Expect.equal pending.Result (Ok(VInt 11L)) "the public database scope retains async execution-context flow"
+
           testCase "sql_mode inside Laravel's real comma-joined connect-time SET turns off strict coercion"
           <| fun _ ->
               // The exact statement `strict => false` sends

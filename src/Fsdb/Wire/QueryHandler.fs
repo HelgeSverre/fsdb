@@ -2213,7 +2213,7 @@ let private handleMixedSet (session: Session) (sql: string) : Session * QueryRes
     applySetActions session parsed
 
 let private handleSet session sql =
-    Executor.withFunctionDatabase session.Database (fun () ->
+    Executor.withSynchronousFunctionDatabase session.Database (fun () ->
         match tryParseUserVariableSet (parserOptionsForSession session) sql with
         | Some assignments ->
             emitParseWarnings (Do(assignments |> List.map snd))
@@ -4027,13 +4027,13 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
     TableHandler.invalidate session stmt executed result, result
 
 let private executeParsedWithTemporaryActionInFunctionDatabase database action session stmt =
-    Executor.withFunctionDatabase database (fun () ->
+    Executor.withSynchronousFunctionDatabase database (fun () ->
         executeParsedWithTemporaryActionCore action session stmt)
 
 let private executeParsedWithFunctionDatabase database session stmt =
     match stmt with
     | SetVariables assignments ->
-        Executor.withFunctionDatabase database (fun () ->
+        Executor.withSynchronousFunctionDatabase database (fun () ->
             InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.setOption
             let session, result = executeVariableSet session assignments
             { session with LastResultColumnMetadata = [] }, result)
@@ -5602,7 +5602,7 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
             let schema = session.Database |> Option.defaultValue defaultDatabase
             checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema ast)
             |> Result.bind (fun () ->
-                Executor.withFunctionDatabase session.Database (fun () ->
+                Executor.withSynchronousFunctionDatabase session.Database (fun () ->
                     Executor.validatePreparedBindings store (preparedRegistryFor session) schema ast))
             |> Result.mapError (fun (code, message) ->
                 match resolveMissingFunctionDatabase session.Database options sql (Err(code, message)) with
@@ -7111,7 +7111,7 @@ let rec private invokeStoredFunction
         | Error error -> raiseFunctionError error
 
     let run () =
-        Executor.withFunctionDatabase (Some routine.Schema) (fun () ->
+        Executor.withSynchronousFunctionDatabase (Some routine.Schema) (fun () ->
             runRoutineStatements
                 executionStore
                 executeParsed

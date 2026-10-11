@@ -838,6 +838,12 @@ Warmed text and reused prepared handler allocation fell by about 6.5 and
 6.2 KiB per call on the fixed lookup fixture. The short latency runs still
 do not establish a speedup.
 
+The [next Release scope comparison](benchmarks/results/2026-10-11-thread-scoped-function-database.md)
+uses a thread-local function-database scope for synchronous QueryHandler
+execution while preserving the public asynchronous scope. Warmed text and
+reused prepared handler allocation fell by about 1.4 and 3.2 KiB per call;
+short-run latency remained inconclusive.
+
 A [three-run indexed constant-bound snapshot](benchmarks/results/2026-10-10-constant-index-bounds.md)
 finds fsdb's fixed primary-key lookup around 220–248 µs versus MySQL's
 41–43 µs. `ROUND(PI())` and `BIT_COUNT(7)` lookups fall within the run-to-run
