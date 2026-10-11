@@ -31,5 +31,12 @@ differential contract cover those cases, quoted charset names, multiple
 arguments, and NULL. The implementation shares `CONVERT`'s byte decoding but
 retains CHAR's different coercibility.
 
-Byte-string high-byte diagnostics and the remaining unusual numeric source
-domains are outside this audit.
+Computed byte strings use the same integer-prefix values but keep binary
+warning previews: `CHAR(UNHEX('8031'))` contributes `00` and warns with
+`'\\x801'`, while `CHAR(UNHEX('31FF'))` contributes `01` and warns with
+`'1\\xFF'`. A binary NUL appears as `\\x00` in the warning; decoded text
+stops its preview at NUL. The focused regression and native differential
+contract cover the values and warning order alongside a decoded `latin1`
+source. Numeric CAST and CHAR share the binary-preview renderer.
+
+The remaining unusual numeric source domains are outside this audit.

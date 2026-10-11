@@ -3361,6 +3361,32 @@ let tests =
                   Expect.equal row [ Some "41"; Some "4142"; Some "utf8mb4" ] "quoted charset, multiple arguments, and NULL"
               | _, result -> failtestf "expected CHAR USING forms, got %A" result
 
+          testCase "CHAR integer warnings preserve binary and text source previews"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT HEX(CHAR(UNHEX('8031'))),HEX(CHAR(CONCAT(CHAR(128),'1'))),HEX(CHAR(UNHEX('31FF'))),HEX(CHAR(CAST(0x8031 AS CHAR CHARACTER SET latin1)))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "00"; Some "00"; Some "01"; Some "00" ] "binary and text integer prefixes"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect INTEGER value: '\\x801'"
+                        1292, "Truncated incorrect INTEGER value: '\\x801'"
+                        1292, "Truncated incorrect INTEGER value: '1\\xFF'"
+                        1292, "Truncated incorrect INTEGER value: '€1'" ]
+                      "binary bytes are escaped, text remains decoded"
+              | _, result -> failtestf "expected CHAR source-preview result, got %A" result
+              let sql = "SELECT HEX(CHAR(UNHEX('310032'))),HEX(CHAR(CAST(0x310032 AS CHAR CHARACTER SET latin1)))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "01"; Some "01" ] "NUL follows the integer prefix"
+                  Expect.equal
+                      (session.Diagnostics |> List.map _.Message)
+                      [ "Truncated incorrect INTEGER value: '1\\x002'"
+                        "Truncated incorrect INTEGER value: '1'" ]
+                      "binary warnings escape NUL and text warnings stop at NUL"
+              | _, result -> failtestf "expected CHAR NUL-preview result, got %A" result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

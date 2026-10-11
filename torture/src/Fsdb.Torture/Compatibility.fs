@@ -1224,6 +1224,14 @@ module ContractCatalog =
                yield Contract.query "char-using-forms"
                    "SELECT HEX(CHAR(65 USING 'utf8mb4')),HEX(CHAR(65,66 USING utf8mb4)),CHARSET(CHAR(NULL USING utf8mb4))"
                    |> Contract.comparingValues
+               yield Contract.query "char-binary-source-values"
+                   "SELECT HEX(CHAR(UNHEX('8031'))),HEX(CHAR(CONCAT(CHAR(128),'1'))),HEX(CHAR(UNHEX('31FF'))),HEX(CHAR(CAST(0x8031 AS CHAR CHARACTER SET latin1)))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-binary-source-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-binary-nul-values"
+                   "SELECT HEX(CHAR(UNHEX('310032'))),HEX(CHAR(CAST(0x310032 AS CHAR CHARACTER SET latin1)))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-binary-nul-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, source in
                    [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
                    yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)

@@ -3730,7 +3730,7 @@ let private spaceFn: Scalar =
 /// NULL arguments contribute no bytes.
 let private charIntegerPrefix = Regex(@"^[\t-\r ]*[+-]?[0-9]+", RegexOptions.CultureInvariant)
 
-let private charTextWord (text: string) =
+let private charTextWord (text: string) (diagnostic: string) =
     let matched = charIntegerPrefix.Match text
     let prefix = matched.Value.Trim()
     let trailing = matched.Success && not (String.IsNullOrWhiteSpace(text.Substring matched.Length))
@@ -3743,7 +3743,7 @@ let private charTextWord (text: string) =
             match UInt64.TryParse(prefix, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture) with
             | true, number -> uint32 (number &&& 0xFFFFFFFFUL), false
             | _ -> (if prefix = "" then 0u else UInt32.MaxValue), prefix <> ""
-    if not matched.Success || trailing || overflow then Diagnostics.numericConversion "INTEGER" text
+    if not matched.Success || trailing || overflow then Diagnostics.numericConversion "INTEGER" diagnostic
     word
 
 let private charFn: Scalar =
@@ -3757,8 +3757,16 @@ let private charFn: Scalar =
                     let rounded = Decimal.Round(number, 0, MidpointRounding.AwayFromZero)
                     let remainder = rounded % 4294967296M
                     uint32 (if remainder < 0M then remainder + 4294967296M else remainder)
-                | (VString _ | VBytes _ | VEncodedString _) as text ->
-                    charTextWord (toText text |> Option.defaultValue "")
+                | (VString _ | VBytes _ | VEncodedString _) as source ->
+                    let text = toText source |> Option.defaultValue ""
+                    let diagnostic =
+                        match source with
+                        | VBytes bytes -> Charset.binaryNumericPreview bytes
+                        | _ ->
+                            match text.IndexOf '\000' with
+                            | -1 -> text
+                            | index -> text.Substring(0, index)
+                    charTextWord text diagnostic
                 | other ->
                     let rounded = Math.Round(toDouble other, MidpointRounding.AwayFromZero)
                     if Double.IsFinite rounded then

@@ -3117,12 +3117,7 @@ let private numericCastDiagnosticText source (text: string) =
         | _ -> None
     let preview =
         match binarySource with
-        | Some bytes ->
-            bytes
-            |> Array.map (fun value ->
-                if value >= 0x20uy && value <= 0x7Euy then string (char value)
-                else sprintf "\\x%02X" value)
-            |> String.concat ""
+        | Some bytes -> Charset.binaryNumericPreview bytes
         | None ->
             let text =
                 match text.IndexOf('\000') with

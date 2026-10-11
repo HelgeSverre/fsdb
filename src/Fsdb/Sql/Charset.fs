@@ -653,6 +653,14 @@ let invalidBytePreview bytes offset = bytePreview false bytes offset
 
 let wideBytePreview bytes offset = bytePreview true bytes offset
 
+/// Numeric-conversion warnings keep printable binary bytes and escape the rest.
+let binaryNumericPreview (bytes: byte[]) =
+    bytes
+    |> Array.map (fun value ->
+        if value >= 0x20uy && value <= 0x7Euy then string (char value)
+        else sprintf "\\x%02X" value)
+    |> String.concat ""
+
 let decodeLoadData (name: string) (bytes: byte[]) =
     match tryCodec name with
     | None -> Error(sprintf "Unsupported character set '%s'" (canonicalName name))

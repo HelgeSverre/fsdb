@@ -246,9 +246,9 @@ audited 32-bit wrap, half rounding, NULL skipping, and downstream high-byte
 TIME warnings. Audited text arguments use an integer prefix, preserve
 argument-order warnings, and clamp signed/unsigned overflow. `CHAR(... USING
 charset)` now interprets those bytes in the selected charset, retaining its
-coercibility and audited invalid-byte diagnostics; byte-string high-byte
-diagnostics and unusual source domains
-remain open.
+coercibility and audited invalid-byte diagnostics. Binary-string integer
+warnings now escape high bytes and NUL, while decoded text warnings stop at
+NUL; unusual source domains remain open.
 
 | Missing family | Functions | Impact |
 |---|---|---|
