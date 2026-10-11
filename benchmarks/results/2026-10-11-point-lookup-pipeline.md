@@ -33,3 +33,13 @@ subtracted from the stage timings above. The current evidence points to
 parsing and general execution as substantial fixed costs for text lookups;
 the prepared typed-result path needs its own narrower stage profile before
 another optimization.
+
+## Discarded parser shortcut
+
+A same-runner follow-up skipped the version-comment rewrite when SQL lacked
+`/*!`. The [raw candidate run](2026-10-11-point-lookup-comment-fastpath.csv)
+showed 616–728 fewer allocated bytes per isolated parse than the baseline
+above. Text-handler allocation was unchanged for all three predicates; its
+timing varied upward in this short run. The shortcut was removed because it
+did not address the measured request cost. This comparison is diagnostic,
+not a controlled latency A/B under isolated host load.
