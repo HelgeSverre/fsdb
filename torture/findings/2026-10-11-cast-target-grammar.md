@@ -50,6 +50,15 @@ single-precision FLOAT; the shared CAST precision check now rejects it and
 the temporal cases. DECIMAL already rejected negative precision and scale.
 The focused regression and differential contract cover both conversion forms.
 
+YEAR casts use conversion diagnostics distinct from YEAR column writes.
+Text zero, including `0000`, becomes 2000, while numeric zero remains 0.
+Invalid text returns NULL with warning 1525; a parsed year outside MySQL's
+range returns NULL with warning 1292. A valid integer prefix followed by
+other text retains the year and warns 1292; leading whitespace is accepted
+without a warning, while trailing whitespace warns. Numeric fractions round
+half away from zero without a text-truncation warning. Fsdb now follows these
+audited CAST and typed-CONVERT cases without changing storage-column coercion.
+
 DECIMAL CAST values use their declared precision as a result bound. MySQL
 8.4.11 rounds `CAST('1.239' AS DECIMAL(5,2))` to `1.24` without a condition,
 but clamps `CAST(999.995 AS DECIMAL(5,2))` to `999.99` with warning 1264.

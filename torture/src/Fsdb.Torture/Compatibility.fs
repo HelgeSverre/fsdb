@@ -1153,6 +1153,16 @@ module ContractCatalog =
                      |> Contract.fails 1427 "42000"
                yield Contract.query "decimal-zero-precision" "SELECT CAST('1' AS DECIMAL(0))"
                      |> Contract.comparingValues
+               for index, source in
+                   [ "'0000'"; "'abc'"; "'-0'"; "'1900'"; "'2156'"; "'2001x'"
+                     "'2001 '"; "' 2001'"; "'1.5'"; "0"; "1.5"; "1900"; "2156"
+                     "_binary'0000'"; "_binary'abc'" ] |> List.indexed do
+                   yield Contract.query (sprintf "year-cast-value-%d" index) (sprintf "SELECT CAST(%s AS YEAR)" source)
+                         |> Contract.comparingValues
+                   yield Contract.query (sprintf "year-cast-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
+               yield Contract.query "year-convert-invalid" "SELECT CONVERT('abc', YEAR)" |> Contract.comparingValues
+               yield Contract.query "year-convert-invalid-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, sql in
                    [ "SELECT CAST('abc' AS DECIMAL(5,2))"
                      "SELECT CAST('1.239' AS DECIMAL(5,2))"

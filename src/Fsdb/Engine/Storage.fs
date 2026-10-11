@@ -1984,13 +1984,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     Ok(VInt 0L)
 
             let finish number shortStringZero =
-                let year = roundInteger number
-                let normalized =
-                    if year = 0M then Some(if shortStringZero then 2000L else 0L)
-                    elif year >= 1M && year <= 69M then Some(int64 year + 2000L)
-                    elif year >= 70M && year <= 99M then Some(int64 year + 1900L)
-                    elif year >= 1901M && year <= 2155M then Some(int64 year)
-                    else None
+                let normalized = normalizeMySqlYear (if shortStringZero then 2000L else 0L) number
 
                 match normalized with
                 | Some value -> Ok(VInt value)

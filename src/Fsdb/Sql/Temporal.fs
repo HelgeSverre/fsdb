@@ -6,6 +6,16 @@ open System.Globalization
 open System.Text.RegularExpressions
 open System.Threading
 
+/// Normalize MySQL YEAR's two-digit pivot and supported range. CAST and
+/// column storage choose different results for a textual zero.
+let normalizeMySqlYear zeroYear (number: decimal) =
+    let year = Math.Round(number, 0, MidpointRounding.AwayFromZero)
+    if year = 0m then Some zeroYear
+    elif year >= 1m && year <= 69m then Some(int64 year + 2000L)
+    elif year >= 70m && year <= 99m then Some(int64 year + 1900L)
+    elif year >= 1901m && year <= 2155m then Some(int64 year)
+    else None
+
 /// Immutable rules loaded from MySQL's time-zone catalog.
 type NamedTimeZone =
     private

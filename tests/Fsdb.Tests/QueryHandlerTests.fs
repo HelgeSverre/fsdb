@@ -3174,6 +3174,33 @@ let tests =
                           sql
                   | _, result -> failtestf "expected scalar binary CAST result for %s, got %A" sql result
 
+          testCase "YEAR casts distinguish text, numeric, and invalid values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for source, expected, warnings in
+                  [ "'0000'", Some "2000", []
+                    "'abc'", None, [ 1525, "Incorrect YEAR value: 'abc'" ]
+                    "'-0'", None, [ 1525, "Incorrect YEAR value: '-0'" ]
+                    "'1900'", None, [ 1292, "Truncated incorrect YEAR value: '1900'" ]
+                    "'2156'", None, [ 1292, "Truncated incorrect YEAR value: '2156'" ]
+                    "'2001x'", Some "2001", [ 1292, "Truncated incorrect YEAR value: '2001x'" ]
+                    "'2001 '", Some "2001", [ 1292, "Truncated incorrect YEAR value: '2001 '" ]
+                    "' 2001'", Some "2001", []
+                    "'1.5'", Some "2001", [ 1292, "Truncated incorrect YEAR value: '1.5'" ]
+                    "0", Some "0", []
+                    "1.5", Some "2002", []
+                    "1900", None, [ 1292, "Truncated incorrect YEAR value: '1900'" ]
+                    "2156", None, [ 1292, "Truncated incorrect YEAR value: '2156'" ] ] do
+                  let sql = sprintf "SELECT CAST(%s AS YEAR)" source
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected YEAR CAST result for %s, got %A" sql result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
