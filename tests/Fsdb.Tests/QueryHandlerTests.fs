@@ -4066,6 +4066,15 @@ let tests =
               let tableBranch = tableJson.GetProperty("query_specifications").EnumerateArray() |> Seq.head
               Expect.equal (tableBranch.GetProperty("query_block").GetProperty("table").GetProperty("table_name").GetString()) "select_limit_plan" "branch access details survive nesting"
 
+              let derivedJson =
+                  unionJson
+                      "EXPLAIN FORMAT=JSON SELECT d.id FROM (SELECT id FROM select_limit_plan LIMIT 2) d UNION SELECT id FROM select_limit_plan"
+              let derivedBranch = derivedJson.GetProperty("query_specifications").EnumerateArray() |> Seq.head
+              let derivedSource =
+                  derivedBranch.GetProperty("query_block").GetProperty("table").GetProperty("materialized_from_subquery")
+              let nestedTable = derivedSource.GetProperty("query_block").GetProperty("table")
+              Expect.equal (nestedTable.GetProperty("table_name").GetString()) "select_limit_plan" "derived access remains under its owning branch"
+
               match handle session "EXPLAIN SELECT 1 UNION ALL SELECT 2" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows.Length 2 "UNION ALL has no materialized result row"
               | other -> failtestf "expected UNION ALL branch plans, got %A" other

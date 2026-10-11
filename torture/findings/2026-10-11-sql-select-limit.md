@@ -41,6 +41,10 @@ row and TREE's synthetic zero-row plan. Fsdb now follows those distinctions.
 For plain UNION branches, JSON now nests each branch under
 `union_result.query_specifications`, reports `using_temporary_table`, and
 adds the zero-limit message only to a materialized result. The branch access
-description is retained. Complex derived/subquery branches still use the
-general JSON renderer until their nested hierarchy is audited; MySQL cost
-details and exact ANALYZE timing presentation also remain open.
+description is retained. An audited derived SELECT with its own explicit
+LIMIT now nests under its owning branch's `materialized_from_subquery`
+object, retaining the child's select ID and access description. Mergeable
+and lateral derived sources, derived set operations, and expression
+subqueries still use the general JSON renderer until their ownership and
+dependence are audited. MySQL cost details and exact ANALYZE timing
+presentation also remain open.

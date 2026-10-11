@@ -20245,7 +20245,12 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
 
     ResultSet(columns, rows |> List.sortBy (fun r -> r.Id |> Option.defaultValue System.Int32.MaxValue) |> List.map renderRow)
 
-let private renderExplainJson (unionMaterialized: bool option) (rows: ExplainRow list) : QueryResult =
+type private ExplainUnionJsonShape =
+    { Materialized: bool
+      BranchCount: int
+      AllowDerived: bool }
+
+let private renderExplainJson (unionShape: ExplainUnionJsonShape option) (rows: ExplainRow list) : QueryResult =
     let jsonArray values =
         let array = JsonArray()
         values |> Seq.iter (fun value -> array.Add(value: JsonNode))
@@ -20283,8 +20288,34 @@ let private renderExplainJson (unionMaterialized: bool option) (rows: ExplainRow
         item["table"] <- table
         item
 
-    let queryBlock (blockRows: ExplainRow list) =
+    let derivedTableId (table: string) =
+        if table.StartsWith("<derived", System.StringComparison.Ordinal) && table.EndsWith(">", System.StringComparison.Ordinal) then
+            let digits = table.Substring(8, table.Length - 9)
+            match System.Int32.TryParse digits with
+            | true, id -> Some id
+            | _ -> None
+        else
+            None
+
+    let rec queryBlock (derivedBlocks: Map<int, ExplainRow list>) (blockRows: ExplainRow list) =
         let block = JsonObject()
+
+        let nestedTableNode row =
+            let item = tableNode row
+
+            row.Table
+            |> Option.bind derivedTableId
+            |> Option.bind (fun id -> Map.tryFind id derivedBlocks)
+            |> Option.iter (fun derivedRows ->
+                let materialized = JsonObject()
+                materialized["using_temporary_table"] <- JsonValue.Create(true)
+                materialized["dependent"] <- JsonValue.Create(false)
+                materialized["cacheable"] <- JsonValue.Create(true)
+                materialized["query_block"] <- queryBlock derivedBlocks derivedRows
+                let table = item["table"] :?> JsonObject
+                table["materialized_from_subquery"] <- materialized)
+
+            item
 
         blockRows
         |> List.tryPick _.Id
@@ -20295,48 +20326,66 @@ let private renderExplainJson (unionMaterialized: bool option) (rows: ExplainRow
             let message = if row.Extra.IsEmpty then "No tables used" else String.concat "; " row.Extra
             block["message"] <- JsonValue.Create(message)
         | [ row ] ->
-            let item = tableNode row
+            let item = nestedTableNode row
             block["table"] <- item["table"].DeepClone()
         | rows ->
-            block["nested_loop"] <- rows |> List.map (tableNode >> fun node -> node :> JsonNode) |> jsonArray
+            block["nested_loop"] <- rows |> List.map (nestedTableNode >> fun node -> node :> JsonNode) |> jsonArray
 
         block
 
     let sorted = rows |> List.sortBy (fun row -> row.Id |> Option.defaultValue System.Int32.MaxValue)
-    let queryBlock =
-        match unionMaterialized with
-        | None -> queryBlock sorted
-        | Some materialized
-            when sorted
-                 |> List.forall (fun row ->
-                     row.SelectType = "PRIMARY"
-                     || row.SelectType = "UNION"
-                     || row.SelectType = "UNION RESULT") ->
+    let branchRows =
+        sorted |> List.filter (fun row -> row.SelectType = "PRIMARY" || row.SelectType = "UNION")
+    let branches = branchRows |> List.groupBy _.Id
+    let derivedBlocks =
+        sorted
+        |> List.filter (fun row -> row.SelectType = "DERIVED")
+        |> List.choose (fun row -> row.Id |> Option.map (fun id -> id, row))
+        |> List.groupBy fst
+        |> List.map (fun (id, grouped) -> id, grouped |> List.map snd)
+        |> Map.ofList
+    let referencedDerivedIds =
+        sorted
+        |> List.choose (fun row -> row.Table |> Option.bind derivedTableId)
+        |> Set.ofList
+    let plainBranchShape shape =
+        branches.Length = shape.BranchCount
+        && (sorted
+            |> List.forall (fun row ->
+                row.SelectType = "PRIMARY"
+                || row.SelectType = "UNION"
+                || row.SelectType = "UNION RESULT"
+                || row.SelectType = "DERIVED"))
+        && (shape.AllowDerived || derivedBlocks.IsEmpty)
+        && (derivedBlocks |> Map.keys |> Set.ofSeq) = referencedDerivedIds
+
+    let rootBlock =
+        match unionShape with
+        | None -> queryBlock Map.empty sorted
+        | Some shape when plainBranchShape shape ->
             let unionResult = JsonObject()
-            unionResult["using_temporary_table"] <- JsonValue.Create(materialized)
+            unionResult["using_temporary_table"] <- JsonValue.Create(shape.Materialized)
 
             if sorted |> List.exists (fun row -> row.SelectType = "UNION RESULT" && row.Extra = [ "Zero limit" ]) then
                 unionResult["message"] <- JsonValue.Create("Zero limit")
 
             let specifications =
-                sorted
-                |> List.filter (fun row -> row.SelectType = "PRIMARY" || row.SelectType = "UNION")
-                |> List.groupBy _.Id
+                branches
                 |> List.map (fun (_, branchRows) ->
                     let specification = JsonObject()
                     specification["dependent"] <- JsonValue.Create(false)
                     specification["cacheable"] <- JsonValue.Create(true)
-                    specification["query_block"] <- queryBlock branchRows
+                    specification["query_block"] <- queryBlock derivedBlocks branchRows
                     specification :> JsonNode)
 
             unionResult["query_specifications"] <- jsonArray specifications
             let block = JsonObject()
             block["union_result"] <- unionResult
             block
-        | Some _ -> queryBlock sorted
+        | Some _ -> queryBlock Map.empty sorted
 
     let root = JsonObject()
-    root["query_block"] <- queryBlock
+    root["query_block"] <- rootBlock
     let options = JsonSerializerOptions(WriteIndented = true)
     ResultSet([ "EXPLAIN" ], [ [ Some(root.ToJsonString(options)) ] ])
 
@@ -20415,6 +20464,19 @@ let private unionMaterializesResult (orderBy: OrderKey list) (rest: (SetOp * Sel
             | OpUnion true -> false
             | _ -> true))
 
+let rec private selectSupportsJsonDerived (select: SelectStmt) =
+    let rec supportedSource = function
+        | FromLateral _ -> false
+        | FromJoinGroup(source, joins) ->
+            supportedSource source && (joins |> List.forall (fun join -> supportedSource join.Table))
+        | FromSubquery(PlainSelect nested, _) ->
+            nested.Limit.IsSome && selectSupportsJsonDerived nested
+        | FromSubquery(UnionSelect _, _) -> false
+        | _ -> true
+
+    (select.From |> Option.forall supportedSource)
+    && (select.Joins |> List.forall (fun join -> supportedSource join.Table))
+
 let private checksumTables (store: Store) (dbName: string) (tables: string list) (quick: bool) : QueryResult =
     let checksum tableName =
         let database, table = splitQualified dbName tableName
@@ -20482,8 +20544,15 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             | ExplainTraditional -> renderExplainRows rows
             | ExplainJson ->
                 match stmt with
-                | Union(_, rest, orderBy, _, _) ->
-                    renderExplainJson (Some(unionMaterializesResult orderBy rest)) rows
+                | Union(first, rest, orderBy, _, _) ->
+                    renderExplainJson
+                        (Some
+                            { Materialized = unionMaterializesResult orderBy rest
+                              BranchCount = rest.Length + 1
+                              AllowDerived =
+                                selectSupportsJsonDerived first
+                                && (rest |> List.forall (fun (_, select) -> selectSupportsJsonDerived select)) })
+                        rows
                 | _ -> renderExplainJson None rows
             | ExplainTree ->
                 match stmt with
