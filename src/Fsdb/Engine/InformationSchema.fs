@@ -1289,6 +1289,7 @@ type StatusCounters internal (id: int64) =
 let private processStatusCounters = StatusCounters 0L
 let private connectionAttempts = AtomicCounter()
 let private abortedConnections = AtomicCounter()
+let private abortedClients = AtomicCounter()
 let private maxUsedConnections = AtomicCounter()
 let private wireBytesReceived = AtomicCounter()
 let private wireBytesSent = AtomicCounter()
@@ -1297,6 +1298,7 @@ let mutable private lastStatusFlushTicks = DateTime.UtcNow.Ticks
 
 let internal recordConnectionAttempt () = connectionAttempts.Increment()
 let internal recordAbortedConnection () = abortedConnections.Increment()
+let internal recordAbortedClient () = abortedClients.Increment()
 let internal resetStatusUptime () =
     Threading.Interlocked.Exchange(&lastStatusFlushTicks, DateTime.UtcNow.Ticks) |> ignore
 
@@ -4324,6 +4326,7 @@ let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) schedulerEnabl
           "Slow_queries", string statusCounters.SlowQueries
           "Connections", string connectionAttempts.Value
           "Aborted_connects", string abortedConnections.Value
+          "Aborted_clients", string abortedClients.Value
           "Max_used_connections", string maxUsedConnections.Value
           "Threads_connected", string (connectedThreads ())
           "Threads_running", string (runningThreads schedulerEnabled)

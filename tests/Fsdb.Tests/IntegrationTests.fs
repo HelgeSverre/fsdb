@@ -3514,6 +3514,17 @@ let tests =
                   do! otherFlush.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
                   let! observerAfterOtherFlush = status observer "SESSION" "Bytes_received"
                   Expect.isLessThan observerAfterOtherFlush observerBeforeOtherFlush "FLUSH STATUS also resets other active sessions"
+
+                  let! abortedClientsBefore = status observer "GLOBAL" "Aborted_clients"
+                  use senderId = sender.CreateCommand()
+                  senderId.CommandText <- "SELECT CONNECTION_ID()"
+                  let! senderConnectionId = senderId.ExecuteScalarAsync() |> Async.AwaitTask
+                  use killSender = observer.CreateCommand()
+                  killSender.CommandText <- sprintf "KILL CONNECTION %s" (string senderConnectionId)
+                  do! killSender.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                  do! Async.Sleep 100
+                  let! abortedClientsAfter = status observer "SESSION" "Aborted_clients"
+                  Expect.isGreaterThan abortedClientsAfter abortedClientsBefore "killing an authenticated connection increments Aborted_clients"
               }
               |> Async.RunSynchronously
 

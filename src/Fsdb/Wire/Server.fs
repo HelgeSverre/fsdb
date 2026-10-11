@@ -1472,6 +1472,14 @@ let private handleConnection
         let mutable activeSession: Session option = None
         let mutable accountLease: IDisposable option = None
         let mutable handshakeCompleted = false
+        let mutable gracefulQuit = false
+
+        let recordConnectionEnd () =
+            if handshakeCompleted then
+                if not gracefulQuit then
+                    InformationSchema.recordAbortedClient ()
+            else
+                InformationSchema.recordAbortedConnection ()
 
         let releaseAccountLease () =
             accountLease |> Option.iter _.Dispose()
@@ -1512,7 +1520,7 @@ let private handleConnection
                 match handshakeResp with
                 | None ->
                     closeTls ()
-                    InformationSchema.recordAbortedConnection ()
+                    recordConnectionEnd ()
                     return ()
                 | Some _ -> ()
 
@@ -1733,7 +1741,9 @@ let private handleConnection
 
                             match command with
                             | None -> ()
-                            | Some Quit -> Session.recordGeneralCommand session "Quit" ""
+                            | Some Quit ->
+                                gracefulQuit <- true
+                                Session.recordGeneralCommand session "Quit" ""
                             | Some Ping ->
                                 do!
                                     writePacketAsync
@@ -2683,16 +2693,14 @@ let private handleConnection
                 |> Async.Catch
                 |> Async.Ignore
         | error ->
-            if not handshakeCompleted then
-                InformationSchema.recordAbortedConnection ()
+            recordConnectionEnd ()
             closeTls ()
             releaseAccountLease ()
             InformationSchema.unregisterProcess (int64 connectionId)
             activeSession |> Option.iter QueryHandler.closeSession
             return raise error
 
-        if not handshakeCompleted then
-            InformationSchema.recordAbortedConnection ()
+        recordConnectionEnd ()
         closeTls ()
         releaseAccountLease ()
         InformationSchema.unregisterProcess (int64 connectionId)

@@ -23,6 +23,12 @@ subsequent `FLUSH STATUS` left it at 3. Fsdb now counts unsuccessful initial
 handshakes, including authentication and database-selection failures, while
 normal disconnections after a completed handshake do not change this status.
 The wire regression checks the unknown-database case through a real client.
+MySQL leaves `Aborted_clients` unchanged for a normal client close, but raises
+it after an authenticated socket closes without `COM_QUIT` and after
+`KILL CONNECTION` closes another active client. Fsdb now records that outcome
+when an established connection ends without a quit command. The same wire
+regression kills its second authenticated connection and checks the counter
+from the first.
 `Threads_created` remains absent because Fsdb does not create one worker
 thread per client connection; exposing a fabricated value would obscure that
 difference in execution model.
