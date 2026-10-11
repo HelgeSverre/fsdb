@@ -4227,6 +4227,56 @@ let tests =
                     let attached = source.GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
                     Expect.equal (attached.GetProperty("query_block").GetProperty("select_id").GetInt32()) 4 "WHERE scalar comes last"
 
+                testCase "UNION branches retain materialized source and clause-specific scalars"
+                <| fun _ ->
+                    let plan = scalarExplainPlan ()
+                    let source = "FROM (SELECT id FROM scalar_plan LIMIT 2) d"
+                    let predicate = "d.id=(SELECT b.id FROM scalar_plan b WHERE b.id=d.id)"
+                    let projected =
+                        "SELECT (SELECT c.id FROM scalar_plan c WHERE c.id=d.id) AS x "
+                        + source + " WHERE " + predicate
+                    let filtered = "SELECT d.id " + source + " WHERE " + predicate
+                    let union = plan ("EXPLAIN FORMAT=JSON " + projected + " UNION ALL " + filtered)
+                    let result = union.GetProperty("union_result")
+                    Expect.isFalse (result.GetProperty("using_temporary_table").GetBoolean()) "UNION ALL streams"
+                    let branches = result.GetProperty("query_specifications").EnumerateArray() |> Seq.toArray
+                    Expect.equal branches.Length 2 "both branches have plans"
+
+                    let first = branches.[0].GetProperty("query_block")
+                    Expect.equal (first.GetProperty("select_id").GetInt32()) 1 "first branch ID"
+                    let selected = first.GetProperty("select_list_subqueries").EnumerateArray() |> Seq.head
+                    Expect.equal (selected.GetProperty("query_block").GetProperty("select_id").GetInt32()) 2 "first projection ID"
+                    let firstSource = first.GetProperty("table")
+                    Expect.equal (firstSource.GetProperty("table_name").GetString()) "d" "first derived alias"
+                    Expect.equal (firstSource.GetProperty("materialized_from_subquery").GetProperty("query_block").GetProperty("select_id").GetInt32()) 3 "first derived ID"
+                    let attached = firstSource.GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+                    Expect.equal (attached.GetProperty("query_block").GetProperty("select_id").GetInt32()) 4 "first WHERE ID"
+
+                    let second = branches.[1].GetProperty("query_block")
+                    Expect.equal (second.GetProperty("select_id").GetInt32()) 5 "second branch ID"
+                    let secondSource = second.GetProperty("table")
+                    Expect.equal (secondSource.GetProperty("table_name").GetString()) "d" "second derived alias"
+                    Expect.equal (secondSource.GetProperty("materialized_from_subquery").GetProperty("query_block").GetProperty("select_id").GetInt32()) 6 "second derived ID"
+                    let attached = secondSource.GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+                    Expect.equal (attached.GetProperty("query_block").GetProperty("select_id").GetInt32()) 7 "second WHERE ID"
+
+                testCase "UNION physical branches attach dependent predicate scalars"
+                <| fun _ ->
+                    let plan = scalarExplainPlan ()
+                    let branch =
+                        "SELECT a.id FROM scalar_plan a WHERE "
+                        + "a.id=(SELECT b.id FROM scalar_plan b WHERE b.id=a.id)"
+                    let union = plan ("EXPLAIN FORMAT=JSON " + branch + " UNION ALL " + branch)
+                    let branches = union.GetProperty("union_result").GetProperty("query_specifications").EnumerateArray() |> Seq.toArray
+
+                    for (branch, expectedBranch, expectedChild) in List.zip3 (Array.toList branches) [ 1; 3 ] [ 2; 4 ] do
+                        let block = branch.GetProperty("query_block")
+                        Expect.equal (block.GetProperty("select_id").GetInt32()) expectedBranch "owning branch ID"
+                        let table = block.GetProperty("table")
+                        Expect.equal (table.GetProperty("table_name").GetString()) "a" "physical source alias"
+                        let scalar = table.GetProperty("attached_subqueries").EnumerateArray() |> Seq.head
+                        Expect.equal (scalar.GetProperty("query_block").GetProperty("select_id").GetInt32()) expectedChild "branch predicate ID"
+
                 testCase "single-clause placement"
                 <| fun _ ->
                     let plan = scalarExplainPlan ()

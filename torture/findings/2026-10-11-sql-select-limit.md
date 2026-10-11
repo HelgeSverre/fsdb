@@ -115,8 +115,19 @@ WHERE scalar as 2, 3, and 4, respectively; the projected scalar remains at
 the branch level while the predicate scalar stays on the source table. Fsdb
 now reserves projection IDs before planning FROM and assigns later-clause IDs
 after the source, matching these audited cases. The renderer still falls back
-for materialized-source joins, aggregate/order wrappers, and derived scalars
-inside UNION branches outside the projection shape.
+for materialized-source joins, aggregate/order wrappers, and more complex
+derived/scalar UNION shapes.
+
+Native UNION ALL probes then confirmed clause ownership per branch. Two
+materialized-source branches with dependent WHERE scalars use branch/source/
+predicate IDs 1/2/3 and 4/5/6, with each scalar in its own source table's
+`attached_subqueries`. A mixed first branch with a projected scalar and a
+WHERE scalar uses IDs 1/2/3/4 for branch/projection/source/predicate, followed
+by 5/6/7 for a WHERE-only second branch. Physical-table branches attach their
+dependent predicate scalars with IDs 1/2 and 3/4. Fsdb now selects each UNION
+branch's audited clause placements independently rather than treating every
+branch scalar as a projection. UNION branches with aggregate or ordering
+wrappers and broader derived or nested subquery shapes remain open.
 
 A further native DISTINCT probe used both a primary-key projection and a
 duplicate-prone non-key value ordered by an independent scalar. MySQL puts

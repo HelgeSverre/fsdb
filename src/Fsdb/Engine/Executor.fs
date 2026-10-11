@@ -20257,12 +20257,6 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
 
     ResultSet(columns, rows |> List.sortBy (fun r -> r.Id |> Option.defaultValue System.Int32.MaxValue) |> List.map renderRow)
 
-type private ExplainUnionJsonShape =
-    { Materialized: bool
-      BranchCount: int
-      AllowDerived: bool
-      AllowProjectionSubqueries: bool }
-
 type private ExplainSubqueryClause =
     | ExplainProjection
     | ExplainWhere
@@ -20277,6 +20271,15 @@ type private ExplainOperation =
 type private ExplainSubqueryPlacement =
     { Clause: ExplainSubqueryClause
       Operations: ExplainOperation list }
+
+type private ExplainUnionBranchSubqueries =
+    | AuditedUnionBranch of (ExplainSubqueryPlacement * int) list
+    | UnsupportedUnionBranch
+
+type private ExplainUnionJsonShape =
+    { Materialized: bool
+      AllowDerived: bool
+      BranchSubqueries: ExplainUnionBranchSubqueries list }
 
 type private ExplainJsonShape =
     | FlatJson
@@ -20545,12 +20548,22 @@ let private renderExplainJson (shape: ExplainJsonShape) (derivedAliases: Map<int
                 Some(rows.Head.SelectType = "DEPENDENT SUBQUERY", rows)
             else
                 None)
+    let nestedBranchSubqueries branchId placements =
+        match placements with
+        | [] -> NoNestedSubqueries
+        | _ ->
+            let assigned, _ =
+                placements
+                |> List.mapFold (fun remaining (placement, count) ->
+                    let owned, rest = List.splitAt count remaining
+                    (placement, owned), rest) (branchSubqueries branchId)
+            NestedSubqueries assigned
     let referencedDerivedIds =
         sorted
         |> List.choose (fun row -> row.Table |> Option.bind derivedTableId)
         |> Set.ofList
     let plainBranchShape shape =
-        branches.Length = shape.BranchCount
+        branches.Length = shape.BranchSubqueries.Length
         && (sorted
             |> List.forall (fun row ->
                 row.SelectType = "PRIMARY"
@@ -20561,8 +20574,14 @@ let private renderExplainJson (shape: ExplainJsonShape) (derivedAliases: Map<int
                 || row.SelectType = "DEPENDENT SUBQUERY"))
         && (shape.AllowDerived || derivedBlocks.IsEmpty)
         && (derivedBlocks |> Map.keys |> Set.ofSeq) = referencedDerivedIds
-        && (subqueryBlocks.IsEmpty
-            || shape.AllowProjectionSubqueries)
+        && List.forall2
+            (fun (branchId, _) branchShape ->
+                match branchShape with
+                | AuditedUnionBranch placements ->
+                    (placements |> List.sumBy snd) = (branchSubqueries branchId).Length
+                | UnsupportedUnionBranch -> false)
+            branches
+            shape.BranchSubqueries
 
     let plainSelectShape (placement: ExplainSubqueryPlacement option) =
         match branches, subqueryBlocks with
@@ -20619,12 +20638,7 @@ let private renderExplainJson (shape: ExplainJsonShape) (derivedAliases: Map<int
             queryBlock derivedBlocks (NestedSubqueries [ placement, branchSubqueries branchId ]) branchRows
         | MixedSelectJson placements when plainMixedSelectShape placements ->
             let branchId, branchRows = List.head branches
-            let assigned, _ =
-                placements
-                |> List.mapFold (fun remaining (placement, count) ->
-                    let owned, rest = List.splitAt count remaining
-                    (placement, owned), rest) (branchSubqueries branchId)
-            queryBlock derivedBlocks (NestedSubqueries assigned) branchRows
+            queryBlock derivedBlocks (nestedBranchSubqueries branchId placements) branchRows
         | UnionJson unionShape when plainBranchShape unionShape ->
             let unionResult = JsonObject()
             unionResult["using_temporary_table"] <- JsonValue.Create(unionShape.Materialized)
@@ -20633,14 +20647,16 @@ let private renderExplainJson (shape: ExplainJsonShape) (derivedAliases: Map<int
                 unionResult["message"] <- JsonValue.Create("Zero limit")
 
             let specifications =
-                branches
-                |> List.map (fun (branchId, branchRows) ->
+                List.zip branches unionShape.BranchSubqueries
+                |> List.map (fun ((branchId, branchRows), branchShape) ->
                     let specification = JsonObject()
                     specification["dependent"] <- JsonValue.Create(false)
                     specification["cacheable"] <- JsonValue.Create(true)
-                    let subqueries = branchSubqueries branchId
-                    let placement = { Clause = ExplainProjection; Operations = [] }
-                    specification["query_block"] <- queryBlock derivedBlocks (NestedSubqueries [ placement, subqueries ]) branchRows
+                    let placements =
+                        match branchShape with
+                        | AuditedUnionBranch placements -> placements
+                        | UnsupportedUnionBranch -> invalidOp "Unaudited UNION branch cannot use nested JSON rendering"
+                    specification["query_block"] <- queryBlock derivedBlocks (nestedBranchSubqueries branchId placements) branchRows
                     specification :> JsonNode)
 
             unionResult["query_specifications"] <- jsonArray specifications
@@ -20895,10 +20911,23 @@ let private selectJsonMixedPlacements (select: SelectStmt) =
             { Clause = clause; Operations = clauseOperations }, subqueries.Length)
         |> Some
 
-let private selectSupportsJsonProjectionSubqueries (select: SelectStmt) =
-    match selectJsonSubqueryPlacement select with
-    | Some { Clause = ExplainProjection; Operations = [] } -> true
-    | _ -> false
+let private unionBranchJsonSubqueries (select: SelectStmt) =
+    let count = selectSubqueryExprs select |> List.sumBy (collectSubqueries >> List.length)
+
+    if count = 0 then AuditedUnionBranch []
+    else
+        match selectJsonMixedPlacements select with
+        | Some placements
+            when (placements |> List.map (fun (placement, _) -> placement.Clause)) = [ ExplainProjection; ExplainWhere ]
+                 && (placements |> List.forall (fun (placement, _) -> placement.Operations.IsEmpty)) ->
+            AuditedUnionBranch placements
+        | _ ->
+            match selectJsonSubqueryPlacement select with
+            | Some placement
+                when placement.Operations.IsEmpty
+                     && (placement.Clause = ExplainProjection || placement.Clause = ExplainWhere) ->
+                AuditedUnionBranch [ placement, count ]
+            | _ -> UnsupportedUnionBranch
 
 let private checksumTables (store: Store) (dbName: string) (tables: string list) (quick: bool) : QueryResult =
     let checksum tableName =
@@ -20986,13 +21015,12 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                     renderExplainJson
                         (UnionJson
                             { Materialized = unionMaterializesResult orderBy rest
-                              BranchCount = rest.Length + 1
                               AllowDerived =
                                 selectSupportsJsonDerived first
                                 && (rest |> List.forall (fun (_, select) -> selectSupportsJsonDerived select))
-                              AllowProjectionSubqueries =
-                                selectSupportsJsonProjectionSubqueries first
-                                && (rest |> List.forall (fun (_, select) -> selectSupportsJsonProjectionSubqueries select)) })
+                              BranchSubqueries =
+                                first :: (rest |> List.map snd)
+                                |> List.map unionBranchJsonSubqueries })
                         (branchAliases (first :: (rest |> List.map snd))) rows
                 | Select select ->
                     let shape =
