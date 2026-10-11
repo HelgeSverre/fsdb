@@ -2144,10 +2144,11 @@ let private handleConnection
 
                                 let columns =
                                     match Storage.tableSnapshot (Session.currentStore session) dbName table with
-                                    | Result.Ok storedTable -> Ok(storedTable.Columns, storedTable.Indexes)
+                                    | Result.Ok storedTable ->
+                                        Ok(storedTable.Columns, ColumnWire.metadataOfTableColumn storedTable.Indexes)
                                     | Result.Error error ->
                                         match QueryHandler.viewColumnsForSession session dbName table with
-                                        | Some(Ok viewColumns) -> Ok(viewColumns, [])
+                                        | Some(Ok viewColumns) -> Ok(viewColumns, ColumnWire.metadataOfViewColumn)
                                         | Some(Error error) -> Error error
                                         | None -> Error(Storage.toMySqlError error)
 
@@ -2158,7 +2159,7 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
-                                | Result.Ok(tableColumns, indexes) ->
+                                | Result.Ok(tableColumns, metadataFor) ->
                                     let matchesColumn =
                                         if wildcard = "" then fun (_: string) -> true
                                         else
@@ -2170,7 +2171,7 @@ let private handleConnection
                                          |> List.filter (fun column -> matchesColumn column.Name)
                                          |> List.map (fun column ->
                                              let metadata =
-                                                 { ColumnWire.metadataOfTableColumn indexes column with
+                                                 { metadataFor column with
                                                      Origin =
                                                          Some
                                                              { Schema = dbName

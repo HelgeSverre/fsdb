@@ -632,7 +632,8 @@ binary rows with microsecond temporal precision. Packet framing handles values
 larger than one protocol packet.
 `COM_FIELD_LIST` filters table and view column names by its case-insensitive
 SQL wildcard; [view metadata](torture/findings/2026-10-11-field-list-views.md)
-comes from the session-aware descriptor without reading rows.
+comes from the session-aware descriptor without reading rows, including the
+view-specific scale for string-like columns.
 
 Transport supports zlib, Zstandard, TLS 1.2 and 1.3, optional server and client
 CA certificates, secure-transport enforcement, and per-account SSL, X509,

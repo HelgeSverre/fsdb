@@ -3264,6 +3264,25 @@ let tests =
                   let! viewEnd = readPacketAsync stream
                   Expect.equal viewEnd.Value.Payload.[0] 0xfeuy "view field list ends after its column"
 
+                  let! _ = query "CREATE TABLE text_source (note VARCHAR(20))"
+                  let! _ = readPacketAsync stream
+                  let! _ = query "CREATE VIEW text_view AS SELECT note FROM text_source"
+                  let! _ = readPacketAsync stream
+                  let textViewFields =
+                      Array.concat
+                          [ [| 0x04uy |]
+                            Text.Encoding.UTF8.GetBytes "text_view"
+                            [| 0uy |]
+                            Text.Encoding.UTF8.GetBytes "%" ]
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = textViewFields } |> Async.Ignore
+                  let! textViewField = readPacketAsync stream
+                  let textMetadata = (readWireDefinition textViewField.Value).Metadata
+                  Expect.equal textMetadata.TypeId TypeVarString "view retains VARCHAR type"
+                  Expect.equal textMetadata.ColumnLength 80u "view retains VARCHAR length"
+                  Expect.equal textMetadata.Decimals 31uy "view text descriptor uses MySQL's expression scale"
+                  let! textViewEnd = readPacketAsync stream
+                  Expect.equal textViewEnd.Value.Payload.[0] 0xfeuy "text view field list ends after its column"
+
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x04uy |] (Array.append (Text.Encoding.UTF8.GetBytes "ghost") [| 0uy |]) }
                   let! fieldListErr = readPacketAsync stream
                   Expect.equal fieldListErr.Value.Payload.[0] 0xffuy "missing table: ERR"

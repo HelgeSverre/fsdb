@@ -19,3 +19,11 @@ Fsdb previously returned 1146 because the column descriptor could no longer
 resolve the source table. The wire handler now distinguishes an invalid stored
 view from an absent relation and returns 1356; a focused raw-wire regression
 asserts the code and message.
+
+A metadata probe found another view-specific rule. A base table's `CHAR`,
+`VARCHAR`, `TEXT`, and `VARBINARY` columns reported descriptor scale 0, while
+the same columns through a view reported 31. `ENUM`, `SET`, `JSON`, `BLOB`, and
+`GEOMETRY` view columns also reported 31; numeric and temporal types retained
+their declared scales. A raw-wire regression caught fsdb reporting 0 for a
+view's `VARCHAR(20)` column. The view wire mapper now applies 31 to these
+string-like type IDs without changing physical-table metadata.

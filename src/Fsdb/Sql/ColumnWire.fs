@@ -187,6 +187,17 @@ let withIndexFlags (indexes: IndexDef list) (columnName: string) (metadata: Colu
 let metadataOfTableColumn (indexes: IndexDef list) (column: ColumnDef) =
     metadataOfColumn column |> withIndexFlags indexes column.Name
 
+let metadataOfViewColumn (column: ColumnDef) =
+    let metadata = metadataOfColumn column
+    match metadata.TypeId with
+    | typeId when
+        typeId = TypeString
+        || typeId = TypeVarString
+        || typeId = TypeBlob
+        || typeId = TypeJson
+        || typeId = TypeGeometry -> { metadata with Decimals = 31uy }
+    | _ -> metadata
+
 let private sourceColumnFlagMask =
     PrimaryKeyFlag ||| UniqueKeyFlag ||| MultipleKeyFlag ||| PartKeyFlag ||| AutoIncrementFlag ||| NoDefaultValueFlag ||| OnUpdateNowFlag
 
