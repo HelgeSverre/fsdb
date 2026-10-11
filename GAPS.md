@@ -844,6 +844,12 @@ execution while preserving the public asynchronous scope. Warmed text and
 reused prepared handler allocation fell by about 1.4 and 3.2 KiB per call;
 short-run latency remained inconclusive.
 
+The [empty stored-function registry comparison](benchmarks/results/2026-10-11-empty-stored-function-registry.md)
+then avoided temporary session records when the stored-function catalog is
+empty. Warmed text and reused prepared handler allocation fell by about
+1.2 and 1.0 KiB per call on the same fixture. The populated-catalog path
+still decorates and restores the session; short-run latency is inconclusive.
+
 A [three-run indexed constant-bound snapshot](benchmarks/results/2026-10-10-constant-index-bounds.md)
 finds fsdb's fixed primary-key lookup around 220–248 µs versus MySQL's
 41–43 µs. `ROUND(PI())` and `BIT_COUNT(7)` lookups fall within the run-to-run

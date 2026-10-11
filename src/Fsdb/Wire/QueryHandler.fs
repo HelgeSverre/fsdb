@@ -7009,7 +7009,7 @@ let rec private invokeStoredFunction
                     if Auth.sameAccount account (accountOf caller) then caller.ActiveRoles else [] }
         | None -> caller
 
-    let caller = withStoredFunctions executeText caller
+    let caller = withStoredFunctions executeText caller (storedFunctionEntries caller.Store)
     let calls = storedFunctionCalls.Value |> Option.defaultValue []
     let key = routine.Schema.ToLowerInvariant(), routine.Name.ToLowerInvariant()
 
@@ -7150,19 +7150,24 @@ let rec private invokeStoredFunction
             )
         )
 
-and private withStoredFunctions executeText current =
+and private withStoredFunctions executeText current functions =
     let registry =
-        registerStoredFunctions current.CustomFunctions (storedFunctionEntries current.Store) (fun routine arguments ->
+        registerStoredFunctions current.CustomFunctions functions (fun routine arguments ->
             if Executor.isMetadataProbe () then VNull
             else invokeStoredFunction executeText current routine arguments)
 
     { current with CustomFunctions = registry }
 
 let private withStoredFunctionRegistry executeText session execute =
-    let customFunctions = session.CustomFunctions
-    let decorated = withStoredFunctions executeText session
-    let executed, result = execute decorated
-    { executed with CustomFunctions = customFunctions }, result
+    let functions = storedFunctionEntries session.Store
+    // Most statements have no stored functions to add to the session registry.
+    // In that case there is no temporary registry to restore afterward.
+    if List.isEmpty functions then execute session
+    else
+        let customFunctions = session.CustomFunctions
+        let decorated = withStoredFunctions executeText session functions
+        let executed, result = execute decorated
+        { executed with CustomFunctions = customFunctions }, result
 
 let private normalizeDispatchedSql parserOptions rawSql =
     (Parser.stripVersionCommentsWithOptions parserOptions rawSql).Trim().TrimEnd(';').Trim()
