@@ -1247,6 +1247,15 @@ module ContractCatalog =
                      |> Contract.comparingValues
                yield Contract.query "numeric-cast-derived-blob-column-warnings" "SHOW WARNINGS"
                      |> Contract.comparingValues
+               for index, sql in
+                   [ "SELECT CAST((SELECT _binary'abc' WHERE 1=1) AS DECIMAL(10,2))"
+                     "SELECT CAST((SELECT _binary'12x' FROM cast_numeric_binary_columns LIMIT 1) AS DECIMAL(10,2))"
+                     "SELECT CAST((SELECT _binary'abc' FROM cast_numeric_binary_columns LIMIT 1) AS DECIMAL(10,2))"
+                     "SELECT CAST((SELECT b FROM cast_numeric_binary_columns LIMIT 1) AS DOUBLE)"
+                     "SELECT CAST((SELECT _binary'12x' FROM cast_numeric_binary_columns LIMIT 1) AS DOUBLE)" ] |> List.indexed do
+                   yield Contract.query (sprintf "numeric-cast-scalar-binary-%d" index) sql |> Contract.comparingValues
+                   yield Contract.query (sprintf "numeric-cast-scalar-binary-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                yield Contract.query "numeric-cast-padded-binary-create" "CREATE TEMPORARY TABLE cast_numeric_padded_binary(b BINARY(4))"
                      |> Contract.comparingValues
                yield Contract.query "numeric-cast-padded-binary-insert" "INSERT INTO cast_numeric_padded_binary VALUES ('12x')"

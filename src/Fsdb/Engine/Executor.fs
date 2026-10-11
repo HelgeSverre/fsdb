@@ -3183,6 +3183,7 @@ let private numericCastTextInput ctx expr source =
                 | Some _ -> StoredBinary, true
                 | None ->
                     match expr with
+                    | Subquery select when select.From.IsSome -> QuietBinary, false
                     | Lit(VBytes _)
                     | Case _
                     | Subquery _ -> RegularText, true

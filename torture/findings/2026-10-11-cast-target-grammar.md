@@ -107,8 +107,8 @@ Audited computed binary results from `CONCAT`, `CONCAT_WS`, `SUBSTRING`, and
 binary CAST, including warning 1366 for an entirely invalid value. The
 classification uses the binary value's origin rather than a function-name
 exception; other expression producers remain to be audited.
-Binary values returned by `IF`, `CASE`, `NULLIF`, and a scalar subquery use
-regular DECIMAL truncation warning 1292, including wholly invalid text.
+Binary values returned by `IF`, `CASE`, `NULLIF`, and a source-free scalar
+subquery use regular DECIMAL truncation warning 1292, including wholly invalid text.
 `COALESCE`, `IFNULL`, and audited byte-string functions instead keep quiet
 truncation and report 1366 for wholly invalid text. The numeric CAST source
 classification now distinguishes these conditional and scalar-subquery
@@ -119,6 +119,10 @@ MySQL treats it like a binary column for invalid DECIMAL text: 1366 precedes
 quiet, including when a byte-string function uses it. Fsdb now uses the
 retained expression coercibility to distinguish synthetic binary columns
 from the stored-column case.
+A scalar subquery with a `FROM` source instead suppresses DOUBLE truncation
+warnings and uses quiet DECIMAL conversion: no warning for a valid numeric
+prefix, or 1366 alone for wholly invalid text. A source-free scalar subquery
+keeps the regular 1292 rule even with a constant `WHERE` or `LIMIT`.
 Text-string numeric CAST warning previews stop at the first NUL byte, as in
 MySQL, while binary-source warnings keep the escaped `\x00` representation.
 The result still uses the numeric prefix preceding the NUL.

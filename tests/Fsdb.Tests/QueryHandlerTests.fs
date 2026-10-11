@@ -3152,6 +3152,28 @@ let tests =
                           sql
                   | _, result -> failtestf "expected derived binary CAST result for %s, got %A" sql result
 
+          testCase "scalar subquery binary CAST warnings depend on a row source"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE cast_scalar_blob(b BLOB)"
+              let session, _ = handle session "INSERT INTO cast_scalar_blob VALUES (_binary'12x')"
+              for sql, result, warnings in
+                  [ "SELECT CAST((SELECT _binary'12x') AS DECIMAL(10,2))", "12.00", [ 1292, "Truncated incorrect DECIMAL value: '12x'" ]
+                    "SELECT CAST((SELECT _binary'abc' WHERE 1=1) AS DECIMAL(10,2))", "0.00", [ 1292, "Truncated incorrect DECIMAL value: 'abc'" ]
+                    "SELECT CAST((SELECT b FROM cast_scalar_blob LIMIT 1) AS DECIMAL(10,2))", "12.00", []
+                    "SELECT CAST((SELECT _binary'12x' FROM cast_scalar_blob LIMIT 1) AS DECIMAL(10,2))", "12.00", []
+                    "SELECT CAST((SELECT _binary'abc' FROM cast_scalar_blob LIMIT 1) AS DECIMAL(10,2))", "0.00", [ 1366, "Incorrect DECIMAL value: '0' for column '' at row -1" ]
+                    "SELECT CAST((SELECT b FROM cast_scalar_blob LIMIT 1) AS DOUBLE)", "12", []
+                    "SELECT CAST((SELECT _binary'12x' FROM cast_scalar_blob LIMIT 1) AS DOUBLE)", "12", [] ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual result sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          warnings
+                          sql
+                  | _, result -> failtestf "expected scalar binary CAST result for %s, got %A" sql result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
