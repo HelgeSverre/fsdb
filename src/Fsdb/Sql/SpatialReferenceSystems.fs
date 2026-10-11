@@ -42,6 +42,19 @@ type private UtmZone =
       SemiMajorAxis: float
       InverseFlattening: float }
 
+type private UtmFamily =
+    { Datum: UtmDatum
+      BaseSrid: int
+      Hemisphere: string
+      FalseNorthing: int
+      Zones: int list }
+
+type private UtmDatumInfo =
+    { Name: string
+      GeographicDefinition: string
+      SemiMajorAxis: float
+      InverseFlattening: float }
+
 let private wgs84Definition =
     "GEOGCS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]"
 
@@ -56,6 +69,12 @@ let private nad83Definition =
 
 let private nad27Definition =
     "GEOGCS[\"NAD27\",DATUM[\"North American Datum 1927\",SPHEROID[\"Clarke 1866\",6378206.4,294.9786982138982,AUTHORITY[\"EPSG\",\"7008\"]],TOWGS84[-32.3841359,180.4090461,120.8442577,-2.1545854,-0.1498782,0.5742915,8.1049164],AUTHORITY[\"EPSG\",\"6267\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.017453292519943278,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Lat\",NORTH],AXIS[\"Lon\",EAST],AUTHORITY[\"EPSG\",\"4267\"]]"
+
+let private utmDatumInfo = function
+    | Wgs84 -> { Name = "WGS 84"; GeographicDefinition = wgs84Definition; SemiMajorAxis = 6378137.0; InverseFlattening = 298.257223563 }
+    | Etrs89 -> { Name = "ETRS89"; GeographicDefinition = etrs89Definition; SemiMajorAxis = 6378137.0; InverseFlattening = 298.257222101 }
+    | Nad83 -> { Name = "NAD83"; GeographicDefinition = nad83Definition; SemiMajorAxis = 6378137.0; InverseFlattening = 298.257222101 }
+    | Nad27 -> { Name = "NAD27"; GeographicDefinition = nad27Definition; SemiMajorAxis = 6378206.4; InverseFlattening = 294.9786982138982 }
 
 let private pseudoMercatorDefinition =
     [ "PROJCS[\"WGS 84 / Pseudo-Mercator\","
@@ -92,31 +111,48 @@ let private utmDefinition name geographicDefinition centralMeridian falseNorthin
       sprintf ",UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"E\",EAST],AXIS[\"N\",NORTH],AUTHORITY[\"EPSG\",\"%d\"]]" srid ]
     |> String.concat ""
 
-let private utmZone name datum geographicDefinition semiMajorAxis inverseFlattening baseSrid hemisphere falseNorthing zone =
-    { Srid = baseSrid + zone
-      Name = sprintf "%s / UTM zone %d%s" name zone hemisphere
-      Datum = datum
-      GeographicDefinition = geographicDefinition
+let private utmZone family zone =
+    let datum = utmDatumInfo family.Datum
+    { Srid = family.BaseSrid + zone
+      Name = sprintf "%s / UTM zone %d%s" datum.Name zone family.Hemisphere
+      Datum = family.Datum
+      GeographicDefinition = datum.GeographicDefinition
       CentralMeridian = zone * 6 - 183
-      FalseNorthing = falseNorthing
-      SemiMajorAxis = semiMajorAxis
-      InverseFlattening = inverseFlattening }
+      FalseNorthing = family.FalseNorthing
+      SemiMajorAxis = datum.SemiMajorAxis
+      InverseFlattening = datum.InverseFlattening }
 
-let private wgs84UtmZones =
-    [ for hemisphere, baseSrid, falseNorthing in [ "N", 32600, 0; "S", 32700, 10000000 ] do
-        for zone in 1..60 do
-            utmZone "WGS 84" Wgs84 wgs84Definition 6378137.0 298.257223563 baseSrid hemisphere falseNorthing zone ]
+let private utmFamilies =
+    [ { Datum = Wgs84
+        BaseSrid = 32600
+        Hemisphere = "N"
+        FalseNorthing = 0
+        Zones = [ 1..60 ] }
+      { Datum = Wgs84
+        BaseSrid = 32700
+        Hemisphere = "S"
+        FalseNorthing = 10000000
+        Zones = [ 1..60 ] }
+      { Datum = Etrs89
+        BaseSrid = 25800
+        Hemisphere = "N"
+        FalseNorthing = 0
+        Zones = [ 28..37 ] }
+      { Datum = Nad83
+        BaseSrid = 26900
+        Hemisphere = "N"
+        FalseNorthing = 0
+        Zones = [ 1..23 ] }
+      { Datum = Nad27
+        BaseSrid = 26700
+        Hemisphere = "N"
+        FalseNorthing = 0
+        Zones = [ 1..22 ] } ]
 
-let private etrs89UtmZones =
-    [ for zone in 28..37 -> utmZone "ETRS89" Etrs89 etrs89Definition 6378137.0 298.257222101 25800 "N" 0 zone ]
-
-let private nad83UtmZones =
-    [ for zone in 1..23 -> utmZone "NAD83" Nad83 nad83Definition 6378137.0 298.257222101 26900 "N" 0 zone ]
-
-let private nad27UtmZones =
-    [ for zone in 1..22 -> utmZone "NAD27" Nad27 nad27Definition 6378206.4 294.9786982138982 26700 "N" 0 zone ]
-
-let private utmZones = wgs84UtmZones @ etrs89UtmZones @ nad83UtmZones @ nad27UtmZones
+let private utmZones =
+    [ for family in utmFamilies do
+        for zone in family.Zones do
+            utmZone family zone ]
 
 let private utmSystems =
     utmZones
@@ -262,7 +298,7 @@ let private worldMercatorInverse (x, y) =
     let latitude = latitudeAt 8 (atan (sinh (y / earthRadius)))
     latitude * 180.0 / Math.PI, wrapProjectedLongitude (x * 180.0 / (earthRadius * Math.PI))
 
-// Fourth-order Krüger series for WGS 84/GRS 1980 Transverse Mercator. The
+// Fourth-order Krüger series for the supported UTM ellipsoids. The
 // omitted terms are below a micrometre inside a UTM zone. Coefficients are from:
 // https://proj.org/en/stable/operations/projections/tmerc.html
 type private UtmProjection =
