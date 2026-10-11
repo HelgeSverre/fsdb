@@ -3117,12 +3117,33 @@ let private numericCastDiagnosticText source (text: string) =
                 else sprintf "\\x%02X" value)
             |> String.concat ""
         | _ ->
-            match text.IndexOf('\000') with
-            | -1 -> text
-            | index -> text.Substring(0, index)
-    // The audited ASCII warning argument stops after 128 rendered bytes.
-    if preview.Length > 128 && Seq.forall (fun value -> int value < 128) preview then preview.Substring(0, 128)
-    else preview
+            let text =
+                match text.IndexOf('\000') with
+                | -1 -> text
+                | index -> text.Substring(0, index)
+            // MySQL renders diagnostics through its three-byte system charset.
+            text.EnumerateRunes()
+            |> Seq.map (fun rune -> if rune.Value > 0xFFFF then "?" else rune.ToString())
+            |> String.concat ""
+    let bytes = System.Text.Encoding.UTF8.GetBytes preview
+    let length = min 128 bytes.Length
+    if length = bytes.Length then preview
+    else
+        let mutable lastRuneStart = length - 1
+        while lastRuneStart > 0 && bytes[lastRuneStart] &&& 0xC0uy = 0x80uy do
+            lastRuneStart <- lastRuneStart - 1
+        let firstByte = bytes[lastRuneStart]
+        let runeLength =
+            if firstByte < 0x80uy then 1
+            elif firstByte < 0xE0uy then 2
+            elif firstByte < 0xF0uy then 3
+            else 4
+        if lastRuneStart + runeLength <= length then
+            System.Text.Encoding.UTF8.GetString(bytes, 0, length)
+        else
+            // A cut multibyte sequence becomes one '?' for each retained byte.
+            System.Text.Encoding.UTF8.GetString(bytes, 0, lastRuneStart)
+            + String.replicate (length - lastRuneStart) "?"
 
 let private numericCastBinaryColumnType ctx expr =
     tryColumnDefForExpr ctx expr

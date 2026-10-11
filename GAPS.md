@@ -749,8 +749,9 @@ Audited computed binary strings now share the quiet DECIMAL truncation policy
 seen with explicit binary casts; other expression producers remain open.
 Audited NUL-containing text casts stop warning previews at the NUL; binary
 casts retain the distinct `\x00` representation.
-Long ASCII numeric CAST warning arguments now stop after 128 rendered bytes;
-multibyte preview clipping remains open.
+Audited numeric CAST warning arguments now stop after 128 encoded bytes,
+including UTF-8 text cut mid-character; other source/client charset
+combinations remain open.
 
 The [audited missing-function diagnostics](torture/findings/2026-10-10-missing-function-dml.md)
 now resolve unqualified calls against the selected database in common

@@ -112,5 +112,8 @@ MySQL, while binary-source warnings keep the escaped `\x00` representation.
 The result still uses the numeric prefix preceding the NUL.
 Long ASCII warning arguments are capped at 128 rendered bytes: a `12x` prefix
 followed by 300 `a` characters retains only 125 `a` characters in MySQL's
-DOUBLE warning. Fsdb now matches that audited boundary. Multibyte previews
-can end in replacement or partial-byte output and remain outside this fix.
+DOUBLE warning. With a UTF-8 client, the cap also counts encoded bytes:
+`12x` plus repeated `é` ends with one `?` for the cut byte, while repeated
+`€` ends with two. Supplementary characters become `?` in this diagnostic
+before clipping. Fsdb now matches these audited text-source boundaries;
+other source charsets and client-charset conversions remain open.

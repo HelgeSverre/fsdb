@@ -3137,6 +3137,22 @@ let tests =
                       "MySQL limits the diagnostic argument to 128 ASCII bytes"
               | _, result -> failtestf "expected long numeric CAST result, got %A" result
 
+          testCase "numeric CAST warnings clip UTF-8 previews at bytes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for character, expected in
+                  [ "é", "12x" + String.replicate 62 "é" + "?"
+                    "€", "12x" + String.replicate 41 "€" + "??"
+                    "😀", "12x" + String.replicate 100 "?" ] do
+                  let sql = sprintf "SELECT CAST(CONCAT('12x', REPEAT('%s', 100)) AS DOUBLE)" character
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some "12" ] ]) ->
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ 1292, "Truncated incorrect DOUBLE value: '" + expected + "'" ]
+                          sql
+                  | _, result -> failtestf "expected Unicode numeric CAST result for %s, got %A" sql result
+
           testCase "FLOAT casts distinguish invalid text from range overflow"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
