@@ -9669,6 +9669,23 @@ let tests =
               let fullNarrowedLog = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" fullNarrowedRight)
               Expect.equal fullNarrowedLog (ResultSet([ "rows_examined" ], [ [ Some "4" ] ])) "full join reads the narrowed right source"
 
+              for suffix in [ ""; " LIMIT 1" ] do
+                  let query =
+                      "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id<2"
+                      + suffix
+                  Expect.equal (run query) (ResultSet([ "id"; "id" ], [ [ Some "1"; Some "1" ] ])) "null-rejected left join result"
+                  let logged = run (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
+                  Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some "2" ] ])) "null-rejected left join uses both indexes"
+
+              Expect.equal
+                  (run "SELECT * FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id<2")
+                  (ResultSet([ "id"; "id"; "left_id" ], [ [ Some "1"; Some "1"; Some "1" ] ]))
+                  "null-rejected join preserves SELECT * column order"
+              Expect.equal
+                  (run "SELECT a.id,b.id FROM slow_left_limit_left a LEFT JOIN slow_left_limit_scan b ON b.left_id=a.id WHERE b.id IS NULL")
+                  (ResultSet([ "id"; "id" ], [ [ Some "3"; None ] ]))
+                  "null-accepting WHERE retains the outer join"
+
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

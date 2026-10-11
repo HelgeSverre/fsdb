@@ -11657,6 +11657,67 @@ and private runUnmergedSelectStmt
                 DynamicScope.withValue lockingReadRows rows (fun () ->
                     runUnlockedSelectStmt current registry dbName select outer))
 
+/// A WHERE condition that rejects the nullable side makes a left join an
+/// inner join. For a selective indexed right source, begin there and probe
+/// the original left table. Expand unqualified stars in their written order
+/// so this physical reordering does not change the result column order.
+and private reorderNullRejectedLeftJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    : SelectStmt =
+    let rejectsNull (qualifier: string) =
+        function
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, _), LiteralValue _)
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue _, QualifiedCol(owner, _)) ->
+            equalsIgnoreCase owner qualifier
+        | IsNotNull(QualifiedCol(owner, _)) -> equalsIgnoreCase owner qualifier
+        | _ -> false
+
+    match select.From, select.Joins with
+    | Some(FromTable leftRef as leftSource), [ join ] when
+        join.Kind = LeftJoin
+        && join.Using.IsEmpty
+        && not select.StraightJoin
+        && select.Locking.IsEmpty
+        && not (hasUnqualifiedReference join.On) ->
+        match join.Table with
+        | FromTable rightRef ->
+            let leftQualifier = leftRef.Alias |> Option.defaultValue leftRef.Table
+            let rightQualifier = rightRef.Alias |> Option.defaultValue rightRef.Table
+            let indexedFilter =
+                match tryPhysicalTableRef store dbName leftRef with
+                | Ok(Some _) ->
+                    select.Where
+                    |> optionalConjuncts
+                    |> List.tryFind (rejectsNull rightQualifier)
+                    |> Option.bind (fun predicate ->
+                        tryPhysicalTableRef store dbName rightRef
+                        |> Result.toOption
+                        |> Option.flatten
+                        |> Option.bind (fun table ->
+                            tryPhysicalReadCandidatesInTable store registry table rightRef (Some predicate)))
+                | _ -> None
+
+            match indexedFilter with
+            | Some _ ->
+                let projections =
+                    select.Projections
+                    |> List.collect (fun projection ->
+                        match projection.Expression with
+                        | Star None ->
+                            [ { projection with Expression = Star(Some leftQualifier) }
+                              { projection with Expression = Star(Some rightQualifier) } ]
+                        | _ -> [ projection ])
+                { select with
+                    From = Some join.Table
+                    Joins = [ { join with Kind = InnerJoin; Table = leftSource } ]
+                    Projections = projections }
+            | None -> select
+        | _ -> select
+    | _ -> select
+
 /// MySQL attaches a multi-value IN condition on equal text keys to the first
 /// source chosen for the join. Numeric members expose that placement because
 /// collation-equal strings need not have equal numeric conversions.
@@ -11767,6 +11828,7 @@ and private runUnlockedSelectStmt
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
     let select = transferNumericJoinIn store dbName select
+    let select = reorderNullRejectedLeftJoin store registry dbName select
     let matchNodes =
         (select.Projections |> List.collect (_.Expression >> collectMatchAgainst))
         @ (select.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])

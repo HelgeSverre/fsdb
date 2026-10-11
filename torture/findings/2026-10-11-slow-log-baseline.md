@@ -62,6 +62,13 @@ Without `LIMIT`, the same condition returned three left rows (two null-padded)
 and examined four rows in MySQL 8.4.11: three left candidates plus the one
 right candidate selected by the primary-key range. Fsdb matches that case too.
 
+A null-rejecting `WHERE b.id<2` on the same two-table left join returned only
+`(1,1)` and examined two rows in MySQL 8.4.11, both with and without `LIMIT 1`.
+Fsdb formerly examined seven rows because it retained the outer join. The
+audited indexed case now becomes an inner join driven from `b`, then probes
+`a`; `SELECT *` keeps the written table-column order and `WHERE b.id IS NULL`
+still retains the outer join.
+
 A prepared `SELECT ? AS fsdb_slow_prepared_probe` executed with 43 produced a
 slow-log row for `SELECT 43 AS fsdb_slow_prepared_probe` with one row sent and
 one examined. The fsdb regression also covers its binary prepared execution
