@@ -3280,6 +3280,18 @@ let tests =
                         1292, "Truncated incorrect time value: '\\x01'" ]
                       "binary column TIME warnings"
               | _, result -> failtestf "expected binary-column TIME CAST results, got %A" result
+              for sql, warning in
+                  [ "SELECT CAST('12\\0x' AS TIME)", "Truncated incorrect time value: '12'"
+                    "SELECT CAST(CONCAT('12',CHAR(0),'x') AS TIME)", "Truncated incorrect time value: '12\\x00x'"
+                    "SELECT CAST(CONCAT('12',CHAR(1),'x') AS TIME)", "Truncated incorrect time value: '12\\x01x'"
+                    "SELECT CAST(CONCAT('12',CAST(0x00 AS CHAR CHARACTER SET utf8mb4),'x') AS TIME)", "Truncated incorrect time value: '12'" ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some "00:00:12" ] ]) ->
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ 1292, warning ]
+                          sql
+                  | _, result -> failtestf "expected NUL-containing TIME CAST for %s, got %A" sql result
 
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->

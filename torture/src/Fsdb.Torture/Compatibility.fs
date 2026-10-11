@@ -1191,6 +1191,15 @@ module ContractCatalog =
                yield Contract.query "time-cast-column-values" "SELECT CAST(b AS TIME),CAST(x AS TIME) FROM time_cast_sources ORDER BY id"
                      |> Contract.comparingValues
                yield Contract.query "time-cast-column-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               for index, source in
+                   [ "'12\\0x'"
+                     "CONCAT('12',CHAR(0),'x')"
+                     "CONCAT('12',CHAR(1),'x')"
+                     "CONCAT('12',CAST(0x00 AS CHAR CHARACTER SET utf8mb4),'x')" ] |> List.indexed do
+                   yield Contract.query (sprintf "time-cast-nul-source-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)
+                         |> Contract.comparingValues
+                   yield Contract.query (sprintf "time-cast-nul-warnings-%d" index) "SHOW WARNINGS"
+                         |> Contract.comparingValues
                for index, sql in
                    [ "SELECT CAST('abc' AS DECIMAL(5,2))"
                      "SELECT CAST('1.239' AS DECIMAL(5,2))"

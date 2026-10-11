@@ -169,6 +169,10 @@ their numeric literal value. Thus `b'1'` and `0x01` return NULL with warning
 The same behavior holds for audited stored BIT and VARBINARY columns. Fsdb
 previously returned zero without a warning for invalid bit literals; the
 focused regression and differential contract now cover both literal and
-column sources. A separate oracle probe found that TIME warnings stop at a
-NUL in a text literal but escape a NUL produced by `CONCAT`; that source
-distinction and other binary-producing expressions remain open.
+column sources. A follow-up oracle probe showed that TIME warnings stop at
+NUL in text results, whether literal or computed, but escape NUL and other
+control bytes in binary results. `CONCAT` can produce either charset: its
+binary result from `CHAR(0)` warns with `12\x00x`, while an explicitly
+`utf8mb4` input yields a text result whose warning stops at `12`. Fsdb now
+matches these audited cases. Binary high-byte previews and other source
+expressions remain open.

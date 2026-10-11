@@ -4093,6 +4093,78 @@ let private sourceCharset ctx expression =
     |> Result.map _.Charset
     |> Result.defaultValue ctx.Store.ExecutionSettings.ConnectionCharset
 
+let private castTimeValue (ctx: EvalContext) sourceExpr fsp source =
+    let raw = Value.toText source |> Option.defaultValue ""
+    let warningInput =
+        match source with
+        | VString _ when sourceCharset ctx sourceExpr = "binary" ->
+            raw
+            |> Seq.map (fun value ->
+                if value < ' ' || value = '\u007f' then sprintf "\\x%02X" (int value)
+                else string value)
+            |> String.concat ""
+        | _ -> raw
+    let warningText = numericCastDiagnosticText source warningInput
+    let isNumeric =
+        match source with
+        | VInt _ | VUInt _ | VDecimal _ | VDouble _ -> true
+        | _ -> false
+    let warn () =
+        Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" warningText)
+    let warnSuperfluousSpace parsed prefixEnd =
+        let position =
+            if raw.StartsWith(" ") then Some 0
+            else
+                match parsed, prefixEnd with
+                | ParsedTime _, Some index when index < raw.Length && raw.[index] = ' ' -> Some index
+                | ParsedTime _, None when raw.Contains(':') ->
+                    let beforeColon = raw.Substring(0, raw.IndexOf ':')
+                    let spaces = beforeColon.Length - beforeColon.TrimEnd(' ').Length
+                    if spaces >= 2 then Some(beforeColon.Length - spaces)
+                    elif raw.EndsWith(" ") then Some(raw.TrimEnd().Length)
+                    else None
+                | ParsedTime _, None when raw.EndsWith(" ") -> Some(raw.TrimEnd().Length)
+                | _ -> None
+        position
+        |> Option.iter (fun index ->
+            Diagnostics.warning 4096
+                (sprintf "Delimiter ' ' in position %d in datetime value '%s' at row %d is superfluous and is deprecated. Please remove."
+                    index raw (Diagnostics.currentRowNumber ())))
+    let parsed, prefixEnd =
+        match parseTimeInput raw with
+        | ParsedTime _ as result -> result, None
+        | TimeComponentsOutOfRange as result -> result, None
+        | NotATime ->
+            let input = raw.TrimStart()
+            let clockPrefix = leadingClockTimePrefixRegex.Match input
+            let prefix =
+                if clockPrefix.Success then clockPrefix
+                else leadingNumericTimePrefixRegex.Match input
+            if not prefix.Success then NotATime, None
+            else
+                let ending = raw.Length - input.Length + prefix.Length
+                let remaining = raw.Substring ending
+                let spaces = remaining |> Seq.takeWhile ((=) ' ') |> Seq.length
+                if spaces >= 3 && spaces < remaining.Length then NotATime, None
+                else parseTimeInput prefix.Value, Some ending
+    let result =
+        match parsed with
+        | ParsedTime ticks ->
+            let adjusted =
+                if ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional then truncateTicksToFsp fsp ticks
+                else roundTimeTicksToFsp fsp ticks
+            if timeMagnitude ticks > uint64 maxTimeTicks || timeMagnitude adjusted > uint64 maxTimeTicks then
+                warn ()
+                if isNumeric then VNull else VTime(timeValueOrClamp adjusted)
+            else
+                if Option.isSome prefixEnd then warn ()
+                VTime(timeValueOrClamp adjusted)
+        | NotATime | TimeComponentsOutOfRange ->
+            warn ()
+            VNull
+    warnSuperfluousSpace parsed prefixEnd
+    result
+
 let private coercibilityOfExpr ctx expr =
     expressionCollation ctx expr
     |> Result.map _.Coercibility
@@ -6151,67 +6223,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | Some result -> Ok result
                 | None -> coerce castMode source |> Result.mapError Storage.toMySqlError
             | TTime fsp, (VString _ | VBytes _ | VEncodedString _ | VBinaryLiteral _ | VBit _ | VInt _ | VUInt _ | VDecimal _ | VDouble _) ->
-                let raw = Value.toText source |> Option.defaultValue ""
-                let warningText = numericCastDiagnosticText source raw
-                let isNumeric =
-                    match source with
-                    | VInt _ | VUInt _ | VDecimal _ | VDouble _ -> true
-                    | _ -> false
-                let warn () =
-                    Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" warningText)
-                let warnSuperfluousSpace parsed prefixEnd =
-                    let position =
-                        if raw.StartsWith(" ") then Some 0
-                        else
-                            match parsed, prefixEnd with
-                            | ParsedTime _, Some index when index < raw.Length && raw.[index] = ' ' -> Some index
-                            | ParsedTime _, None when raw.Contains(':') ->
-                                let beforeColon = raw.Substring(0, raw.IndexOf ':')
-                                let spaces = beforeColon.Length - beforeColon.TrimEnd(' ').Length
-                                if spaces >= 2 then Some(beforeColon.Length - spaces)
-                                elif raw.EndsWith(" ") then Some(raw.TrimEnd().Length)
-                                else None
-                            | ParsedTime _, None when raw.EndsWith(" ") -> Some(raw.TrimEnd().Length)
-                            | _ -> None
-                    position
-                    |> Option.iter (fun index ->
-                        Diagnostics.warning 4096
-                            (sprintf "Delimiter ' ' in position %d in datetime value '%s' at row %d is superfluous and is deprecated. Please remove."
-                                index raw (Diagnostics.currentRowNumber ())))
-                let parsed, prefixEnd =
-                    match parseTimeInput raw with
-                    | ParsedTime _ as result -> result, None
-                    | TimeComponentsOutOfRange as result -> result, None
-                    | NotATime ->
-                        let input = raw.TrimStart()
-                        let clockPrefix = leadingClockTimePrefixRegex.Match input
-                        let prefix =
-                            if clockPrefix.Success then clockPrefix
-                            else leadingNumericTimePrefixRegex.Match input
-                        if not prefix.Success then NotATime, None
-                        else
-                            let ending = raw.Length - input.Length + prefix.Length
-                            let remaining = raw.Substring ending
-                            let spaces = remaining |> Seq.takeWhile ((=) ' ') |> Seq.length
-                            if spaces >= 3 && spaces < remaining.Length then NotATime, None
-                            else parseTimeInput prefix.Value, Some ending
-                let result =
-                    match parsed with
-                    | ParsedTime ticks ->
-                        let adjusted =
-                            if castMode.TruncateFractional then truncateTicksToFsp fsp ticks
-                            else roundTimeTicksToFsp fsp ticks
-                        if timeMagnitude ticks > uint64 maxTimeTicks || timeMagnitude adjusted > uint64 maxTimeTicks then
-                            warn ()
-                            if isNumeric then VNull else VTime(timeValueOrClamp adjusted)
-                        else
-                            if Option.isSome prefixEnd then warn ()
-                            VTime(timeValueOrClamp adjusted)
-                    | NotATime | TimeComponentsOutOfRange ->
-                        warn ()
-                        VNull
-                warnSuperfluousSpace parsed prefixEnd
-                Ok result
+                Ok(castTimeValue ctx e fsp source)
             | (TDate | TDateTime _), _ ->
                 let source =
                     match v with

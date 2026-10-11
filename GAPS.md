@@ -732,8 +732,9 @@ space delimiters now produce MySQL's 4096 warning on audited inputs, and
 the audited one- or two-space internal delimiter cases distinguish a retained
 time prefix from a NULL result; bit/hex literals and stored BIT/VARBINARY
 sources now parse their bytes as text and escape nonprintable warning bytes;
-broader delimiter grammar and source expressions remain open, including the
-different NUL warning previews for literals and computed text;
+audited binary-result TIME warnings now escape embedded NUL and control bytes,
+while text-result warnings stop at NUL; broader delimiter grammar, binary
+high-byte previews, and source expressions remain open;
 audited DECIMAL precision/scale limits follow MySQL's validation order and
 source-expression labels, including the zero-precision default. Negative
 FLOAT, TIME, DATETIME, and DECIMAL target precisions now fail as syntax in
