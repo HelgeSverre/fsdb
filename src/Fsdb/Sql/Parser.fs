@@ -46,6 +46,7 @@ let private allowsBackslashEscape (options: ParserOptions) delimiter =
 /// Diagnostics raised after recognizing syntax that MySQL rejects semantically.
 let trySemanticError (detail: string) =
     match detail.Trim() with
+    | message when message.StartsWith("Unknown character set: '", StringComparison.Ordinal) -> Some(1115, message)
     | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
     | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
     | message when
@@ -1407,7 +1408,10 @@ let private convertUsingAtom: Parser<Expr, unit> =
             (sym ")")
             (expr .>> keyword "USING" .>>. (identifier <|> (stringLit |>> (function VString s -> s | _ -> ""))))
     )
-    |>> fun (e, charset) -> FuncCall("CONVERT", [ e; Lit(VString charset) ])
+    >>= fun (e, charset) ->
+        match Charset.tryFind charset with
+        | Some _ -> preturn (FuncCall("CONVERT", [ e; Lit(VString charset) ]))
+        | None -> raise (SemanticParseError(sprintf "Unknown character set: '%s'" charset))
 
 /// Carries the modifier as a cast node so stored expressions retain an
 /// ordinary AST; `Executor` applies WEIGHT_STRING's own length semantics.
@@ -1666,6 +1670,8 @@ let private castExpr: Parser<Expr, unit> =
 
         match charset with
         | Some cs ->
+            if Charset.tryFind cs |> Option.isNone then
+                raise (SemanticParseError(sprintf "Unknown character set: '%s'" cs))
             match target with
             | TChar _ -> CastCharset(e, explicitLength, cs)
             | _ when cs.Equals("binary", System.StringComparison.OrdinalIgnoreCase) -> BinaryCast cast

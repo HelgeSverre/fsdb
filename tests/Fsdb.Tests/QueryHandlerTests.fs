@@ -2824,6 +2824,18 @@ let tests =
               let session, _ = handle session "SELECT CAST('x' AS CHAR CHARACTER SET utf8mb3)"
               expectWarnings [ utf8mb3Warning ] session "CAST charset deprecation"
 
+          testCase "unknown conversion charsets fail before expression evaluation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let expected = Err(1115, "Unknown character set: 'nosuchcharset'")
+              for sql in
+                  [ "SELECT CONVERT('x' USING nosuchcharset)"
+                    "SELECT CONVERT(NULL USING nosuchcharset)"
+                    "SELECT IF(0, CONVERT('x' USING nosuchcharset), 1)"
+                    "SELECT CAST('x' AS CHAR CHARACTER SET nosuchcharset)" ] do
+                  let _, result = handle session sql
+                  Expect.equal result expected sql
+
           testCase "AES result metadata remains binary when LIMIT 0 returns no rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

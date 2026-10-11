@@ -1040,6 +1040,14 @@ module ContractCatalog =
                yield Contract.query "cast-char-binary-width-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield
                    Contract.query "cast-char-binary-metadata" "SELECT CAST(0xE9 AS CHAR CHARACTER SET binary) AS raw, CAST('é' AS CHAR CHARACTER SET binary) AS text_value, CAST('éx' AS CHAR(1) CHARACTER SET binary) AS limited"
+               for index, sql in
+                   [ "SELECT CONVERT('x' USING nosuchcharset)"
+                     "SELECT CONVERT(NULL USING nosuchcharset)"
+                     "SELECT IF(0, CONVERT('x' USING nosuchcharset), 1)"
+                     "SELECT CAST('x' AS CHAR CHARACTER SET nosuchcharset)" ]
+                   |> List.indexed do
+                   yield Contract.query (sprintf "unknown-conversion-charset-%d" index) sql
+                         |> Contract.fails 1115 "42000"
                for index, sql in List.indexed bytePreservation do
                    yield Contract.execute (sprintf "bytes-charset-%d" index) "SET NAMES utf8mb4"
                    for step, fragment in sql.Split(';') |> Array.indexed do

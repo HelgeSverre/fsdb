@@ -25,4 +25,10 @@ for `BINARY(1)` with the original source bytes in the message. Its result
 metadata is variable-string with the binary flag and audited widths of one,
 four, and one byte for those three forms. Fsdb now uses the same cast node
 for binary targets and follows these value, warning, and metadata cases.
+
+MySQL rejects an unknown target charset with error 1115 and SQLSTATE 42000
+before evaluating either `CAST` or `CONVERT ... USING`. The error occurs for
+NULL input and an unchosen `IF` branch too. Fsdb now validates the literal
+charset while parsing these forms; the focused regression and differential
+contract cover the early failure.
 Other CAST charset contexts remain open.
