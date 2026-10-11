@@ -70,8 +70,14 @@ under `grouping_operation.having_subqueries`, and a dependent `ORDER BY` scalar
 under `ordering_operation.order_by_subqueries`; fsdb now renders both for
 audited single-table plans. A projected scalar moves into the corresponding
 grouping or ordering operation, or into `duplicates_removal` for `DISTINCT`;
-fsdb also retains that ownership in the audited simple cases. Independent
-ORDER BY scalars can appear under the operation's
+fsdb also retains that ownership in the audited simple cases. For an indexed
+GROUP BY followed by ORDER BY, native MySQL nests `grouping_operation` inside
+`ordering_operation`; projected and HAVING scalars stay with grouping, while
+an ORDER BY scalar belongs to the outer ordering operation. Fsdb now composes
+those two wrappers for the audited dependent cases and reports a filesort for
+the scalar order key even when its traditional plan row omits that flag.
+Independent ORDER BY scalars can appear under the operation's
 `optimized_away_subqueries`, while independent HAVING scalars can have an
-optimized-away child block. Combined operations, nested scalar blocks, mixed
-derived/scalar plans, and broader optimizer placement remain open.
+optimized-away child block. DISTINCT with ordering, subqueries in more than
+one clause, nested scalar blocks, mixed derived/scalar plans, and broader
+optimizer placement remain open.

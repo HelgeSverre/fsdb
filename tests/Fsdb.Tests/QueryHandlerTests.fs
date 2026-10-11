@@ -4218,6 +4218,29 @@ let tests =
               Expect.isTrue (deduplicated.GetProperty("using_temporary_table").GetBoolean()) "DISTINCT materializes its result"
               Expect.equal (deduplicated.GetProperty("select_list_subqueries").GetArrayLength()) 1 "projected scalar stays under duplicate removal"
 
+              let groupedAndOrdered = plan (projectionSql "GROUP BY a.id ORDER BY a.id DESC")
+              let outerOrdering = groupedAndOrdered.GetProperty("ordering_operation")
+              let innerGrouping = outerOrdering.GetProperty("grouping_operation")
+              Expect.isFalse (outerOrdering.GetProperty("using_filesort").GetBoolean()) "indexed outer ordering avoids filesort"
+              Expect.isFalse (innerGrouping.GetProperty("using_filesort").GetBoolean()) "indexed inner grouping avoids filesort"
+              Expect.equal (innerGrouping.GetProperty("select_list_subqueries").GetArrayLength()) 1 "projection belongs to grouping inside ordering"
+
+              let havingAndOrdered =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a GROUP BY a.id HAVING a.id=(SELECT b.id FROM scalar_plan b WHERE b.id=a.id) ORDER BY a.id DESC"
+              let orderedGrouping = havingAndOrdered.GetProperty("ordering_operation").GetProperty("grouping_operation")
+              Expect.equal (orderedGrouping.GetProperty("having_subqueries").GetArrayLength()) 1 "HAVING belongs to grouping inside ordering"
+
+              let groupedAndOrderScalar =
+                  plan "EXPLAIN FORMAT=JSON SELECT a.id FROM scalar_plan a GROUP BY a.id ORDER BY (SELECT b.id FROM scalar_plan b WHERE b.id=a.id)"
+              let orderedGroups = groupedAndOrderScalar.GetProperty("ordering_operation")
+              Expect.isTrue (orderedGroups.GetProperty("using_filesort").GetBoolean()) "scalar outer ordering filesorts"
+              Expect.isFalse (orderedGroups.GetProperty("grouping_operation").GetProperty("using_filesort").GetBoolean()) "indexed groups avoid filesort"
+              Expect.equal (orderedGroups.GetProperty("order_by_subqueries").GetArrayLength()) 1 "ORDER BY scalar belongs to outer ordering"
+              let groupedTable = orderedGroups.GetProperty("grouping_operation").GetProperty("table")
+              Expect.equal (groupedTable.GetProperty("table_name").GetString()) "a" "grouping retains the source table"
+              let mutable tableMessage = Unchecked.defaultof<System.Text.Json.JsonElement>
+              Expect.isFalse (groupedTable.TryGetProperty("message", &tableMessage)) "operation flags do not leak into the table message"
+
           testCase "sql_safe_updates rejects mutations without a key predicate or LIMIT"
           <| fun _ ->
               let unsafeMessage =
