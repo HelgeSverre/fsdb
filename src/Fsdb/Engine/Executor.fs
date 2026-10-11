@@ -406,13 +406,10 @@ type private MemoizedSubquery =
     | MemoizedSubquery of ExpressionSubqueryResult
     | UnmemoizedSubquery
 
-type private MaterializedEqualityLookup =
-    { Columns: ColumnDef list
-      FindRows: Value list -> Value[] list option }
+type private MaterializedEqualityLookup = Value list -> Value[] list option
 
 type private MaterializedRangeLookup =
-    { Columns: ColumnDef list
-      FindRows: (Value * bool) option -> (Value * bool) option -> Value[] list option }
+    (Value * bool) option -> (Value * bool) option -> Value[] list option
 
 type private PhysicalProjectionStep =
     { InputColumns: ColumnDef list
@@ -572,7 +569,7 @@ let private materializedEqualityLookup
                             | true, matches -> List.ofSeq matches
                             | _ -> [])
 
-                Some { Columns = columns; FindRows = findRows }))
+                Some findRows))
 
 let private isNumericIndexType = function
     | TTinyInt _
@@ -660,7 +657,7 @@ let private materializedRangeLookup
                     |> Array.toList
                     |> Some
 
-            Some { Columns = columns; FindRows = findRows })
+            Some findRows)
 
 let private tryLiteralValues expressions =
     let rec collect values =
@@ -13519,7 +13516,7 @@ and private isStableMaterializedSource source =
             |> Option.exists _.StatementStable)
     | _ -> false
 
-and private tryMaterializedCorrelatedEqualityLookup
+and private tryMaterializedCorrelatedLookup
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -13527,76 +13524,60 @@ and private tryMaterializedCorrelatedEqualityLookup
     (whereExpr: Expr option)
     (outer: EvalContext option)
     : (ColumnDef list * Value[] list) option =
-    FromItem.tryQualifier source
-    |> Option.bind (fun qualifier ->
-        if not (isStableMaterializedSource source) then
-            None
-        else
-            outer
-            |> Option.bind (fun context ->
+    match FromItem.tryQualifier source, outer with
+    | Some qualifier, Some context when isStableMaterializedSource source ->
+        resolveFromItem store registry dbName source
+        |> Result.toOption
+        |> Option.bind (fun (columns, rows) ->
+            let probeSource = correlatedProbeSource qualifier columns
+            let memo = currentStatementMemo ()
 
-                resolveFromItem store registry dbName source
-                |> Result.toOption
-                |> Option.bind (fun (columns, rows) ->
-                    correlatedProbeEqualities (correlatedProbeSource qualifier columns) whereExpr (Some context)
-                    |> Option.bind (fun equalities ->
-                        let byColumn = (currentStatementMemo ()).MaterializedCorrelatedEqualities
+            let equalityCandidates () =
+                let equalities = correlatedProbeEqualities probeSource whereExpr (Some context) |> Option.defaultValue []
 
-                        let sourceLookups =
-                            getMemoized byColumn source (fun () ->
-                                Dictionary<string list, MaterializedEqualityLookup option>())
+                // One statement-local key covers every usable equality.
+                let probes =
+                    equalities
+                    |> List.distinctBy (fst >> fun name -> name.ToLowerInvariant())
+                    |> List.sortBy (fst >> fun name -> name.ToLowerInvariant())
 
-                        // A materialized CTE or derived table has no maintained physical
-                        // index. Build one statement-local key from all usable equalities.
-                        let probes =
-                            equalities
-                            |> List.distinctBy (fst >> fun name -> name.ToLowerInvariant())
-                            |> List.sortBy (fst >> fun name -> name.ToLowerInvariant())
+                let names = probes |> List.map (fst >> fun name -> name.ToLowerInvariant())
+                let values = probes |> List.map snd
 
-                        let names = probes |> List.map (fst >> fun name -> name.ToLowerInvariant())
-                        let values = probes |> List.map snd
+                if names.IsEmpty then
+                    None
+                else
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedEqualities source (fun () ->
+                            Dictionary<string list, MaterializedEqualityLookup option>())
 
-                        if names.IsEmpty then
-                            None
-                        else
-                            getMemoized sourceLookups names (fun () -> materializedEqualityLookup store columns rows names)
-                            |> Option.bind (fun lookup ->
-                                lookup.FindRows values
-                                |> Option.map (fun rows -> lookup.Columns, rows))))))
+                    getMemoized lookups names (fun () -> materializedEqualityLookup store columns rows names)
+                    |> Option.bind (fun lookup -> lookup values)
 
-and private tryMaterializedCorrelatedRangeLookup
-    (store: Store)
-    (registry: Registry)
-    (dbName: string)
-    (source: FromItem)
-    (whereExpr: Expr option)
-    (outer: EvalContext option)
-    : (ColumnDef list * Value[] list) option =
-    FromItem.tryQualifier source
-    |> Option.filter (fun _ -> isStableMaterializedSource source)
-    |> Option.bind (fun qualifier ->
-        outer
-        |> Option.bind (fun context ->
-            resolveFromItem store registry dbName source
-            |> Result.toOption
-            |> Option.bind (fun (columns, rows) ->
-                let bounds =
-                    correlatedRangeBounds (correlatedProbeSource qualifier columns) whereExpr (Some context)
+            let rangeCandidates () =
+                let bounds = correlatedRangeBounds probeSource whereExpr (Some context)
 
-                let bySource = (currentStatementMemo ()).MaterializedCorrelatedRanges
-                let sourceLookups =
-                    getMemoized bySource source (fun () ->
-                        Dictionary<string, MaterializedRangeLookup option>(System.StringComparer.OrdinalIgnoreCase))
+                if bounds.IsEmpty then
+                    None
+                else
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedRanges source (fun () ->
+                            Dictionary<string, MaterializedRangeLookup option>(System.StringComparer.OrdinalIgnoreCase))
 
-                bounds
-                |> List.choose (fun bound ->
-                    getMemoized sourceLookups bound.Column (fun () -> materializedRangeLookup columns rows bound.Column)
-                    |> Option.bind (fun lookup ->
-                        lookup.FindRows bound.Lower bound.Upper
-                        |> Option.map (fun matches -> lookup.Columns, matches)))
-                |> function
-                    | [] -> None
-                    | candidates -> Some(List.minBy (snd >> List.length) candidates))))
+                    bounds
+                    |> List.choose (fun bound ->
+                        getMemoized lookups bound.Column (fun () -> materializedRangeLookup columns rows bound.Column)
+                        |> Option.bind (fun lookup -> lookup bound.Lower bound.Upper))
+                    |> function
+                        | [] -> None
+                        | candidates -> Some(List.minBy List.length candidates)
+
+            [ equalityCandidates (); rangeCandidates () ]
+            |> List.choose id
+            |> function
+                | [] -> None
+                | candidates -> Some(columns, List.minBy List.length candidates))
+    | _ -> None
 
 and private tryCorrelatedSourceLookup
     (store: Store)
@@ -13613,10 +13594,7 @@ and private tryCorrelatedSourceLookup
             | [] -> None
             | candidates -> Some(List.minBy (snd >> List.length) candidates)
 
-    let materializedLookup () =
-        [ tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
-          tryMaterializedCorrelatedRangeLookup store registry dbName source whereExpr outer ]
-        |> fewestRows
+    let materializedLookup () = tryMaterializedCorrelatedLookup store registry dbName source whereExpr outer
 
     match source with
     | FromTable table ->
