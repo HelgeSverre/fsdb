@@ -705,9 +705,17 @@ let private trackExaminedRows (rows: 'row seq) : 'row seq =
     match examinedRows.Value with
     | None -> rows
     | Some count ->
-        rows |> Seq.map (fun row ->
+        rows
+        |> Seq.map (fun row ->
             count.Value <- count.Value + 1L
             row)
+
+let private cacheExaminedRows rows =
+    match examinedRows.Value with
+    | None -> rows
+    // Join planning can enumerate a source before execution. Count each
+    // source row once without changing the ordinary streaming path.
+    | Some _ -> rows |> trackExaminedRows |> Seq.cache
 
 let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
     DynamicScope.withValue variableContext (Some variables) body
@@ -10052,6 +10060,7 @@ and private applyPreparedJoin
                     |> Option.map _.CandidateRows
                     |> Option.defaultValue probe.Table.RowsArray.Indexed
                     |> Seq.map (fun (rowId, right) -> rowId, readRight right)
+                    |> trackExaminedRows
 
                 indexedRows.IsSome, rows
 
@@ -10145,6 +10154,7 @@ and private applyPreparedJoin
         | _, None when hashEligible ->
             let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+            let joinRows = cacheExaminedRows joinRows
             let rightCount = joinRows |> Seq.length
             let buildOnLeft = leftIndexed.Value.Length <= rightCount
 
@@ -10176,6 +10186,7 @@ and private applyPreparedJoin
                 |> keepMatches residualHolds id
                 |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
         | _, None ->
+            let joinRows = cacheExaminedRows joinRows
             let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
             match join.Kind, isConstantTrue effectiveOn with
@@ -11685,7 +11696,9 @@ and private runUnlockedSelectStmt
 
             let basePredicate = Map.tryFind (baseQualifier.ToLowerInvariant()) pushedWhere
             let baseRows = narrowPhysicalSourceRows store registry fromItem basePhysicalTable basePredicate baseRows
-            let baseRows = trackExaminedRows baseRows
+            let baseRows =
+                if select.Joins.IsEmpty then trackExaminedRows baseRows
+                else cacheExaminedRows baseRows
 
             match prepareVirtualRows store registry dbName baseQualifier baseColumns baseRows with
             | Error error -> error, [], []

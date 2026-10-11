@@ -25,6 +25,19 @@ An `INSERT … SELECT` that read three source rows and inserted two reported
 `rows_sent=0`, `rows_examined=3`; fsdb's existing nested SELECT scope gives
 the same result in a regression.
 
+A follow-up join probe used three left rows and four right rows, with three
+matching right rows. MySQL 8.4.11 logged six examined rows for an indexed
+`STRAIGHT_JOIN` on the right-side key, and seven when the right-side key had no
+index. Both returned three rows. The fsdb regressions now cover both paths:
+they count each left source row once, right-side index candidates for the
+indexed path, and right source rows for the scan/hash path. Planner re-reads
+must not inflate the metric.
+
+The probe used `a(id PRIMARY KEY, v)` with IDs 1–3 and
+`b(id PRIMARY KEY, left_id)` with `left_id` values 1, 1, 2, and 4. It ran
+`SELECT a.id,b.id FROM a STRAIGHT_JOIN b ON b.left_id=a.id` under
+`long_query_time=0`, first with `KEY(left_id)` on `b`, then without it.
+
 A prepared `SELECT ? AS fsdb_slow_prepared_probe` executed with 43 produced a
 slow-log row for `SELECT 43 AS fsdb_slow_prepared_probe` with one row sent and
 one examined. The fsdb regression also covers its binary prepared execution
@@ -37,9 +50,10 @@ values.
 Fsdb now publishes table-backed slow-log rows from completed text and binary
 prepared statements. An execution scope counts source candidates before
 filtering for scalar reads, single-table scans, `INSERT … SELECT` source reads,
-and single-table UPDATE/DELETE, rather than guessing from result-row counts.
+single-table UPDATE/DELETE, and audited indexed and scan-shaped joins, rather
+than guessing from result-row counts.
 `SET SESSION long_query_time=0`
-now counts itself, matching the oracle above. Broader join, full-text, and
-other mutation accounting remains
+now counts itself, matching the oracle above. Other join shapes, full-text, and
+other mutation accounting remain
 incomplete, and `lock_time` currently reports zero. FILE output is refused
 while enabled until there is a compatible sink.

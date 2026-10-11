@@ -9530,6 +9530,33 @@ let tests =
                   ))
                   "slow table records observed statement metrics"
 
+          testCase "slow log counts indexed and scan join candidates"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE slow_join_left (id INT PRIMARY KEY, v INT)"
+              let session, _ = handle session "CREATE TABLE slow_join_right (id INT PRIMARY KEY, left_id INT, KEY(left_id))"
+              let session, _ = handle session "CREATE TABLE slow_join_scan (id INT PRIMARY KEY, left_id INT)"
+              let session, _ = handle session "INSERT INTO slow_join_left VALUES (1,10),(2,20),(3,30)"
+              let session, _ = handle session "INSERT INTO slow_join_right VALUES (1,1),(2,1),(3,2),(4,4)"
+              let session, _ = handle session "INSERT INTO slow_join_scan VALUES (1,1),(2,1),(3,2),(4,4)"
+              let session, _ = handle session "SET GLOBAL log_output='TABLE'"
+              let session, _ = handle session "SET GLOBAL slow_query_log=ON"
+              let session, _ = handle session "SET SESSION long_query_time=0"
+              let query =
+                  "SELECT a.id,b.id FROM slow_join_left a STRAIGHT_JOIN slow_join_right b ON b.left_id=a.id"
+              let session, joined = handle session query
+              Expect.equal joined
+                  (ResultSet([ "id"; "id" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ]; [ Some "2"; Some "3" ] ]))
+                  "indexed join result"
+              let _, logged = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" query)
+              Expect.equal logged (ResultSet([ "rows_examined" ], [ [ Some "6" ] ])) "both source candidate sets count"
+              let scanQuery =
+                  "SELECT a.id,b.id FROM slow_join_left a STRAIGHT_JOIN slow_join_scan b ON b.left_id=a.id"
+              let session, scanned = handle session scanQuery
+              Expect.equal scanned joined "scan join result"
+              let _, scanLog = handle session (sprintf "SELECT rows_examined FROM mysql.slow_log WHERE sql_text='%s'" scanQuery)
+              Expect.equal scanLog (ResultSet([ "rows_examined" ], [ [ Some "7" ] ])) "scan-shaped join candidate count"
+
           TestSupport.processGlobalCase "long_query_time counts completed slow statements per session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
