@@ -3746,6 +3746,55 @@ let private charTextWord (text: string) (diagnostic: string) =
     if not matched.Success || trailing || overflow then Diagnostics.numericConversion "INTEGER" diagnostic
     word
 
+let private charDecimalWord (rounded: decimal) =
+    if rounded > decimal UInt64.MaxValue then UInt32.MaxValue, true
+    elif rounded < decimal Int64.MinValue then 0u, true
+    else
+        let remainder = rounded % 4294967296M
+        uint32 (if remainder < 0M then remainder + 4294967296M else remainder), false
+
+let private charDoubleWord (rounded: float) =
+    if not (Double.IsFinite rounded) then 0u, true
+    elif rounded >= 18446744073709551616.0 then UInt32.MaxValue, true
+    elif rounded < -9223372036854775808.0 then 0u, true
+    else
+        let remainder = rounded % 4294967296.0
+        uint32 (if remainder < 0.0 then remainder + 4294967296.0 else remainder), false
+
+let private charJsonStringPrefix = Regex(@"^[\t-\r ]*[+-]?[0-9]+(?:\.[0-9]+)?", RegexOptions.CultureInvariant)
+
+/// Returns the assembled word and any MySQL JSON-to-integer warning code.
+/// The caller owns the source name and row number in the warning message.
+let internal charJsonInteger (json: string) : uint32 * int option =
+    let numericWord (round: decimal -> decimal) (text: string) =
+        match Decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, number -> charDecimalWord (round number)
+        | _ ->
+            match Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, number -> charDoubleWord (Math.Round(number, MidpointRounding.ToEven))
+            | _ -> 0u, true
+
+    try
+        use document = JsonDocument.Parse json
+        let root = document.RootElement
+        match root.ValueKind with
+        | JsonValueKind.Number ->
+            let word, outside = numericWord (fun number -> Decimal.Round(number, 0, MidpointRounding.ToEven)) (root.GetRawText())
+            word, (if outside then Some 3155 else None)
+        | JsonValueKind.String ->
+            let source = root.GetString()
+            let matched = charJsonStringPrefix.Match source
+            if not matched.Success then 0u, Some 3156
+            else
+                let prefix = matched.Value.Trim()
+                let word, outside = numericWord Decimal.Truncate prefix
+                let incomplete = matched.Length <> source.Length || prefix.Contains('.')
+                word, (if outside then Some 3155 elif incomplete then Some 3156 else None)
+        | JsonValueKind.True -> 1u, None
+        | JsonValueKind.False -> 0u, None
+        | _ -> 0u, Some 3156
+    with :? JsonException -> 0u, Some 3156
+
 let private charFn: Scalar =
     fun args ->
         let integerBytes value =
@@ -3755,16 +3804,10 @@ let private charFn: Scalar =
                 | VUInt number -> uint32 (number &&& 0xFFFFFFFFUL)
                 | VBit(_, number) -> uint32 (number &&& 0xFFFFFFFFUL)
                 | VDecimal number ->
-                    let rounded = Decimal.Round(number, 0, MidpointRounding.AwayFromZero)
-                    if rounded > decimal UInt64.MaxValue then
+                    let word, outside = charDecimalWord (Decimal.Round(number, 0, MidpointRounding.AwayFromZero))
+                    if outside then
                         Diagnostics.numericConversion "DECIMAL" (toText value |> Option.defaultValue "")
-                        UInt32.MaxValue
-                    elif rounded < decimal Int64.MinValue then
-                        Diagnostics.numericConversion "DECIMAL" (toText value |> Option.defaultValue "")
-                        0u
-                    else
-                        let remainder = rounded % 4294967296M
-                        uint32 (if remainder < 0M then remainder + 4294967296M else remainder)
+                    word
                 | (VString _ | VBytes _ | VEncodedString _) as source ->
                     let text = toText source |> Option.defaultValue ""
                     let diagnostic =
@@ -3777,12 +3820,7 @@ let private charFn: Scalar =
                     charTextWord text diagnostic
                 | other ->
                     let rounded = Math.Round(toDouble other, MidpointRounding.AwayFromZero)
-                    if not (Double.IsFinite rounded) then 0u
-                    elif rounded >= 18446744073709551616.0 then UInt32.MaxValue
-                    elif rounded < -9223372036854775808.0 then 0u
-                    else
-                        let remainder = rounded % 4294967296.0
-                        uint32 (if remainder < 0.0 then remainder + 4294967296.0 else remainder)
+                    charDoubleWord rounded |> fst
             let bytes =
                 [| byte (word >>> 24)
                    byte (word >>> 16)

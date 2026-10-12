@@ -1251,6 +1251,18 @@ module ContractCatalog =
                yield Contract.query "char-stored-double-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "char-large-double-literal" "SELECT HEX(CHAR(1e30))" |> Contract.comparingValues
                yield Contract.query "char-large-double-literal-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-scalars"
+                   "SELECT HEX(CHAR(CAST('12' AS JSON))),HEX(CHAR(CAST('\"12\"' AS JSON))),HEX(CHAR(CAST('12.5' AS JSON))),HEX(CHAR(CAST('\"12.5\"' AS JSON))),HEX(CHAR(CAST('true' AS JSON))),HEX(CHAR(CAST('false' AS JSON))),HEX(CHAR(CAST('null' AS JSON)))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-scalar-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-composites"
+                   "SELECT HEX(CHAR(JSON_ARRAY(1,2))),HEX(CHAR(JSON_OBJECT('n',12))),HEX(CHAR(CAST('\"5x\"' AS JSON))),HEX(CHAR(CAST('\"abc\"' AS JSON)))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-composite-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-overflow"
+                   "SELECT HEX(CHAR(CAST('18446744073709551616' AS JSON))),HEX(CHAR(CAST('-9223372036854775809' AS JSON)))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-overflow-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, source in
                    [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
                    yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)

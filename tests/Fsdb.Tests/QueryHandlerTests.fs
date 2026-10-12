@@ -3434,6 +3434,42 @@ let tests =
                   Expect.isEmpty session.Diagnostics "literal overflow has no warning"
               | _, result -> failtestf "expected literal CHAR DOUBLE result, got %A" result
 
+          testCase "CHAR converts JSON scalar and composite arguments with source warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT HEX(CHAR(CAST('12' AS JSON))),HEX(CHAR(CAST('\"12\"' AS JSON))),HEX(CHAR(CAST('12.5' AS JSON))),HEX(CHAR(CAST('\"12.5\"' AS JSON))),HEX(CHAR(CAST('true' AS JSON))),HEX(CHAR(CAST('false' AS JSON))),HEX(CHAR(CAST('null' AS JSON)))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "0C"; Some "0C"; Some "0C"; Some "0C"; Some "01"; Some "00"; Some "00" ] "JSON scalar integer values"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3156, "Invalid JSON value for CAST to INTEGER from column cast_as_json at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column cast_as_json at row 1" ]
+                      "JSON string fraction and null warnings"
+              | _, result -> failtestf "expected CHAR JSON scalar result, got %A" result
+              let sql = "SELECT HEX(CHAR(JSON_ARRAY(1,2))),HEX(CHAR(JSON_OBJECT('n',12))),HEX(CHAR(CAST('\"5x\"' AS JSON))),HEX(CHAR(CAST('\"abc\"' AS JSON)))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "00"; Some "00"; Some "05"; Some "00" ] "JSON composite and prefix values"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3156, "Invalid JSON value for CAST to INTEGER from column json_array at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column json_object at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column cast_as_json at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column cast_as_json at row 1" ]
+                      "JSON warnings use expression sources"
+              | _, result -> failtestf "expected CHAR JSON composite result, got %A" result
+              let sql = "SELECT HEX(CHAR(CAST('18446744073709551616' AS JSON))),HEX(CHAR(CAST('-9223372036854775809' AS JSON)))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "FFFFFFFF"; Some "00" ] "JSON numeric overflow clamps"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3155, "Out of range JSON value for CAST to INTEGER from column cast_as_json at row 1"
+                        3155, "Out of range JSON value for CAST to INTEGER from column cast_as_json at row 1" ]
+                      "JSON overflow warnings"
+              | _, result -> failtestf "expected CHAR JSON overflow result, got %A" result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

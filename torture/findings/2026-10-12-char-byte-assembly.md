@@ -52,5 +52,13 @@ with that value yields the same bytes and warning 1292. A negative stored
 overflow yields `00` and the same warning kind. Focused and differential
 tests cover both sources and warning order.
 
-JSON argument diagnostics and overflow behavior for other expression origins
-remain outside this audit.
+JSON arguments have a separate integer cast path. Audited JSON numbers round
+ties to even, JSON strings truncate an integer prefix and warn 3156 for a
+fraction or trailing junk, booleans become one or zero, and JSON null,
+arrays, and objects contribute zero with warning 3156. The audited
+64-bit-boundary JSON numbers clamp with warning 3155. The warning names the
+originating `cast_as_json`, `json_array`, or `json_object` expression; focused and native
+differential cases cover values, codes, names, and order.
+
+Stored JSON row-number diagnostics, other JSON expression origins, and
+floating overflow in other expression forms remain outside this audit.

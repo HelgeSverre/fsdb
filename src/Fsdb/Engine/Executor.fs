@@ -7661,6 +7661,24 @@ and private prepareScalarArguments ctx name expressions values =
             | _ -> ()
 
         let value =
+            match value with
+            | VJson json when charBuiltin ->
+                let word, warningCode = Functions.charJsonInteger json
+                let source =
+                    match expression with
+                    | Cast(_, TJson) -> "cast_as_json"
+                    | FuncCall(functionName, _) -> functionName.ToLowerInvariant()
+                    | Col columnName
+                    | QualifiedCol(_, columnName) -> columnName
+                    | _ -> (exprLabel expression).ToLowerInvariant()
+                warningCode
+                |> Option.iter (fun code ->
+                    let reason = if code = 3155 then "Out of range" else "Invalid"
+                    Diagnostics.warning code (sprintf "%s JSON value for CAST to INTEGER from column %s at row %d" reason source (Diagnostics.currentRowNumber ())))
+                VUInt(uint64 word)
+            | _ -> value
+
+        let value =
             if Functions.isTextArgument name index ctx.Registry then
                 displayValueForText ctx expression value
             else
