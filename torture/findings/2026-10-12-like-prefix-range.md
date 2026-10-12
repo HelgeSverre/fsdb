@@ -4,7 +4,8 @@ Native MySQL 8.4.11 uses `range` access on indexed `VARCHAR(20)` columns
 with `utf8mb4_0900_bin` or `utf8mb4_bin` for `LIKE 'ab%'`,
 `LIKE 'é%'`, and `LIKE '😀%'`. The 0900 collation also uses a range for
 `LIKE 'ab_%'`. It also uses a prefix-length index on `TEXT`, `TINYTEXT`,
-`MEDIUMTEXT`, and `LONGTEXT` for `LIKE 'abc%'`. The ASCII probes return the
+`MEDIUMTEXT`, and `LONGTEXT` for `LIKE 'abc%'`. Indexed `CHAR(20)` under
+either binary collation also uses a range for fixed prefixes. The ASCII probes return the
 same rows as a table without the index:
 `ab` matches only the first pattern, while `abc`, `abZ`, `ab `, and
 `ab%` match both. A leading wildcard cannot supply a lower bound.
@@ -21,11 +22,11 @@ The residual `LIKE` test distinguishes `ab` from `ab ` even though indexed
 comparison pads spaces. The planner chooses the range only when its observed
 candidate count beats a scan. This path covers literal patterns with default
 backslash or explicit `ESCAPE` semantics, including escaped wildcard characters
-and exact patterns, on binary-collated `VARCHAR` and indexed `TEXT` family keys.
+and exact patterns, on binary-collated `CHAR`, `VARCHAR`, and indexed `TEXT` family keys.
 For a prefix-length key such as `v(2)`, storage widens the interval to
 include every row sharing the truncated key; the residual `LIKE` test
 selects `abc` from an `abc%` probe. Other
-collations, `CHAR` keys, expression patterns, and composite-key prefixes
+collations, expression patterns, and composite-key prefixes
 remain open.
 
 The focused Expecto tests first reported `ALL` where MySQL chose `range`.
@@ -33,14 +34,15 @@ They now check both ASCII prefix patterns, BMP and supplementary Unicode
 prefixes, `TEXT` family keys, escaped `_` and `%`, an explicit escape
 character, an exact pattern, trailing-space variants under the legacy binary
 collation, result parity with a scan, the leading-wildcard control, and the
-truncated-index candidate range. The
+truncated-index candidate range. The `CHAR` probes also check that default
+trailing-space stripping leaves only `ab c` matching `LIKE 'ab %'`. The
 `binary-like-prefix-range` differential contract compares the returned
 rows with native MySQL.
 
-All eighteen contract steps matched in `20261012T182646512-26833/contracts`
+All twenty-four contract steps matched in `20261012T183209679-28135/contracts`
 against native MySQL 8.4.11, and the case restored its database objects.
-The full 150-case, 19,110-step run retained two previously documented
-row differences in the Han REGEXP property and mixed-type join cases.
+The full 150-case, 19,116-step run had one Han REGEXP difference and three
+connection-sensitive mixed-type join differences outside this case.
 
 The [focused quick benchmark](../../benchmarks/results/2cf93f5d-quick.md)
 used 10,000 `functional_users` rows and the same `prefix42%` query with

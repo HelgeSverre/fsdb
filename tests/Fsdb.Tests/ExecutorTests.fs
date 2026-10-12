@@ -6979,6 +6979,34 @@ let tests =
                             Expect.equal plan.AccessType (Some "range") "a text key supplies a selective range"
                             Expect.equal plan.Key (Some "ix_v") "the text index supplies the range"
 
+                testCase "binary CHAR LIKE ranges use stored trailing-space semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    let values =
+                        [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁" ]
+                        @ [ for id in 11..36 -> sprintf "zz%02d" id ]
+                        |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
+                        |> String.concat ","
+
+                    for collation, table in
+                        [ "utf8mb4_0900_bin", "like_char_0900"
+                          "utf8mb4_bin", "like_char_legacy" ] do
+                        runDefault store $"CREATE TABLE {table} (id INT PRIMARY KEY, v CHAR(20) COLLATE {collation}, KEY ix_v(v))" |> ignore
+                        Expect.equal (runDefault store $"INSERT INTO {table} VALUES {values}") (Affected 36UL) "seed fixed-width text"
+
+                        for pattern, expected in
+                            [ "ab%", [ 1; 2; 3; 4 ]
+                              "ab %", [ 3 ]
+                              "é%", [ 5; 6 ]
+                              "😀%", [ 8; 9 ] ] do
+                            Expect.equal
+                                (runDefault store $"SELECT id FROM {table} WHERE v LIKE '{pattern}' ORDER BY id")
+                                (ResultSet([ "id" ], expected |> List.map (fun id -> [ Some(string id) ])))
+                                "CHAR padding does not create extra LIKE matches"
+                            let plan = runDefault store $"EXPLAIN SELECT id FROM {table} WHERE v LIKE '{pattern}'" |> explainRow
+                            Expect.equal plan.AccessType (Some "range") "a selective CHAR prefix uses a range"
+                            Expect.equal plan.Key (Some "ix_v") "the CHAR index supplies the range"
+
                 testCase "competing index families choose the lowest-cardinality access"
                 <| fun _ ->
                     let store = newStore ()
