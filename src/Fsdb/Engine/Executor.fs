@@ -2760,6 +2760,9 @@ type private EvalContext =
       ProjectionAliases: Map<string, Result<Expr * Value, EvalError>>
       /// MySQL uses the projected column name in expression range warnings.
       ProjectionLabel: string option
+      /// A JSON expression projected by a stored view keeps its function name
+      /// in CHAR conversion warnings, even when the view renames the column.
+      JsonViewSourceNames: Map<int, string>
       Store: Store
       DbName: string
       /// The enclosing query's own context, if this one belongs to a
@@ -2843,6 +2846,7 @@ let private contextFactory
           RollupKeys = []
           ProjectionAliases = Map.empty
           ProjectionLabel = None
+          JsonViewSourceNames = Map.empty
           Store = store
           DbName = dbName
           Outer = outer
@@ -7663,6 +7667,27 @@ and private isBuiltinCharFunction registry (name: string) =
      || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
     && Functions.isUnmodifiedBuiltinScalar name registry
 
+and private viewJsonSourceNames (store: Store) (dbName: string) (columns: ColumnDef list) (projections: Projection list) (select: SelectStmt) =
+    if not (containsCharProjection projections) then Map.empty
+    else
+        match select.From, select.Joins with
+        | Some(FromTable viewRef), [] ->
+            let viewDb = viewRef.Database |> Option.defaultValue dbName
+            match tryStoredView store viewDb viewRef.Table with
+            | Some view ->
+                match parseStoredViewStatement view with
+                | Ok(Select definition) when definition.Projections.Length = columns.Length ->
+                    definition.Projections
+                    |> List.mapi (fun index projection ->
+                        match projection.Expression with
+                        | FuncCall(functionName, _) -> Some(index, functionName.ToLowerInvariant())
+                        | _ -> None)
+                    |> List.choose id
+                    |> Map.ofList
+                | _ -> Map.empty
+            | None -> Map.empty
+        | _ -> Map.empty
+
 and private charComputedDoubleOverflow (number: double) =
     // The signed lower bound is accepted here; a stored DOUBLE at that
     // boundary still emits a conversion warning in prepareCharArgument.
@@ -7708,7 +7733,10 @@ and private prepareCharArgument ctx expression value =
             | Cast(_, TJson) -> "cast_as_json"
             | FuncCall(functionName, _) -> functionName.ToLowerInvariant()
             | Col columnName
-            | QualifiedCol(_, columnName) -> columnName
+            | QualifiedCol(_, columnName) ->
+                tryDirectColumnForExpr ctx expression
+                |> Option.bind (fun (index, _) -> Map.tryFind index ctx.JsonViewSourceNames)
+                |> Option.defaultValue columnName
             | _ -> (exprLabel expression).ToLowerInvariant()
         warningCode
         |> Option.iter (fun code ->
@@ -16614,7 +16642,11 @@ and private runGroupedSelect
         select.OrderBy |> List.map fst
         |> prepareOrderProjectionAliases registry columnIndex qualifiers orderProjections
 
-    let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
+    let jsonViewSourceNames = viewJsonSourceNames store dbName columns select.Projections select
+    let baseCtxFor = contextFactory store registry dbName columnIndex qualifiers outer
+    let ctxFor =
+        if Map.isEmpty jsonViewSourceNames then baseCtxFor
+        else fun row -> { baseCtxFor row with JsonViewSourceNames = jsonViewSourceNames }
     let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex select.Projections)
     let tryProjectedExpressionIndex expression =
         orderProjections |> List.tryFindIndex (fun projection -> projection.Expression = expression)
@@ -19327,7 +19359,11 @@ and private runSelect
         runGroupedSelect store registry dbName columns qualifiers rows groupInputOrder { select with OrderBy = originalOrderBy } outer
     else
 
-    let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
+    let jsonViewSourceNames = viewJsonSourceNames store dbName columns projections select
+    let baseCtxFor = contextFactory store registry dbName columnIndex qualifiers outer
+    let ctxFor =
+        if Map.isEmpty jsonViewSourceNames then baseCtxFor
+        else fun row -> { baseCtxFor row with JsonViewSourceNames = jsonViewSourceNames }
 
     let resolveOrderExpr = resolveOrderPosition orderProjections
 

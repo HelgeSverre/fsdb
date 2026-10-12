@@ -3562,6 +3562,29 @@ let tests =
                           sql
                   | _, result -> failtestf "expected mixed JSON/NULL CTE result for %s, got %A" sql result
 
+          testCase "CHAR preserves JSON source and warning rows through views"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE char_view_source (id INT PRIMARY KEY,payload JSON)"
+              let session, _ = handle session "INSERT INTO char_view_source VALUES (1,'\"12.5\"'),(2,'null')"
+              let session, _ = handle session "CREATE VIEW char_direct_v AS SELECT id,payload FROM char_view_source"
+              let session, _ = handle session "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
+              let session, _ = handle session "CREATE VIEW char_union_v AS SELECT 1 AS id,CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,CAST('null' AS JSON)"
+              for viewName, columnName, warningSource in
+                  [ "char_direct_v", "payload", "payload"
+                    "char_extract_v", "extracted", "json_extract"
+                    "char_union_v", "payload", "payload" ] do
+                  let sql = sprintf "SELECT id,HEX(CHAR(%s)) FROM %s ORDER BY id DESC" columnName viewName
+                  match handle session sql with
+                  | session, ResultSet(_, rows) ->
+                      Expect.equal rows [ [ Some "2"; Some "00" ]; [ Some "1"; Some "0C" ] ] sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ for row in 1 .. 2 ->
+                                3156, sprintf "Invalid JSON value for CAST to INTEGER from column %s at row %d" warningSource row ]
+                          sql
+                  | _, result -> failtestf "expected CHAR JSON view result for %s, got %A" sql result
+
           testCase "CHAR rejects computed integer overflow before byte assembly"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

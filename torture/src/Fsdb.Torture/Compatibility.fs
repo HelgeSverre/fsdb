@@ -1324,6 +1324,17 @@ module ContractCatalog =
                    "WITH d AS (SELECT 1 AS id, NULL AS payload UNION ALL SELECT 2,CAST('\"12.5\"' AS JSON)) SELECT id,HEX(CHAR(payload)),JSON_TYPE(payload) FROM d ORDER BY id"
                    |> Contract.comparingValues
                yield Contract.query "char-json-cte-null-first-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.execute "char-json-view-source-create" "CREATE TABLE char_view_source(id INT PRIMARY KEY,payload JSON)"
+               yield Contract.execute "char-json-view-source-insert" "INSERT INTO char_view_source VALUES (1,'\"12.5\"'),(2,'null')"
+               yield Contract.execute "char-json-view-direct-create" "CREATE VIEW char_direct_v AS SELECT id,payload FROM char_view_source"
+               yield Contract.execute "char-json-view-extract-create" "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
+               yield Contract.execute "char-json-view-union-create" "CREATE VIEW char_union_v AS SELECT 1 AS id,CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,CAST('null' AS JSON)"
+               for name, sql in
+                   [ "direct", "SELECT id,HEX(CHAR(payload)) FROM char_direct_v ORDER BY id DESC"
+                     "extract", "SELECT id,HEX(CHAR(extracted)) FROM char_extract_v ORDER BY id DESC"
+                     "union", "SELECT id,HEX(CHAR(payload)) FROM char_union_v ORDER BY id DESC" ] do
+                   yield Contract.query (sprintf "char-json-view-%s" name) sql |> Contract.comparingValues
+                   yield Contract.query (sprintf "char-json-view-%s-warnings" name) "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.execute "char-json-storage-create" "CREATE TABLE char_json_probe(id INT PRIMARY KEY,payload JSON)"
                yield Contract.execute "char-json-storage-insert"
                    "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"
