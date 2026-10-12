@@ -14989,7 +14989,8 @@ and private transformUsesStoredSemantics (registry: Registry) expression = funct
 
             callsUnmodified
             && (requested.NullFallback
-                |> Option.forall (fun fallback -> Functions.isUnmodifiedBuiltinScalar fallback.Name registry))
+                |> Option.forall (fun fallback ->
+                    Functions.isUnmodifiedBuiltinScalar (FunctionalIndex.fallbackBuiltinName fallback.Function) registry))
             && (requested.NullComparison.IsNone
                 || Functions.isUnmodifiedBuiltinScalar "NULLIF" registry)
         | _ -> false

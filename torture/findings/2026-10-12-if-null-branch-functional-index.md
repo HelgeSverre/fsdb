@@ -14,11 +14,10 @@ returned only ID 1, and `EXPLAIN` named `ux` with `key_len=5`. The fixture
 ran against the disposable native MySQL 8.4.11 benchmark server and was
 removed afterward.
 
-Fsdb now recognizes this exact NULL-branch shape for signed `INT` sources
-with a fitting integer literal. The focused Expecto regression first failed
-with unsupported unique-expression error 1235, then passed with physical
-equality and uniqueness. Other `IF` conditions, result types, and branches
-remain outside the supported physical-key grammar.
+Fsdb now recognizes this NULL-branch shape for signed `INT` sources with a
+fitting integer literal. The focused Expecto regression first failed with
+unsupported unique-expression error 1235, then passed with physical equality
+and uniqueness.
 
 `just check` passed all 3,494 tests with no build warnings. The six steps of
 `if-null-branch-functional-index` passed against native MySQL 8.4.11 in the
@@ -28,3 +27,20 @@ steps: `regexp-posix-classes/han-script-negation` and the previously recorded
 `mixed-type-join-in/costed-d-three-labels-unindexed`. The native server uses
 `lower_case_table_names=2` on macOS; this is supplementary evidence rather
 than the pinned-container oracle lane.
+
+MySQL 8.4.11 also accepts `IF(value IS NOT NULL, value, 7)` with the same
+five-byte key width. Its `SHOW INDEX` expression is distinct, and a table
+that has only the `IS NULL` form does not use that key for the `IS NOT NULL`
+form, even though the values are equivalent. The mirrored fsdb regression
+first failed with 1235 and now verifies uniqueness, equality lookup, key
+width, and separate key identity. The differential contract covers both
+forms. Other `IF` conditions, result types, and branch expressions remain
+outside the supported physical-key grammar.
+
+After adding the second form, `just check` passed all 3,495 tests with no
+build warnings. All 12 steps of the expanded contract passed in the native
+MySQL 8.4.11 run at
+`torture/artifacts/runs/20261012T155415356-51608/contracts`. Its two
+result differences were the same unrelated Han regex and mixed-type join
+cases noted above. The digest-pinned container lane has not been rerun for
+this change.

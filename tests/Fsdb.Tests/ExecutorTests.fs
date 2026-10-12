@@ -8890,6 +8890,42 @@ let tests =
                     Expect.equal plan.Key (Some "ux") "the IF expression uses its own key"
                     Expect.equal plan.KeyLength (Some "5") "MySQL keeps the IF result nullable"
 
+                    let otherForm =
+                        runDefault store "EXPLAIN SELECT id FROM conditional_key WHERE IF(value IS NOT NULL, value, 7) = 7"
+                        |> explainRow
+
+                    Expect.equal otherForm.Key None "the equivalent branch order is a distinct expression"
+
+                testCase "IF NOT NULL-branch functional keys keep distinct physical identity"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE reversed_key (id INT PRIMARY KEY, value INT, UNIQUE INDEX ux ((IF(value IS NOT NULL, value, 7))))")
+                        (Affected 0UL)
+                        "MySQL accepts the reversed conditional key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO reversed_key VALUES (1, NULL), (2, 9)")
+                        (Affected 2UL)
+                        "both branches populate the reversed key"
+
+                    match runDefault store "INSERT INTO reversed_key VALUES (3, 7)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "the explicit seven must collide with the NULL branch; got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM reversed_key WHERE IF(value IS NOT NULL, value, 7) = 7")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the reversed equality finds the fallback row"
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM reversed_key WHERE IF(value IS NOT NULL, value, 7) = 7"
+                        |> explainRow
+
+                    Expect.equal plan.Key (Some "ux") "the reversed expression uses its own key"
+                    Expect.equal plan.KeyLength (Some "5") "the reversed form keeps MySQL's nullable width"
+
                 testCase "IFNULL integer functional keys retain their distinct result types"
                 <| fun _ ->
                     let store = newStore ()

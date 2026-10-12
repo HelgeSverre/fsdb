@@ -152,8 +152,26 @@ let tryBuiltinName transform =
     |> List.tryPick (fun definition ->
         if definition.Transform = transform then Some definition.CanonicalName else None)
 
+type NullFallbackFunction =
+    | CoalesceFunction
+    | IfNullFunction
+    | IfNullBranch
+    | IfNotNullBranch
+
+let fallbackBuiltinName = function
+    | CoalesceFunction -> "COALESCE"
+    | IfNullFunction -> "IFNULL"
+    | IfNullBranch | IfNotNullBranch -> "IF"
+
+let private isConditionalFallback = function
+    | IfNullBranch | IfNotNullBranch -> true
+    | _ -> false
+
+let private coalescingFunction (name: string) =
+    if name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase) then CoalesceFunction else IfNullFunction
+
 type NullFallback =
-    { Name: string
+    { Function: NullFallbackFunction
       Value: Value
       Literal: Expr }
 
@@ -169,9 +187,11 @@ let private canonicalExpression (column: string) fallback nullComparison (calls:
     let source =
         let column = Col(column.ToLowerInvariant())
         match fallback, nullComparison with
-        | Some fallback, None when fallback.Name = "IF" ->
+        | Some({ Function = IfNullBranch } as fallback), None ->
             FuncCall("IF", [ IsNull column; fallback.Literal; column ])
-        | Some fallback, None -> FuncCall(fallback.Name, [ column; fallback.Literal ])
+        | Some({ Function = IfNotNullBranch } as fallback), None ->
+            FuncCall("IF", [ IsNotNull column; column; fallback.Literal ])
+        | Some fallback, None -> FuncCall(fallbackBuiltinName fallback.Function, [ column; fallback.Literal ])
         | None, Some value -> FuncCall("NULLIF", [ column; Lit value ])
         | None, None -> column
         | Some _, Some _ -> invalidArg (nameof nullComparison) "An index source cannot have two NULL rules"
@@ -196,6 +216,23 @@ let tryPhysicalExpression expression =
         | IntroducedLiteral(value, _, _) as expression -> Some(expression, value)
         | _ -> None
 
+    let matchingColumn tested source =
+        match tested, source with
+        | Col tested, Col column when tested.Equals(column, StringComparison.OrdinalIgnoreCase) ->
+            Some(None, column)
+        | QualifiedCol(testedQualifier, tested), QualifiedCol(qualifier, column)
+            when testedQualifier.Equals(qualifier, StringComparison.OrdinalIgnoreCase)
+                 && tested.Equals(column, StringComparison.OrdinalIgnoreCase) ->
+            Some(Some qualifier, column)
+        | _ -> None
+
+    let conditionalFallback form tested argument source calls =
+        matchingColumn tested source
+        |> Option.bind (fun (qualifier, column) ->
+            literal argument
+            |> Option.map (fun (expression, value) ->
+                qualifier, column, Some { Function = form; Value = value; Literal = expression }, None, calls))
+
     let rec collect calls = function
         | Col column -> Some(None, column, None, None, calls)
         | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, None, None, calls)
@@ -204,26 +241,19 @@ let tryPhysicalExpression expression =
                  || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
             literal argument
             |> Option.map (fun (expression, value) ->
-                None, column, Some { Name = name.ToUpperInvariant(); Value = value; Literal = expression }, None, calls)
+                None, column, Some { Function = coalescingFunction name; Value = value; Literal = expression }, None, calls)
         | FuncCall(name, [ QualifiedCol(qualifier, column); argument ])
             when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
                  || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
             literal argument
             |> Option.map (fun (expression, value) ->
-                Some qualifier, column, Some { Name = name.ToUpperInvariant(); Value = value; Literal = expression }, None, calls)
-        | FuncCall(name, [ IsNull(Col tested); argument; Col column ])
-            when name.Equals("IF", StringComparison.OrdinalIgnoreCase)
-                 && tested.Equals(column, StringComparison.OrdinalIgnoreCase) ->
-            literal argument
-            |> Option.map (fun (expression, value) ->
-                None, column, Some { Name = "IF"; Value = value; Literal = expression }, None, calls)
-        | FuncCall(name, [ IsNull(QualifiedCol(testedQualifier, tested)); argument; QualifiedCol(qualifier, column) ])
-            when name.Equals("IF", StringComparison.OrdinalIgnoreCase)
-                 && testedQualifier.Equals(qualifier, StringComparison.OrdinalIgnoreCase)
-                 && tested.Equals(column, StringComparison.OrdinalIgnoreCase) ->
-            literal argument
-            |> Option.map (fun (expression, value) ->
-                Some qualifier, column, Some { Name = "IF"; Value = value; Literal = expression }, None, calls)
+                Some qualifier, column, Some { Function = coalescingFunction name; Value = value; Literal = expression }, None, calls)
+        | FuncCall(name, [ IsNull tested; argument; source ])
+            when name.Equals("IF", StringComparison.OrdinalIgnoreCase) ->
+            conditionalFallback IfNullBranch tested argument source calls
+        | FuncCall(name, [ IsNotNull tested; source; argument ])
+            when name.Equals("IF", StringComparison.OrdinalIgnoreCase) ->
+            conditionalFallback IfNotNullBranch tested argument source calls
         | FuncCall(name, [ Col column; Lit comparison ]) when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
             Some(None, column, None, Some comparison, calls)
         | FuncCall(name, [ QualifiedCol(qualifier, column); Lit comparison ])
@@ -447,19 +477,22 @@ type private IntegerFallbackKey =
 let private tryIntegerFallbackKey columnType fallback =
     let wideLiteral value = value >= 10_000_000_000L || value <= -10_000_000_000L
 
-    match columnType, fallback.Name, fallback.Value with
-    | TInt false, "IF", VInt value when value >= int64 Int32.MinValue && value <= int64 Int32.MaxValue ->
+    match columnType, fallback.Function, fallback.Value with
+    | TInt false, (IfNullBranch | IfNotNullBranch), VInt value
+        when value >= int64 Int32.MinValue && value <= int64 Int32.MaxValue ->
         Some SignedInt32
-    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt false), "IFNULL", VInt _ ->
+    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt false), IfNullFunction, VInt _ ->
         Some SignedInt64
-    | TBigInt true, "IFNULL", VInt _ -> Some ExactDecimal20
-    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _), "COALESCE", VInt value ->
+    | TBigInt true, IfNullFunction, VInt _ -> Some ExactDecimal20
+    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _), CoalesceFunction, VInt value ->
         Some(if wideLiteral value then SignedInt64 else SignedInt32)
-    | TBigInt false, "COALESCE", VInt _ -> Some SignedInt64
-    | TBigInt true, "COALESCE", VInt _ -> Some ExactDecimal20
-    | (TBool | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false), _, VUInt _ ->
+    | TBigInt false, CoalesceFunction, VInt _ -> Some SignedInt64
+    | TBigInt true, CoalesceFunction, VInt _ -> Some ExactDecimal20
+    | (TBool | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false),
+      (CoalesceFunction | IfNullFunction), VUInt _ ->
         Some ExactDecimal20
-    | (TTinyInt true | TSmallInt true | TMediumInt true | TInt true | TBigInt true), _, VUInt _ ->
+    | (TTinyInt true | TSmallInt true | TMediumInt true | TInt true | TBigInt true),
+      (CoalesceFunction | IfNullFunction), VUInt _ ->
         Some UnsignedInt64
     | _ -> None
 
@@ -499,7 +532,7 @@ let supportsColumn transform (column: ColumnDef) =
             let sourceSupported =
                 (physical.NullFallback
                  |> Option.forall (fun fallback ->
-                     if fallback.Name = "IF" then
+                     if isConditionalFallback fallback.Function then
                          transforms.IsEmpty && (tryIntegerFallbackKey columnType fallback |> Option.isSome)
                      else
                          tryIntegerFallbackKey columnType fallback |> Option.isSome
@@ -549,7 +582,8 @@ let tryIntegerExpressionKeyLength columnType = function
         | Some { NullComparison = Some _; Calls = [] } -> nullIfIntegerWidth columnType |> Option.map ((+) 1)
         | Some { NullFallback = Some fallback; Calls = [] } ->
             match tryIntegerFallbackKey columnType fallback with
-            | Some SignedInt32 -> Some(if fallback.Name = "IF" then 5 else 4)
+            | Some SignedInt32 ->
+                Some(if isConditionalFallback fallback.Function then 5 else 4)
             | Some SignedInt64
             | Some UnsignedInt64 -> Some 8
             | Some ExactDecimal20 -> Some 9

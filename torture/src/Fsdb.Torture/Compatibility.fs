@@ -5982,15 +5982,23 @@ module ContractCatalog =
         { Name = "if-null-branch-functional-index"
           Setup =
             [| "CREATE TABLE if_branch_probe(id INT PRIMARY KEY,v INT,UNIQUE KEY ux ((IF(v IS NULL,7,v))))"
-               "INSERT INTO if_branch_probe VALUES(1,NULL),(2,9)" |]
+               "INSERT INTO if_branch_probe VALUES(1,NULL),(2,9)"
+               "CREATE TABLE if_reversed_probe(id INT PRIMARY KEY,v INT,UNIQUE KEY ux ((IF(v IS NOT NULL,v,7))))"
+               "INSERT INTO if_reversed_probe VALUES(1,NULL),(2,9)" |]
           Steps =
             [| Contract.query "fallback" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=7"
                Contract.query "ordinary" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=9"
                Contract.execute "duplicate" "INSERT INTO if_branch_probe VALUES(3,7)" |> Contract.fails 1062 "23000"
                Contract.execute "update" "UPDATE if_branch_probe SET v=8 WHERE id=1"
                Contract.query "old-key" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=7"
-               Contract.query "new-key" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=8" |]
-          Cleanup = [| "DROP TABLE if_branch_probe" |]
+               Contract.query "new-key" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=8"
+               Contract.query "reversed-fallback" "SELECT id FROM if_reversed_probe WHERE IF(v IS NOT NULL,v,7)=7"
+               Contract.query "reversed-ordinary" "SELECT id FROM if_reversed_probe WHERE IF(v IS NOT NULL,v,7)=9"
+               Contract.execute "reversed-duplicate" "INSERT INTO if_reversed_probe VALUES(3,7)" |> Contract.fails 1062 "23000"
+               Contract.execute "reversed-update" "UPDATE if_reversed_probe SET v=8 WHERE id=1"
+               Contract.query "reversed-old-key" "SELECT id FROM if_reversed_probe WHERE IF(v IS NOT NULL,v,7)=7"
+               Contract.query "reversed-new-key" "SELECT id FROM if_reversed_probe WHERE IF(v IS NOT NULL,v,7)=8" |]
+          Cleanup = [| "DROP TABLE if_branch_probe"; "DROP TABLE if_reversed_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private textNullFallbackFunctionalIndex =
