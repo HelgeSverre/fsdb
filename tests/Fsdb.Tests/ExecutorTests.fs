@@ -8860,6 +8860,36 @@ let tests =
                     Expect.equal widePlan.Key (Some "ix") "the wide literal uses its physical key"
                     Expect.equal widePlan.KeyLength (Some "8") "the hidden BIGINT key is eight bytes"
 
+                testCase "IF NULL-branch integer functional keys keep their own nullable result"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE conditional_key (id INT PRIMARY KEY, value INT, UNIQUE INDEX ux ((IF(value IS NULL, 7, value))))")
+                        (Affected 0UL)
+                        "MySQL accepts the conditional functional key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO conditional_key VALUES (1, NULL), (2, 9)")
+                        (Affected 2UL)
+                        "both branches populate the key"
+
+                    match runDefault store "INSERT INTO conditional_key VALUES (3, 7)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "the explicit seven must collide with the NULL branch; got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM conditional_key WHERE IF(value IS NULL, 7, value) = 7")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the conditional equality finds the stored key"
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM conditional_key WHERE IF(value IS NULL, 7, value) = 7"
+                        |> explainRow
+
+                    Expect.equal plan.Key (Some "ux") "the IF expression uses its own key"
+                    Expect.equal plan.KeyLength (Some "5") "MySQL keeps the IF result nullable"
+
                 testCase "IFNULL integer functional keys retain their distinct result types"
                 <| fun _ ->
                     let store = newStore ()

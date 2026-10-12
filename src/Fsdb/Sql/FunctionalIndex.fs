@@ -169,6 +169,8 @@ let private canonicalExpression (column: string) fallback nullComparison (calls:
     let source =
         let column = Col(column.ToLowerInvariant())
         match fallback, nullComparison with
+        | Some fallback, None when fallback.Name = "IF" ->
+            FuncCall("IF", [ IsNull column; fallback.Literal; column ])
         | Some fallback, None -> FuncCall(fallback.Name, [ column; fallback.Literal ])
         | None, Some value -> FuncCall("NULLIF", [ column; Lit value ])
         | None, None -> column
@@ -209,6 +211,19 @@ let tryPhysicalExpression expression =
             literal argument
             |> Option.map (fun (expression, value) ->
                 Some qualifier, column, Some { Name = name.ToUpperInvariant(); Value = value; Literal = expression }, None, calls)
+        | FuncCall(name, [ IsNull(Col tested); argument; Col column ])
+            when name.Equals("IF", StringComparison.OrdinalIgnoreCase)
+                 && tested.Equals(column, StringComparison.OrdinalIgnoreCase) ->
+            literal argument
+            |> Option.map (fun (expression, value) ->
+                None, column, Some { Name = "IF"; Value = value; Literal = expression }, None, calls)
+        | FuncCall(name, [ IsNull(QualifiedCol(testedQualifier, tested)); argument; QualifiedCol(qualifier, column) ])
+            when name.Equals("IF", StringComparison.OrdinalIgnoreCase)
+                 && testedQualifier.Equals(qualifier, StringComparison.OrdinalIgnoreCase)
+                 && tested.Equals(column, StringComparison.OrdinalIgnoreCase) ->
+            literal argument
+            |> Option.map (fun (expression, value) ->
+                Some qualifier, column, Some { Name = "IF"; Value = value; Literal = expression }, None, calls)
         | FuncCall(name, [ Col column; Lit comparison ]) when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
             Some(None, column, None, Some comparison, calls)
         | FuncCall(name, [ QualifiedCol(qualifier, column); Lit comparison ])
@@ -433,6 +448,8 @@ let private tryIntegerFallbackKey columnType fallback =
     let wideLiteral value = value >= 10_000_000_000L || value <= -10_000_000_000L
 
     match columnType, fallback.Name, fallback.Value with
+    | TInt false, "IF", VInt value when value >= int64 Int32.MinValue && value <= int64 Int32.MaxValue ->
+        Some SignedInt32
     | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt false), "IFNULL", VInt _ ->
         Some SignedInt64
     | TBigInt true, "IFNULL", VInt _ -> Some ExactDecimal20
@@ -482,8 +499,11 @@ let supportsColumn transform (column: ColumnDef) =
             let sourceSupported =
                 (physical.NullFallback
                  |> Option.forall (fun fallback ->
-                     tryIntegerFallbackKey columnType fallback |> Option.isSome
-                     || (transforms.IsEmpty && supportsTextFallback column fallback)))
+                     if fallback.Name = "IF" then
+                         transforms.IsEmpty && (tryIntegerFallbackKey columnType fallback |> Option.isSome)
+                     else
+                         tryIntegerFallbackKey columnType fallback |> Option.isSome
+                         || (transforms.IsEmpty && supportsTextFallback column fallback)))
                 && (physical.NullComparison
                     |> Option.forall (supportsNullIf columnType))
 
@@ -529,7 +549,7 @@ let tryIntegerExpressionKeyLength columnType = function
         | Some { NullComparison = Some _; Calls = [] } -> nullIfIntegerWidth columnType |> Option.map ((+) 1)
         | Some { NullFallback = Some fallback; Calls = [] } ->
             match tryIntegerFallbackKey columnType fallback with
-            | Some SignedInt32 -> Some 4
+            | Some SignedInt32 -> Some(if fallback.Name = "IF" then 5 else 4)
             | Some SignedInt64
             | Some UnsignedInt64 -> Some 8
             | Some ExactDecimal20 -> Some 9

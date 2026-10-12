@@ -477,6 +477,9 @@ different access pattern:
   `NULLIF(integer_column, integer_literal)` has a nullable physical key:
   narrow integer sources promote to `INT`, while `BIGINT` retains its width.
   Equality and unique-key checks use the projected result.
+  `IF(column IS NULL, integer_literal, column)` has a distinct nullable
+  physical key for signed `INT` columns and fitting integer literals. Equality
+  and unique-key checks use its projected result.
 
   Text and binary values use MySQL's leading-number conversion and
   diagnostics. Arithmetic and other general expression keys retain their DDL

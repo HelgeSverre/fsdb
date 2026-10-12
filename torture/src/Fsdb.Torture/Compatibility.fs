@@ -5978,6 +5978,21 @@ module ContractCatalog =
                "DROP TABLE ifnull_unsigned" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private ifNullBranchFunctionalIndex =
+        { Name = "if-null-branch-functional-index"
+          Setup =
+            [| "CREATE TABLE if_branch_probe(id INT PRIMARY KEY,v INT,UNIQUE KEY ux ((IF(v IS NULL,7,v))))"
+               "INSERT INTO if_branch_probe VALUES(1,NULL),(2,9)" |]
+          Steps =
+            [| Contract.query "fallback" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=7"
+               Contract.query "ordinary" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=9"
+               Contract.execute "duplicate" "INSERT INTO if_branch_probe VALUES(3,7)" |> Contract.fails 1062 "23000"
+               Contract.execute "update" "UPDATE if_branch_probe SET v=8 WHERE id=1"
+               Contract.query "old-key" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=7"
+               Contract.query "new-key" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=8" |]
+          Cleanup = [| "DROP TABLE if_branch_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private textNullFallbackFunctionalIndex =
         { Name = "text-null-fallback-functional-index"
           Setup =
@@ -11240,6 +11255,7 @@ module ContractCatalog =
            signFunctionalIndex
            coalesceFunctionalIndex
            ifnullFunctionalIndex
+           ifNullBranchFunctionalIndex
            textNullFallbackFunctionalIndex
            nullifFunctionalIndex
            bitCountFunctionalIndex
