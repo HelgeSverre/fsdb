@@ -12577,7 +12577,18 @@ and private transferNumericJoinIn
     (dbName: string)
     (select: SelectStmt)
     =
-    let key (name: string) = name.ToLowerInvariant()
+    let normalized (name: string) = name.ToLowerInvariant()
+    let isNumericLiteral = function
+        | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VDouble _) -> true
+        | _ -> false
+
+    let isLiteral = function
+        | LiteralValue _ -> true
+        | _ -> false
+
+    let hasTransferableCandidates (candidates: Expr list) =
+        candidates.Length > 1 && List.forall isLiteral candidates && List.exists isNumericLiteral candidates
+
     let physical tableRef =
         tryPhysicalTableRef store dbName tableRef
         |> Result.toOption
@@ -12595,14 +12606,14 @@ and private transferNumericJoinIn
             match physical rightRef with
             | None -> select
             | Some rightTable ->
-                let baseQualifier = key (baseRef.Alias |> Option.defaultValue baseRef.Table)
-                let rightQualifier = key (rightRef.Alias |> Option.defaultValue rightRef.Table)
+                let baseQualifier = normalized (baseRef.Alias |> Option.defaultValue baseRef.Table)
+                let rightQualifier = normalized (rightRef.Alias |> Option.defaultValue rightRef.Table)
                 let equalityColumns =
                     join.On
                     |> conjuncts
                     |> List.choose (function
                         | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, rightName)) ->
-                            match key leftOwner, key rightOwner with
+                            match normalized leftOwner, normalized rightOwner with
                             | left, right when left = baseQualifier && right = rightQualifier -> Some(leftName, rightName)
                             | left, right when left = rightQualifier && right = baseQualifier -> Some(rightName, leftName)
                             | _ -> None
@@ -12632,41 +12643,32 @@ and private transferNumericJoinIn
                     |> List.collect (function
                         | MatchAgainst(columns, _, _) -> columns |> List.choose _.Qualifier
                         | _ -> [])
-                    |> List.map key
+                    |> List.map normalized
                     |> List.distinct
 
-                let firstQualifier =
+                let filterOwner =
                     if select.StraightJoin || join.Kind = StraightJoin then Some baseQualifier
                     else
                         match matchOwners with
                         | [ owner ] when owner = baseQualifier || owner = rightQualifier -> Some owner
                         | _ -> None
 
-                match columns, firstQualifier, select.Where with
-                | Some(baseName, rightName), Some firstQualifier, Some where ->
-                    let isNumericLiteral = function
-                        | LiteralValue value ->
-                            match value with
-                            | VInt _ | VUInt _ | VDecimal _ | VDouble _ -> true
-                            | _ -> false
-                        | _ -> false
-
-                    let transfer = function
+                match columns, filterOwner, select.Where with
+                | Some(baseName, rightName), Some filterOwner, Some where ->
+                    let rewritePredicate = function
                         | In(QualifiedCol(owner, column), candidates) as predicate
-                            when candidates.Length > 1
-                                 && List.forall (function LiteralValue _ -> true | _ -> false) candidates
-                                 && List.exists isNumericLiteral candidates ->
-                            let owner = key owner
+                            when hasTransferableCandidates candidates ->
+                            let owner = normalized owner
                             let isJoinKey =
                                 (owner = baseQualifier && equalsIgnoreCase column baseName)
                                 || (owner = rightQualifier && equalsIgnoreCase column rightName)
                             if isJoinKey then
-                                let targetName = if firstQualifier = baseQualifier then baseName else rightName
-                                In(QualifiedCol(firstQualifier, targetName), candidates)
+                                let targetName = if filterOwner = baseQualifier then baseName else rightName
+                                In(QualifiedCol(filterOwner, targetName), candidates)
                             else predicate
                         | predicate -> predicate
 
-                    { select with Where = where |> conjuncts |> List.map transfer |> combineConjuncts }
+                    { select with Where = where |> conjuncts |> List.map rewritePredicate |> combineConjuncts }
                 | _ -> select
         | _ -> select
     | _ -> select
