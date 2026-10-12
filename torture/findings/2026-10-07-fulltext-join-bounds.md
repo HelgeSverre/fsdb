@@ -263,3 +263,24 @@ be attributed solely to hash-join execution. The native oracle script now
 asserts these observations. This is an observed MySQL execution-path
 inconsistency, not evidence that TREE or ANALYZE row counts can substitute
 for the ordinary query result when deciding Fsdb compatibility.
+
+### Connection-sensitive result on 2026-10-12
+
+The same three-by-three SQL also depends on connection history in MySQL
+8.4.11. On three fresh fixtures in the digest-pinned Docker server, the
+connection that created and populated the tables returned IDs 1 and 2 on
+repeated ordinary `SELECT` calls. A second connection returned only ID 2;
+after that read, the original connection also returned only ID 2. A separate
+disposable native server reproduced the same sequence. The TREE plan shown
+before and after the second connection was identical: a hash join with a
+filter on `d.k` and the same displayed costs and row estimates. The maintained
+native oracle now asserts both connection outcomes.
+
+A fresh 139-case, 18,895-step pinned contract run at
+`20261012T052916142-16388/contracts` still has ten differences. Its
+long-lived connection returns IDs 1 and 2 for this step, while fsdb returns
+only ID 2. The second-connection observation limits the claim: an
+unconditional transfer of the numeric filter would match one MySQL session
+history and break another. The result is observable, but neither displayed
+plan nor table cardinality explains which history applies. Further work
+should identify the MySQL state transition before changing fsdb's join rule.

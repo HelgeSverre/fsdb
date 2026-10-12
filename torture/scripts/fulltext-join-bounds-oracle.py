@@ -8,7 +8,7 @@ import subprocess
 native = runpy.run_path(str(pathlib.Path(__file__).with_name("fulltext-transaction-oracle.py")))
 
 
-def verify(client, _):
+def verify(client, second_client):
     client.query("USE probe;CREATE TABLE owners(id INT PRIMARY KEY);"
                  "INSERT INTO owners VALUES(42);"
                  "CREATE TABLE bounds(id INT PRIMARY KEY);INSERT INTO bounds VALUES(42);"
@@ -178,6 +178,9 @@ def verify(client, _):
             client.query("SET SESSION optimizer_switch='block_nested_loop=off'")
             native["expect"]("costed numeric IN without hash join", client.query(query), "1\n2")
             client.query("SET SESSION optimizer_switch='default'")
+            second_client.query("USE probe")
+            native["expect"]("costed numeric IN on another connection", second_client.query(query), "2")
+            native["expect"]("costed numeric IN after another connection", client.query(query), "2")
 
     native["expect"]("direct names IN", client.query(
         "SELECT id,k IN (1,NULL) FROM names ORDER BY id"), "1\tNULL\n2\t1\n3\tNULL")
