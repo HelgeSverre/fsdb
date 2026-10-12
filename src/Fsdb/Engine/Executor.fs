@@ -2684,6 +2684,24 @@ let internal likeMatch (escape: char) (charEq: char -> char -> bool) (subject: s
 
     result |> ValueOption.defaultValue false
 
+let private likeLiteralPrefix (escape: char) (pattern: string) =
+    let prefix = System.Text.StringBuilder()
+    let mutable index = 0
+    let mutable wildcard = false
+
+    while index < pattern.Length && not wildcard do
+        let character = pattern[index]
+        if character = escape && index + 1 < pattern.Length then
+            prefix.Append(pattern[index + 1]) |> ignore
+            index <- index + 2
+        elif character = '%' || character = '_' then
+            wildcard <- true
+        else
+            prefix.Append(character) |> ignore
+            index <- index + 1
+
+    prefix.ToString()
+
 let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
     match subject, pattern with
     | VNull, _
@@ -13392,7 +13410,7 @@ and private plannerRangePredicatesFor
 /// A fixed ASCII prefix is a byte-order interval under utf8mb4_0900_bin.
 and private likePrefixRangePredicate scope (table: Table) tref expression =
     match expression with
-    | Like(source, LiteralValue(VString pattern), _, None) ->
+    | Like(source, LiteralValue(VString pattern), _, escape) ->
         rangeColumnNameFor scope tref source
         |> Option.bind (fun name ->
             table.Columns
@@ -13404,11 +13422,10 @@ and private likePrefixRangePredicate scope (table: Table) tref expression =
                     |> Option.exists (fun collation -> equalsIgnoreCase collation "utf8mb4_0900_bin")
                 | _ -> false)
             |> Option.bind (fun column ->
-                let wildcard = pattern.IndexOfAny([| '%'; '_' |])
-                if wildcard <= 0 then None
+                let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
+                if prefix.Length = 0 then None
                 else
-                    let prefix = pattern[..wildcard - 1]
-                    if prefix |> Seq.exists (fun character -> character < ' ' || character >= '\u007f' || character = '\\') then None
+                    if prefix |> Seq.exists (fun character -> character < ' ' || character >= '\u007f') then None
                     else
                         let successor = prefix.Substring(0, prefix.Length - 1) + string (char (int prefix[prefix.Length - 1] + 1))
                         Some

@@ -6075,8 +6075,8 @@ module ContractCatalog =
 
     let private binaryLikePrefixRange =
         let values =
-            [ "ab"; "abc"; "abZ"; "ab "; "ab%" ]
-            @ [ for id in 6..30 -> sprintf "zz%02d" id ]
+            [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo" ]
+            @ [ for id in 8..32 -> sprintf "zz%02d" id ]
             |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
             |> String.concat ","
 
@@ -6090,6 +6090,10 @@ module ContractCatalog =
             [| Contract.query "prefix" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab%' ORDER BY id"
                Contract.query "prefix-and-single-character" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab_%' ORDER BY id"
                Contract.query "leading-wildcard" "SELECT id FROM like_prefix_probe WHERE v LIKE '%ab' ORDER BY id"
+               Contract.query "escaped-default" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab\\\\_%' ORDER BY id"
+               Contract.query "escaped-percent" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab\\\\%%' ORDER BY id"
+               Contract.query "escaped-explicit" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab#_%' ESCAPE '#' ORDER BY id"
+               Contract.query "exact-pattern" "SELECT id FROM like_prefix_probe WHERE v LIKE 'abc' ORDER BY id"
                Contract.query "truncated-key" "SELECT id FROM like_prefix_short_probe WHERE v LIKE 'abc%' ORDER BY id" |]
           Cleanup = [| "DROP TABLE like_prefix_probe"; "DROP TABLE like_prefix_short_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }

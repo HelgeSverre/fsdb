@@ -10,8 +10,9 @@ Fsdb now derives an ordered-key interval from the fixed ASCII portion
 before the first unescaped wildcard. The query still evaluates its full
 `LIKE` predicate on candidates, so `_` and later pattern characters retain
 their normal meaning. The planner chooses the range only when its observed
-candidate count beats a scan. This path currently covers literal patterns
-without an explicit `ESCAPE` clause on `utf8mb4_0900_bin` `VARCHAR` keys.
+candidate count beats a scan. This path covers literal patterns with default
+backslash or explicit `ESCAPE` semantics, including escaped wildcard characters
+and exact patterns, on `utf8mb4_0900_bin` `VARCHAR` keys.
 For a prefix-length key such as `v(2)`, storage widens the interval to
 include every row sharing the truncated key; the residual `LIKE` test
 selects `abc` from an `abc%` probe. Other
@@ -19,14 +20,15 @@ collations, column types, expression patterns, and composite-key prefixes
 remain open.
 
 The focused Expecto test first reported `ALL` where MySQL chose `range`.
-It now checks both prefix patterns, result parity with a scan, the
+It now checks both prefix patterns, escaped `_` and `%`, an explicit escape
+character, an exact pattern, result parity with a scan, the
 leading-wildcard control, and the truncated-index candidate range. The
 `binary-like-prefix-range` differential contract compares the returned
 rows with native MySQL.
 
-All four contract steps matched in `20261012T174924382-1284/contracts`
+All eight contract steps matched in `20261012T180328376-14205/contracts`
 against native MySQL 8.4.11, and the case restored its database objects.
-The full 150-case, 19,096-step run retained two previously documented
+The full 150-case, 19,100-step run retained two previously documented
 row differences in the Han REGEXP property and mixed-type join cases.
 
 The [focused quick benchmark](../../benchmarks/results/2cf93f5d-quick.md)

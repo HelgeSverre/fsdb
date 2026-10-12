@@ -6849,8 +6849,8 @@ let tests =
                 <| fun _ ->
                     let store = newStore ()
                     let seed =
-                        [ "ab"; "abc"; "abZ"; "ab "; "ab%" ]
-                        @ [ for id in 6..30 -> sprintf "zz%02d" id ]
+                        [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo" ]
+                        @ [ for id in 8..32 -> sprintf "zz%02d" id ]
                         |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
                         |> String.concat ","
 
@@ -6864,12 +6864,12 @@ let tests =
                             "create the comparison table"
                         Expect.equal
                             (runDefault store $"INSERT INTO {table} VALUES {seed}")
-                            (Affected 30UL)
+                            (Affected 32UL)
                             "seed matching and nonmatching prefixes"
 
                     for pattern, expected in
-                        [ "ab%", [ 1; 2; 3; 4; 5 ]
-                          "ab_%", [ 2; 3; 4; 5 ] ] do
+                        [ "ab%", [ 1; 2; 3; 4; 5; 6; 7 ]
+                          "ab_%", [ 2; 3; 4; 5; 6; 7 ] ] do
                         let rows = expected |> List.map (fun id -> [ Some(string id) ])
                         for table in [ "like_indexed"; "like_scanned" ] do
                             Expect.equal
@@ -6883,6 +6883,20 @@ let tests =
 
                     let leadingWildcard = runDefault store "EXPLAIN SELECT id FROM like_indexed WHERE v LIKE '%ab'" |> explainRow
                     Expect.equal leadingWildcard.Key None "a leading wildcard cannot bound the index"
+
+                    for predicate, expected in
+                        [ "v LIKE 'ab\\\\_%'", [ 6; 7 ]
+                          "v LIKE 'ab\\\\%%'", [ 5 ]
+                          "v LIKE 'ab#_%' ESCAPE '#'", [ 6; 7 ]
+                          "v LIKE 'abc'", [ 2 ] ] do
+                        let rows = expected |> List.map (fun id -> [ Some(string id) ])
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM like_indexed WHERE {predicate} ORDER BY id")
+                            (ResultSet([ "id" ], rows))
+                            "escaped and exact prefixes keep their LIKE results"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM like_indexed WHERE {predicate}" |> explainRow
+                        Expect.equal plan.AccessType (Some "range") "the literal prefix uses a range"
+                        Expect.equal plan.Key (Some "ix_v") "the literal prefix uses the text key"
 
                     Expect.equal
                         (runDefault store "SELECT id FROM like_prefix_indexed WHERE v LIKE 'abc%' ORDER BY id")
