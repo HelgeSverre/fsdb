@@ -7686,11 +7686,25 @@ and private viewJsonSourceNames (store: Store) (dbName: string) (columns: Column
                             | _ -> Map.empty
                         let sourceName (columnName: string) =
                             Map.tryFind (columnName.ToLowerInvariant()) upstream |> Option.defaultValue columnName
-                        match definition.Projections with
-                        | [ { Expression = Star _ } ] ->
-                            view.Columns
-                            |> List.map (fun name -> name.ToLowerInvariant(), sourceName name)
-                            |> Map.ofList
+                        let sourceColumns =
+                            match definition.From, definition.Joins with
+                            | Some(FromTable source), [] ->
+                                let sourceDb = source.Database |> Option.defaultValue viewDb
+                                match tryStoredView store sourceDb source.Table with
+                                | Some sourceView when not sourceView.Columns.IsEmpty -> sourceView.Columns
+                                | _ ->
+                                    selectSourceColumns store viewDb (FromTable source)
+                                    |> List.choose id
+                                    |> List.map _.Name
+                            | _ -> []
+                        let expandedProjections =
+                            definition.Projections
+                            |> List.collect (fun projection ->
+                                match projection.Expression with
+                                | Star _ when not sourceColumns.IsEmpty ->
+                                    sourceColumns |> List.map (fun name -> Projection.create (Col name) None)
+                                | _ -> [ projection ])
+                        match expandedProjections with
                         | projections when projections.Length = view.Columns.Length ->
                             List.zip view.Columns projections
                             |> List.choose (fun (outputName, projection) ->

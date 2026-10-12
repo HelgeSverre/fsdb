@@ -3572,6 +3572,8 @@ let tests =
               let session, _ = handle session "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
               let session, _ = handle session "CREATE VIEW char_star_v AS SELECT * FROM char_extract_v"
               let session, _ = handle session "CREATE VIEW char_star_renamed_v AS SELECT id,extracted AS renamed FROM char_star_v"
+              let session, _ = handle session "CREATE VIEW char_mixed_star_v AS SELECT *,JSON_ARRAY(1,2) AS computed FROM char_view_source"
+              let session, _ = handle session "CREATE VIEW char_mixed_nested_v AS SELECT id,computed AS renamed FROM char_mixed_star_v"
               let session, _ = handle session "CREATE VIEW char_renamed_v AS SELECT id,payload AS renamed FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_cast_v AS SELECT CAST('\"12.5\"' AS JSON) AS payload"
               let session, _ = handle session "CREATE VIEW char_cast_nested_v AS SELECT payload AS renamed FROM char_cast_v"
@@ -3594,6 +3596,25 @@ let tests =
                                 3156, sprintf "Invalid JSON value for CAST to INTEGER from column %s at row %d" warningSource row ]
                           sql
                   | _, result -> failtestf "expected CHAR JSON view result for %s, got %A" sql result
+              match handle session "SELECT id,HEX(CHAR(payload)),HEX(CHAR(computed)) FROM char_mixed_star_v ORDER BY id DESC" with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "2"; Some "00"; Some "00" ]; [ Some "1"; Some "0C"; Some "00" ] ] "mixed star view rows"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ for row in 1 .. 2 do
+                            for source in [ "payload"; "json_array" ] do
+                                3156, sprintf "Invalid JSON value for CAST to INTEGER from column %s at row %d" source row ]
+                      "mixed star view warnings"
+              | _, result -> failtestf "expected mixed CHAR JSON view result, got %A" result
+              match handle session "SELECT id,HEX(CHAR(renamed)) FROM char_mixed_nested_v ORDER BY id DESC" with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "2"; Some "00" ]; [ Some "1"; Some "00" ] ] "nested mixed star view rows"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ for row in 1 .. 2 ->
+                            3156, sprintf "Invalid JSON value for CAST to INTEGER from column json_array at row %d" row ]
+                      "nested mixed star view warnings"
+              | _, result -> failtestf "expected nested mixed CHAR JSON view result, got %A" result
               match handle session "SELECT HEX(CHAR(renamed)) FROM char_cast_nested_v" with
               | session, ResultSet(_, [ [ Some "0C" ] ]) ->
                   Expect.equal

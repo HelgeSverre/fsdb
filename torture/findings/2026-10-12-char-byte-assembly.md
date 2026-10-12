@@ -97,6 +97,9 @@ the outer alias for these warning sources. Descending view queries also match
 the warning row numbers. A nested view of `CAST(... AS JSON) AS payload` likewise
 retains `payload` as the warning source after renaming it. A single-source
 `SELECT *` view retains the source function name through another rename.
+Mixing `*` with a JSON-producing projection retains each origin separately:
+the stored `payload` column warns under `payload`, and `JSON_ARRAY(1,2) AS
+computed` warns under `json_array`, including through a nested rename.
 
 Stored JSON values and warning row numbers now match the audited seven-row
 table with all rows, a `WHERE` filter, descending ordering with and without
