@@ -9220,10 +9220,11 @@ let tests =
                 testCase "NULLIF text keys project source collation equality"
                 <| fun _ ->
                     let store = newStore ()
+                    let nullRows = [ [ Some "1" ]; [ Some "2" ] ]
 
-                    for name, collation, rows in
-                        [ "pad", "utf8mb4_bin", "(1,'x'),(2,'x '),(3,'X')"
-                          "fold", "utf8mb4_0900_ai_ci", "(1,'x'),(2,'X'),(3,'x '),(4,'é'),(5,'E')" ] do
+                    for name, collation, rows, count in
+                        [ "pad", "utf8mb4_bin", "(1,'x'),(2,'x '),(3,'X')", 3UL
+                          "fold", "utf8mb4_0900_ai_ci", "(1,'x'),(2,'X'),(3,'x '),(4,'é'),(5,'E')", 5UL ] do
                         Expect.equal
                             (runDefault store $"CREATE TABLE nullif_{name} (id INT PRIMARY KEY, value VARCHAR(20) COLLATE {collation}, KEY ix ((NULLIF(value,_utf8mb4'x'))))")
                             (Affected 0UL)
@@ -9231,14 +9232,12 @@ let tests =
 
                         Expect.equal
                             (runDefault store $"INSERT INTO nullif_{name} VALUES {rows}")
-                            (Affected(if name = "pad" then 3UL else 5UL))
+                            (Affected count)
                             "seed values with distinct collation weights"
-
-                        let expectedNulls = [ [ Some "1" ]; [ Some "2" ] ]
 
                         Expect.equal
                             (runDefault store $"SELECT id FROM nullif_{name} WHERE NULLIF(value,_utf8mb4'x') IS NULL ORDER BY id")
-                            (ResultSet([ "id" ], expectedNulls))
+                            (ResultSet([ "id" ], nullRows))
                             "the stored comparison follows the source collation"
 
                         let plan =
@@ -9248,46 +9247,44 @@ let tests =
                         Expect.equal plan.Key (Some "ix") "the connection literal uses the text key"
                         Expect.equal plan.KeyLength (Some "83") "the nullable VARCHAR width is preserved"
 
-                        if name = "fold" then
-                            Expect.equal
-                                (runDefault store "SELECT id FROM nullif_fold WHERE NULLIF(value,_utf8mb4'x')='E' ORDER BY id")
-                                (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "5" ] ]))
-                                "accent-insensitive equality finds both index entries"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM nullif_fold WHERE NULLIF(value,_utf8mb4'x')='E' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "5" ] ]))
+                        "accent-insensitive equality finds both index entries"
 
-                            let mixedCharset =
-                                runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'X')='E'"
-                                |> explainRow
+                    let mixedCharset =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'X')='E'"
+                        |> explainRow
 
-                            Expect.equal mixedCharset.Key (Some "ix") "equivalent mixed-charset comparison uses the key"
+                    Expect.equal mixedCharset.Key (Some "ix") "equivalent mixed-charset comparison uses the key"
 
-                            let differentText =
-                                runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'y')='E'"
-                                |> explainRow
+                    let differentText =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'y')='E'"
+                        |> explainRow
 
-                            Expect.equal differentText.Key None "different comparison text remains a separate expression"
+                    Expect.equal differentText.Key None "different comparison text remains a separate expression"
 
-                            let binaryCharset =
-                                runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_binary'x')='E'"
-                                |> explainRow
+                    let binaryCharset =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_binary'x')='E'"
+                        |> explainRow
 
-                            Expect.equal binaryCharset.Key None "binary comparison does not share a text key"
+                    Expect.equal binaryCharset.Key None "binary comparison does not share a text key"
 
-                            Expect.equal
-                                (runDefault store "SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'X')='E' ORDER BY id")
-                                (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "5" ] ]))
-                                "the mixed-charset probe retains accent-folded results"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'X')='E' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "5" ] ]))
+                        "the mixed-charset probe retains accent-folded results"
 
-                        if name = "pad" then
-                            let distinctLiteral =
-                                runDefault store "EXPLAIN SELECT id FROM nullif_pad WHERE NULLIF(value,_utf8mb4'X')='x'"
-                                |> explainRow
+                    let distinctLiteral =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_pad WHERE NULLIF(value,_utf8mb4'X')='x'"
+                        |> explainRow
 
-                            Expect.equal distinctLiteral.Key None "a changed binary literal must scan to preserve rows"
+                    Expect.equal distinctLiteral.Key None "a changed binary literal must scan to preserve rows"
 
-                            Expect.equal
-                                (runDefault store "SELECT id FROM nullif_pad WHERE NULLIF(value,_utf8mb4'X')='x'")
-                                (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
-                                "the scan retains rows lost by MySQL's key substitution"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM nullif_pad WHERE NULLIF(value,_utf8mb4'X')='x'")
+                        (ResultSet([ "id" ], nullRows))
+                        "the scan retains rows lost by MySQL's key substitution"
 
                     Expect.equal
                         (runDefault store "CREATE TABLE nullif_latin1 (id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_bin, KEY ix ((NULLIF(value,_latin1'x'))))")

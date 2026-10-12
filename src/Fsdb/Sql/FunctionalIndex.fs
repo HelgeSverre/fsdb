@@ -1050,7 +1050,7 @@ let private matchesNullComparison textEquals source comparison =
     | VString text, VString literal -> textEquals text literal
     | _ -> Fsdb.Value.equals source comparison = Some true
 
-let rec projectValueWithStatus textEquals encodeText transform value =
+let rec projectValueWithStatusUsing textEquals encodeText transform value =
     match transform, value with
     | Some IsNullResult, VNull -> VInt 1L, None
     | Some IsNullResult, _ -> VInt 0L, None
@@ -1071,7 +1071,7 @@ let rec projectValueWithStatus textEquals encodeText transform value =
             physical.Calls
             |> List.fold
                 (fun (current, firstTruncation) (_, step) ->
-                    let projected, truncated = projectValueWithStatus textEquals encodeText (Some step) current
+                    let projected, truncated = projectValueWithStatusUsing textEquals encodeText (Some step) current
                     projected, (firstTruncation |> Option.orElse truncated))
                 (source, None)
     | Some _, VNull -> VNull, None
@@ -1152,8 +1152,15 @@ let rec projectValueWithStatus textEquals encodeText transform value =
         VDouble(abs number), truncated
     | _ -> value, None
 
+let projectValueWithStatus encodeText transform value =
+    projectValueWithStatusUsing
+        (fun left right -> String.Equals(left, right, StringComparison.Ordinal))
+        encodeText
+        transform
+        value
+
 let projectValueWith encodeText transform value =
-    projectValueWithStatus (fun left right -> String.Equals(left, right, StringComparison.Ordinal)) encodeText transform value |> fst
+    projectValueWithStatus encodeText transform value |> fst
 
 let projectValue transform value =
     projectValueWith Text.Encoding.UTF8.GetBytes transform value

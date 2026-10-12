@@ -2956,7 +2956,7 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
                         indexName
                         (Diagnostics.currentRowNumber ()))
             let textEquals = (Collation.findOrDefault column.Collation).Equals
-            FunctionalIndex.projectValueWithStatus textEquals encodeText transform indexedValue
+            FunctionalIndex.projectValueWithStatusUsing textEquals encodeText transform indexedValue
         with
         | FunctionalIndex.IntegerFallbackIndexValueOutOfRange ->
             let message =
