@@ -128,6 +128,19 @@ must be defined", even with AllowUserVariables enabled. A raw-wire integration
 regression separately checks COM_STMT_PREPARE metadata and COM_STMT_EXECUTE
 integer conversion after a decimal assignment.
 
+The `prepared-user-variable-types` differential contract also covers direct
+references in table-backed projections and indexed predicates, derived
+tables, CTEs, scalar subqueries, UNION branches, and prepared `CREATE TABLE
+AS SELECT`. Each statement is prepared while its variable is a signed
+integer, then executed after integer, decimal, double, text, or NULL
+assignments as appropriate. The CTAS case confirms that a later decimal
+value still creates a BIGINT column and stores the retained integer value
+2. All 46 added steps matched MySQL 8.4.11 in the pinned
+`20261012T054457239-18098/contracts` run. Across 139 cases and 18,941
+steps, the ten differences were the previously recorded signatures; none
+came from these histories. Other expression families, mutation statements,
+and values beyond System.Decimal precision remain unaudited here.
+
 Remaining boundaries:
 
 - Decimal result-scale propagation and division rounding remain incomplete;

@@ -4515,9 +4515,57 @@ module ContractCatalog =
                Contract.execute "assignment-prepare"
                    "PREPARE assigned_variable FROM 'SELECT @direct_assignment:=1.75 AS assigned,@direct_assignment AS value'"
                Contract.query "assignment-read" "EXECUTE assigned_variable"
-               Contract.query "assignment-stored-value" "SELECT @direct_assignment AS value" |]
-          Cleanup = [| "DEALLOCATE PREPARE assigned_variable" |]
-          Coverage = [| "statement:select", [| "text-differential" |] |] }
+               Contract.query "assignment-stored-value" "SELECT @direct_assignment AS value"
+               Contract.execute "table-create" "CREATE TABLE direct_rows(id INT PRIMARY KEY)"
+               Contract.execute "table-insert" "INSERT INTO direct_rows VALUES(1),(2)"
+               Contract.execute "table-initial" "SET @direct_table=-2"
+               Contract.execute "table-projection-prepare"
+                   "PREPARE direct_projection FROM 'SELECT id,@direct_table AS value,@direct_table+id AS adjusted FROM direct_rows ORDER BY id'"
+               Contract.execute "table-predicate-prepare"
+                   "PREPARE direct_predicate FROM 'SELECT id FROM direct_rows WHERE id=@direct_table ORDER BY id'"
+               for name, value in
+                   [ "integer", "-2"
+                     "decimal", "1.75"
+                     "double", "1.5e0"
+                     "text", "'2'"
+                     "null", "NULL" ] do
+                   Contract.execute ("table-set-" + name) ("SET @direct_table=" + value)
+                   Contract.query ("table-projection-" + name) "EXECUTE direct_projection"
+                   Contract.query ("table-predicate-" + name) "EXECUTE direct_predicate"
+               Contract.execute "nested-initial" "SET @direct_table=-2"
+               for name, sql in
+                   [ "derived", "SELECT value FROM (SELECT @direct_table AS value) d"
+                     "cte", "WITH values_cte AS (SELECT @direct_table AS value) SELECT value FROM values_cte"
+                     "scalar", "SELECT (SELECT @direct_table) AS value FROM direct_rows WHERE id=1"
+                     "union", "SELECT @direct_table AS value UNION ALL SELECT @direct_table+1 AS value" ] do
+                   Contract.execute ("nested-prepare-" + name)
+                       ("PREPARE direct_" + name + " FROM '" + sql + "'")
+               for name, value in [ "integer", "-2"; "decimal", "1.75"; "null", "NULL" ] do
+                   Contract.execute ("nested-set-" + name) ("SET @direct_table=" + value)
+                   for shape in [ "derived"; "cte"; "scalar"; "union" ] do
+                       Contract.query ("nested-" + shape + "-" + name) ("EXECUTE direct_" + shape)
+               Contract.execute "ctas-initial" "SET @direct_ddl=-2"
+               Contract.execute "ctas-prepare"
+                   "PREPARE direct_ctas FROM 'CREATE TABLE direct_ctas_rows AS SELECT @direct_ddl AS value'"
+               Contract.execute "ctas-change" "SET @direct_ddl=1.75"
+               Contract.execute "ctas-execute" "EXECUTE direct_ctas"
+               Contract.query "ctas-column-type"
+                   "SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='direct_ctas_rows'"
+               Contract.query "ctas-row" "SELECT value FROM direct_ctas_rows" |]
+          Cleanup =
+            [| "DEALLOCATE PREPARE assigned_variable"
+               "DEALLOCATE PREPARE direct_projection"
+               "DEALLOCATE PREPARE direct_predicate"
+               "DEALLOCATE PREPARE direct_derived"
+               "DEALLOCATE PREPARE direct_cte"
+               "DEALLOCATE PREPARE direct_scalar"
+               "DEALLOCATE PREPARE direct_union"
+               "DEALLOCATE PREPARE direct_ctas"
+               "DROP TABLE IF EXISTS direct_ctas_rows"
+               "DROP TABLE IF EXISTS direct_rows" |]
+          Coverage =
+            [| "statement:select", [| "text-differential" |]
+               "statement:create-table", [| "text-differential" |] |] }
 
     let private preparedUserAssignments =
         { Name = "prepared-user-variable-assignments"
