@@ -6953,6 +6953,32 @@ let tests =
                         Expect.equal plan.AccessType (Some "range") "a selective pad-space prefix uses a range"
                         Expect.equal plan.Key (Some "ix_v") "the pad-space index supplies the range"
 
+                testCase "binary TEXT LIKE uses prefix-length indexes"
+                <| fun _ ->
+                    let store = newStore ()
+                    let values =
+                        [ "ab"; "abc"; "abcd"; "abx"; "ac"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁" ]
+                        @ [ for id in 12..37 -> sprintf "zz%02d" id ]
+                        |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
+                        |> String.concat ","
+
+                    for typeName, table in
+                        [ "TINYTEXT", "like_tiny_text"
+                          "TEXT", "like_text"
+                          "MEDIUMTEXT", "like_medium_text"
+                          "LONGTEXT", "like_long_text" ] do
+                        runDefault store $"CREATE TABLE {table} (id INT PRIMARY KEY, v {typeName} COLLATE utf8mb4_0900_bin, KEY ix_v(v(2)))" |> ignore
+                        Expect.equal (runDefault store $"INSERT INTO {table} VALUES {values}") (Affected 37UL) "seed text key candidates"
+
+                        for pattern, expected in [ "abc%", [ 2; 3 ]; "é%", [ 6; 7 ]; "😀%", [ 9; 10 ] ] do
+                            Expect.equal
+                                (runDefault store $"SELECT id FROM {table} WHERE v LIKE '{pattern}' ORDER BY id")
+                                (ResultSet([ "id" ], expected |> List.map (fun id -> [ Some(string id) ])))
+                                "the truncated text key keeps the full LIKE match"
+                            let plan = runDefault store $"EXPLAIN SELECT id FROM {table} WHERE v LIKE '{pattern}'" |> explainRow
+                            Expect.equal plan.AccessType (Some "range") "a text key supplies a selective range"
+                            Expect.equal plan.Key (Some "ix_v") "the text index supplies the range"
+
                 testCase "competing index families choose the lowest-cardinality access"
                 <| fun _ ->
                     let store = newStore ()

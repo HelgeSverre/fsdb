@@ -13448,7 +13448,7 @@ and private likePrefixRangePredicate scope (table: Table) tref expression =
             |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
             |> Option.filter (fun column ->
                 match column.Type with
-                | TVarchar _ ->
+                | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
                     column.Collation
                     |> Option.exists (fun collation ->
                         equalsIgnoreCase collation "utf8mb4_0900_bin"
