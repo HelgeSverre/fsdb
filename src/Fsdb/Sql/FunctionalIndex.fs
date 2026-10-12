@@ -303,6 +303,37 @@ let isBuiltin = function
     | Expression expression -> tryPhysicalExpression expression |> Option.isSome
     | transform -> tryBuiltinName transform |> Option.isSome
 
+let sameLookupTransform (column: ColumnDef) requested stored =
+    if requested = stored then
+        true
+    else
+        match requested, stored with
+        | Some(Expression requested), Some(Expression stored) ->
+            match tryPhysicalExpression requested, tryPhysicalExpression stored with
+            | Some requested, Some stored when
+                requested.Column.Equals(stored.Column, StringComparison.OrdinalIgnoreCase)
+                && requested.Calls = stored.Calls
+                && requested.NullFallback.IsNone
+                && stored.NullFallback.IsNone ->
+                match requested.NullComparison, stored.NullComparison with
+                | Some requestedComparison, Some storedComparison ->
+                    match requestedComparison.Value, storedComparison.Value,
+                          requestedComparison.Literal, storedComparison.Literal with
+                    | VString requestedText, VString storedText,
+                      IntroducedLiteral(_, requestedCharset, _), IntroducedLiteral(_, storedCharset, _) ->
+                        let sameCharset = Fsdb.Charset.canonicalName requestedCharset = Fsdb.Charset.canonicalName storedCharset
+                        let defaultUnicodeCollation =
+                            column.Collation
+                            |> Option.exists (fun name -> name.Equals("utf8mb4_0900_ai_ci", StringComparison.OrdinalIgnoreCase))
+
+                        (sameCharset
+                         || (defaultUnicodeCollation && Fsdb.Charset.canonicalName requestedCharset <> "binary"))
+                        && (Fsdb.Collation.findOrDefault column.Collation).Equals requestedText storedText
+                    | _ -> false
+                | _ -> false
+            | _ -> false
+        | _ -> false
+
 type private TransformFamily =
     | TextOperation
     | IntegerFromText

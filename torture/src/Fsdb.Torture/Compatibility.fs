@@ -6128,6 +6128,7 @@ module ContractCatalog =
                Contract.query "pad-case" "SELECT id FROM text_nullif_pad WHERE NULLIF(v,'x')='X'"
                Contract.query "fold-null-results" "SELECT id FROM text_nullif_fold WHERE NULLIF(v,_utf8mb4'x') IS NULL ORDER BY id"
                Contract.query "fold-accent" "SELECT id FROM text_nullif_fold WHERE NULLIF(v,_utf8mb4'x')='E' ORDER BY id"
+               Contract.query "fold-mixed-charset" "SELECT id FROM text_nullif_fold WHERE NULLIF(v,_latin1'X')='E' ORDER BY id"
                Contract.query "latin1-null-results" "SELECT id FROM text_nullif_latin1 WHERE NULLIF(v,_latin1'x') IS NULL ORDER BY id"
                Contract.query "latin1-match" "SELECT id FROM text_nullif_latin1 WHERE NULLIF(v,_latin1'x')='X'"
                Contract.query "latin1-connection" "SELECT id FROM text_nullif_latin1 WHERE NULLIF(v,'x')='X'"

@@ -5203,7 +5203,8 @@ let internal equalityIndexesForTransform
     | Error _ -> []
     | Ok index ->
         let matching (group: SingleColumnKeyGroup) =
-            group.ColumnIndex = index && group.Transform = transform
+            group.ColumnIndex = index
+            && FunctionalIndex.sameLookupTransform table.Columns.[index] transform group.Transform
         let unique =
             uniqueKeyGroups table
             |> visibleGroups

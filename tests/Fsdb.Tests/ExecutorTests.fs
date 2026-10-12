@@ -9254,6 +9254,41 @@ let tests =
                                 (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "5" ] ]))
                                 "accent-insensitive equality finds both index entries"
 
+                            let mixedCharset =
+                                runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'X')='E'"
+                                |> explainRow
+
+                            Expect.equal mixedCharset.Key (Some "ix") "equivalent mixed-charset comparison uses the key"
+
+                            let differentText =
+                                runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'y')='E'"
+                                |> explainRow
+
+                            Expect.equal differentText.Key None "different comparison text remains a separate expression"
+
+                            let binaryCharset =
+                                runDefault store "EXPLAIN SELECT id FROM nullif_fold WHERE NULLIF(value,_binary'x')='E'"
+                                |> explainRow
+
+                            Expect.equal binaryCharset.Key None "binary comparison does not share a text key"
+
+                            Expect.equal
+                                (runDefault store "SELECT id FROM nullif_fold WHERE NULLIF(value,_latin1'X')='E' ORDER BY id")
+                                (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "5" ] ]))
+                                "the mixed-charset probe retains accent-folded results"
+
+                        if name = "pad" then
+                            let distinctLiteral =
+                                runDefault store "EXPLAIN SELECT id FROM nullif_pad WHERE NULLIF(value,_utf8mb4'X')='x'"
+                                |> explainRow
+
+                            Expect.equal distinctLiteral.Key None "a changed binary literal must scan to preserve rows"
+
+                            Expect.equal
+                                (runDefault store "SELECT id FROM nullif_pad WHERE NULLIF(value,_utf8mb4'X')='x'")
+                                (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                                "the scan retains rows lost by MySQL's key substitution"
+
                     Expect.equal
                         (runDefault store "CREATE TABLE nullif_latin1 (id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_bin, KEY ix ((NULLIF(value,_latin1'x'))))")
                         (Affected 0UL)

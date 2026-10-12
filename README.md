@@ -480,8 +480,10 @@ different access pattern:
   `NULLIF` also has a physical key for `VARCHAR` when its text comparison
   literal uses the source charset. Key projection follows the column's
   collation, including case and accent folding and PAD SPACE. Plain
-  connection literals share a key with matching `utf8mb4` literals. Fsdb
-  conservatively scans a different charset identity or numeric probe.
+  connection literals share a key with matching `utf8mb4` literals. The
+  default `utf8mb4_0900_ai_ci` key also serves text literals from other
+  nonbinary charsets when the comparison values collate equal. Other
+  mixed-charset expressions and numeric probes scan.
   `IF(column IS NULL, integer_literal, column)` has a distinct nullable
   physical key for `BOOLEAN`, narrow integer columns, `INT`, and signed
   `BIGINT` with a fitting signed literal. The hidden key uses a four-byte
