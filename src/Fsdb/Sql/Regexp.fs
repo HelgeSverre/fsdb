@@ -131,10 +131,13 @@ let private unicodeCategoryAliases =
 let private basicLatinAliases =
     set [ "ASCII"; "BLK=BASIC_LATIN"; "BLOCK=BASIC_LATIN"; "INBASICLATIN" ]
 
-let private asciiHexDigitAliases = set [ "ASCII_HEX_DIGIT"; "AHEX" ]
-let private hexDigitAliases = set [ "HEX_DIGIT"; "HEX"; "XDIGIT" ]
-let private hexDigitMembers = "0-9A-Fa-f\\uFF10-\\uFF19\\uFF21-\\uFF26\\uFF41-\\uFF46"
-let private joinControlAliases = set [ "JOIN_CONTROL"; "JOIN_C" ]
+let private binaryClassMembers =
+    [ [ "ASCII_HEX_DIGIT"; "AHEX" ], "0-9A-Fa-f"
+      [ "HEX_DIGIT"; "HEX"; "XDIGIT" ], "0-9A-Fa-f\\uFF10-\\uFF19\\uFF21-\\uFF26\\uFF41-\\uFF46"
+      [ "JOIN_CONTROL"; "JOIN_C" ], "\\u200C\\u200D"
+      [ "BIDI_CONTROL"; "BIDI_C" ], "\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069" ]
+    |> List.collect (fun (aliases, members) -> aliases |> List.map (fun alias -> alias, members))
+    |> Map.ofList
 
 let private unicodePropertyNameAt (pattern: string) index =
     if index + 3 >= pattern.Length
@@ -170,17 +173,14 @@ let private unicodePropertyAt (pattern: string) index =
                 Some("\\s", "\\s")
             elif Set.contains name basicLatinAliases then
                 Some("\\p{IsBasicLatin}", "\\p{IsBasicLatin}")
-            elif Set.contains name asciiHexDigitAliases then
-                Some("[0-9A-Fa-f]", "0-9A-Fa-f")
-            elif Set.contains name hexDigitAliases then
-                Some("[" + hexDigitMembers + "]", hexDigitMembers)
-            elif Set.contains name joinControlAliases then
-                Some("[\\u200C\\u200D]", "\\u200C\\u200D")
             else
-                Map.tryFind categoryName unicodeCategoryAliases
-                |> Option.map (fun category ->
-                    let property = "\\p{" + category + "}"
-                    property, property)
+                match Map.tryFind name binaryClassMembers with
+                | Some members -> Some("[" + members + "]", members)
+                | None ->
+                    Map.tryFind categoryName unicodeCategoryAliases
+                    |> Option.map (fun category ->
+                        let property = "\\p{" + category + "}"
+                        property, property)
         positive
         |> Option.map (fun (atom, memberSyntax) ->
             nextIndex,

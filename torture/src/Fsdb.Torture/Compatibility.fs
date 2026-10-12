@@ -10782,6 +10782,12 @@ module ContractCatalog =
                Contract.query "join-control-negation-and-brackets"
                    "SELECT REGEXP_LIKE(CONVERT(0xE2808C USING utf8mb4),'[\\\\p{Join_Control}]','c'),REGEXP_LIKE(CONVERT(0xE2808B USING utf8mb4),'[\\\\P{Join_Control}]','c'),HEX(REGEXP_SUBSTR('😀','\\\\P{Join_C}',1,1,'c'))"
                    |> Contract.comparingValues
+               Contract.query "bidi-control-properties"
+                   "SELECT REGEXP_LIKE(CONVERT(0xD89C USING utf8mb4),'\\\\p{Bidi_Control}','c'),REGEXP_LIKE(CONVERT(0xE2808E USING utf8mb4),'\\\\p{Bidi_C}','c'),REGEXP_LIKE(CONVERT(0xE280AE USING utf8mb4),'\\\\p{Bidi_Control}','c'),REGEXP_LIKE(CONVERT(0xE281A6 USING utf8mb4),'\\\\p{Bidi_Control}','c'),REGEXP_LIKE(CONVERT(0xE281A9 USING utf8mb4),'[\\\\p{Bidi_Control}]','c')"
+                   |> Contract.comparingValues
+               Contract.query "bidi-control-negation"
+                   "SELECT REGEXP_LIKE(CONVERT(0xE2808C USING utf8mb4),'\\\\p{Bidi_Control}','c'),REGEXP_LIKE(CONVERT(0xE281A0 USING utf8mb4),'\\\\p{Bidi_Control}','c'),REGEXP_LIKE(CONVERT(0xE281AA USING utf8mb4),'\\\\P{Bidi_Control}','c'),HEX(REGEXP_SUBSTR('😀','\\\\P{Bidi_C}',1,1,'c'))"
+                   |> Contract.comparingValues
                Contract.query "whitespace-escapes"
                    "SELECT REGEXP_LIKE(' ','\\\\h','c'),REGEXP_LIKE('\\n','\\\\h','c'),REGEXP_LIKE(' ','\\\\H','c'),REGEXP_LIKE('\\n','\\\\v','c'),REGEXP_LIKE(' ','\\\\v','c'),REGEXP_LIKE('A','\\\\V','c'),REGEXP_LIKE('\\n','[a\\\\H]','c'),REGEXP_LIKE(' ','[a\\\\H]','c')"
                    |> Contract.comparingValues

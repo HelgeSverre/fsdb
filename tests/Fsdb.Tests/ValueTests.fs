@@ -3201,6 +3201,40 @@ let tests =
                               (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{Join_C}"; VInt 1L; VInt 1L; VString "c" ])
                               (VString "😀")
                               "negated Join_Control consumes one Unicode scalar"
+                      testCase "REGEXP Bidi_Control property covers the audited control set"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          let controls =
+                              [ 0x061c; 0x200e; 0x200f
+                                0x202a; 0x202b; 0x202c; 0x202d; 0x202e
+                                0x2066; 0x2067; 0x2068; 0x2069 ]
+
+                          for codePoint in controls do
+                              Expect.equal
+                                  (matches "\\p{Bidi_Control}" codePoint)
+                                  (VInt 1L)
+                                  (sprintf "U+%04X is Bidi_Control" codePoint)
+
+                          Expect.equal (matches "\\p{Bidi_C}" 0x061c) (VInt 1L) "short alias"
+                          Expect.equal (matches "[\\p{Bidi_Control}]" 0x2069) (VInt 1L) "bracket property"
+
+                          for codePoint in [ 0x200c; 0x200d; 0x2060; 0x206a ] do
+                              Expect.equal
+                                  (matches "\\p{Bidi_Control}" codePoint)
+                                  (VInt 0L)
+                                  (sprintf "U+%04X is not Bidi_Control" codePoint)
+                              Expect.equal
+                                  (matches "\\P{Bidi_Control}" codePoint)
+                                  (VInt 1L)
+                                  (sprintf "U+%04X is in the complement" codePoint)
+
+                          Expect.equal (matches "[\\P{Bidi_Control}]" 0x2060) (VInt 1L) "bracket complement"
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{Bidi_C}"; VInt 1L; VInt 1L; VString "c" ])
+                              (VString "😀")
+                              "negated Bidi_Control consumes one Unicode scalar"
                       testCase "REGEXP Any property consumes one Unicode scalar"
                       <| fun _ ->
                           for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do
