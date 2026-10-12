@@ -588,6 +588,13 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected the binary LIKE operands to remain distinct, got %A" other
 
+                testCase "binary LIKE compares text patterns as UTF-8 bytes"
+                <| fun _ ->
+                    let store = newStore ()
+                    match runDefault store "SELECT _binary 0xC3A9 LIKE 'é', _binary 0xC3A9 LIKE _binary 0xC3A9, _binary 0xE9 LIKE _latin1 0xE9, _binary 0xC3A9 LIKE _latin1 0xE9" with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "1"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected text and raw patterns to use the same UTF-8 bytes, got %A" other
+
                 testCase "WEIGHT_STRING applies CHAR truncation, BINARY padding, and source collation"
                 <| fun _ ->
                     match
@@ -6919,6 +6926,43 @@ let tests =
                     let truncated = runDefault store "EXPLAIN SELECT id FROM like_prefix_indexed WHERE v LIKE 'abc%'" |> explainRow
                     Expect.equal truncated.AccessType (Some "range") "a truncated key still narrows the candidates"
                     Expect.equal truncated.Key (Some "ix_v") "the prefix key supplies the broad range"
+
+                testCase "VARBINARY LIKE prefixes use byte ranges"
+                <| fun _ ->
+                    let store = newStore ()
+                    let seed =
+                        [ "0x6162"; "0x616263"; "0x61625A"; "0x616220"; "0x616225"; "0x61625F"; "0x61625F666F6F"
+                          "0x414258"; "0xC3A9"; "0xC3A978"; "0xE9"; "0xFF" ]
+                        @ [ for id in 13..37 -> sprintf "0x7A7A%02X" id ]
+                        |> List.mapi (fun index value -> sprintf "(%d,%s)" (index + 1) value)
+                        |> String.concat ","
+                    for table, definition in
+                        [ "like_bytes", "VARBINARY(20), KEY ix_v(v)"
+                          "like_fixed_bytes", "BINARY(20), KEY ix_v(v)"
+                          "like_blob", "BLOB, KEY ix_v(v(2))" ] do
+                        runDefault store $"CREATE TABLE {table} (id INT PRIMARY KEY, v {definition})" |> ignore
+                        Expect.equal (runDefault store $"INSERT INTO {table} VALUES {seed}") (Affected 37UL) "seed binary keys"
+
+                    for pattern, expected in
+                        [ "'ab%'", [ 1; 2; 3; 4; 5; 6; 7 ]
+                          "'é%'", [ 9; 10 ]
+                          "_latin1 0xE925", [ 11 ]
+                          "0xFF25", [ 12 ] ] do
+                        for table in [ "like_bytes"; "like_fixed_bytes" ] do
+                            Expect.equal
+                                (runDefault store $"SELECT id FROM {table} WHERE v LIKE {pattern} ORDER BY id")
+                                (ResultSet([ "id" ], expected |> List.map (fun id -> [ Some(string id) ])))
+                                "byte ranges preserve binary LIKE matches"
+                            let plan = runDefault store $"EXPLAIN SELECT id FROM {table} WHERE v LIKE {pattern}" |> explainRow
+                            Expect.equal plan.AccessType (Some "range") "a selective binary prefix uses a range"
+                            Expect.equal plan.Key (Some "ix_v") "the binary key supplies the range"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM like_blob WHERE v LIKE 'abc%' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "a truncated BLOB key keeps the full LIKE filter"
+                    let blobPlan = runDefault store "EXPLAIN SELECT id FROM like_blob WHERE v LIKE 'abc%'" |> explainRow
+                    Expect.equal blobPlan.AccessType (Some "range") "the BLOB prefix key narrows candidates"
 
                 testCase "binary text LIKE indexes Unicode prefixes"
                 <| fun _ ->

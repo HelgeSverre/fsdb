@@ -2721,6 +2721,16 @@ let private likePrefixUpperBound (prefix: string) =
         let next = if runes[last].Value = 0xD7FF then 0xE000 else runes[last].Value + 1
         Some(unicodePrefixThrough runes last next)
 
+let private likeBytePrefixUpperBound (prefix: byte[]) =
+    let mutable last = prefix.Length - 1
+    while last >= 0 && prefix[last] = 0xFFuy do
+        last <- last - 1
+    if last < 0 then None
+    else
+        let successor = Array.sub prefix 0 (last + 1)
+        successor[last] <- successor[last] + 1uy
+        Some successor
+
 let private likePadSpaceLowerBound (prefix: string) =
     let significant = prefix.TrimEnd(' ')
     let runes = significant.EnumerateRunes() |> Seq.toArray
@@ -2733,19 +2743,40 @@ let private likePadSpaceLowerBound (prefix: string) =
             let previous = if scalar = 0xE000 then 0xD7FF else scalar - 1
             Some(unicodePrefixThrough runes last previous)
 
-let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
+let private likeOp
+    (coll: Collation.Collation option)
+    (caseSensitive: bool)
+    (escape: char option)
+    (subjectCharset: string)
+    (patternCharset: string)
+    (subject: Value)
+    (pattern: Value)
+    : Value =
     match subject, pattern with
     | VNull, _
     | _, VNull -> VNull
     | _ ->
-        let text = subject |> toText |> Option.defaultValue ""
-        let pat = pattern |> toText |> Option.defaultValue ""
+        let raw = tryRawBytes subject |> Option.orElseWith (fun () -> tryRawBytes pattern) |> Option.isSome
+        let textOf charset value =
+            if raw then
+                let bytes =
+                    match value with
+                    | VEncodedString(_, bytes) -> bytes
+                    | _ ->
+                        value
+                        |> tryRawBytes
+                        |> Option.defaultWith (fun () -> value |> toText |> Option.defaultValue "" |> Charset.encode charset)
+                System.Text.Encoding.Latin1.GetString bytes
+            else
+                value |> toText |> Option.defaultValue ""
+        let text = textOf subjectCharset subject
+        let pat = textOf patternCharset pattern
         let col = coll |> Option.defaultValue Collation.defaultCollation
         // MySQL's LIKE never trims trailing spaces, not even under a PAD
         // SPACE collation ('a ' LIKE 'a' is false under utf8mb4_unicode_ci,
         // MySQL-verified) — folding is per character only. LIKE BINARY is
         // byte-for-byte with no folding at all.
-        let charEq = if caseSensitive then (=) else col.CharEquals
+        let charEq = if raw || caseSensitive then (=) else col.CharEquals
         boolToValue (likeMatch (escape |> Option.defaultValue '\\') charEq text pat)
 
 let private regexpOp
@@ -5671,7 +5702,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         (tryColumnDefForExpr ctx e)
                         p
                         (tryColumnDefForExpr ctx p)
-                |> Result.map (fun collation -> likeOp (Some collation) caseSensitive escape ve vp)))
+                |> Result.map (fun collation ->
+                    likeOp (Some collation) caseSensitive escape (sourceCharset ctx e) (sourceCharset ctx p) ve vp)))
     | Regexp(e, p) ->
         eval e
         |> Result.bind (fun ve ->
@@ -13438,8 +13470,8 @@ and private plannerRangePredicatesFor
         | [] -> rangePredicatesFor numericColumnName tryNumericConstant expression
         | predicates -> predicates
 
-/// Binary UTF-8 collations keep fixed LIKE prefixes within a byte-order interval.
-and private likePrefixRangePredicate constantValue scope (table: Table) tref expression =
+/// Binary text collations and byte-valued keys keep fixed LIKE prefixes in ordered intervals.
+and private likePrefixRangePredicate constantValue textCharset scope (table: Table) tref expression =
     let rec hasExplicitCollation expression =
         match expression with
         | Expression.CollationOverride _ -> true
@@ -13449,10 +13481,8 @@ and private likePrefixRangePredicate constantValue scope (table: Table) tref exp
     | Like(source, patternExpression, _, escape) when not (hasExplicitCollation patternExpression) ->
         let pattern =
             match patternExpression with
-            | LiteralValue(VString text) -> Some text
-            | _ ->
-                constantValue patternExpression
-                |> Option.bind (function VString text -> Some text | _ -> None)
+            | LiteralValue value -> Some value
+            | _ -> constantValue patternExpression
 
         pattern
         |> Option.bind (fun pattern ->
@@ -13460,28 +13490,51 @@ and private likePrefixRangePredicate constantValue scope (table: Table) tref exp
             |> Option.bind (fun name ->
                 table.Columns
                 |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
-                |> Option.filter (fun column ->
-                    match column.Type with
-                    | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
-                        column.Collation
-                        |> Option.exists (fun collation ->
-                            equalsIgnoreCase collation "utf8mb4_0900_bin"
-                            || equalsIgnoreCase collation "utf8mb4_bin")
-                    | _ -> false)
                 |> Option.bind (fun column ->
-                    let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
-                    if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
-                    else
-                        // PAD SPACE sorts longer trailing-space variants before the bare prefix.
-                        let lower =
-                            if column.Collation |> Option.exists (fun collation -> equalsIgnoreCase collation "utf8mb4_bin") then
-                                likePadSpaceLowerBound prefix
+                    let escape = escape |> Option.defaultValue '\\'
+                    let bounds =
+                        match column.Type, pattern with
+                        | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText), VString text
+                            when column.Collation
+                                 |> Option.exists (fun collation ->
+                                     equalsIgnoreCase collation "utf8mb4_0900_bin"
+                                     || equalsIgnoreCase collation "utf8mb4_bin") ->
+                            let prefix = likeLiteralPrefix escape text
+                            if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
                             else
-                                Some prefix
-                        Some
-                            { Column = column.Name
-                              Lower = lower |> Option.map (fun value -> VString value, true)
-                              Upper = likePrefixUpperBound prefix |> Option.map (fun successor -> VString successor, false) })))
+                                // PAD SPACE sorts longer trailing-space variants before the bare prefix.
+                                let lower =
+                                    if column.Collation |> Option.exists (fun collation -> equalsIgnoreCase collation "utf8mb4_bin") then
+                                        likePadSpaceLowerBound prefix
+                                    else Some prefix
+                                Some(
+                                    lower |> Option.map (fun value -> VString value, true),
+                                    likePrefixUpperBound prefix |> Option.map (fun value -> VString value, false))
+                        | (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob), _
+                            when escape <= '\u007F' ->
+                            let bytes =
+                                tryRawBytes pattern
+                                |> Option.orElseWith (fun () ->
+                                    match pattern with
+                                    | VEncodedString(_, bytes) -> Some bytes
+                                    | VString text -> Some(Charset.encode (textCharset patternExpression) text)
+                                    | _ -> None)
+                            bytes
+                            |> Option.bind (fun bytes ->
+                                let prefix =
+                                    bytes
+                                    |> System.Text.Encoding.Latin1.GetString
+                                    |> likeLiteralPrefix escape
+                                    |> System.Text.Encoding.Latin1.GetBytes
+                                if prefix.Length = 0 then None
+                                else
+                                    Some(
+                                        Some(VBytes prefix, true),
+                                        likeBytePrefixUpperBound prefix |> Option.map (fun value -> VBytes value, false)))
+                        | _ -> None
+                    bounds
+                    |> Option.map (fun (lower, upper) ->
+                        { Column = column.Name; Lower = lower; Upper = upper }))))
     | _ -> None
 
 and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
@@ -14699,7 +14752,7 @@ and private tryRangeAccessInTableWith
         let likeRanges =
             whereExpr
             |> optionalConjuncts
-            |> List.choose (likePrefixRangePredicate (plannerConstantEvaluator store registry) scope table tref)
+            |> List.choose (likePrefixRangePredicate (plannerConstantEvaluator store registry) (sourceCharset context.Value) scope table tref)
             |> List.choose (fun bounds ->
                 // Storage widens truncated bounds to include every row sharing the prefix key.
                 Storage.trySecondaryRangeLookupInTableWith allowed store table bounds.Column bounds.Lower bounds.Upper)

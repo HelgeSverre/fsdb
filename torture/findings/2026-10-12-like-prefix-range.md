@@ -27,6 +27,13 @@ same interval on binary-collated `CHAR`, `VARCHAR`, and indexed `TEXT` family ke
 An explicit pattern `COLLATE` excludes the binary range: with
 `utf8mb4_0900_ai_ci`, `ABX` also matches `ab%` despite the column's binary
 collation. The query falls back to a scan and still returns that row.
+For byte-valued `BINARY`, `VARBINARY`, and indexed `BLOB` family keys, the
+range instead uses a byte prefix and its next lexicographic byte string.
+An all-`FF` prefix has no upper bound. The residual predicate compares raw
+bytes: connection text is encoded in its source charset, while introduced
+charset values retain their declared bytes. Thus a UTF-8 `é%` matches
+`0xC3A9`, while `_latin1 0xE925` matches `0xE9`. Prefix-length `BLOB`
+indexes widen the range before the residual filter.
 For a prefix-length key such as `v(2)`, storage widens the interval to
 include every row sharing the truncated key; the residual `LIKE` test
 selects `abc` from an `abc%` probe. Other
@@ -37,21 +44,20 @@ The focused Expecto tests first reported `ALL` where MySQL chose `range`.
 They now check both ASCII prefix patterns, BMP and supplementary Unicode
 prefixes, `TEXT` family keys, escaped `_` and `%`, an explicit escape
 character, an exact pattern, safe constant expression patterns, explicit
-case-insensitive pattern overrides, trailing-space
-variants under the legacy binary collation, result parity with a scan, the
+case-insensitive pattern overrides, byte-valued prefixes and source encodings,
+trailing-space variants under the legacy binary collation, result parity with a scan, the
 leading-wildcard control, and the truncated-index candidate range. The `CHAR`
 probes check that default trailing-space stripping leaves only `ab c` matching
-`LIKE 'ab %'`. The `binary-like-prefix-range` differential contract compares the returned
-rows with native MySQL.
+`LIKE 'ab %'`. The `binary-like-prefix-range` differential contract compares
+the returned rows with native MySQL.
 
-All twenty-nine contract steps matched both the native Homebrew MySQL 8.4.11
-run (`20261012T185944804-37978/contracts`) and the digest-pinned Docker
-MySQL 8.4.11 run (`20261012T190355105-38814/contracts`). Both runs restored
-the case's database objects. The full pinned-image run had ten differences
-outside this case, including identifier-case diagnostics and the
-connection-sensitive mixed-type join. The native Homebrew run additionally
-reported a Han REGEXP property difference because that build ships different
-Unicode property data; the Han case matches the pinned image.
+All thirty-seven contract steps matched the digest-pinned Docker MySQL 8.4.11
+run (`20261012T192831737-54078/contracts`), and the case restored its database
+objects. The full 150-case, 19,129-step run had ten differences outside this
+case, including identifier-case diagnostics and the connection-sensitive
+mixed-type join. An earlier native Homebrew run reported a Han REGEXP property
+difference because that build ships different Unicode property data; the Han
+case matches the pinned image.
 
 The [focused quick benchmark](../../benchmarks/results/2cf93f5d-quick.md)
 used 10,000 `functional_users` rows and the same `prefix42%` query with

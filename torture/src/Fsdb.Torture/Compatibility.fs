@@ -6080,6 +6080,12 @@ module ContractCatalog =
             |> String.concat ","
 
         let values = renderValues [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo"; "ABX" ] 33
+        let binaryValues =
+            [ "6162"; "616263"; "61625A"; "616220"; "616225"; "61625F"; "61625F666F6F"
+              "414258"; "C3A9"; "C3A978"; "E9"; "FF" ]
+            @ [ for id in 13..37 -> sprintf "7A7A%02X" id ]
+            |> List.mapi (fun index value -> sprintf "(%d,0x%s)" (index + 1) value)
+            |> String.concat ","
         let unicodeValues = renderValues [ "é"; "éa"; "ê"; "é"; "😀"; "😀a"; "😁"; "éÿ"; "é " ] 34
         let padSpaceValues =
             renderValues [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁"; "ab  "; "ab  c" ] 38
@@ -6092,6 +6098,12 @@ module ContractCatalog =
                "INSERT INTO like_prefix_probe VALUES " + values
                "CREATE TABLE like_prefix_short_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v(2)))"
                "INSERT INTO like_prefix_short_probe VALUES " + values
+               "CREATE TABLE like_binary_probe(id INT PRIMARY KEY,v VARBINARY(20),KEY ix_v(v))"
+               "INSERT INTO like_binary_probe VALUES " + binaryValues
+               "CREATE TABLE like_fixed_binary_probe(id INT PRIMARY KEY,v BINARY(20),KEY ix_v(v))"
+               "INSERT INTO like_fixed_binary_probe VALUES " + binaryValues
+               "CREATE TABLE like_blob_probe(id INT PRIMARY KEY,v BLOB,KEY ix_v(v(2)))"
+               "INSERT INTO like_blob_probe VALUES " + binaryValues
                "CREATE TABLE like_unicode_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v))"
                "INSERT INTO like_unicode_probe VALUES " + unicodeValues
                "CREATE TABLE like_pad_space_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,KEY ix_v(v))"
@@ -6115,6 +6127,14 @@ module ContractCatalog =
                Contract.query "constant-coalesce" "SELECT id FROM like_prefix_probe WHERE v LIKE COALESCE(NULL,'ab%') ORDER BY id"
                Contract.query "explicit-pattern-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE ('ab%' COLLATE utf8mb4_0900_ai_ci) ORDER BY id"
                Contract.query "constant-explicit-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE (CONCAT('ab','%') COLLATE utf8mb4_0900_ai_ci) ORDER BY id"
+               Contract.query "binary-utf8-literal" "SELECT _binary 0xC3A9 LIKE 'é',_binary 0xC3A9 LIKE _binary 0xC3A9" |> Contract.comparingValues
+               Contract.query "binary-introduced-literal" "SELECT _binary 0xE9 LIKE _latin1 0xE9,_binary 0xC3A9 LIKE _latin1 0xE9" |> Contract.comparingValues
+               Contract.query "varbinary-prefix" "SELECT id FROM like_binary_probe WHERE v LIKE 'ab%' ORDER BY id"
+               Contract.query "varbinary-utf8-prefix" "SELECT id FROM like_binary_probe WHERE v LIKE 'é%' ORDER BY id"
+               Contract.query "varbinary-introduced-prefix" "SELECT id FROM like_binary_probe WHERE v LIKE _latin1 0xE925 ORDER BY id"
+               Contract.query "varbinary-maximum-byte-prefix" "SELECT id FROM like_binary_probe WHERE v LIKE 0xFF25 ORDER BY id"
+               Contract.query "binary-fixed-prefix" "SELECT id FROM like_fixed_binary_probe WHERE v LIKE 'ab%' ORDER BY id"
+               Contract.query "blob-truncated-prefix" "SELECT id FROM like_blob_probe WHERE v LIKE 'abc%' ORDER BY id"
                Contract.query "truncated-key" "SELECT id FROM like_prefix_short_probe WHERE v LIKE 'abc%' ORDER BY id"
                Contract.query "unicode-bmp" "SELECT id FROM like_unicode_probe WHERE v LIKE 'é%' ORDER BY id"
                Contract.query "unicode-supplementary" "SELECT id FROM like_unicode_probe WHERE v LIKE '😀%' ORDER BY id"
@@ -6132,7 +6152,7 @@ module ContractCatalog =
                Contract.query "char-legacy-prefix" "SELECT id FROM like_char_legacy_probe WHERE v LIKE 'ab%' ORDER BY id"
                Contract.query "char-legacy-trailing-space" "SELECT id FROM like_char_legacy_probe WHERE v LIKE 'ab %' ORDER BY id"
                Contract.query "char-legacy-supplementary" "SELECT id FROM like_char_legacy_probe WHERE v LIKE '😀%' ORDER BY id" |]
-          Cleanup = [| "DROP TABLE like_prefix_probe"; "DROP TABLE like_prefix_short_probe"; "DROP TABLE like_unicode_probe"; "DROP TABLE like_pad_space_probe"; "DROP TABLE like_text_probe"; "DROP TABLE like_char_0900_probe"; "DROP TABLE like_char_legacy_probe" |]
+          Cleanup = [| "DROP TABLE like_prefix_probe"; "DROP TABLE like_prefix_short_probe"; "DROP TABLE like_binary_probe"; "DROP TABLE like_fixed_binary_probe"; "DROP TABLE like_blob_probe"; "DROP TABLE like_unicode_probe"; "DROP TABLE like_pad_space_probe"; "DROP TABLE like_text_probe"; "DROP TABLE like_char_0900_probe"; "DROP TABLE like_char_legacy_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private textIfNullBranchFunctionalIndex =
