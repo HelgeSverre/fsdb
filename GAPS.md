@@ -265,8 +265,9 @@ renamed, nested expression, single-source plain or mixed `SELECT *`, and UNION
 views preserve JSON values and warning names; broader view shapes,
 user-defined JSON origins, and other expression-origin overflow cases remain
 open. Audited joined view references retain the JSON warning source. MySQL's
-right-side join warning row counter can reset to 1 for each probe, while fsdb
-still counts final output rows; joined diagnostic row provenance remains open.
+join warning row counter can reset to 1 for each probe, and projection order
+changes which subsequent expressions see that reset. Fsdb still counts final
+output rows; joined diagnostic row provenance remains open.
 
 | Missing family | Functions | Impact |
 |---|---|---|

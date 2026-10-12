@@ -7691,24 +7691,33 @@ and private viewJsonSourceNames
                             | _ -> Map.empty
                         let sourceName (columnName: string) =
                             Map.tryFind (columnName.ToLowerInvariant()) upstream |> Option.defaultValue columnName
-                        let sourceColumns =
-                            match definition.From, definition.Joins with
-                            | Some(FromTable source), [] ->
-                                let sourceDb = source.Database |> Option.defaultValue viewDb
-                                match tryStoredView store sourceDb source.Table with
-                                | Some sourceView when not sourceView.Columns.IsEmpty -> sourceView.Columns
-                                | _ ->
-                                    selectSourceColumns store viewDb (FromTable source)
-                                    |> List.choose id
-                                    |> List.map _.Name
-                            | _ -> []
                         let expandedProjections =
-                            definition.Projections
-                            |> List.collect (fun projection ->
-                                match projection.Expression with
-                                | Star _ when not sourceColumns.IsEmpty ->
-                                    sourceColumns |> List.map (fun name -> Projection.create (Col name) None)
-                                | _ -> [ projection ])
+                            let hasStar =
+                                definition.Projections
+                                |> List.exists (fun projection ->
+                                    match projection.Expression with
+                                    | Star _ -> true
+                                    | _ -> false)
+                            if not hasStar then
+                                definition.Projections
+                            else
+                                let sourceColumns =
+                                    match definition.From, definition.Joins with
+                                    | Some(FromTable source), [] ->
+                                        let sourceDb = source.Database |> Option.defaultValue viewDb
+                                        match tryStoredView store sourceDb source.Table with
+                                        | Some sourceView when not sourceView.Columns.IsEmpty -> sourceView.Columns
+                                        | _ ->
+                                            selectSourceColumns store viewDb (FromTable source)
+                                            |> List.choose id
+                                            |> List.map _.Name
+                                    | _ -> []
+                                definition.Projections
+                                |> List.collect (fun projection ->
+                                    match projection.Expression with
+                                    | Star _ when not sourceColumns.IsEmpty ->
+                                        sourceColumns |> List.map (fun name -> Projection.create (Col name) None)
+                                    | _ -> [ projection ])
                         match expandedProjections with
                         | projections when projections.Length = view.Columns.Length ->
                             List.zip view.Columns projections

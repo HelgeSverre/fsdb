@@ -103,11 +103,15 @@ computed` warns under `json_array`, including through a nested rename.
 
 Joined queries retain the view function as the warning source whether the view
 is the first or second table. Warning row numbers remain a separate gap: in the
-audited two-row equijoin, MySQL numbers the first-table view's warnings 1 and 2,
-but numbers both second-table view warnings 1, including when that right source
-is a physical JSON column. Fsdb currently numbers the right-source warnings by
-the final output rows (1 and 2). This needs join-evaluation provenance rather
-than a source-name substitution.
+audited two-row equijoin, MySQL numbers the first-table view's warnings 1 and 2
+when only that table contributes projected columns, but numbers both second-table
+view warnings 1, including when that right source is a physical JSON column.
+Projection order also matters: projecting the right table's ID before
+`CHAR(left.payload)` gives row 1 twice, while projecting that ID afterward
+gives rows 1 and 2. Projecting `CHAR()` from both tables gives row 1 for all
+four warnings. Fsdb currently numbers those warnings by final output row. A
+correct fix needs join-evaluation diagnostic provenance rather than a
+source-name substitution or a constant right-table row number.
 
 Stored JSON values and warning row numbers now match the audited seven-row
 table with all rows, a `WHERE` filter, descending ordering with and without
