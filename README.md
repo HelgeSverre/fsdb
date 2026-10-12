@@ -458,10 +458,13 @@ different access pattern:
   while an embedding override of any function in the chain keeps execution on
   the ordinary scan path.
 
-  For signed integer columns, `COALESCE(column, integer_literal)` also has a
-  maintained physical key, including when the fallback exceeds the source
-  column's range. Equality, uniqueness, grouping, mutation, and recovery use
-  that key; an embedding override uses a scan.
+  For integer columns, `COALESCE(column, integer_literal)` also has a maintained
+  physical key. Its result type follows MySQL's source signedness and literal
+  width: narrow integer fallbacks use a signed `INT` key, wider ones use
+  `BIGINT`, and `BIGINT UNSIGNED` with a signed fallback uses an exact decimal
+  key. A value outside the hidden key's range fails in strict mode and is
+  clipped with a warning in permissive mode. Equality, uniqueness, grouping,
+  mutation, and recovery use that key; an embedding override uses a scan.
 
   Text and binary values use MySQL's leading-number conversion and
   diagnostics. Arithmetic and other general expression keys retain their DDL

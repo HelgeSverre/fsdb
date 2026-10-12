@@ -12940,11 +12940,17 @@ and private runUnlockedSelectStmt
                     | Error error -> error, [], []
                     | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows None narrowed
                     | Ok None ->
+                        let physicalTable = physicalFastPathTable store dbName tref
                         let physicalCandidates =
-                            physicalFastPathTable store dbName tref
+                            physicalTable
                             |> Option.map (fun table ->
                                 physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where)
                             |> Option.defaultValue []
+
+                        let coveredSelect access =
+                            physicalTable
+                            |> Option.map (fun table -> selectWithCoveredCoalesceEquality registry table tref access select)
+                            |> Option.defaultValue select
 
                         let equalityAccess =
                             physicalCandidates
@@ -12958,13 +12964,15 @@ and private runUnlockedSelectStmt
                             tryEqualityPrefixOrder store registry dbName tref select equalityAccess
 
                         match orderedPrefix with
-                        | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
+                        | Some plan ->
+                            let covered = coveredSelect (equalityAccess |> Option.map EqualityAccess)
+                            runArbitrary plan.Columns plan.Rows None { covered with OrderBy = [] }
                         | None ->
                             let indexOrder = tryIndexOrder store registry dbName tref select
                             let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder indexOrder physicalCandidates
 
                             match earlyPhysicalAccess |> Option.map physicalAccessRows with
-                            | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
+                            | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None (coveredSelect earlyPhysicalAccess)
                             | None ->
                                 let projectedLookup =
                                     tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
@@ -12986,7 +12994,7 @@ and private runUnlockedSelectStmt
 
                                         match resolved with
                                         | Error e -> e, [], []
-                                        | Ok(columns, rows) -> runArbitrary columns rows None select
+                                        | Ok(columns, rows) -> runArbitrary columns rows None (coveredSelect physicalAccess)
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then
@@ -13032,6 +13040,42 @@ and private literalPointLookupEqualities (registry: Registry) (tref: TableRef) (
                       Transform = transform
                       Value = value })
             | _ -> None)
+
+/// MySQL compares a functional equality through the maintained key. A
+/// permissively clipped COALESCE key can therefore differ from reevaluating
+/// the scalar expression against the stored source value.
+and private selectWithCoveredCoalesceEquality registry table tref access select =
+    match access with
+    | Some(EqualityAccess plan) ->
+        let covers = function
+            | BinOp(Eq, indexed, LiteralValue _)
+            | BinOp(Eq, LiteralValue _, indexed) ->
+                storedIndexedColumnFor registry tref indexed
+                |> Option.exists (fun (column, transform) ->
+                    match transform with
+                    | Some(Expression expression) ->
+                        FunctionalIndex.tryPhysicalExpression expression
+                        |> Option.exists (fun physical ->
+                            physical.NullFallback.IsSome
+                            && (Storage.equalityIndexesForTransform table column transform
+                                |> List.exists (fun index -> equalsIgnoreCase index.Name plan.KeyName)))
+                    | _ -> false)
+            | _ -> false
+
+        let rec removeFirstCovered = function
+            | [] -> []
+            | term :: rest when covers term -> rest
+            | term :: rest -> term :: removeFirstCovered rest
+
+        let remaining =
+            select.Where
+            |> Option.map conjuncts
+            |> Option.defaultValue []
+            |> removeFirstCovered
+            |> combineConjuncts
+
+        { select with Where = remaining }
+    | _ -> select
 
 and private plannerConstantEvaluator (store: Store) (registry: Registry) =
     let rec isSafe expression =

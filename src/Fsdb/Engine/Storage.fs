@@ -2945,8 +2945,25 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
 
     let transformed, truncated =
         try
-            FunctionalIndex.projectValueWithStatus encodeText transform value
+            let indexedValue, outOfRange = FunctionalIndex.prepareIndexValue column.Type transform value
+            if outOfRange then
+                reportIndexExpressionIssue
+                    indexName
+                    row
+                    3752
+                    (sprintf
+                        "Value is out of range for functional index '%s' at row %d"
+                        indexName
+                        (Diagnostics.currentRowNumber ()))
+            FunctionalIndex.projectValueWithStatus encodeText transform indexedValue
         with
+        | FunctionalIndex.CoalesceIndexValueOutOfRange ->
+            let message =
+                sprintf
+                    "Value is out of range for functional index '%s' at row %d"
+                    indexName
+                    (Diagnostics.currentRowNumber ())
+            raise (IndexExpressionError(3752, message))
         | FunctionalIndex.InvalidLogarithmArgument ->
             raise (IndexExpressionError(3020, "Invalid argument for logarithm"))
         | FunctionalIndex.DoubleOutOfRange functionName ->

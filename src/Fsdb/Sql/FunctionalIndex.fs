@@ -10,6 +10,7 @@ open Fsdb.Value
 
 exception DoubleOutOfRange of string
 exception InvalidLogarithmArgument
+exception CoalesceIndexValueOutOfRange
 
 type private Builtin =
     { CanonicalName: string
@@ -345,17 +346,19 @@ type private NumericKeyResult =
     | SignedInteger
     | Approximate
 
-let private numericKeyResult columnType transforms =
+let private numericKeyResult columnType startsWithFallback transforms =
     let sourceResult =
-        match columnType, transforms with
-        | TBit _, AbsoluteValue :: _ -> ExactSource
-        | TBool, _
-        | TYear, _
-        | TBit _, _
-        | TFloat _, _
-        | TDouble _, _ -> Approximate
-        | _ when isTextOrBinary columnType -> Approximate
-        | _ -> ExactSource
+        if startsWithFallback then ExactSource
+        else
+            match columnType, transforms with
+            | TBit _, AbsoluteValue :: _ -> ExactSource
+            | TBool, _
+            | TYear, _
+            | TBit _, _
+            | TFloat _, _
+            | TDouble _, _ -> Approximate
+            | _ when isTextOrBinary columnType -> Approximate
+            | _ -> ExactSource
 
     transforms
     |> List.fold
@@ -366,17 +369,25 @@ let private numericKeyResult columnType transforms =
             | _ -> result)
         sourceResult
 
-let private supportsNullFallback columnType = function
-    | VInt _ ->
-        match columnType with
-        | TBool
-        | TTinyInt false
-        | TSmallInt false
-        | TMediumInt false
-        | TInt false
-        | TBigInt false -> true
-        | _ -> false
-    | _ -> false
+type private CoalesceIntegerKey =
+    | SignedInt32
+    | SignedInt64
+    | UnsignedInt64
+    | ExactDecimal20
+
+let private tryCoalesceIntegerKey columnType fallback =
+    let wideLiteral value = value >= 10_000_000_000L || value <= -10_000_000_000L
+
+    match columnType, fallback with
+    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _), VInt value ->
+        Some(if wideLiteral value then SignedInt64 else SignedInt32)
+    | TBigInt false, VInt _ -> Some SignedInt64
+    | TBigInt true, VInt _ -> Some ExactDecimal20
+    | (TBool | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false), VUInt _ ->
+        Some ExactDecimal20
+    | (TTinyInt true | TSmallInt true | TMediumInt true | TInt true | TBigInt true), VUInt _ ->
+        Some UnsignedInt64
+    | _ -> None
 
 let supportsColumnType transform columnType =
     match transform with
@@ -384,7 +395,9 @@ let supportsColumnType transform columnType =
         tryPhysicalExpression expression
         |> Option.exists (fun physical ->
             let transforms = physical.Calls |> List.map snd
-            let sourceSupported = physical.NullFallback |> Option.forall (supportsNullFallback columnType)
+            let sourceSupported =
+                physical.NullFallback
+                |> Option.forall (fun fallback -> tryCoalesceIntegerKey columnType fallback |> Option.isSome)
 
             if not sourceSupported then false
             else
@@ -421,15 +434,17 @@ let rec private integerKeyLength = function
         |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> integerKeyLength))
     | _ -> None
 
-/// MySQL promotes a signed integer COALESCE with an integer literal to INT,
-/// except that a BIGINT source keeps its eight-byte result.
+/// The hidden result type depends on both source signedness and literal width.
 let tryCoalesceKeyLength columnType = function
     | Expression expression ->
         match tryPhysicalExpression expression with
-        | Some { NullFallback = Some(VInt _); Calls = [] } ->
-            match columnType with
-            | TBigInt false -> Some 8
-            | _ -> Some 4
+        | Some { NullFallback = Some fallback; Calls = [] } ->
+            match tryCoalesceIntegerKey columnType fallback with
+            | Some SignedInt32 -> Some 4
+            | Some SignedInt64
+            | Some UnsignedInt64 -> Some 8
+            | Some ExactDecimal20 -> Some 9
+            | None -> None
         | _ -> None
     | _ -> None
 
@@ -530,10 +545,59 @@ let private tryExactUInt64 =
     | VBytes bytes -> bytes |> Text.Encoding.Latin1.GetString |> ofText
     | _ -> None
 
-let private tryNullFallbackProbe fallback value =
-    match fallback with
-    | Some(VInt _) -> tryExactInt64 value |> Option.map VInt
-    | _ -> None
+let private tryCoalesceKeyValue key value =
+    match key with
+    | SignedInt32 ->
+        value
+        |> tryExactInt64
+        |> Option.filter (fun number -> number >= int64 Int32.MinValue && number <= int64 Int32.MaxValue)
+        |> Option.map VInt
+    | SignedInt64 -> tryExactInt64 value |> Option.map VInt
+    | UnsignedInt64 -> tryExactUInt64 value |> Option.map VUInt
+    | ExactDecimal20 ->
+        match value with
+        | VInt number -> Some(VDecimal(decimal number))
+        | VUInt number -> Some(VDecimal(decimal number))
+        | VDecimal number
+            when number >= decimal Int64.MinValue
+                 && number <= decimal UInt64.MaxValue
+                 && Decimal.Truncate number = number ->
+            Some(VDecimal number)
+        | _ -> None
+
+let private tryNullFallbackProbe columnType fallback value =
+    fallback
+    |> Option.bind (tryCoalesceIntegerKey columnType)
+    |> Option.bind (fun key ->
+        match tryCoalesceKeyValue key value with
+        | Some projected -> Some projected
+        // Preserve an exact, out-of-range probe. It cannot match a clipped
+        // key, but still lets the physical lookup prove the result empty.
+        | None when key = SignedInt32 ->
+            match value with
+            | VInt _ | VUInt _ -> Some value
+            | _ -> None
+        | None -> None)
+
+let prepareIndexValue columnType transform value =
+    match transform with
+    | Some(Expression expression) ->
+        match tryPhysicalExpression expression with
+        | Some { NullFallback = Some fallback } ->
+            match tryCoalesceIntegerKey columnType fallback with
+            | Some key ->
+                let selected = if value = VNull then fallback else value
+                match tryCoalesceKeyValue key selected with
+                | Some projected -> projected, false
+                | None ->
+                    match key, selected with
+                    | SignedInt32, VInt number ->
+                        VInt(if number < int64 Int32.MinValue then int64 Int32.MinValue else int64 Int32.MaxValue), true
+                    | SignedInt32, VUInt _ -> VInt(int64 Int32.MaxValue), true
+                    | _ -> raise CoalesceIndexValueOutOfRange
+            | None -> value, false
+        | _ -> value, false
+    | _ -> value, false
 
 let private tryRoundedProbe columnType value =
     let exactDoubleLimit = 1L <<< 53
@@ -603,17 +667,17 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             let transforms = physical.Calls |> List.map snd
 
             match List.tryLast transforms with
-            | None when physical.NullFallback.IsSome -> tryNullFallbackProbe physical.NullFallback value
+            | None when physical.NullFallback.IsSome -> tryNullFallbackProbe columnType physical.NullFallback value
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
             | Some transform when isEncodedTextTransform transform -> tryTextResultProbe value
             | Some _ when List.forall isNumericTransform transforms ->
-                match numericKeyResult columnType transforms, value with
+                match numericKeyResult columnType physical.NullFallback.IsSome transforms, value with
                 | SignedInteger, _ -> tryExactInt64 value |> Option.map VInt
                 | Approximate, VDouble number when Double.IsFinite number -> Some(VDouble number)
                 | Approximate, _ -> None
                 | ExactSource, _ when physical.NullFallback.IsSome ->
-                    tryNullFallbackProbe physical.NullFallback value
+                    tryNullFallbackProbe columnType physical.NullFallback value
                 | ExactSource, _ -> tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
             | Some _ -> normalizeStored value
             | None -> None)

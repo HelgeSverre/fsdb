@@ -8682,13 +8682,99 @@ let tests =
 
                     Expect.equal bigPlan.KeyLength (Some "8") "MySQL indexes the BIGINT expression result"
 
-                    match
-                        runDefault
-                            store
-                            "CREATE TABLE unsupported_coalesced (id INT PRIMARY KEY, value INT UNSIGNED, UNIQUE INDEX ux_fallback ((COALESCE(value, 0))))"
-                    with
-                    | Err(1235, _) -> ()
-                    | other -> failtestf "an unsupported unique expression must be refused; got %A" other
+                testCase "unsigned COALESCE keys use MySQL's signed or decimal result type"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE unsigned_small (id INT PRIMARY KEY, value TINYINT UNSIGNED, UNIQUE INDEX ux_fallback ((COALESCE(value, 0))))")
+                        (Affected 0UL)
+                        "MySQL permits a signed INT result over an unsigned narrow column"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO unsigned_small VALUES (1, NULL)")
+                        (Affected 1UL)
+                        "the fallback occupies the unique key"
+
+                    match runDefault store "INSERT INTO unsigned_small VALUES (2, 0)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "the unsigned zero must collide with the fallback; got %A" other
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE unsigned_int (id INT PRIMARY KEY, value INT UNSIGNED, INDEX ix_fallback ((COALESCE(value, 0))))")
+                        (Affected 0UL)
+                        "MySQL permits the INT UNSIGNED functional key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO unsigned_int VALUES (1, NULL), (2, 2147483647)")
+                        (Affected 2UL)
+                        "values within the hidden signed result fit"
+
+                    match runDefault store "INSERT INTO unsigned_int VALUES (3, 2147483648)" with
+                    | Err(3752, _) -> ()
+                    | other -> failtestf "the hidden signed INT result must reject overflow; got %A" other
+
+                    let intPlan =
+                        runDefault store "EXPLAIN SELECT id FROM unsigned_int WHERE COALESCE(value, 0) = 0"
+                        |> explainRow
+
+                    Expect.equal intPlan.Key (Some "ix_fallback") "the unsigned source has a physical fallback key"
+                    Expect.equal intPlan.KeyLength (Some "4") "the hidden result is a signed INT"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE unsigned_big (id INT PRIMARY KEY, value BIGINT UNSIGNED, UNIQUE INDEX ux_fallback ((COALESCE(value, 0))))")
+                        (Affected 0UL)
+                        "MySQL uses a DECIMAL(20,0) result for mixed BIGINT signedness"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO unsigned_big VALUES (1, NULL), (2, 18446744073709551615)")
+                        (Affected 2UL)
+                        "the decimal result preserves the unsigned maximum"
+
+                    match runDefault store "INSERT INTO unsigned_big VALUES (3, 0)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "the decimal zero must collide with the fallback; got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM unsigned_big WHERE COALESCE(value, 0) = 18446744073709551615")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "the maximum unsigned key remains exact"
+
+                    let decimalPlan =
+                        runDefault store "EXPLAIN SELECT id FROM unsigned_big WHERE COALESCE(value, 0) = 0"
+                        |> explainRow
+
+                    Expect.equal decimalPlan.KeyLength (Some "9") "the DECIMAL(20,0) key uses nine bytes"
+
+                testCase "COALESCE literal width controls the hidden integer key"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE narrow_literal (id INT PRIMARY KEY, value TINYINT, INDEX ix ((COALESCE(value, 2147483648))))")
+                        (Affected 0UL)
+                        "a ten-digit fallback still declares an INT result"
+
+                    match runDefault store "INSERT INTO narrow_literal VALUES (1, NULL)" with
+                    | Err(3752, _) -> ()
+                    | other -> failtestf "the ten-digit fallback must overflow its hidden INT key; got %A" other
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE wide_literal (id INT PRIMARY KEY, value TINYINT, INDEX ix ((COALESCE(value, 9223372036854775807))))")
+                        (Affected 0UL)
+                        "a nineteen-digit fallback declares a BIGINT result"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO wide_literal VALUES (1, NULL)")
+                        (Affected 1UL)
+                        "the BIGINT fallback fits"
+
+                    let widePlan =
+                        runDefault store "EXPLAIN SELECT id FROM wide_literal WHERE COALESCE(value, 9223372036854775807) = 9223372036854775807"
+                        |> explainRow
+
+                    Expect.equal widePlan.Key (Some "ix") "the wide literal uses its physical key"
+                    Expect.equal widePlan.KeyLength (Some "8") "the hidden BIGINT key is eight bytes"
 
                 testCase "TRIM expression indexes enforce uniqueness and narrow predicates"
                 <| fun _ ->

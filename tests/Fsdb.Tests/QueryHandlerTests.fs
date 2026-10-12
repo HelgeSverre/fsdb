@@ -2522,6 +2522,32 @@ let tests =
                   (ResultSet([ "id" ], [ [ Some "9007199254740992" ] ]))
                   "the neighboring BIGINT must not compare equal to the DOUBLE bound"
 
+          testCase "permissive unsigned COALESCE keeps the source and probes the clipped key"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created =
+                  handle session "CREATE TABLE clipped_coalesce (id INT PRIMARY KEY, value INT UNSIGNED, KEY ix ((COALESCE(value,0))))"
+              Expect.equal created (Affected 0UL) "create the hidden signed INT key"
+              let session, seeded = handle session "INSERT INTO clipped_coalesce VALUES(1,2147483647)"
+              Expect.equal seeded (Affected 1UL) "seed the boundary key"
+              let session, _ = handle session "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+              let session, inserted = handle session "INSERT INTO clipped_coalesce VALUES(2,2147483648)"
+              Expect.equal inserted (Affected 1UL) "permissive mode stores the source value"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 3752 ] "hidden key overflow warns"
+              Expect.equal (Fsdb.SqlState.forCode 3752) "22003" "hidden key overflow SQLSTATE"
+              Expect.equal
+                  (handle session "SELECT value FROM clipped_coalesce WHERE id=2" |> snd)
+                  (ResultSet([ "value" ], [ [ Some "2147483648" ] ]))
+                  "the stored value remains unsigned"
+              Expect.equal
+                  (handle session "SELECT id FROM clipped_coalesce WHERE COALESCE(value,0)=2147483647 ORDER BY id" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                  "the clipped key matches the signed boundary"
+              Expect.equal
+                  (handle session "SELECT id FROM clipped_coalesce WHERE COALESCE(value,0)=2147483648 ORDER BY id" |> snd)
+                  (ResultSet([ "id" ], []))
+                  "the out-of-range probe cannot match the hidden key"
+
           testCase "text ABS indexes report conversion conditions without partial writes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

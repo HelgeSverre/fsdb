@@ -5904,16 +5904,46 @@ module ContractCatalog =
                "CREATE TABLE coalesce_unique_probe(id INT PRIMARY KEY,v INT,UNIQUE KEY ux_fallback ((COALESCE(v,0))))"
                "INSERT INTO coalesce_unique_probe VALUES(1,NULL)"
                "CREATE TABLE coalesce_narrow_probe(id INT PRIMARY KEY,v TINYINT,KEY ix_wide ((COALESCE(v,500))))"
-               "INSERT INTO coalesce_narrow_probe VALUES(1,NULL),(2,5)" |]
+               "INSERT INTO coalesce_narrow_probe VALUES(1,NULL),(2,5)"
+               "CREATE TABLE coalesce_unsigned_small_probe(id INT PRIMARY KEY,v TINYINT UNSIGNED,UNIQUE KEY ux ((COALESCE(v,0))))"
+               "INSERT INTO coalesce_unsigned_small_probe VALUES(1,NULL)"
+               "CREATE TABLE coalesce_unsigned_int_probe(id INT PRIMARY KEY,v INT UNSIGNED,KEY ix ((COALESCE(v,0))))"
+               "INSERT INTO coalesce_unsigned_int_probe VALUES(1,NULL),(2,2147483647)"
+               "CREATE TABLE coalesce_unsigned_big_probe(id INT PRIMARY KEY,v BIGINT UNSIGNED,UNIQUE KEY ux ((COALESCE(v,0))))"
+               "INSERT INTO coalesce_unsigned_big_probe VALUES(1,NULL),(2,18446744073709551615)"
+               "CREATE TABLE coalesce_literal_int_probe(id INT PRIMARY KEY,v TINYINT,KEY ix ((COALESCE(v,2147483648))))"
+               "CREATE TABLE coalesce_literal_big_probe(id INT PRIMARY KEY,v TINYINT,KEY ix ((COALESCE(v,9223372036854775807))))"
+               "INSERT INTO coalesce_literal_big_probe VALUES(1,NULL)" |]
           Steps =
             [| Contract.query "fallback-equality" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=0 ORDER BY id"
                Contract.query "distinct-equality" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=5 ORDER BY id"
                Contract.query "wide-fallback" "SELECT id FROM coalesce_narrow_probe WHERE COALESCE(v,500)=500 ORDER BY id"
                Contract.execute "duplicate-fallback" "INSERT INTO coalesce_unique_probe VALUES(2,0)" |> Contract.fails 1062 "23000"
+               Contract.execute "unsigned-small-duplicate" "INSERT INTO coalesce_unsigned_small_probe VALUES(2,0)" |> Contract.fails 1062 "23000"
+               Contract.query "unsigned-int-lookup" "SELECT id FROM coalesce_unsigned_int_probe WHERE COALESCE(v,0)=0 ORDER BY id"
+               Contract.execute "unsigned-int-overflow" "INSERT INTO coalesce_unsigned_int_probe VALUES(3,2147483648)" |> Contract.fails 3752 "22003"
+               Contract.query "unsigned-big-maximum" "SELECT id FROM coalesce_unsigned_big_probe WHERE COALESCE(v,0)=18446744073709551615 ORDER BY id"
+               Contract.execute "unsigned-big-duplicate" "INSERT INTO coalesce_unsigned_big_probe VALUES(3,0)" |> Contract.fails 1062 "23000"
+               Contract.execute "literal-int-overflow" "INSERT INTO coalesce_literal_int_probe VALUES(1,NULL)" |> Contract.fails 3752 "22003"
+               Contract.query "literal-big-lookup" "SELECT id FROM coalesce_literal_big_probe WHERE COALESCE(v,9223372036854775807)=9223372036854775807"
                Contract.execute "update" "UPDATE coalesce_probe SET v=7 WHERE id=1"
                Contract.query "old-key" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=0 ORDER BY id"
-               Contract.query "new-key" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=7 ORDER BY id" |]
-          Cleanup = [| "DROP TABLE coalesce_probe"; "DROP TABLE coalesce_unique_probe"; "DROP TABLE coalesce_narrow_probe" |]
+               Contract.query "new-key" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=7 ORDER BY id"
+               Contract.execute "permissive-mode" "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+               Contract.execute "permissive-unsigned-overflow" "INSERT INTO coalesce_unsigned_int_probe VALUES(3,2147483648)"
+               Contract.query "permissive-warning" "SHOW WARNINGS"
+               Contract.query "permissive-stored" "SELECT id,v FROM coalesce_unsigned_int_probe WHERE id=3"
+               Contract.query "permissive-clipped-probe" "SELECT id FROM coalesce_unsigned_int_probe WHERE COALESCE(v,0)=2147483647 ORDER BY id"
+               Contract.query "permissive-original-probe" "SELECT id FROM coalesce_unsigned_int_probe WHERE COALESCE(v,0)=2147483648 ORDER BY id" |]
+          Cleanup =
+            [| "DROP TABLE coalesce_probe"
+               "DROP TABLE coalesce_unique_probe"
+               "DROP TABLE coalesce_narrow_probe"
+               "DROP TABLE coalesce_unsigned_small_probe"
+               "DROP TABLE coalesce_unsigned_int_probe"
+               "DROP TABLE coalesce_unsigned_big_probe"
+               "DROP TABLE coalesce_literal_int_probe"
+               "DROP TABLE coalesce_literal_big_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private bitCountFunctionalIndex =
