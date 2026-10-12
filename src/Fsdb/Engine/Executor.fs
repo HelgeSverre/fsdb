@@ -7663,8 +7663,10 @@ and private isBuiltinCharFunction registry (name: string) =
      || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
     && Functions.isUnmodifiedBuiltinScalar name registry
 
-and private charDoubleOutsideIntegerRange (number: double) =
-    number >= 18446744073709551616.0 || number <= -9223372036854775808.0
+and private charComputedDoubleOverflow (number: double) =
+    // The signed lower bound is accepted here; a stored DOUBLE at that
+    // boundary still emits a conversion warning in prepareCharArgument.
+    number >= 18446744073709551616.0 || number < -9223372036854775808.0
 
 and private validateCharComputedOverflow ctx name expressions values : Result<unit, EvalError> =
     if not (isBuiltinCharFunction ctx.Registry name) then Ok ()
@@ -7673,15 +7675,25 @@ and private validateCharComputedOverflow ctx name expressions values : Result<un
         |> List.tryPick (fun (expression, value) ->
             match expression, value with
             | (ApproximateLiteral _ | Lit _ | Col _ | QualifiedCol _), _ -> None
-            | _, VDouble number when charDoubleOutsideIntegerRange number ->
-                Some(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql expression))
+            | Case _, _ -> None
+            | FuncCall(functionName, _), _
+                when (functionName.Equals("IF", System.StringComparison.OrdinalIgnoreCase)
+                      || functionName.Equals("NULLIF", System.StringComparison.OrdinalIgnoreCase))
+                     && Functions.isUnmodifiedBuiltinScalar functionName ctx.Registry -> None
+            | _, VDouble number when charComputedDoubleOverflow number ->
+                let diagnosticExpression =
+                    match expression with
+                    | FuncCall(functionName, [ argument ]) when functionName.Equals("ROUND", System.StringComparison.OrdinalIgnoreCase) ->
+                        FuncCall(functionName, [ argument; Lit(VInt 0L) ])
+                    | _ -> expression
+                Some(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql diagnosticExpression))
             | _ -> None)
         |> Option.map Error
         |> Option.defaultValue (Ok ())
 
 and private prepareCharArgument ctx expression value =
     match value with
-    | VDouble number when charDoubleOutsideIntegerRange number ->
+    | VDouble number when number >= 18446744073709551616.0 || number <= -9223372036854775808.0 ->
         match tryColumnDefForExpr ctx expression with
         | Some column when (match column.Type with TDouble _ | TFloat _ -> true | _ -> false) ->
             Diagnostics.numericConversion "INTEGER" (Value.toText value |> Option.defaultValue "")

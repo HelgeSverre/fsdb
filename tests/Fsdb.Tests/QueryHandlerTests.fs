@@ -3433,6 +3433,14 @@ let tests =
                   Expect.equal row [ Some "FFFFFFFF" ] "literal overflow bytes"
                   Expect.isEmpty session.Diagnostics "literal overflow has no warning"
               | _, result -> failtestf "expected literal CHAR DOUBLE result, got %A" result
+              let session, _ = handle session "INSERT INTO char_stored_double VALUES (5,-9223372036854775808e0)"
+              match handle session "SELECT HEX(CHAR(amount)) FROM char_stored_double WHERE id = 5" with
+              | session, ResultSet(_, [ [ Some "00" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect INTEGER value: '-9.223372036854776e18'" ]
+                      "stored signed boundary warns"
+              | _, result -> failtestf "expected stored signed-boundary CHAR result, got %A" result
 
           testCase "CHAR converts JSON scalar and composite arguments with source warnings"
           <| fun _ ->
@@ -3495,10 +3503,37 @@ let tests =
                     "SELECT HEX(CHAR(ABS(-1e30)))", "BIGINT value is out of range in 'abs(-(1e30))'"
                     "SELECT HEX(CHAR(-1e30))", "BIGINT value is out of range in '-(1e30)'"
                     "SELECT HEX(CHAR(COALESCE(1e30,0)))", "BIGINT value is out of range in 'coalesce(1e30,0)'"
+                    "SELECT HEX(CHAR(IFNULL(NULL,1e30)))", "BIGINT value is out of range in 'ifnull(NULL,1e30)'"
+                    "SELECT HEX(CHAR(GREATEST(1e30,1)))", "BIGINT value is out of range in 'greatest(1e30,1)'"
+                    "SELECT HEX(CHAR(ROUND(1e30)))", "BIGINT value is out of range in 'round(1e30,0)'"
                     "SELECT HEX(CHAR(CAST('1e30' AS DOUBLE)))", "BIGINT value is out of range in 'cast('1e30' as double)'" ] do
                   match handle session sql with
                   | _, Err(1690, message) -> Expect.equal message expectedMessage sql
                   | _, result -> failtestf "expected computed CHAR overflow for %s, got %A" sql result
+
+          testCase "CHAR preserves large pass-through numeric expressions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expected in
+                  [ "SELECT HEX(CHAR(IF(1,1e30,1)))", "FFFFFFFF"
+                    "SELECT HEX(CHAR(IF(0,1e30,1)))", "01"
+                    "SELECT HEX(CHAR(NULLIF(1e30,0)))", "FFFFFFFF"
+                    "SELECT HEX(CHAR(CASE WHEN 1 THEN 1e30 ELSE 1 END))", "FFFFFFFF"
+                    "SELECT HEX(CHAR(-9223372036854775808e0))", "00" ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected sql
+                      Expect.isEmpty session.Diagnostics sql
+                  | _, result -> failtestf "expected large CHAR pass-through for %s, got %A" sql result
+              let decimalSql = "SELECT HEX(CHAR(CAST('18446744073709551616' AS DECIMAL(21,0)))),HEX(CHAR(CAST('18446744073709551616' AS DECIMAL(21,0)) + 0))"
+              match handle session decimalSql with
+              | session, ResultSet(_, [ [ Some "FFFFFFFF"; Some "FFFFFFFF" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 1292, "Truncated incorrect DECIMAL value: '18446744073709551616'"
+                        1292, "Truncated incorrect DECIMAL value: '18446744073709551616'" ]
+                      "DECIMAL casts retain their warning path"
+              | _, result -> failtestf "expected large DECIMAL CHAR result, got %A" result
 
           testCase "CHAR reports stored JSON warnings at filtered result rows"
           <| fun _ ->

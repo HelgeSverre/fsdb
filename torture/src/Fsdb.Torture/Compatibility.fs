@@ -1251,13 +1251,29 @@ module ContractCatalog =
                yield Contract.query "char-stored-double-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "char-large-double-literal" "SELECT HEX(CHAR(1e30))" |> Contract.comparingValues
                yield Contract.query "char-large-double-literal-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.execute "char-stored-double-boundary-insert"
+                   "INSERT INTO char_stored_double VALUES (5,-9223372036854775808e0)"
+               yield Contract.query "char-stored-double-boundary" "SELECT HEX(CHAR(amount)) FROM char_stored_double WHERE id=5"
+                   |> Contract.comparingValues
+               yield Contract.query "char-stored-double-boundary-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, sql in
                    [ "SELECT HEX(CHAR(1e30 + 0e0))"
                      "SELECT HEX(CHAR(ABS(-1e30)))"
                      "SELECT HEX(CHAR(-1e30))"
                      "SELECT HEX(CHAR(COALESCE(1e30,0)))"
+                     "SELECT HEX(CHAR(IFNULL(NULL,1e30)))"
+                     "SELECT HEX(CHAR(GREATEST(1e30,1)))"
+                     "SELECT HEX(CHAR(ROUND(1e30)))"
                      "SELECT HEX(CHAR(CAST('1e30' AS DOUBLE)))" ] |> List.indexed do
                    yield Contract.query (sprintf "char-computed-overflow-%d" index) sql |> Contract.fails 1690 "22003"
+               yield Contract.query "char-double-pass-through"
+                   "SELECT HEX(CHAR(IF(1,1e30,1))),HEX(CHAR(IF(0,1e30,1))),HEX(CHAR(NULLIF(1e30,0))),HEX(CHAR(CASE WHEN 1 THEN 1e30 ELSE 1 END)),HEX(CHAR(-9223372036854775808e0))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-double-pass-through-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-decimal-overflow-path"
+                   "SELECT HEX(CHAR(CAST('18446744073709551616' AS DECIMAL(21,0)))),HEX(CHAR(CAST('18446744073709551616' AS DECIMAL(21,0)) + 0))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-decimal-overflow-path-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "char-json-scalars"
                    "SELECT HEX(CHAR(CAST('12' AS JSON))),HEX(CHAR(CAST('\"12\"' AS JSON))),HEX(CHAR(CAST('12.5' AS JSON))),HEX(CHAR(CAST('\"12.5\"' AS JSON))),HEX(CHAR(CAST('true' AS JSON))),HEX(CHAR(CAST('false' AS JSON))),HEX(CHAR(CAST('null' AS JSON)))"
                    |> Contract.comparingValues
