@@ -3495,6 +3495,21 @@ let tests =
                       "JSON expression source names"
               | _, result -> failtestf "expected CHAR JSON expression result, got %A" result
 
+          testCase "CHAR names JSON mutation and search sources"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT HEX(CHAR(JSON_MERGE_PRESERVE('{}','{\"n\":2}'))),HEX(CHAR(JSON_ARRAY_APPEND('[1]','$',2))),HEX(CHAR(JSON_ARRAY_INSERT('[1]','$[0]',2))),HEX(CHAR(JSON_INSERT('{}','$.x',2))),HEX(CHAR(JSON_REPLACE('{\"x\":1}','$.x',2))),HEX(CHAR(JSON_REMOVE('{\"x\":1}','$.x'))),HEX(CHAR(JSON_SEARCH('[\"x\"]','one','x')))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row (List.replicate 7 (Some "00")) "JSON mutation and search values"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      ([ "json_merge_preserve"; "json_array_append"; "json_array_insert"; "json_insert"
+                         "json_replace"; "json_remove"; "json_search" ]
+                       |> List.map (fun source -> 3156, sprintf "Invalid JSON value for CAST to INTEGER from column %s at row 1" source))
+                      "JSON mutation and search warning sources"
+              | _, result -> failtestf "expected CHAR JSON mutation result, got %A" result
+
           testCase "CHAR rejects computed integer overflow before byte assembly"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

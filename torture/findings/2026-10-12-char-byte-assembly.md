@@ -73,13 +73,15 @@ arrays, and objects contribute zero with warning 3156. The audited
 64-bit-boundary JSON numbers clamp with warning 3155. The warning names the
 originating `cast_as_json`, `json_array`, or `json_object` expression. A later
 oracle sweep also confirmed `json_extract`, `json_set`, `json_merge_patch`, and
-`json_keys` source names, bytes, codes, and warning order. Focused and native
-differential cases pin down those observed forms.
+`json_keys` source names, bytes, codes, and warning order. Audited
+`json_merge_preserve`, `json_array_append`, `json_array_insert`, `json_insert`,
+`json_replace`, `json_remove`, and `json_search` origins match as well. Focused
+and native differential cases pin down those observed forms.
 
 Stored JSON values and warning row numbers now match the audited seven-row
 table with all rows, a `WHERE` filter, descending ordering with and without
 `LIMIT`, and grouping by the row ID. The projection row number follows the
 selected result order: a filtered or descending warning refers to its output
 position rather than the physical table position. Other JSON expression
-origins beyond those named above, more complex ordering and grouping shapes, and floating overflow in
-other expression forms remain outside this audit.
+origins beyond those named above, more complex ordering and grouping shapes,
+and floating overflow in other expression forms remain outside this audit.

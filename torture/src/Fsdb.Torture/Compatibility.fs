@@ -1297,6 +1297,10 @@ module ContractCatalog =
                    "SELECT HEX(CHAR(JSON_EXTRACT('[\"12.5\"]','$[0]'))),HEX(CHAR(JSON_EXTRACT('[18446744073709551616]','$[0]'))),HEX(CHAR(JSON_SET('{}','$.x','12.5'))),HEX(CHAR(JSON_MERGE_PATCH('{}','{\"n\":2}'))),HEX(CHAR(JSON_KEYS('{\"a\":1}')))"
                    |> Contract.comparingValues
                yield Contract.query "char-json-expression-source-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-mutation-search-sources"
+                   "SELECT HEX(CHAR(JSON_MERGE_PRESERVE('{}','{\"n\":2}'))),HEX(CHAR(JSON_ARRAY_APPEND('[1]','$',2))),HEX(CHAR(JSON_ARRAY_INSERT('[1]','$[0]',2))),HEX(CHAR(JSON_INSERT('{}','$.x',2))),HEX(CHAR(JSON_REPLACE('{\"x\":1}','$.x',2))),HEX(CHAR(JSON_REMOVE('{\"x\":1}','$.x'))),HEX(CHAR(JSON_SEARCH('[\"x\"]','one','x')))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-mutation-search-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.execute "char-json-storage-create" "CREATE TABLE char_json_probe(id INT PRIMARY KEY,payload JSON)"
                yield Contract.execute "char-json-storage-insert"
                    "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"
