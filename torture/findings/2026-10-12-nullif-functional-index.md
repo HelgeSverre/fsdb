@@ -26,9 +26,9 @@ through an update. All 3,492 Fsdb tests pass. All 11
 `nullif-functional-index` steps match MySQL in
 `20261012T104107235-2663/contracts`; the full run has 143 cases and
 19,019 steps, with the same ten previously documented differences as before.
-Non-integer or non-literal comparisons and broader compositions remain open.
+Non-literal comparisons and broader compositions remain open.
 
-## Exact-binary text comparison
+## Text comparison with column collations
 
 Native MySQL 8.4.11 also accepts a unique `NULLIF(v,_utf8mb4'x')` key on
 `VARCHAR(20) COLLATE utf8mb4_0900_bin`. The hidden nullable text key is 83
@@ -36,15 +36,31 @@ bytes. Plain `'x'` and `_utf8mb4'x'` in the comparison use the same key;
 `_latin1'x'` and numeric comparison scan. A source `x` projects NULL,
 while `X` and `x ` remain distinct non-NULL values. An explicit duplicate
 `X` fails with 1062. Fsdb now retains the comparison literal's charset
-identity and maintains this exact-binary key. The focused Expecto regression
-and `text-nullif-functional-index` differential contract cover equality,
-nullable uniqueness, numeric comparison, and updates. Other text collations
-and text types remain open until physical projection can use their collation
-rules directly.
+identity and maintains this exact-binary key.
 
-`just check` passed all 3,499 tests. All nine steps of the text contract
+MySQL also maintains the same nullable key for `utf8mb4_bin` (PAD SPACE),
+`utf8mb4_0900_ai_ci` (case and accent folding without padding), and
+`latin1_bin` (one-byte PAD SPACE). The `latin1_bin` hidden key is 23 bytes.
+Fsdb now passes the source column's collation into physical projection, so
+text `NULLIF` keys use the same equality classes as ordinary comparisons.
+The focused regressions and `text-nullif-functional-index` differential
+contract cover equality, nullable uniqueness, numeric comparison, and
+updates across these representative collations. Non-`VARCHAR` text types,
+mixed-charset expression identities, and non-literal comparisons remain open.
+In particular, MySQL can use the `utf8mb4_0900_ai_ci` key for an equivalent
+`_latin1` comparison, while fsdb conservatively scans that spelling.
+
+`just check` passed all 3,500 tests. All nine steps of the initial text contract
 matched native MySQL 8.4.11 in
 `torture/artifacts/runs/20261012T164135996-60894/contracts`. The broader
 run retained two unrelated result differences in the established regex and
 mixed-type join cases. The native server uses `lower_case_table_names=2` on
 macOS; the digest-pinned container lane was not rerun for this change.
+The later 16-step text contract passed in
+`torture/artifacts/runs/20261012T165041591-63050/contracts` across the
+additional source collations. That run retained the same two unrelated
+regex and mixed-type join result differences.
+The final 17-step contract, including accent-folded unique-key rejection,
+passed in `torture/artifacts/runs/20261012T165406580-63639/contracts`.
+That full run reported the regex difference and four existing mixed-type
+join signatures; the text `NULLIF` case remained fully matched.

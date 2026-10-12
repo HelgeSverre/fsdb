@@ -9217,6 +9217,85 @@ let tests =
                         (ResultSet([ "id" ], [ [ Some "5" ]; [ Some "6" ]; [ Some "7" ] ]))
                         "numeric comparison keeps every text-to-number match"
 
+                testCase "NULLIF text keys project source collation equality"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for name, collation, rows in
+                        [ "pad", "utf8mb4_bin", "(1,'x'),(2,'x '),(3,'X')"
+                          "fold", "utf8mb4_0900_ai_ci", "(1,'x'),(2,'X'),(3,'x '),(4,'é'),(5,'E')" ] do
+                        Expect.equal
+                            (runDefault store $"CREATE TABLE nullif_{name} (id INT PRIMARY KEY, value VARCHAR(20) COLLATE {collation}, KEY ix ((NULLIF(value,_utf8mb4'x'))))")
+                            (Affected 0UL)
+                            $"MySQL accepts {collation} text NULLIF keys"
+
+                        Expect.equal
+                            (runDefault store $"INSERT INTO nullif_{name} VALUES {rows}")
+                            (Affected(if name = "pad" then 3UL else 5UL))
+                            "seed values with distinct collation weights"
+
+                        let expectedNulls = [ [ Some "1" ]; [ Some "2" ] ]
+
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM nullif_{name} WHERE NULLIF(value,_utf8mb4'x') IS NULL ORDER BY id")
+                            (ResultSet([ "id" ], expectedNulls))
+                            "the stored comparison follows the source collation"
+
+                        let plan =
+                            runDefault store $"EXPLAIN SELECT id FROM nullif_{name} WHERE NULLIF(value,'x')='X'"
+                            |> explainRow
+
+                        Expect.equal plan.Key (Some "ix") "the connection literal uses the text key"
+                        Expect.equal plan.KeyLength (Some "83") "the nullable VARCHAR width is preserved"
+
+                        if name = "fold" then
+                            Expect.equal
+                                (runDefault store "SELECT id FROM nullif_fold WHERE NULLIF(value,_utf8mb4'x')='E' ORDER BY id")
+                                (ResultSet([ "id" ], [ [ Some "4" ]; [ Some "5" ] ]))
+                                "accent-insensitive equality finds both index entries"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE nullif_latin1 (id INT PRIMARY KEY, value VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_bin, KEY ix ((NULLIF(value,_latin1'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts a latin1 text NULLIF key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO nullif_latin1 VALUES (1,'x'),(2,'x '),(3,'X')")
+                        (Affected 3UL)
+                        "seed a one-byte charset key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM nullif_latin1 WHERE NULLIF(value,_latin1'x') IS NULL ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "latin1 PAD SPACE comparison projects both NULLs"
+
+                    let latin1Plan =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_latin1 WHERE NULLIF(value,_latin1'x')='X'"
+                        |> explainRow
+
+                    Expect.equal latin1Plan.Key (Some "ix") "matching latin1 literals use the key"
+                    Expect.equal latin1Plan.KeyLength (Some "23") "latin1 VARCHAR uses its one-byte width"
+
+                    let latin1Plain =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_latin1 WHERE NULLIF(value,'x')='X'"
+                        |> explainRow
+
+                    Expect.equal latin1Plain.Key None "the connection charset remains a distinct expression"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE nullif_fold_unique (id INT PRIMARY KEY, value VARCHAR(20) COLLATE utf8mb4_0900_ai_ci, UNIQUE KEY ux ((NULLIF(value,_utf8mb4'x'))))")
+                        (Affected 0UL)
+                        "the folded text key can be unique"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO nullif_fold_unique VALUES (1,'x'),(2,'X'),(3,'é')")
+                        (Affected 3UL)
+                        "multiple null projections coexist with one folded text result"
+
+                    match runDefault store "INSERT INTO nullif_fold_unique VALUES (4,'E')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "folded non-NULL result must collide; got %A" other
+
                 testCase "NULLIF integer functional keys promote narrow widths and preserve nullable uniqueness"
                 <| fun _ ->
                     let store = newStore ()

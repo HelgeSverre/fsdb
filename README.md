@@ -477,10 +477,11 @@ different access pattern:
   `NULLIF(integer_column, integer_literal)` has a nullable physical key:
   narrow integer sources promote to `INT`, while `BIGINT` retains its width.
   Equality and unique-key checks use the projected result.
-  `NULLIF` also has a physical key for `VARCHAR` under the exact
-  `utf8mb4_0900_bin` collation when its text comparison literal uses
-  `utf8mb4`. Plain connection literals and `_utf8mb4` literals share the
-  key identity; other charsets and numeric probes scan.
+  `NULLIF` also has a physical key for `VARCHAR` when its text comparison
+  literal uses the source charset. Key projection follows the column's
+  collation, including case and accent folding and PAD SPACE. Plain
+  connection literals share a key with matching `utf8mb4` literals. Fsdb
+  conservatively scans a different charset identity or numeric probe.
   `IF(column IS NULL, integer_literal, column)` has a distinct nullable
   physical key for `BOOLEAN`, narrow integer columns, `INT`, and signed
   `BIGINT` with a fitting signed literal. The hidden key uses a four-byte

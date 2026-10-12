@@ -538,8 +538,8 @@ let private supportsNullIf (column: ColumnDef) comparison =
     | _, VString _ ->
         match column.Type, column.Collation, comparison.Literal with
         | TVarchar _, Some collation, IntroducedLiteral(_, charset, _) ->
-            collation.Equals("utf8mb4_0900_bin", StringComparison.OrdinalIgnoreCase)
-            && Fsdb.Charset.canonicalName charset = "utf8mb4"
+            Fsdb.Collation.tryFind collation |> Option.isSome
+            && Fsdb.Charset.canonicalName charset = (column.Charset |> Option.defaultValue "utf8mb4" |> Fsdb.Charset.canonicalName)
         | _ -> false
     | _ -> false
 
@@ -1014,12 +1014,12 @@ let private digestValueWith encodeText (hash: byte[] -> byte[]) value =
 
     hash bytes |> Convert.ToHexString |> fun text -> VString(text.ToLowerInvariant())
 
-let private matchesNullComparison source comparison =
+let private matchesNullComparison textEquals source comparison =
     match source, comparison with
-    | VString text, VString literal -> String.Equals(text, literal, StringComparison.Ordinal)
+    | VString text, VString literal -> textEquals text literal
     | _ -> Fsdb.Value.equals source comparison = Some true
 
-let rec projectValueWithStatus encodeText transform value =
+let rec projectValueWithStatus textEquals encodeText transform value =
     match transform, value with
     | Some IsNullResult, VNull -> VInt 1L, None
     | Some IsNullResult, _ -> VInt 0L, None
@@ -1034,13 +1034,13 @@ let rec projectValueWithStatus encodeText transform value =
 
             let source =
                 match physical.NullComparison with
-                | Some comparison when matchesNullComparison source comparison.Value -> VNull
+                | Some comparison when matchesNullComparison textEquals source comparison.Value -> VNull
                 | _ -> source
 
             physical.Calls
             |> List.fold
                 (fun (current, firstTruncation) (_, step) ->
-                    let projected, truncated = projectValueWithStatus encodeText (Some step) current
+                    let projected, truncated = projectValueWithStatus textEquals encodeText (Some step) current
                     projected, (firstTruncation |> Option.orElse truncated))
                 (source, None)
     | Some _, VNull -> VNull, None
@@ -1122,7 +1122,7 @@ let rec projectValueWithStatus encodeText transform value =
     | _ -> value, None
 
 let projectValueWith encodeText transform value =
-    projectValueWithStatus encodeText transform value |> fst
+    projectValueWithStatus (fun left right -> String.Equals(left, right, StringComparison.Ordinal)) encodeText transform value |> fst
 
 let projectValue transform value =
     projectValueWith Text.Encoding.UTF8.GetBytes transform value

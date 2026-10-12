@@ -340,7 +340,11 @@ let private functionalIndexScalar transform: Scalar =
     | [ value ] ->
         try
             let projected, truncated =
-                FunctionalIndex.projectValueWithStatus Text.Encoding.UTF8.GetBytes (Some transform) value
+                FunctionalIndex.projectValueWithStatus
+                    (fun left right -> String.Equals(left, right, StringComparison.Ordinal))
+                    Text.Encoding.UTF8.GetBytes
+                    (Some transform)
+                    value
 
             truncated
             |> Option.iter (fun text -> Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text))

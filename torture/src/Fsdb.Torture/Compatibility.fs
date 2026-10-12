@@ -6105,7 +6105,15 @@ module ContractCatalog =
         { Name = "text-nullif-functional-index"
           Setup =
             [| "CREATE TABLE text_nullif_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,UNIQUE KEY ux ((NULLIF(v,_utf8mb4'x'))))"
-               "INSERT INTO text_nullif_probe VALUES(1,NULL),(2,'x'),(3,'X'),(4,'x '),(5,'1'),(6,'01'),(7,'1x')" |]
+               "INSERT INTO text_nullif_probe VALUES(1,NULL),(2,'x'),(3,'X'),(4,'x '),(5,'1'),(6,'01'),(7,'1x')"
+               "CREATE TABLE text_nullif_pad(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,KEY ix ((NULLIF(v,_utf8mb4'x'))))"
+               "INSERT INTO text_nullif_pad VALUES(1,'x'),(2,'x '),(3,'X')"
+               "CREATE TABLE text_nullif_fold(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,KEY ix ((NULLIF(v,_utf8mb4'x'))))"
+               "INSERT INTO text_nullif_fold VALUES(1,'x'),(2,'X'),(3,'x '),(4,'é'),(5,'E')"
+               "CREATE TABLE text_nullif_latin1(id INT PRIMARY KEY,v VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_bin,KEY ix ((NULLIF(v,_latin1'x'))))"
+               "INSERT INTO text_nullif_latin1 VALUES(1,'x'),(2,'x '),(3,'X')"
+               "CREATE TABLE text_nullif_fold_unique(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,UNIQUE KEY ux ((NULLIF(v,_utf8mb4'x'))))"
+               "INSERT INTO text_nullif_fold_unique VALUES(1,'x'),(2,'X'),(3,'é')" |]
           Steps =
             [| Contract.query "introduced-comparison" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='X'"
                Contract.query "connection-comparison" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,'x')='X'"
@@ -6115,8 +6123,16 @@ module ContractCatalog =
                Contract.execute "duplicate" "INSERT INTO text_nullif_probe VALUES(8,'X')" |> Contract.fails 1062 "23000"
                Contract.execute "update" "UPDATE text_nullif_probe SET v='new' WHERE id=3"
                Contract.query "old-key" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='X'"
-               Contract.query "new-key" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='new'" |]
-          Cleanup = [| "DROP TABLE text_nullif_probe" |]
+               Contract.query "new-key" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='new'"
+               Contract.query "pad-null-results" "SELECT id FROM text_nullif_pad WHERE NULLIF(v,_utf8mb4'x') IS NULL ORDER BY id"
+               Contract.query "pad-case" "SELECT id FROM text_nullif_pad WHERE NULLIF(v,'x')='X'"
+               Contract.query "fold-null-results" "SELECT id FROM text_nullif_fold WHERE NULLIF(v,_utf8mb4'x') IS NULL ORDER BY id"
+               Contract.query "fold-accent" "SELECT id FROM text_nullif_fold WHERE NULLIF(v,_utf8mb4'x')='E' ORDER BY id"
+               Contract.query "latin1-null-results" "SELECT id FROM text_nullif_latin1 WHERE NULLIF(v,_latin1'x') IS NULL ORDER BY id"
+               Contract.query "latin1-match" "SELECT id FROM text_nullif_latin1 WHERE NULLIF(v,_latin1'x')='X'"
+               Contract.query "latin1-connection" "SELECT id FROM text_nullif_latin1 WHERE NULLIF(v,'x')='X'"
+               Contract.execute "folded-duplicate" "INSERT INTO text_nullif_fold_unique VALUES(4,'E')" |> Contract.fails 1062 "23000" |]
+          Cleanup = [| "DROP TABLE text_nullif_probe"; "DROP TABLE text_nullif_pad"; "DROP TABLE text_nullif_fold"; "DROP TABLE text_nullif_latin1"; "DROP TABLE text_nullif_fold_unique" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private bitCountFunctionalIndex =
