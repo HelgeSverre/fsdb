@@ -3372,6 +3372,42 @@ let tests =
                           Expect.equal (matches "[\\p{Cyrillic}]" 0x1e08f) (VInt 1L) "bracket includes supplementary Cyrillic"
                           Expect.equal (matches "\\P{scx=Cyrillic}" 0x0485) (VInt 0L) "negation excludes shared mark"
                           Expect.equal (matches "\\P{Cyrillic}" 0x1e090) (VInt 1L) "negation includes adjacent scalar"
+                      testCase "REGEXP Arabic script and shared extension marks"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          for codePoint in [ 0x0639; 0x08e3; 0x1ee00; 0x1eef1 ] do
+                              Expect.equal (matches "\\p{Arabic}" codePoint) (VInt 1L) (sprintf "U+%X has Arabic script" codePoint)
+
+                          for codePoint in [ 0x060c; 0x0640; 0x102e0 ] do
+                              Expect.equal (matches "\\p{Arabic}" codePoint) (VInt 0L) (sprintf "U+%X lacks Arabic script" codePoint)
+                              Expect.equal (matches "\\p{scx=Arab}" codePoint) (VInt 1L) (sprintf "U+%X has Arabic script extension" codePoint)
+
+                          for alias in [ "\\p{Arab}"; "\\p{IsArabic}"; "\\p{sc=Arabic}"; "\\p{Script=Arab}" ] do
+                              Expect.equal (matches alias 0x0639) (VInt 1L) (sprintf "%s alias" alias)
+
+                          Expect.equal (matches "[\\p{Arabic}]" 0x1eef1) (VInt 1L) "bracket includes supplementary Arabic"
+                          Expect.equal (matches "\\P{scx=Arabic}" 0x102e0) (VInt 0L) "negation excludes shared number"
+                          Expect.equal (matches "\\P{Arabic}" 0x1eef2) (VInt 1L) "negation includes adjacent scalar"
+                      testCase "REGEXP Devanagari script and shared extension marks"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          for codePoint in [ 0x0915; 0x0950; 0xa8e0; 0x11b09 ] do
+                              Expect.equal (matches "\\p{Devanagari}" codePoint) (VInt 1L) (sprintf "U+%X has Devanagari script" codePoint)
+
+                          for codePoint in [ 0x0951; 0x0964; 0x1cd0 ] do
+                              Expect.equal (matches "\\p{Devanagari}" codePoint) (VInt 0L) (sprintf "U+%X lacks Devanagari script" codePoint)
+                              Expect.equal (matches "\\p{scx=Deva}" codePoint) (VInt 1L) (sprintf "U+%X has Devanagari script extension" codePoint)
+
+                          for alias in [ "\\p{Deva}"; "\\p{IsDevanagari}"; "\\p{sc=Devanagari}"; "\\p{Script=Deva}" ] do
+                              Expect.equal (matches alias 0x0915) (VInt 1L) (sprintf "%s alias" alias)
+
+                          Expect.equal (matches "[\\p{Devanagari}]" 0x11b09) (VInt 1L) "bracket includes supplementary Devanagari"
+                          Expect.equal (matches "\\P{scx=Devanagari}" 0x0951) (VInt 0L) "negation excludes shared mark"
+                          Expect.equal (matches "\\P{Devanagari}" 0x11b0a) (VInt 1L) "negation includes adjacent scalar"
                       testCase "REGEXP variation selectors include supplementary scalars"
                       <| fun _ ->
                           let matches pattern codePoint =

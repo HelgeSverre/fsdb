@@ -10905,6 +10905,18 @@ module ContractCatalog =
                Contract.query "cyrillic-script-negation"
                    "SELECT REGEXP_LIKE(CONVERT(0xD285 USING utf8mb4),'\\\\P{scx=Cyrillic}','c'),REGEXP_LIKE(CONVERT(0xE2B983 USING utf8mb4),'\\\\P{Cyrillic}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF09E8290 USING utf8mb4),'\\\\P{Cyrillic}',1,1,'c')),REGEXP_LIKE(CONVERT(0xF09E828F USING utf8mb4),'[^\\\\p{scx=Cyrl}]','c')"
                    |> Contract.comparingValues
+               Contract.query "arabic-script-properties"
+                   "SELECT REGEXP_LIKE(CONVERT(0xD8B9 USING utf8mb4),'\\\\p{Arabic}','c'),REGEXP_LIKE(CONVERT(0xD88C USING utf8mb4),'\\\\p{Arabic}','c'),REGEXP_LIKE(CONVERT(0xD88C USING utf8mb4),'\\\\p{scx=Arab}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF09EBBB1 USING utf8mb4),'[\\\\p{Script=Arab}]',1,1,'c'))"
+                   |> Contract.comparingValues
+               Contract.query "arabic-script-negation"
+                   "SELECT REGEXP_LIKE(CONVERT(0xF0908BA0 USING utf8mb4),'\\\\P{scx=Arabic}','c'),REGEXP_LIKE(CONVERT(0xD88C USING utf8mb4),'\\\\P{Arabic}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF09EBBB2 USING utf8mb4),'\\\\P{Arabic}',1,1,'c')),REGEXP_LIKE(CONVERT(0xF09EBBB1 USING utf8mb4),'[^\\\\p{scx=Arab}]','c')"
+                   |> Contract.comparingValues
+               Contract.query "devanagari-script-properties"
+                   "SELECT REGEXP_LIKE(CONVERT(0xE0A495 USING utf8mb4),'\\\\p{Devanagari}','c'),REGEXP_LIKE(CONVERT(0xE0A591 USING utf8mb4),'\\\\p{Devanagari}','c'),REGEXP_LIKE(CONVERT(0xE0A591 USING utf8mb4),'\\\\p{scx=Deva}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF091AC89 USING utf8mb4),'[\\\\p{Script=Deva}]',1,1,'c'))"
+                   |> Contract.comparingValues
+               Contract.query "devanagari-script-negation"
+                   "SELECT REGEXP_LIKE(CONVERT(0xE0A591 USING utf8mb4),'\\\\P{scx=Devanagari}','c'),REGEXP_LIKE(CONVERT(0xE0A591 USING utf8mb4),'\\\\P{Devanagari}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF091AC8A USING utf8mb4),'\\\\P{Devanagari}',1,1,'c')),REGEXP_LIKE(CONVERT(0xF091AC89 USING utf8mb4),'[^\\\\p{scx=Deva}]','c')"
+                   |> Contract.comparingValues
                Contract.query "variation-selector-properties"
                    "SELECT REGEXP_LIKE(CONVERT(0xE1A08B USING utf8mb4),'\\\\p{VS}','c'),REGEXP_LIKE(CONVERT(0xEFB88F USING utf8mb4),'\\\\p{Variation_Selector}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF3A08480 USING utf8mb4),'[\\\\p{VS}]',1,1,'c')),REGEXP_LIKE(CONVERT(0xE1A08E USING utf8mb4),'\\\\p{VS}','c')"
                    |> Contract.comparingValues

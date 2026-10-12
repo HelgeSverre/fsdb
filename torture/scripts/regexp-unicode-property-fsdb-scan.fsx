@@ -23,7 +23,15 @@ let expected =
       "Cyrillic", "c", 508, "03188fa3fcd5b19593b01537c99f8450d60866f828457b64d27048badb55f791"
       "Cyrillic", "i", 508, "03188fa3fcd5b19593b01537c99f8450d60866f828457b64d27048badb55f791"
       "scx=Cyrl", "c", 521, "aee85ddae735d8f9c89079482e8bb7d67fd00d4d5be124b05653d4fb1e0e4403"
-      "scx=Cyrl", "i", 521, "aee85ddae735d8f9c89079482e8bb7d67fd00d4d5be124b05653d4fb1e0e4403" ]
+      "scx=Cyrl", "i", 521, "aee85ddae735d8f9c89079482e8bb7d67fd00d4d5be124b05653d4fb1e0e4403"
+      "Arabic", "c", 1373, "f088b5daba99c5ab94d6fd287c3573936626ac92d50c975a53948c6dd13d552d"
+      "Arabic", "i", 1373, "f088b5daba99c5ab94d6fd287c3573936626ac92d50c975a53948c6dd13d552d"
+      "scx=Arab", "c", 1421, "aed5806cd5fb7202bae0be61c9805b55b1f0cf13972de66f1d46fa4eb5f5d609"
+      "scx=Arab", "i", 1421, "aed5806cd5fb7202bae0be61c9805b55b1f0cf13972de66f1d46fa4eb5f5d609"
+      "Devanagari", "c", 164, "03b3b629028fd89e3ba20610b2af2c2f284f4eafebd4ac00ba4d2c21f34d4bb8"
+      "Devanagari", "i", 164, "03b3b629028fd89e3ba20610b2af2c2f284f4eafebd4ac00ba4d2c21f34d4bb8"
+      "scx=Deva", "c", 221, "f7818e049964c2c64231dae10d176be1d0f69bca09a26bc27674b966fb03148f"
+      "scx=Deva", "i", 221, "f7818e049964c2c64231dae10d176be1d0f69bca09a26bc27674b966fb03148f" ]
 
 for propertyName, mode, expectedCount, expectedDigest in expected do
     let pattern =

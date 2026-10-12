@@ -158,6 +158,61 @@ let private cyrillicScriptAliases =
 let private cyrillicScriptExtensionAliases =
     set [ "SCX=CYRILLIC"; "SCX=CYRL"; "SCRIPT_EXTENSIONS=CYRILLIC"; "SCRIPT_EXTENSIONS=CYRL" ]
 
+let private arabicScriptRanges =
+    [ 0x0600, 0x0604; 0x0606, 0x060B; 0x060D, 0x061A; 0x061C, 0x061E
+      0x0620, 0x063F; 0x0641, 0x064A; 0x0656, 0x066F
+      0x0671, 0x06DC; 0x06DE, 0x06FF; 0x0750, 0x077F
+      0x0870, 0x088E; 0x0890, 0x0891; 0x0897, 0x08E1; 0x08E3, 0x08FF
+      0xFB50, 0xFBC2; 0xFBD3, 0xFD3D; 0xFD40, 0xFD8F
+      0xFD92, 0xFDC7; 0xFDCF, 0xFDCF; 0xFDF0, 0xFDFF
+      0xFE70, 0xFE74; 0xFE76, 0xFEFC
+      0x10E60, 0x10E7E; 0x10EC2, 0x10EC4; 0x10EFC, 0x10EFF
+      0x1EE00, 0x1EE03; 0x1EE05, 0x1EE1F; 0x1EE21, 0x1EE22
+      0x1EE24, 0x1EE24; 0x1EE27, 0x1EE27; 0x1EE29, 0x1EE32
+      0x1EE34, 0x1EE37; 0x1EE39, 0x1EE39; 0x1EE3B, 0x1EE3B
+      0x1EE42, 0x1EE42; 0x1EE47, 0x1EE47; 0x1EE49, 0x1EE49
+      0x1EE4B, 0x1EE4B; 0x1EE4D, 0x1EE4F; 0x1EE51, 0x1EE52
+      0x1EE54, 0x1EE54; 0x1EE57, 0x1EE57; 0x1EE59, 0x1EE59
+      0x1EE5B, 0x1EE5B; 0x1EE5D, 0x1EE5D; 0x1EE5F, 0x1EE5F
+      0x1EE61, 0x1EE62; 0x1EE64, 0x1EE64; 0x1EE67, 0x1EE6A
+      0x1EE6C, 0x1EE72; 0x1EE74, 0x1EE77; 0x1EE79, 0x1EE7C
+      0x1EE7E, 0x1EE7E; 0x1EE80, 0x1EE89; 0x1EE8B, 0x1EE9B
+      0x1EEA1, 0x1EEA3; 0x1EEA5, 0x1EEA9; 0x1EEAB, 0x1EEBB
+      0x1EEF0, 0x1EEF1 ]
+
+let private arabicScriptExtensionMembers =
+    [ 0x060C, 0x060C; 0x061B, 0x061B; 0x061F, 0x061F
+      0x0640, 0x0640; 0x064B, 0x0655; 0x0670, 0x0670
+      0x204F, 0x204F; 0x2E41, 0x2E41; 0xFD3E, 0xFD3F
+      0x102E0, 0x102FB ]
+
+let private arabicScriptAtom = scalarRangesAtom arabicScriptRanges
+let private arabicScriptExtensionsAtom = "(?:" + arabicScriptAtom + "|" + scalarRangesAtom arabicScriptExtensionMembers + ")"
+
+let private arabicScriptAliases =
+    set [ "ARABIC"; "ARAB"; "ISARABIC"; "SC=ARABIC"; "SC=ARAB"; "SCRIPT=ARABIC"; "SCRIPT=ARAB" ]
+
+let private arabicScriptExtensionAliases =
+    set [ "SCX=ARABIC"; "SCX=ARAB"; "SCRIPT_EXTENSIONS=ARABIC"; "SCRIPT_EXTENSIONS=ARAB" ]
+
+let private devanagariScriptRanges =
+    [ 0x0900, 0x0950; 0x0955, 0x0963; 0x0966, 0x097F
+      0xA8E0, 0xA8FF; 0x11B00, 0x11B09 ]
+
+let private devanagariScriptExtensionMembers =
+    [ 0x02BC, 0x02BC; 0x0951, 0x0952; 0x0964, 0x0965
+      0x1CD0, 0x1CF6; 0x1CF8, 0x1CF9; 0x20F0, 0x20F0
+      0xA830, 0xA839 ]
+
+let private devanagariScriptAtom = scalarRangesAtom devanagariScriptRanges
+let private devanagariScriptExtensionsAtom = "(?:" + devanagariScriptAtom + "|" + scalarRangesAtom devanagariScriptExtensionMembers + ")"
+
+let private devanagariScriptAliases =
+    set [ "DEVANAGARI"; "DEVA"; "ISDEVANAGARI"; "SC=DEVANAGARI"; "SC=DEVA"; "SCRIPT=DEVANAGARI"; "SCRIPT=DEVA" ]
+
+let private devanagariScriptExtensionAliases =
+    set [ "SCX=DEVANAGARI"; "SCX=DEVA"; "SCRIPT_EXTENSIONS=DEVANAGARI"; "SCRIPT_EXTENSIONS=DEVA" ]
+
 let private scriptAtoms =
     [ greekScriptAliases, greekScriptAtom, greekScriptFoldedAtom
       greekScriptExtensionAliases, greekScriptExtensionsAtom false, greekScriptExtensionsAtom true
@@ -166,7 +221,11 @@ let private scriptAtoms =
       latinScriptAliases, latinScriptAtom, latinScriptAtom
       latinScriptExtensionAliases, latinScriptExtensionsAtom, latinScriptExtensionsAtom
       cyrillicScriptAliases, cyrillicScriptAtom, cyrillicScriptAtom
-      cyrillicScriptExtensionAliases, cyrillicScriptExtensionsAtom, cyrillicScriptExtensionsAtom ]
+      cyrillicScriptExtensionAliases, cyrillicScriptExtensionsAtom, cyrillicScriptExtensionsAtom
+      arabicScriptAliases, arabicScriptAtom, arabicScriptAtom
+      arabicScriptExtensionAliases, arabicScriptExtensionsAtom, arabicScriptExtensionsAtom
+      devanagariScriptAliases, devanagariScriptAtom, devanagariScriptAtom
+      devanagariScriptExtensionAliases, devanagariScriptExtensionsAtom, devanagariScriptExtensionsAtom ]
     |> List.collect (fun (aliases, sensitive, insensitive) ->
         aliases |> Set.toList |> List.map (fun name -> name, (sensitive, insensitive)))
     |> Map.ofList
