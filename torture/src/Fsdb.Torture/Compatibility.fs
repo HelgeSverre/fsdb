@@ -1263,6 +1263,10 @@ module ContractCatalog =
                    "SELECT HEX(CHAR(CAST('18446744073709551616' AS JSON))),HEX(CHAR(CAST('-9223372036854775809' AS JSON)))"
                    |> Contract.comparingValues
                yield Contract.query "char-json-overflow-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-expression-sources"
+                   "SELECT HEX(CHAR(JSON_EXTRACT('[\"12.5\"]','$[0]'))),HEX(CHAR(JSON_EXTRACT('[18446744073709551616]','$[0]'))),HEX(CHAR(JSON_SET('{}','$.x','12.5'))),HEX(CHAR(JSON_MERGE_PATCH('{}','{\"n\":2}'))),HEX(CHAR(JSON_KEYS('{\"a\":1}')))"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-expression-source-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.execute "char-json-storage-create" "CREATE TABLE char_json_probe(id INT PRIMARY KEY,payload JSON)"
                yield Contract.execute "char-json-storage-insert"
                    "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"

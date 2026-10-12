@@ -3470,6 +3470,23 @@ let tests =
                       "JSON overflow warnings"
               | _, result -> failtestf "expected CHAR JSON overflow result, got %A" result
 
+          testCase "CHAR names JSON expression conversion sources"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT HEX(CHAR(JSON_EXTRACT('[\"12.5\"]','$[0]'))),HEX(CHAR(JSON_EXTRACT('[18446744073709551616]','$[0]'))),HEX(CHAR(JSON_SET('{}','$.x','12.5'))),HEX(CHAR(JSON_MERGE_PATCH('{}','{\"n\":2}'))),HEX(CHAR(JSON_KEYS('{\"a\":1}')))"
+              match handle session sql with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "0C"; Some "FFFFFFFF"; Some "00"; Some "00"; Some "00" ] "JSON expression conversion bytes"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3156, "Invalid JSON value for CAST to INTEGER from column json_extract at row 1"
+                        3155, "Out of range JSON value for CAST to INTEGER from column json_extract at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column json_set at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column json_merge_patch at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column json_keys at row 1" ]
+                      "JSON expression source names"
+              | _, result -> failtestf "expected CHAR JSON expression result, got %A" result
+
           testCase "CHAR reports stored JSON warnings at filtered result rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
