@@ -7644,6 +7644,30 @@ and private validateConcatEncoding ctx name descriptor expressions values =
                     right.Collation.Name (coercibilityName right.Coercibility)))
     | _ -> Ok ()
 
+and private prepareCharArgument ctx expression value =
+    match value with
+    | VDouble number when number >= 18446744073709551616.0 || number <= -9223372036854775808.0 ->
+        match tryColumnDefForExpr ctx expression with
+        | Some column when (match column.Type with TDouble _ | TFloat _ -> true | _ -> false) ->
+            Diagnostics.numericConversion "INTEGER" (Value.toText value |> Option.defaultValue "")
+        | _ -> ()
+        value
+    | VJson json ->
+        let word, warningCode = Functions.charJsonInteger json
+        let source =
+            match expression with
+            | Cast(_, TJson) -> "cast_as_json"
+            | FuncCall(functionName, _) -> functionName.ToLowerInvariant()
+            | Col columnName
+            | QualifiedCol(_, columnName) -> columnName
+            | _ -> (exprLabel expression).ToLowerInvariant()
+        warningCode
+        |> Option.iter (fun code ->
+            let reason = if code = 3155 then "Out of range" else "Invalid"
+            Diagnostics.warning code (sprintf "%s JSON value for CAST to INTEGER from column %s at row %d" reason source (Diagnostics.currentRowNumber ())))
+        VUInt(uint64 word)
+    | _ -> value
+
 and private prepareScalarArguments ctx name expressions values =
     let charBuiltin =
         (name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
@@ -7652,31 +7676,7 @@ and private prepareScalarArguments ctx name expressions values =
 
     List.zip expressions values
     |> List.mapi (fun index (expression, value) ->
-        if charBuiltin then
-            match value, tryColumnDefForExpr ctx expression with
-            | VDouble number, Some column
-                when (match column.Type with TDouble _ | TFloat _ -> true | _ -> false)
-                     && (number >= 18446744073709551616.0 || number <= -9223372036854775808.0) ->
-                Diagnostics.numericConversion "INTEGER" (Value.toText value |> Option.defaultValue "")
-            | _ -> ()
-
-        let value =
-            match value with
-            | VJson json when charBuiltin ->
-                let word, warningCode = Functions.charJsonInteger json
-                let source =
-                    match expression with
-                    | Cast(_, TJson) -> "cast_as_json"
-                    | FuncCall(functionName, _) -> functionName.ToLowerInvariant()
-                    | Col columnName
-                    | QualifiedCol(_, columnName) -> columnName
-                    | _ -> (exprLabel expression).ToLowerInvariant()
-                warningCode
-                |> Option.iter (fun code ->
-                    let reason = if code = 3155 then "Out of range" else "Invalid"
-                    Diagnostics.warning code (sprintf "%s JSON value for CAST to INTEGER from column %s at row %d" reason source (Diagnostics.currentRowNumber ())))
-                VUInt(uint64 word)
-            | _ -> value
+        let value = if charBuiltin then prepareCharArgument ctx expression value else value
 
         let value =
             if Functions.isTextArgument name index ctx.Registry then
@@ -19318,10 +19318,30 @@ and private runSelect
                 | None, Some(Error error) -> Error error
                 | None, Some(Ok expr) -> evalExpr { ctxFor row with Clause = HavingClause } expr |> Result.map (fun v -> truthy v = Some true))
 
-    let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
+    let charProjection =
         projections
-        |> traverse (evalProjection (ctxFor row) columns)
-        |> Result.map List.concat
+        |> List.exists (fun projection ->
+            Expression.exists
+                (function
+                | FuncCall(name, _) ->
+                    name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase)
+                | _ -> false)
+                projection.Expression)
+
+    let mutable projectedRowNumber = 0
+
+    let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
+        let evaluate () =
+            projections
+            |> traverse (evalProjection (ctxFor row) columns)
+            |> Result.map List.concat
+
+        if charProjection then
+            projectedRowNumber <- projectedRowNumber + 1
+            Diagnostics.withRowNumber projectedRowNumber evaluate
+        else
+            evaluate ()
 
     let bindOrderAliases =
         orderBy |> List.map (fst >> resolveOrderExpr)
@@ -19373,6 +19393,7 @@ and private runSelect
         | Ok allProjected ->
             ResultSet(colNames, []), applyWireOverrides outputWireOverrides (columnMetadataOf (List.length colNames) allProjected), []
     | Ok probeProjection ->
+        projectedRowNumber <- 0
         let colNames = probeProjection |> List.map fst
 
         // Wire metadata follows returned rows so LIMIT can stop source

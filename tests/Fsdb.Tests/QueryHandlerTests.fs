@@ -3470,6 +3470,22 @@ let tests =
                       "JSON overflow warnings"
               | _, result -> failtestf "expected CHAR JSON overflow result, got %A" result
 
+          testCase "CHAR reports stored JSON warnings at filtered result rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE char_json_probe (id INT PRIMARY KEY, payload JSON)"
+              let session, _ = handle session "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"
+              match handle session "SELECT id,HEX(CHAR(payload)) FROM char_json_probe WHERE id >= 4 ORDER BY id" with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "4"; Some "00" ]; [ Some "5"; Some "00" ]; [ Some "6"; Some "FFFFFFFF" ]; [ Some "7"; Some "FFFFFFFF" ] ] "stored JSON bytes"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3156, "Invalid JSON value for CAST to INTEGER from column payload at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column payload at row 2"
+                        3155, "Out of range JSON value for CAST to INTEGER from column payload at row 4" ]
+                      "warnings use filtered result row numbers"
+              | _, result -> failtestf "expected stored CHAR JSON result, got %A" result
+
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

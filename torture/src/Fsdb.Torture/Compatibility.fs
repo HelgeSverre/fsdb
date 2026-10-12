@@ -1263,6 +1263,15 @@ module ContractCatalog =
                    "SELECT HEX(CHAR(CAST('18446744073709551616' AS JSON))),HEX(CHAR(CAST('-9223372036854775809' AS JSON)))"
                    |> Contract.comparingValues
                yield Contract.query "char-json-overflow-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.execute "char-json-storage-create" "CREATE TABLE char_json_probe(id INT PRIMARY KEY,payload JSON)"
+               yield Contract.execute "char-json-storage-insert"
+                   "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"
+               yield Contract.query "char-json-storage-values" "SELECT id,HEX(CHAR(payload)) FROM char_json_probe ORDER BY id"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-storage-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-storage-filtered" "SELECT id,HEX(CHAR(payload)) FROM char_json_probe WHERE id >= 4 ORDER BY id"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-storage-filtered-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, source in
                    [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
                    yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)

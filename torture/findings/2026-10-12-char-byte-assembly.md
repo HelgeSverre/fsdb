@@ -60,5 +60,9 @@ arrays, and objects contribute zero with warning 3156. The audited
 originating `cast_as_json`, `json_array`, or `json_object` expression; focused and native
 differential cases cover values, codes, names, and order.
 
-Stored JSON row-number diagnostics, other JSON expression origins, and
-floating overflow in other expression forms remain outside this audit.
+Stored JSON values and warning row numbers now match the audited seven-row
+table, both with all rows and after a `WHERE` filter. The projection row
+number follows the filtered result order, so the first warning after a filter
+reports row 1 rather than its physical table position. Other JSON expression
+origins, ordering and grouping shapes, and floating overflow in other
+expression forms remain outside this audit.
