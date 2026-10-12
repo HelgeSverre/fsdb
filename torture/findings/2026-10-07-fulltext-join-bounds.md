@@ -220,3 +220,33 @@ MySQL 8.4.11 run at `20261012T045938983-12044/contracts` passed every
 139 cases and 18,882 steps, the two costed result mismatches disappeared;
 the remaining nine signatures are exactly the previous identifier-case
 differences, with no new mismatch.
+
+### A wider costed-join matrix
+
+Fresh MySQL 8.4.11 tables show why the small costed fix is not a general
+row-count rule. With three `names` rows and three unindexed `labels` rows,
+the written `d.k IN (1,NULL)` query returns IDs 1 and 2, as it does with
+101 labels. With only the two collation-equivalent `names` rows and two
+unindexed labels, it returns ID 2. Adding a key to `labels` makes the
+three-name, one-label query return IDs 1 and 2, but the three-name,
+two-label query returns only ID 2. The maintained native
+[`fulltext-join-bounds-oracle.py`](../scripts/fulltext-join-bounds-oracle.py)
+asserts those fresh-table outcomes.
+
+The focused regression and differential contract now cover the indexed
+single-label choice and an unindexed one-name/one-label choice, with the
+two-name/two-label and two-index/two-label outcomes as controls. Those two
+singleton cases failed before this follow-up and pass afterward. The
+equal-cardinality three-name/three-label unindexed query still returns only
+ID 2 in Fsdb, so it remains an observed result-membership gap. MySQL's
+displayed TREE filter on `d.k` does not by itself explain why that query
+returns both IDs; moving the predicate based solely on row counts would
+break the two-name/two-label control.
+
+`just check` passed 3,478 tests with no build warnings or errors. In the
+pinned `20261012T051636753-13861/contracts` run, the two singleton
+differences disappeared and no new mismatch appeared. Of 139 cases and
+18,895 steps, ten signatures remain: the nine identifier-case differences
+and this equal-cardinality costed-join result mismatch. A fuller
+access-path and predicate-placement model is needed before expanding this
+rule to the remaining costed shapes.

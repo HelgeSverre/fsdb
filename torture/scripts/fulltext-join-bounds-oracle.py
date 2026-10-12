@@ -147,6 +147,28 @@ def verify(client, _):
     client.query("ALTER TABLE labels DROP INDEX k")
     native["expect"]("unindexed labels restore costed names bound", client.query(names_bound), "1\n2")
 
+    for label, name_count, label_count, label_indexed, expected in [
+        ("unindexed-three-by-three", 3, 3, False, "1\n2"),
+        ("unindexed-three-by-many", 3, 101, False, "1\n2"),
+        ("unindexed-two-by-two", 2, 2, False, "2"),
+        ("indexed-three-by-one", 3, 1, True, "1\n2"),
+        ("indexed-three-by-two", 3, 2, True, "2"),
+    ]:
+        name_table = "matrix_names_" + label.replace("-", "_")
+        label_table = "matrix_labels_" + label.replace("-", "_")
+        client.query(
+            f"CREATE TABLE {name_table}(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,KEY(k));"
+            f"CREATE TABLE {label_table}(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci"
+            + (",KEY(k)" if label_indexed else "") + ")")
+        name_values = ["(1,'①')", "(2,'1')", "(3,'other')"][:name_count]
+        label_values = ["('1')"] + [f"('unmatched_{i}')" for i in range(label_count - 1)]
+        client.query(
+            f"INSERT INTO {name_table} VALUES " + ",".join(name_values)
+            + f";INSERT INTO {label_table} VALUES " + ",".join(label_values))
+        query = (f"SELECT d.id FROM {name_table} d JOIN {label_table} o ON o.k=d.k "
+                 "WHERE d.k IN (1,NULL) ORDER BY d.id")
+        native["expect"]("costed numeric IN " + label, client.query(query), expected)
+
     native["expect"]("direct names IN", client.query(
         "SELECT id,k IN (1,NULL) FROM names ORDER BY id"), "1\tNULL\n2\t1\n3\tNULL")
     native["expect"]("direct labels IN", client.query(

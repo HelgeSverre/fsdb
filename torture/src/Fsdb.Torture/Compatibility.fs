@@ -10920,8 +10920,26 @@ module ContractCatalog =
                    Contract.query
                        (sprintf "costed-%s-two-labels" owner)
                        (sprintf "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE %s.k IN (1,NULL) ORDER BY d.id" owner)
+               Contract.execute "add-third-label" "INSERT INTO join_labels VALUES('other2')"
+               Contract.query "costed-d-three-labels-unindexed"
+                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE d.k IN (1,NULL) ORDER BY d.id"
+               Contract.execute "remove-third-label" "DELETE FROM join_labels WHERE k = 'other2'"
                Contract.execute "index-competing-key" "CREATE INDEX labels_k ON join_labels(k)"
                Contract.query "costed-d-two-indexes"
+                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE d.k IN (1,NULL) ORDER BY d.id"
+               Contract.execute "remove-second-label" "DELETE FROM join_labels WHERE k = 'other'"
+               Contract.query "costed-d-one-indexed-label"
+                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE d.k IN (1,NULL) ORDER BY d.id"
+               Contract.execute "restore-second-label" "INSERT INTO join_labels VALUES('other')"
+               Contract.execute "drop-competing-key" "DROP INDEX labels_k ON join_labels"
+               Contract.execute "remove-third-name" "DELETE FROM join_names WHERE id = 3"
+               Contract.query "costed-d-two-names-two-labels"
+                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE d.k IN (1,NULL) ORDER BY d.id"
+               Contract.execute "remove-second-name" "DELETE FROM join_names WHERE id = 2"
+               Contract.query "costed-d-one-name-two-labels"
+                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE d.k IN (1,NULL) ORDER BY d.id"
+               Contract.execute "remove-other-label" "DELETE FROM join_labels WHERE k = 'other'"
+               Contract.query "costed-d-one-name-one-label"
                    "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE d.k IN (1,NULL) ORDER BY d.id" |]
           Cleanup = [| "DROP TABLE IF EXISTS join_labels"; "DROP TABLE IF EXISTS join_names" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }

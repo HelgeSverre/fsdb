@@ -3410,6 +3410,13 @@ let tests =
                     check "names d JOIN labels o" "d" "(1,NULL)" "" [ "1"; "2" ]
                     runDefault store "CREATE INDEX labels_k ON labels(k)" |> ignore
                     check "names d JOIN labels o" "d" "(1,NULL)" "" [ "2" ]
+                    runDefault store "DELETE FROM labels WHERE k = 'other'" |> ignore
+                    check "names d JOIN labels o" "d" "(1,NULL)" "" [ "1"; "2" ]
+                    runDefault store "DROP INDEX labels_k ON labels" |> ignore
+                    runDefault store "DELETE FROM names WHERE id <> 1" |> ignore
+                    check "names d JOIN labels o" "d" "(1,NULL)" "" [ "1" ]
+                    runDefault store "INSERT INTO labels VALUES('other')" |> ignore
+                    check "names d JOIN labels o" "d" "(1,NULL)" "" []
 
                 testCase "outer hash joins preserve the retained side's scan order"
                 <| fun _ ->

@@ -12618,8 +12618,9 @@ and private tryTextJoinEquality
         | _ -> None)
 
 /// For this audited numeric-IN shape, start at the smaller unindexed source
-/// when the other equality key has an index. A competing index leaves the
-/// costed owner unresolved. Simple projections keep source order invisible.
+/// when the other equality key has an index. The audited singleton cases
+/// also need the right-hand key to own the numeric filter. Simple
+/// projections keep source order invisible.
 and private chooseNumericJoinBase (store: Store) (dbName: string) (select: SelectStmt) =
     let physical tableRef =
         tryPhysicalTableRef store dbName tableRef
@@ -12672,12 +12673,19 @@ and private chooseNumericJoinBase (store: Store) (dbName: string) (select: Selec
                         || (equalsIgnoreCase owner rightQualifier && equalsIgnoreCase name rightName)
                     | _ -> false
 
+                let drivesFromRight rightName =
+                    let leftRows = leftTable.RowsArray.Count
+                    let rightRows = rightTable.RowsArray.Count
+                    if indexed rightTable rightName then
+                        rightRows = 1 && leftRows > 1
+                    else
+                        rightRows < leftRows || (rightRows = 1 && leftRows = 1)
+
                 match equalityColumns with
                 | Some(leftName, rightName)
-                    when rightTable.RowsArray.Count < leftTable.RowsArray.Count
-                         && transferableKeys leftName rightName
+                    when transferableKeys leftName rightName
                          && indexed leftTable leftName
-                         && not (indexed rightTable rightName) ->
+                         && drivesFromRight rightName ->
                     { select with From = Some join.Table; Joins = [ { join with Table = leftSource } ] },
                     Some(rightQualifier.ToLowerInvariant())
                 | _ -> select, None
