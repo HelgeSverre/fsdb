@@ -1330,6 +1330,8 @@ module ContractCatalog =
                yield Contract.execute "char-json-view-aux-insert" "INSERT INTO char_view_aux VALUES (1),(2)"
                yield Contract.execute "char-json-view-direct-create" "CREATE VIEW char_direct_v AS SELECT id,payload FROM char_view_source"
                yield Contract.execute "char-json-view-extract-create" "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
+               yield Contract.execute "char-json-view-limited-create" "CREATE VIEW char_limited_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source LIMIT 10"
+               yield Contract.execute "char-json-view-temp-create" "CREATE ALGORITHM=TEMPTABLE VIEW char_temp_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
                yield Contract.execute "char-json-view-nested-create" "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
                yield Contract.execute "char-json-view-star-create" "CREATE VIEW char_star_v AS SELECT * FROM char_extract_v"
                yield Contract.execute "char-json-view-star-renamed-create" "CREATE VIEW char_star_renamed_v AS SELECT id,extracted AS renamed FROM char_star_v"
@@ -1358,6 +1360,17 @@ module ContractCatalog =
                yield Contract.query "char-json-view-left-join" "SELECT v.id,HEX(CHAR(v.extracted)) FROM char_extract_v v JOIN char_view_aux a ON a.id=v.id ORDER BY v.id DESC" |> Contract.comparingValues
                yield Contract.query "char-json-view-left-join-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "char-json-view-right-join" "SELECT a.id,HEX(CHAR(v.extracted)) FROM char_view_aux a JOIN char_extract_v v ON v.id=a.id ORDER BY a.id DESC" |> Contract.comparingValues
+               for name, sql in
+                   [ "derived-view-star", "SELECT d.id,HEX(CHAR(d.extracted)) FROM (SELECT * FROM char_extract_v) d ORDER BY d.id DESC"
+                     "derived-view-renamed", "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,extracted AS renamed FROM char_extract_v) d ORDER BY d.id DESC"
+                     "derived-table-renamed", "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,payload AS renamed FROM char_view_source) d ORDER BY d.id DESC"
+                     "derived-table-function", "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,JSON_EXTRACT(payload,'$') AS renamed FROM char_view_source) d ORDER BY d.id DESC"
+                     "derived-limited-function", "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,JSON_EXTRACT(payload,'$') AS renamed FROM char_view_source LIMIT 10) d ORDER BY d.id DESC"
+                     "derived-limited-column", "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,payload AS renamed FROM char_view_source LIMIT 10) d ORDER BY d.id DESC"
+                     "limited", "SELECT id,HEX(CHAR(extracted)) FROM char_limited_v ORDER BY id DESC"
+                     "temp", "SELECT id,HEX(CHAR(extracted)) FROM char_temp_v ORDER BY id DESC" ] do
+                   yield Contract.query (sprintf "char-json-view-%s" name) sql |> Contract.comparingValues
+                   yield Contract.query (sprintf "char-json-view-%s-warnings" name) "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.execute "char-json-storage-create" "CREATE TABLE char_json_probe(id INT PRIMARY KEY,payload JSON)"
                yield Contract.execute "char-json-storage-insert"
                    "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"

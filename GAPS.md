@@ -268,6 +268,9 @@ open. Audited joined view references retain the JSON warning source. MySQL's
 join warning row counter can reset to 1 for each probe, and projection order
 changes which subsequent expressions see that reset. Fsdb still counts final
 output rows; joined diagnostic row provenance remains open.
+Audited mergeable pass-through and renamed derived sources over a view or
+physical table retain the defining column or JSON function warning source;
+limited derived sources and limited or `TEMPTABLE` views use the exposed alias.
 
 | Missing family | Functions | Impact |
 |---|---|---|

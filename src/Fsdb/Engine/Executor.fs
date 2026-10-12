@@ -3543,15 +3543,16 @@ and private selectProjectionColumns (store: Store) (dbName: string) (select: Sel
             | Some value, Some name -> Some { value with Name = name }
             | _ -> column))
 
+let private selectRequiresMaterialization (body: SelectStmt) =
+    body.Limit.IsSome || body.Offset.IsSome || body.Distinct
+    || not body.GroupBy.IsEmpty || body.Having.IsSome || body.Rollup
+    || body.Projections |> List.exists (fun { Expression = expression } ->
+        containsAggregate Functions.builtins expression || not (collectWindowFuncs expression).IsEmpty)
+
 let private sourceForBody (body: SelectStmt) (source: ColumnSource) =
-    let materialized =
-        body.Limit.IsSome || body.Offset.IsSome || body.Distinct
-        || not body.GroupBy.IsEmpty || body.Having.IsSome || body.Rollup
-        || body.Projections |> List.exists (fun { Expression = expression } ->
-            containsAggregate Functions.builtins expression || not (collectWindowFuncs expression).IsEmpty)
     match source with
     | CorrelatedColumn _ -> source
-    | _ when materialized -> MaterializedColumn source.Origin
+    | _ when selectRequiresMaterialization body -> MaterializedColumn source.Origin
     | _ -> source
 
 type private OutputColumnSource =
@@ -7675,63 +7676,75 @@ and private viewJsonSourceNames
     (select: SelectStmt) =
     if not (containsCharProjection projections) then Map.empty
     else
+        let sourceColumns dbName source =
+            let fromMetadata () =
+                selectSourceColumns store dbName source
+                |> List.choose id
+                |> List.map _.Name
+            match source with
+            | FromTable tableRef ->
+                let sourceDb = tableRef.Database |> Option.defaultValue dbName
+                match tryStoredView store sourceDb tableRef.Table with
+                | Some view when not view.Columns.IsEmpty -> view.Columns
+                | _ -> fromMetadata ()
+            | _ -> fromMetadata ()
+        let projectedSources
+            (dbName: string)
+            (outputNames: string list)
+            (definition: SelectStmt)
+            (upstream: Map<string, string>)
+            (preserveFunctionNames: bool) =
+            let sourceName (columnName: string) =
+                Map.tryFind (columnName.ToLowerInvariant()) upstream |> Option.defaultValue columnName
+            let expandedProjections =
+                let hasStar =
+                    definition.Projections
+                    |> List.exists (fun projection ->
+                        match projection.Expression with
+                        | Star _ -> true
+                        | _ -> false)
+                if not hasStar then
+                    definition.Projections
+                else
+                    let columns =
+                        match definition.From, definition.Joins with
+                        | Some source, [] -> sourceColumns dbName source
+                        | _ -> []
+                    definition.Projections
+                    |> List.collect (fun projection ->
+                        match projection.Expression with
+                        | Star _ when not columns.IsEmpty ->
+                            columns |> List.map (fun name -> Projection.create (Col name) None)
+                        | _ -> [ projection ])
+            if expandedProjections.Length <> List.length outputNames then Map.empty
+            else
+                List.zip outputNames expandedProjections
+                |> List.choose (fun (outputName, projection) ->
+                    let origin =
+                        match projection.Expression with
+                        | FuncCall(functionName, _) when preserveFunctionNames -> Some(functionName.ToLowerInvariant())
+                        | Col columnName
+                        | QualifiedCol(_, columnName) -> Some(sourceName columnName)
+                        | _ -> None
+                    origin |> Option.map (fun name -> outputName.ToLowerInvariant(), name))
+                |> Map.ofList
         let rec sources (seen: Set<string * string>) (viewDb: string) (viewName: string) =
             let key = viewDb.ToLowerInvariant(), viewName.ToLowerInvariant()
             if Set.contains key seen then Map.empty
             else
                 match tryStoredView store viewDb viewName with
                 | None -> Map.empty
-                | Some view ->
+                | Some view when not (view.Algorithm.Equals("TEMPTABLE", System.StringComparison.OrdinalIgnoreCase)) ->
                     match parseStoredViewStatement view with
-                    | Ok(Select definition) ->
+                    | Ok(Select definition) when not (selectRequiresMaterialization definition) ->
                         let upstream =
                             match definition.From, definition.Joins with
                             | Some(FromTable source), [] ->
                                 sources (Set.add key seen) (source.Database |> Option.defaultValue viewDb) source.Table
                             | _ -> Map.empty
-                        let sourceName (columnName: string) =
-                            Map.tryFind (columnName.ToLowerInvariant()) upstream |> Option.defaultValue columnName
-                        let expandedProjections =
-                            let hasStar =
-                                definition.Projections
-                                |> List.exists (fun projection ->
-                                    match projection.Expression with
-                                    | Star _ -> true
-                                    | _ -> false)
-                            if not hasStar then
-                                definition.Projections
-                            else
-                                let sourceColumns =
-                                    match definition.From, definition.Joins with
-                                    | Some(FromTable source), [] ->
-                                        let sourceDb = source.Database |> Option.defaultValue viewDb
-                                        match tryStoredView store sourceDb source.Table with
-                                        | Some sourceView when not sourceView.Columns.IsEmpty -> sourceView.Columns
-                                        | _ ->
-                                            selectSourceColumns store viewDb (FromTable source)
-                                            |> List.choose id
-                                            |> List.map _.Name
-                                    | _ -> []
-                                definition.Projections
-                                |> List.collect (fun projection ->
-                                    match projection.Expression with
-                                    | Star _ when not sourceColumns.IsEmpty ->
-                                        sourceColumns |> List.map (fun name -> Projection.create (Col name) None)
-                                    | _ -> [ projection ])
-                        match expandedProjections with
-                        | projections when projections.Length = view.Columns.Length ->
-                            List.zip view.Columns projections
-                            |> List.choose (fun (outputName, projection) ->
-                                let origin =
-                                    match projection.Expression with
-                                    | FuncCall(functionName, _) -> Some(functionName.ToLowerInvariant())
-                                    | Col columnName
-                                    | QualifiedCol(_, columnName) -> Some(sourceName columnName)
-                                    | _ -> None
-                                origin |> Option.map (fun name -> outputName.ToLowerInvariant(), name))
-                            |> Map.ofList
-                        | _ -> Map.empty
+                        projectedSources viewDb view.Columns definition upstream true
                     | _ -> Map.empty
+                | Some _ -> Map.empty
         ((select.From |> Option.toList) @ (select.Joins |> List.map _.Table))
         |> List.collect FromItem.leaves
         |> List.collect (function
@@ -7746,6 +7759,23 @@ and private viewJsonSourceNames
                     |> List.mapi (fun index column ->
                         Map.tryFind (column.Name.ToLowerInvariant()) sourceNames
                         |> Option.map (fun source -> offset + index, source))
+                    |> List.choose id
+            | FromSubquery(PlainSelect definition, qualifier) ->
+                match Map.tryFind (qualifier.ToLowerInvariant()) qualifiers with
+                | None -> []
+                | Some _ when selectRequiresMaterialization definition -> []
+                | Some(columns, offset) ->
+                    let upstream =
+                        match definition.From, definition.Joins with
+                        | Some(FromTable viewRef), [] ->
+                            sources Set.empty (viewRef.Database |> Option.defaultValue dbName) viewRef.Table
+                        | _ -> Map.empty
+                    let sourceNames =
+                        projectedSources dbName (columns |> List.map _.Name) definition upstream definition.From.IsSome
+                    columns
+                    |> List.mapi (fun index column ->
+                        Map.tryFind (column.Name.ToLowerInvariant()) sourceNames
+                        |> Option.map (fun name -> offset + index, name))
                     |> List.choose id
             | _ -> [])
         |> Map.ofList

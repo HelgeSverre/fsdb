@@ -3571,6 +3571,8 @@ let tests =
               let session, _ = handle session "INSERT INTO char_view_aux VALUES (1),(2)"
               let session, _ = handle session "CREATE VIEW char_direct_v AS SELECT id,payload FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
+              let session, _ = handle session "CREATE VIEW char_limited_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source LIMIT 10"
+              let session, _ = handle session "CREATE ALGORITHM=TEMPTABLE VIEW char_temp_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
               let session, _ = handle session "CREATE VIEW char_star_v AS SELECT * FROM char_extract_v"
               let session, _ = handle session "CREATE VIEW char_star_renamed_v AS SELECT id,extracted AS renamed FROM char_star_v"
@@ -3619,6 +3621,24 @@ let tests =
                            condition.Message.StartsWith("Invalid JSON value for CAST to INTEGER from column json_extract at row ")))
                       "right-side view warning source"
               | _, result -> failtestf "expected joined CHAR JSON view result for %s, got %A" rightJoinedSql result
+              for sql, warningSource in
+                  [ "SELECT d.id,HEX(CHAR(d.extracted)) FROM (SELECT * FROM char_extract_v) d ORDER BY d.id DESC", "json_extract"
+                    "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,extracted AS renamed FROM char_extract_v) d ORDER BY d.id DESC", "json_extract"
+                    "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,payload AS renamed FROM char_view_source) d ORDER BY d.id DESC", "payload"
+                    "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,JSON_EXTRACT(payload,'$') AS renamed FROM char_view_source) d ORDER BY d.id DESC", "json_extract"
+                    "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,JSON_EXTRACT(payload,'$') AS renamed FROM char_view_source LIMIT 10) d ORDER BY d.id DESC", "renamed"
+                    "SELECT d.id,HEX(CHAR(d.renamed)) FROM (SELECT id,payload AS renamed FROM char_view_source LIMIT 10) d ORDER BY d.id DESC", "renamed"
+                    "SELECT id,HEX(CHAR(extracted)) FROM char_limited_v ORDER BY id DESC", "extracted"
+                    "SELECT id,HEX(CHAR(extracted)) FROM char_temp_v ORDER BY id DESC", "extracted" ] do
+                  match handle session sql with
+                  | session, ResultSet(_, rows) ->
+                      Expect.equal rows [ [ Some "2"; Some "00" ]; [ Some "1"; Some "0C" ] ] sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ for row in 1 .. 2 ->
+                                3156, sprintf "Invalid JSON value for CAST to INTEGER from column %s at row %d" warningSource row ]
+                          sql
+                  | _, result -> failtestf "expected derived CHAR JSON result for %s, got %A" sql result
               match handle session "SELECT id,HEX(CHAR(payload)),HEX(CHAR(computed)) FROM char_mixed_star_v ORDER BY id DESC" with
               | session, ResultSet(_, rows) ->
                   Expect.equal rows [ [ Some "2"; Some "00"; Some "00" ]; [ Some "1"; Some "0C"; Some "00" ] ] "mixed star view rows"

@@ -113,6 +113,15 @@ four warnings. Fsdb currently numbers those warnings by final output row. A
 correct fix needs join-evaluation diagnostic provenance rather than a
 source-name substitution or a constant right-table row number.
 
+Pass-through derived queries over a stored JSON view retain its defining
+`json_extract` warning source through both `SELECT *` and an additional alias.
+Mergeable derived queries over a physical table likewise warn under the base
+`payload` column or `json_extract` function when those expressions are aliased.
+Fsdb previously used the derived output alias for these cases. Materialized
+sources have the opposite rule: a derived query with `LIMIT`, and a limited or
+`ALGORITHM=TEMPTABLE` view, warn under the exposed alias. Source-free derived
+JSON expressions also use their exposed alias in the audited cases.
+
 Stored JSON values and warning row numbers now match the audited seven-row
 table with all rows, a `WHERE` filter, descending ordering with and without
 `LIMIT`, and grouping by the row ID. The projection row number follows the
