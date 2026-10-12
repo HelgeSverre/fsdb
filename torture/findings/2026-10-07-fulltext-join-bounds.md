@@ -188,3 +188,15 @@ cannot transfer the predicate solely because `names.k` is indexed or the
 labels table has fewer rows; it must account for competing access paths.
 These probes require a UTF-8 connection: the native oracle explicitly uses
 `utf8mb4` so the circled-digit key reaches MySQL intact.
+
+An optimizer-trace probe of a fresh `d`/`o` fixture with the same rows adds
+chosen access paths to the result evidence. With only `d.k` indexed, MySQL
+chooses `o` first, probes `d.k`, attaches `o.k IN (1,NULL)`, and returns
+IDs 1 and 2. Adding `KEY(k)` to `o` makes the `d`-first plan cheaper;
+the trace attaches `d.k IN (1,NULL)` and the result becomes ID 2. This was
+observed on the pinned 8.4.11 image with a `utf8mb4` client connection.
+It explains this controlled counterexample, but it does not turn the displayed
+TREE plan or a row-count heuristic into a general predicate-ownership rule.
+The costed fix needs an explicit source-choice decision that accounts for
+competing equality access paths and retains the original `IN` semantics
+when that choice is not established.
