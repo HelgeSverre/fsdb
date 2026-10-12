@@ -61,8 +61,9 @@ originating `cast_as_json`, `json_array`, or `json_object` expression; focused a
 differential cases cover values, codes, names, and order.
 
 Stored JSON values and warning row numbers now match the audited seven-row
-table, both with all rows and after a `WHERE` filter. The projection row
-number follows the filtered result order, so the first warning after a filter
-reports row 1 rather than its physical table position. Other JSON expression
-origins, ordering and grouping shapes, and floating overflow in other
-expression forms remain outside this audit.
+table with all rows, a `WHERE` filter, descending ordering with and without
+`LIMIT`, and grouping by the row ID. The projection row number follows the
+selected result order: a filtered or descending warning refers to its output
+position rather than the physical table position. Other JSON expression
+origins, more complex ordering and grouping shapes, and floating overflow in
+other expression forms remain outside this audit.

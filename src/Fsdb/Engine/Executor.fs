@@ -4538,6 +4538,17 @@ type private SqlValueKeyComparer(collations: Collation.Collation list, coerceNum
             | [| v |] -> (bucketOf 0 v).GetHashCode()
             | _ -> a |> Array.mapi (fun i v -> (bucketOf i v).GetHashCode()) |> Array.fold (fun h x -> h * 31 + x) 17
 
+let private containsCharProjection (projections: Projection list) =
+    projections
+    |> List.exists (fun projection ->
+        Expression.exists
+            (function
+            | FuncCall(name, _) ->
+                name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
+                || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase)
+            | _ -> false)
+            projection.Expression)
+
 /// Traverses lazily and retains only accepted values, so rejected join
 /// candidates do not consume result memory. Stops at the first error or cancellation.
 let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
@@ -16658,19 +16669,26 @@ and private runGroupedSelect
         rewriteAggregateValues registry context
             (evalAggregateUsing evaluate registry aggregateContext groupRows) expression
 
+    let charProjection = containsCharProjection select.Projections
+    let mutable projectedGroupNumber = 0
+
     let projectGroup (rollup: Expr -> Expr, rolledKeys: Expr list) (groupRows: GroupInputRow list) : Result<(string * Value) list, EvalError> =
         let representative = representativeOf groupRows
-
-        select.Projections
-        |> traverse (fun ({ Expression = expr } as projection) ->
-            match expr with
-            | Star None -> Ok(columns |> List.mapi (fun i c -> c.Name, representative.[i]))
-            | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
-            | _ ->
-                rewriteGroupAggregates groupRows (rollup expr)
-                |> Result.bind (evalExpr { ctxFor representative with RollupKeys = rolledKeys; ProjectionLabel = Some(projectionLabel projection) })
-                |> Result.map (fun v -> [ projectionLabel projection, v ]))
-        |> Result.map List.concat
+        let evaluate () =
+            select.Projections
+            |> traverse (fun ({ Expression = expr } as projection) ->
+                match expr with
+                | Star None -> Ok(columns |> List.mapi (fun i c -> c.Name, representative.[i]))
+                | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
+                | _ ->
+                    rewriteGroupAggregates groupRows (rollup expr)
+                    |> Result.bind (evalExpr { ctxFor representative with RollupKeys = rolledKeys; ProjectionLabel = Some(projectionLabel projection) })
+                    |> Result.map (fun v -> [ projectionLabel projection, v ]))
+            |> Result.map List.concat
+        if charProjection then
+            projectedGroupNumber <- projectedGroupNumber + 1
+            Diagnostics.withRowNumber projectedGroupNumber evaluate
+        else evaluate ()
 
     let havingOk (rollup: Expr -> Expr, rolledKeys: Expr list) projected (groupRows: GroupInputRow list) : Result<bool, EvalError> =
         match havingExpression with
@@ -16834,6 +16852,7 @@ and private runGroupedSelect
     with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjected ->
+        projectedGroupNumber <- 0
         let colNames = probeProjected |> List.map fst
 
         let tryIndexOnlySimpleGroups () =
@@ -19273,13 +19292,22 @@ and private runSelect
         | _ -> None
 
     let directOrderExpressions =
-        let directProjection (projection: Projection) =
-            match projection with
-            | { Expression = Col _ }
-            | { Expression = QualifiedCol _ } -> true
+        // These functions have no side effects and do not supply the order
+        // key. MySQL evaluates their projections after selecting direct-key
+        // top-N rows, including their row-indexed conversion diagnostics.
+        let rec deferableProjection = function
+            | Col _
+            | QualifiedCol _
+            | Lit _ -> true
+            | FuncCall(name, arguments)
+                when (name.Equals("HEX", System.StringComparison.OrdinalIgnoreCase)
+                      || name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
+                      || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
+                     && Functions.isUnmodifiedBuiltinScalar name registry ->
+                arguments |> List.forall deferableProjection
             | _ -> false
 
-        if projections |> List.forall directProjection then
+        if projections |> List.forall (_.Expression >> deferableProjection) then
             let rec collect resolved =
                 function
                 | [] -> Some(List.rev resolved)
@@ -19318,16 +19346,7 @@ and private runSelect
                 | None, Some(Error error) -> Error error
                 | None, Some(Ok expr) -> evalExpr { ctxFor row with Clause = HavingClause } expr |> Result.map (fun v -> truthy v = Some true))
 
-    let charProjection =
-        projections
-        |> List.exists (fun projection ->
-            Expression.exists
-                (function
-                | FuncCall(name, _) ->
-                    name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
-                    || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase)
-                | _ -> false)
-                projection.Expression)
+    let charProjection = containsCharProjection projections
 
     let mutable projectedRowNumber = 0
 
@@ -19434,6 +19453,16 @@ and private runSelect
                     |> Result.bind (fun outputCols ->
                         orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols, distinctKeyOf row outputCols))))
 
+        let evalDirectOrderKeys orderExpressions row =
+            matches row
+            |> Result.bind (fun keep ->
+                if keep then
+                    orderExpressions
+                    |> traverse (fun expression -> evalOrderKey (ctxFor row) expression)
+                    |> Result.map (fun keys -> Some(keys, row))
+                else
+                    Ok None)
+
         // No `ORDER BY`: `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET` stream lazily
         // through `streamLimited`, which stops pulling rows the moment
         // enough have survived — verified against a real MySQL oracle
@@ -19472,17 +19501,7 @@ and private runSelect
 
             match directOrderExpressions with
             | Some orderExpressions ->
-                let evalOrderedRow row =
-                    matches row
-                    |> Result.bind (fun keep ->
-                        if keep then
-                            orderExpressions
-                            |> traverse (fun expression -> evalOrderKey (ctxFor row) expression)
-                            |> Result.map (fun keys -> Some(keys, row))
-                        else
-                            Ok None)
-
-                match rows |> boundedTopN capacity (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) evalOrderedRow with
+                match rows |> boundedTopN capacity (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) (evalDirectOrderKeys orderExpressions) with
                 | Error(code, message) -> Err(code, message), [], []
                 | Ok top ->
                     let selected = top |> List.map snd |> applyLimitOffset limit offset
@@ -19497,6 +19516,23 @@ and private runSelect
                 | Error(code, message) -> Err(code, message), [], []
                 | Ok top ->
                     let limited = top |> List.map (fun (_, pair, _) -> pair) |> applyLimitOffset limit offset
+                    ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
+
+        elif not select.Distinct && not orderBy.IsEmpty && directOrderExpressions.IsSome then
+            let directions = List.map snd orderBy
+            let orderExpressions = Option.get directOrderExpressions
+            match rows |> traverseSeq (evalDirectOrderKeys orderExpressions) with
+            | Error(code, message) -> Err(code, message), [], []
+            | Ok keyed ->
+                let sorted =
+                    keyed
+                    |> List.sortWith (fun (left, _) (right, _) -> compareByOrderKeys directions left right)
+                    |> List.map snd
+                    |> applyLimitOffset limit offset
+                match sorted |> traverse projectRow with
+                | Error(code, message) -> Err(code, message), [], []
+                | Ok projected ->
+                    let limited = projected |> List.map pairOf
                     ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
 
         // Honest barrier: `ORDER BY` with no `LIMIT` (nothing to bound a

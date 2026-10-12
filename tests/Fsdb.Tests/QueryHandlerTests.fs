@@ -3485,6 +3485,37 @@ let tests =
                         3155, "Out of range JSON value for CAST to INTEGER from column payload at row 4" ]
                       "warnings use filtered result row numbers"
               | _, result -> failtestf "expected stored CHAR JSON result, got %A" result
+              match handle session "SELECT id,HEX(CHAR(payload)) FROM char_json_probe ORDER BY id DESC LIMIT 3" with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "7"; Some "FFFFFFFF" ]; [ Some "6"; Some "FFFFFFFF" ]; [ Some "5"; Some "00" ] ] "bounded descending JSON rows"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3155, "Out of range JSON value for CAST to INTEGER from column payload at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column payload at row 3" ]
+                      "bounded ordering counts selected rows"
+              | _, result -> failtestf "expected descending CHAR JSON result, got %A" result
+              match handle session "SELECT id,HEX(CHAR(payload)) FROM char_json_probe ORDER BY id DESC" with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal (rows |> List.map List.head) [ Some "7"; Some "6"; Some "5"; Some "4"; Some "3"; Some "2"; Some "1" ] "unbounded descending JSON rows"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3155, "Out of range JSON value for CAST to INTEGER from column payload at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column payload at row 3"
+                        3156, "Invalid JSON value for CAST to INTEGER from column payload at row 4"
+                        3156, "Invalid JSON value for CAST to INTEGER from column payload at row 6" ]
+                      "unbounded ordering counts output rows"
+              | _, result -> failtestf "expected unbounded CHAR JSON result, got %A" result
+              match handle session "SELECT id,HEX(CHAR(payload)) FROM char_json_probe GROUP BY id ORDER BY id" with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal (rows |> List.map List.head) [ Some "1"; Some "2"; Some "3"; Some "4"; Some "5"; Some "6"; Some "7" ] "grouped JSON rows"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3156, "Invalid JSON value for CAST to INTEGER from column payload at row 2"
+                        3156, "Invalid JSON value for CAST to INTEGER from column payload at row 4"
+                        3156, "Invalid JSON value for CAST to INTEGER from column payload at row 5"
+                        3155, "Out of range JSON value for CAST to INTEGER from column payload at row 7" ]
+                      "grouped projections count result rows"
+              | _, result -> failtestf "expected grouped CHAR JSON result, got %A" result
 
           testCase "numeric CAST warnings stop text previews at NUL"
           <| fun _ ->

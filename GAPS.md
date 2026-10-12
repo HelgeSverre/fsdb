@@ -253,7 +253,7 @@ now preserve their MySQL byte values. Stored DOUBLE overflow emits the audited
 integer warning while a direct large literal stays quiet; JSON argument
 values and diagnostics now match the audited scalar, array, object, and
 overflow expressions. Stored JSON values and warning row numbers match the
-audited full and filtered projections; other JSON source forms and
+audited full, filtered, descending, bounded, and grouped projections; other JSON source forms and
 expression-origin overflow cases remain open.
 
 | Missing family | Functions | Impact |

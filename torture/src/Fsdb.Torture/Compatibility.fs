@@ -1272,6 +1272,15 @@ module ContractCatalog =
                yield Contract.query "char-json-storage-filtered" "SELECT id,HEX(CHAR(payload)) FROM char_json_probe WHERE id >= 4 ORDER BY id"
                    |> Contract.comparingValues
                yield Contract.query "char-json-storage-filtered-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-storage-desc-limit" "SELECT id,HEX(CHAR(payload)) FROM char_json_probe ORDER BY id DESC LIMIT 3"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-storage-desc-limit-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-storage-desc-all" "SELECT id,HEX(CHAR(payload)) FROM char_json_probe ORDER BY id DESC"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-storage-desc-all-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-storage-grouped" "SELECT id,HEX(CHAR(payload)) FROM char_json_probe GROUP BY id ORDER BY id"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-storage-grouped-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                for index, source in
                    [ "CONCAT('12',CHAR(128),'x')"; "CONCAT('é',CHAR(0),'x')" ] |> List.indexed do
                    yield Contract.query (sprintf "char-byte-time-%d" index) (sprintf "SELECT CAST(%s AS TIME)" source)
