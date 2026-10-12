@@ -10,6 +10,28 @@ open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
+let private runConcurrentInserts store writerCount insertSql =
+    use ready = new Threading.CountdownEvent(writerCount)
+    use start = new Threading.ManualResetEventSlim()
+
+    let inserts =
+        Array.init writerCount (fun index ->
+            Threading.Tasks.Task.Factory.StartNew(
+                (fun () ->
+                    ready.Signal() |> ignore
+                    start.Wait()
+                    handle (create (index + 2) store) (insertSql index) |> snd),
+                Threading.CancellationToken.None,
+                Threading.Tasks.TaskCreationOptions.LongRunning,
+                Threading.Tasks.TaskScheduler.Default
+            ))
+
+    Expect.isTrue (ready.Wait(TimeSpan.FromSeconds 5.)) "every writer reached the start barrier"
+    start.Set()
+    let completed = Threading.Tasks.Task.WhenAll inserts
+    Expect.isTrue (completed.Wait(TimeSpan.FromSeconds 10.)) "every writer completes"
+    inserts |> Array.map _.Result
+
 let tests =
     testList
         "Transactions"
@@ -434,28 +456,10 @@ let tests =
               let setup = create 1 store
               let setup, _ = handle setup "CREATE TABLE tx_concurrent_insert (id INT AUTO_INCREMENT PRIMARY KEY, note VARCHAR(40) UNIQUE)"
               let writerCount = 16
-              use ready = new Threading.CountdownEvent(writerCount)
-              use start = new Threading.ManualResetEventSlim()
-
-              let inserts =
-                  Array.init writerCount (fun index ->
-                      Threading.Tasks.Task.Factory.StartNew(
-                          (fun () ->
-                              ready.Signal() |> ignore
-                              start.Wait()
-                              handle (create (index + 2) store) $"INSERT INTO tx_concurrent_insert(note) VALUES ('row-{index}')" |> snd),
-                          Threading.CancellationToken.None,
-                          Threading.Tasks.TaskCreationOptions.LongRunning,
-                          Threading.Tasks.TaskScheduler.Default
-                      ))
-
-              Expect.isTrue (ready.Wait(TimeSpan.FromSeconds 5.)) "every writer reached the start barrier"
-              start.Set()
-              let completed = Threading.Tasks.Task.WhenAll inserts
-              Expect.isTrue (completed.Wait(TimeSpan.FromSeconds 10.)) "every writer completes"
+              let inserts = runConcurrentInserts store writerCount (fun index -> $"INSERT INTO tx_concurrent_insert(note) VALUES ('row-{index}')")
 
               inserts
-              |> Array.iter (fun insert -> Expect.equal insert.Result (Affected 1UL) "each insert publishes one row")
+              |> Array.iter (fun result -> Expect.equal result (Affected 1UL) "each insert publishes one row")
 
               match handle setup "SELECT COUNT(*), COUNT(DISTINCT id), COUNT(DISTINCT note) FROM tx_concurrent_insert" |> snd with
               | ResultSet(_, [ [ count; distinctIds; distinctNotes ] ]) ->
@@ -464,6 +468,22 @@ let tests =
                   Expect.equal distinctIds expected "every insert receives a distinct identity"
                   Expect.equal distinctNotes expected "every insert retains its distinct value"
               | result -> failtestf "expected every concurrent insert exactly once, got %A" result
+
+          testCase "concurrent keyless inserts retain every committed row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_keyless_insert (value INT NOT NULL)"
+              let writerCount = 16
+              let inserts = runConcurrentInserts store writerCount (fun index -> $"INSERT INTO tx_keyless_insert VALUES ({index})")
+              inserts |> Array.iter (fun result -> Expect.equal result (Affected 1UL) "each keyless insert commits")
+
+              match handle setup "SELECT COUNT(*), COUNT(DISTINCT value) FROM tx_keyless_insert" |> snd with
+              | ResultSet(_, [ [ count; distinct ] ]) ->
+                  let expected = Some(string writerCount)
+                  Expect.equal count expected "all keyless inserts remain visible"
+                  Expect.equal distinct expected "no keyless insert is duplicated"
+              | result -> failtestf "expected every keyless insert exactly once, got %A" result
 
           testCase "READ COMMITTED savepoint rollback retains concurrent committed rows"
           <| fun _ ->

@@ -30,3 +30,23 @@ durable mode. The weaker fsdb scaling is a useful signal for profiling the
 per-database publication section and keyless optimistic-merge work; this run
 does not isolate which part dominates. The three short trials support a
 directional result, not a production throughput guarantee.
+
+## Follow-up on the publication path
+
+A ten-second `dotnet-sampled-thread-time` trace of an eight-writer run sampled
+substantial monitor waiting: `Monitor.Enter_Slowpath` accounted for about 20%
+of sampled thread time. The samples include other runtime waits and do not
+identify a single lock or measure its hold duration, but they support looking
+at synchronization before micro-optimizing row coercion.
+
+I tried preparing a single keyless candidate before acquiring the database
+publication lock, using the existing prepared-candidate helper. The same
+one/eight-writer, three-trial configuration measured **7,623 / 9,836 ops/sec**
+after that change, against **7,324 / 9,865 ops/sec** in the recorded baseline.
+The eight-writer result did not improve; the single-writer change is within
+the short-run variation and unrelated to lock parallelism. I removed the
+candidate fast path rather than retain complexity without a demonstrated gain.
+The next useful profile should separate time waiting for the database slot
+from work done while holding it, and inspect statement/protocol costs outside
+that section. A 16-writer regression now checks that keyless autocommit inserts
+remain visible exactly once.
