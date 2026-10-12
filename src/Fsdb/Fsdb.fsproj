@@ -35,6 +35,7 @@
     <Compile Include="Sql/SingleByteCharset.fs" />
     <Compile Include="Sql/Charset.fs" />
     <Compile Include="Sql/Collation.fs" />
+    <Compile Include="Sql/RegexpScriptProperties.fs" />
     <Compile Include="Sql/Regexp.fs" />
     <Compile Include="Sql/Temporal.fs" />
     <Compile Include="Sql/TemporalLocale.fs" />
