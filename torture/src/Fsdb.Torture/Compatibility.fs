@@ -5990,7 +5990,13 @@ module ContractCatalog =
                "CREATE TABLE if_unsigned_probe(id INT PRIMARY KEY,v INT UNSIGNED,UNIQUE KEY ux ((IF(v IS NULL,7,v))))"
                "INSERT INTO if_unsigned_probe VALUES(1,NULL),(2,9)"
                "CREATE TABLE if_big_probe(id INT PRIMARY KEY,v BIGINT,UNIQUE KEY ux ((IF(v IS NULL,7,v))))"
-               "INSERT INTO if_big_probe VALUES(1,NULL),(2,9223372036854775807)" |]
+               "INSERT INTO if_big_probe VALUES(1,NULL),(2,9223372036854775807)"
+               "CREATE TABLE if_literal_narrow_probe(id INT PRIMARY KEY,v TINYINT,KEY ix ((IF(v IS NULL,2147483648,v))))"
+               "INSERT INTO if_literal_narrow_probe VALUES(1,5)"
+               "CREATE TABLE if_literal_wide_probe(id INT PRIMARY KEY,v TINYINT,UNIQUE KEY ux ((IF(v IS NULL,10000000000,v))))"
+               "INSERT INTO if_literal_wide_probe VALUES(1,NULL),(2,5)"
+               "CREATE TABLE if_literal_reversed_probe(id INT PRIMARY KEY,v TINYINT,UNIQUE KEY ux ((IF(v IS NOT NULL,v,10000000000))))"
+               "INSERT INTO if_literal_reversed_probe VALUES(1,NULL),(2,5)" |]
           Steps =
             [| Contract.query "fallback" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=7"
                Contract.query "ordinary" "SELECT id FROM if_branch_probe WHERE IF(v IS NULL,7,v)=9"
@@ -6009,13 +6015,21 @@ module ContractCatalog =
                Contract.query "unsigned-fallback" "SELECT id FROM if_unsigned_probe WHERE IF(v IS NULL,7,v)=7"
                Contract.execute "unsigned-overflow" "INSERT INTO if_unsigned_probe VALUES(3,4294967295)" |> Contract.fails 3752 "22003"
                Contract.query "big-fallback" "SELECT id FROM if_big_probe WHERE IF(v IS NULL,7,v)=7"
-               Contract.query "big-maximum" "SELECT id FROM if_big_probe WHERE IF(v IS NULL,7,v)=9223372036854775807" |]
+               Contract.query "big-maximum" "SELECT id FROM if_big_probe WHERE IF(v IS NULL,7,v)=9223372036854775807"
+               Contract.execute "literal-narrow-overflow" "INSERT INTO if_literal_narrow_probe VALUES(2,NULL)" |> Contract.fails 3752 "22003"
+               Contract.query "literal-wide-fallback" "SELECT id FROM if_literal_wide_probe WHERE IF(v IS NULL,10000000000,v)=10000000000"
+               Contract.execute "literal-wide-duplicate" "INSERT INTO if_literal_wide_probe VALUES(3,NULL)" |> Contract.fails 1062 "23000"
+               Contract.query "literal-reversed-fallback" "SELECT id FROM if_literal_reversed_probe WHERE IF(v IS NOT NULL,v,10000000000)=10000000000"
+               Contract.execute "literal-reversed-duplicate" "INSERT INTO if_literal_reversed_probe VALUES(3,NULL)" |> Contract.fails 1062 "23000" |]
           Cleanup =
             [| "DROP TABLE if_branch_probe"
                "DROP TABLE if_reversed_probe"
                "DROP TABLE if_boolean_probe"
                "DROP TABLE if_unsigned_probe"
-               "DROP TABLE if_big_probe" |]
+               "DROP TABLE if_big_probe"
+               "DROP TABLE if_literal_narrow_probe"
+               "DROP TABLE if_literal_wide_probe"
+               "DROP TABLE if_literal_reversed_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private textNullFallbackFunctionalIndex =

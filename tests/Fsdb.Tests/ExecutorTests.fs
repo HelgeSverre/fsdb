@@ -8969,6 +8969,78 @@ let tests =
                         (Affected 1UL)
                         "the signed BIGINT maximum fits its conditional key"
 
+                testCase "IF NULL-branch literal width controls the hidden integer key"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE if_literal_narrow (id INT PRIMARY KEY, value TINYINT, KEY ix ((IF(value IS NULL,2147483648,value))))")
+                        (Affected 0UL)
+                        "MySQL accepts the out-of-range literal in the key declaration"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO if_literal_narrow VALUES (1,5)")
+                        (Affected 1UL)
+                        "a stored value that fits the hidden key remains valid"
+
+                    match runDefault store "INSERT INTO if_literal_narrow VALUES (2,NULL)" with
+                    | Err(3752, _) -> ()
+                    | other -> failtestf "the fallback must overflow the hidden signed INT key; got %A" other
+
+                    let narrowPlan =
+                        runDefault store "EXPLAIN SELECT id FROM if_literal_narrow WHERE IF(value IS NULL,2147483648,value)=2147483648"
+                        |> explainRow
+
+                    Expect.equal narrowPlan.KeyLength (Some "5") "the ten-digit literal leaves a five-byte nullable key"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE if_literal_boundary (id INT PRIMARY KEY, value TINYINT, KEY ix ((IF(value IS NULL,9999999999,value))))")
+                        (Affected 0UL)
+                        "the largest ten-digit literal still declares an INT key"
+
+                    match runDefault store "INSERT INTO if_literal_boundary VALUES (1,NULL)" with
+                    | Err(3752, _) -> ()
+                    | other -> failtestf "the ten-digit boundary must overflow the signed INT key; got %A" other
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE if_literal_wide (id INT PRIMARY KEY, value TINYINT, UNIQUE KEY ux ((IF(value IS NULL,10000000000,value))))")
+                        (Affected 0UL)
+                        "the wider literal promotes the hidden key to BIGINT"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO if_literal_wide VALUES (1,NULL),(2,5)")
+                        (Affected 2UL)
+                        "the wide fallback and source value both fit"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM if_literal_wide WHERE IF(value IS NULL,10000000000,value)=10000000000")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the promoted key finds the fallback row"
+
+                    let widePlan =
+                        runDefault store "EXPLAIN SELECT id FROM if_literal_wide WHERE IF(value IS NULL,10000000000,value)=10000000000"
+                        |> explainRow
+
+                    Expect.equal widePlan.Key (Some "ux") "the promoted key remains physical"
+                    Expect.equal widePlan.KeyLength (Some "9") "the promoted nullable BIGINT key uses nine bytes"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE if_literal_negative (id INT PRIMARY KEY, value TINYINT, KEY ix ((IF(value IS NULL,-10000000000,value))))")
+                        (Affected 0UL)
+                        "the negative wide literal also declares a BIGINT key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO if_literal_negative VALUES (1,NULL)")
+                        (Affected 1UL)
+                        "the negative wide fallback fits its hidden key"
+
+                    let negativePlan =
+                        runDefault store "EXPLAIN SELECT id FROM if_literal_negative WHERE IF(value IS NULL,-10000000000,value)=-10000000000"
+                        |> explainRow
+
+                    Expect.equal negativePlan.Key (Some "ix") "the negative wide key is physical"
+                    Expect.equal negativePlan.KeyLength (Some "9") "the negative wide key uses nine bytes"
+
                 testCase "IFNULL integer functional keys retain their distinct result types"
                 <| fun _ ->
                     let store = newStore ()

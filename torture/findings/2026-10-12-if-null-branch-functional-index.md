@@ -18,18 +18,27 @@ source value of `4294967295` overflows the four-byte signed result and fails
 with error 3752 in strict mode. These width and overflow probes ran on the
 disposable native MySQL 8.4.11 benchmark server; their databases were dropped.
 
+Literal width also controls the hidden type. For a `TINYINT` or `INT` source,
+fallback literals `2147483648` and `9999999999` leave a five-byte key and
+fail with 3752 when a NULL row selects them. At `10000000000`, the result
+promotes to a nine-byte nullable `BIGINT` key and the NULL row is stored.
+The negative boundary mirrors this: `-9999999999` overflows the narrow key,
+while `-10000000000` uses nine bytes. Both IF branch orders share these
+result widths while retaining distinct expression identities.
+
 Fsdb now maintains physical equality and unique keys for both branch forms
 with fitting signed integer literals and the audited source types. The
 Expecto regressions first failed with unsupported unique-expression error
-1235 and now cover result lookup, unique collisions, distinct identities,
-key widths, and overflow. Other `IF` conditions, `BIGINT UNSIGNED`, wider
-literal-result forms, and branch expressions remain outside the supported
-physical-key grammar.
+1235 or an unindexed insert that should have overflowed; they now cover
+result lookup, unique collisions, distinct identities, key widths, and
+overflow. Other `IF` conditions, `BIGINT UNSIGNED`, unsigned fallback
+literals beyond signed `BIGINT`, and other branch expressions remain outside
+the supported physical-key grammar.
 
-`just check` passed all 3,496 tests with no build warnings. All 18 steps of
+`just check` passed all 3,497 tests with no build warnings. All 23 steps of
 `if-null-branch-functional-index` passed in the native MySQL 8.4.11 contract
-run at `torture/artifacts/runs/20261012T160054056-52991/contracts`. The
-145-case, 19,047-step run retained two unrelated result differences:
+run at `torture/artifacts/runs/20261012T160736591-54070/contracts`. The
+145-case, 19,052-step run retained two unrelated result differences:
 `regexp-posix-classes/han-script-negation` and the previously recorded
 `mixed-type-join-in/costed-d-three-labels-unindexed`. The native server uses
 `lower_case_table_names=2` on macOS. This is supplementary evidence; the

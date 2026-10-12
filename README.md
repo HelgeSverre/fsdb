@@ -481,7 +481,10 @@ different access pattern:
   physical key for `BOOLEAN`, narrow integer columns, `INT`, and signed
   `BIGINT` with a fitting signed literal. The hidden key uses a four-byte
   integer plus a NULL byte through `INT`, or eight plus one for signed
-  `BIGINT`; a source value outside that hidden range fails in strict mode.
+  `BIGINT`. A literal of `10,000,000,000` or more in magnitude promotes a
+  narrower source's key to nullable `BIGINT`; smaller out-of-range literals
+  keep the narrower key and fail when stored in strict mode. A source value
+  outside the hidden range likewise fails in strict mode.
   Equality and unique-key checks use the projected result. The equivalent
   `IF(column IS NOT NULL, column, integer_literal)` form has its own key
   identity, matching MySQL's expression-based lookup.

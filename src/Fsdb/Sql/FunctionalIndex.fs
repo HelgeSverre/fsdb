@@ -479,9 +479,8 @@ let private tryIntegerFallbackKey columnType fallback =
 
     match columnType, fallback.Function, fallback.Value with
     | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _),
-      (IfNullBranch | IfNotNullBranch), VInt value
-        when value >= int64 Int32.MinValue && value <= int64 Int32.MaxValue ->
-        Some SignedInt32
+      (IfNullBranch | IfNotNullBranch), VInt value ->
+        Some(if wideLiteral value then SignedInt64 else SignedInt32)
     | TBigInt false, (IfNullBranch | IfNotNullBranch), VInt _ -> Some SignedInt64
     | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt false), IfNullFunction, VInt _ ->
         Some SignedInt64
