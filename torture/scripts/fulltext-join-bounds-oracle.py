@@ -141,6 +141,12 @@ def verify(client, _):
         print(label + ":\n" + plan, flush=True)
         native["expect"](label + " filter owner", f"({filter_owner}.k in (1,NULL))" in plan, True)
 
+    names_bound = prefix + "d.k IN (1,NULL) ORDER BY d.id"
+    client.query("ALTER TABLE labels ADD KEY(k)")
+    native["expect"]("indexed labels change costed names bound", client.query(names_bound), "2")
+    client.query("ALTER TABLE labels DROP INDEX k")
+    native["expect"]("unindexed labels restore costed names bound", client.query(names_bound), "1\n2")
+
     native["expect"]("direct names IN", client.query(
         "SELECT id,k IN (1,NULL) FROM names ORDER BY id"), "1\tNULL\n2\t1\n3\tNULL")
     native["expect"]("direct labels IN", client.query(

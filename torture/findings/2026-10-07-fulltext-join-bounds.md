@@ -178,3 +178,13 @@ returns only ID 2 when it is written on `d.k`. The run at
 differences: the previous nine signatures are unchanged, and these two
 costed-join probes account for the increase. Recent index and write-path
 changes have not closed this result-membership gap.
+
+The native oracle now tests an index-only counterprobe on the same two-label
+fixture. Adding `KEY(k)` to `labels` changes the costed query with written
+`d.k IN (1,NULL)` from IDs 1 and 2 to ID 2; dropping that key restores IDs
+1 and 2. The rows and SQL are otherwise unchanged. The expanded
+`fulltext-join-bounds-oracle.py` passes against MySQL 8.4.11. A fix therefore
+cannot transfer the predicate solely because `names.k` is indexed or the
+labels table has fewer rows; it must account for competing access paths.
+These probes require a UTF-8 connection: the native oracle explicitly uses
+`utf8mb4` so the circled-digit key reaches MySQL intact.
