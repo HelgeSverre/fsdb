@@ -3296,6 +3296,27 @@ let tests =
                               (call "REGEXP_INSTR" [ VString "a𐅀b"; VString "\\p{Greek}"; VInt 1L; VInt 1L; VInt 1L; VString "c" ])
                               (VInt 3L)
                               "end position counts supplementary Greek as one scalar"
+                      testCase "REGEXP Greek script extensions include shared marks"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          for codePoint in [ 0x00b7; 0x0300; 0x0345; 0x0374; 0x03a9; 0x10140 ] do
+                              Expect.equal (matches "\\p{scx=Grek}" codePoint) (VInt 1L) (sprintf "U+%X has Greek script extension" codePoint)
+
+                          for codePoint in [ 0x0041; 0x03e2; 0x1f600 ] do
+                              Expect.equal (matches "\\p{scx=Grek}" codePoint) (VInt 0L) (sprintf "U+%X lacks Greek script extension" codePoint)
+
+                          for alias in [ "\\p{scx=Greek}"; "\\p{Script_Extensions=Greek}"; "\\p{Script_Extensions=Grek}" ] do
+                              Expect.equal (matches alias 0x0300) (VInt 1L) (sprintf "%s alias" alias)
+
+                          Expect.equal (matches "[\\p{scx=Grek}]" 0x10140) (VInt 1L) "bracket includes supplementary Greek"
+                          Expect.equal (matches "\\P{scx=Grek}" 0x0300) (VInt 0L) "negation excludes a shared mark"
+                          Expect.equal (matches "[^\\p{scx=Grek}]" 0x1f600) (VInt 1L) "negated bracket includes emoji"
+                          Expect.equal
+                              (call "REGEXP_LIKE" [ VString "µ"; VString "\\p{scx=Grek}"; VString "i" ])
+                              (VInt 1L)
+                              "case folding includes micro sign"
                       testCase "REGEXP Any property consumes one Unicode scalar"
                       <| fun _ ->
                           for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do

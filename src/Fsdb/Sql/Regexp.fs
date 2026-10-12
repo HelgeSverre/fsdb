@@ -173,8 +173,20 @@ let private greekScriptAtom =
 
 let private greekScriptFoldedAtom = "(?:" + greekScriptAtom + "|[\\u00B5\\u0345])"
 
+let private greekScriptAtomFor ignoreCase =
+    if ignoreCase then greekScriptFoldedAtom else greekScriptAtom
+
+let private greekScriptExtensionMembers =
+    "[\\u00B7\\u0300-\\u0301\\u0304\\u0306\\u0308\\u0313\\u0342\\u0345\\u0374\\u1DC0-\\u1DC1\\u205D]"
+
+let private greekScriptExtensionsAtom ignoreCase =
+    "(?:" + greekScriptAtomFor ignoreCase + "|" + greekScriptExtensionMembers + ")"
+
 let private greekScriptAliases =
     set [ "GREEK"; "GREK"; "ISGREEK"; "SC=GREEK"; "SC=GREK"; "SCRIPT=GREEK"; "SCRIPT=GREK" ]
+
+let private greekScriptExtensionAliases =
+    set [ "SCX=GREEK"; "SCX=GREK"; "SCRIPT_EXTENSIONS=GREEK"; "SCRIPT_EXTENSIONS=GREK" ]
 
 let private unicodePropertyNameAt (pattern: string) index =
     if index + 3 >= pattern.Length
@@ -203,8 +215,11 @@ let private unicodePropertyAt ignoreCase (pattern: string) index =
     | Some(nextIndex, name) when Map.containsKey name supplementaryBinaryAtoms ->
         let atom = Map.find name supplementaryBinaryAtoms
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
+    | Some(nextIndex, name) when Set.contains name greekScriptExtensionAliases ->
+        let atom = greekScriptExtensionsAtom ignoreCase
+        Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
     | Some(nextIndex, name) when Set.contains name greekScriptAliases ->
-        let atom = if ignoreCase then greekScriptFoldedAtom else greekScriptAtom
+        let atom = greekScriptAtomFor ignoreCase
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
     | Some(nextIndex, name) ->
         let categoryName =
