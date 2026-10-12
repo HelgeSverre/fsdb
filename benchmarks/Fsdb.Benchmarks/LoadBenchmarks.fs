@@ -25,6 +25,7 @@ type private Workload =
     | UpdateHot
     | UpsertDistinct
     | Insert
+    | InsertKeyless
     | ReplaceDistinct
     | TransactionDistinct
     | Mixed
@@ -36,11 +37,12 @@ type private Workload =
         | UpdateHot -> "update-hot"
         | UpsertDistinct -> "upsert-distinct"
         | Insert -> "insert"
+        | InsertKeyless -> "insert-keyless"
         | ReplaceDistinct -> "replace-distinct"
         | TransactionDistinct -> "transaction-distinct"
         | Mixed -> "mixed"
 
-    static member All = [ PointRead; UpdateDistinct; UpdateHot; UpsertDistinct; Insert; ReplaceDistinct; TransactionDistinct; Mixed ]
+    static member All = [ PointRead; UpdateDistinct; UpdateHot; UpsertDistinct; Insert; InsertKeyless; ReplaceDistinct; TransactionDistinct; Mixed ]
 
     static member TryParse(value: string) =
         Workload.All
@@ -142,6 +144,9 @@ let private runOneWorker (conn: MySqlConnection) (workload: Workload) (workerCou
             let i = Interlocked.Increment(&insertCounter.contents)
             exec
                 $"INSERT INTO users (name, email, age, meta, created_at) VALUES ('load_{i}', 'load_{i}@bench.test', 30, '{{\"plan\":\"free\"}}', '2024-01-01 00:00:00')"
+        | InsertKeyless ->
+            let i = Interlocked.Increment(&insertCounter.contents)
+            exec $"INSERT INTO keyless_events (worker_id, event_id) VALUES ({w}, {i})"
         | ReplaceDistinct ->
             let id = sliceStart + rng.Next(sliceSize)
             let seedIndex = id - 1
@@ -211,9 +216,27 @@ let private runWorkers (target: string) (workload: Workload) (workerCount: int) 
 
 /// Warmup then measure completed operations and contention retries.
 let private measure (target: string) (workload: Workload) (workerCount: int) : Measurement =
+    if workload = InsertKeyless then
+        use conn = new MySqlConnection(Schema.connectionString target)
+        conn.Open()
+        use command = conn.CreateCommand()
+        command.CommandText <- "CREATE TABLE keyless_events (worker_id INT NOT NULL, event_id BIGINT NOT NULL)"
+        command.ExecuteNonQuery() |> ignore
+
     let insertCounter = ref 0L
-    runWorkers target workload workerCount warmupSeconds insertCounter |> ignore
+    let warmupCounts, _ = runWorkers target workload workerCount warmupSeconds insertCounter
     let counts, elapsed = runWorkers target workload workerCount measureSeconds insertCounter
+
+    if workload = InsertKeyless then
+        use conn = new MySqlConnection(Schema.connectionString target)
+        conn.Open()
+        use command = conn.CreateCommand()
+        command.CommandText <- "SELECT COUNT(*) FROM keyless_events"
+        let stored = Convert.ToInt64(command.ExecuteScalar())
+        let expected = warmupCounts.Completed + counts.Completed
+        if stored <> expected then
+            failwithf "%s retained %d of %d completed keyless inserts" target stored expected
+
     let attempts = counts.Completed + counts.Retried
 
     { OperationsPerSecond = float counts.Completed / elapsed.TotalSeconds

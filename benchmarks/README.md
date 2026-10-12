@@ -382,6 +382,15 @@ cost.
 
 ### Concurrency throughput
 
+The `insert-keyless` load workload writes to a table without primary or unique
+keys. It checks that the final row count equals the number of completed warmup
+and measured inserts, so a lost row cannot inflate throughput. Select it with
+`FSDB_LOAD_WORKLOADS=insert-keyless just bench-load`; use
+`FSDB_LOAD_WORKERS=1,8` to compare single-writer and concurrent scaling. The
+ordinary load recipe compares in-memory fsdb with durable MySQL, so its write
+rates should be used for scaling diagnosis rather than a durability-matched
+throughput claim.
+
 The broad [eight-worker baseline](results/4897506-load.md) predates optimistic
 row-conflict merging:
 
