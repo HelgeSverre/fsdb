@@ -412,6 +412,18 @@ let hasNonNullableTextFallback = function
                         | _ -> false))))
     | _ -> false
 
+let hasNullableVarcharNullIfResult = function
+    | Expression expression ->
+        tryPhysicalExpression expression
+        |> Option.exists (fun physical ->
+            physical.Calls.IsEmpty
+            && (physical.NullComparison
+                |> Option.exists (fun comparison ->
+                    match comparison.Value with
+                    | VString _ -> true
+                    | _ -> false)))
+    | _ -> false
+
 let tryRebaseColumn column = function
     | Expression expression ->
         tryPhysicalExpression expression
@@ -568,7 +580,7 @@ let private supportsNullIf (column: ColumnDef) comparison =
     | Some _, (VInt _ | VUInt _) -> true
     | _, VString _ ->
         match column.Type, column.Collation, comparison.Literal with
-        | TVarchar _, Some collation, IntroducedLiteral(_, charset, _) ->
+        | (TChar _ | TVarchar _), Some collation, IntroducedLiteral(_, charset, _) ->
             Fsdb.Collation.tryFind collation |> Option.isSome
             && Fsdb.Charset.canonicalName charset = (column.Charset |> Option.defaultValue "utf8mb4" |> Fsdb.Charset.canonicalName)
         | _ -> false

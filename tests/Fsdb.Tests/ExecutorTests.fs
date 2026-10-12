@@ -9328,6 +9328,53 @@ let tests =
                     | Err(1062, _) -> ()
                     | other -> failtestf "folded non-NULL result must collide; got %A" other
 
+                testCase "NULLIF CHAR keys use nullable VARCHAR result widths"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE nullif_char (id INT PRIMARY KEY, value CHAR(20) COLLATE utf8mb4_0900_ai_ci, UNIQUE KEY ux ((NULLIF(value,_utf8mb4'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts a unique CHAR NULLIF key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO nullif_char VALUES (1,NULL),(2,'x'),(3,'X'),(4,'x '),(5,'other')")
+                        (Affected 5UL)
+                        "multiple CHAR spellings project NULL under the column collation"
+
+                    match runDefault store "INSERT INTO nullif_char VALUES (6,'OTHER')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "a folded CHAR result must collide; got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM nullif_char WHERE NULLIF(value,_utf8mb4'x') IS NULL ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]))
+                        "CHAR storage and NULLIF equality select the same NULL bucket"
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_char WHERE NULLIF(value,'x')='other'"
+                        |> explainRow
+
+                    Expect.equal plan.Key (Some "ux") "CHAR NULLIF equality uses the key"
+                    Expect.equal plan.KeyLength (Some "83") "the hidden nullable VARCHAR result includes a length prefix"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE nullif_char_latin1 (id INT PRIMARY KEY, value CHAR(20) CHARACTER SET latin1 COLLATE latin1_bin, KEY ix ((NULLIF(value,_latin1'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts a one-byte CHAR NULLIF key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO nullif_char_latin1 VALUES (1,'x'),(2,'x '),(3,'X')")
+                        (Affected 3UL)
+                        "seed latin1 CHAR values"
+
+                    let latin1Plan =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_char_latin1 WHERE NULLIF(value,_latin1'x')='X'"
+                        |> explainRow
+
+                    Expect.equal latin1Plan.Key (Some "ix") "latin1 CHAR lookup uses its key"
+                    Expect.equal latin1Plan.KeyLength (Some "23") "the one-byte nullable result keeps a two-byte length prefix"
+
                 testCase "NULLIF integer functional keys promote narrow widths and preserve nullable uniqueness"
                 <| fun _ ->
                     let store = newStore ()

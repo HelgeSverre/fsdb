@@ -6136,6 +6136,25 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE text_nullif_probe"; "DROP TABLE text_nullif_pad"; "DROP TABLE text_nullif_fold"; "DROP TABLE text_nullif_latin1"; "DROP TABLE text_nullif_fold_unique" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private charNullifFunctionalIndex =
+        { Name = "char-nullif-functional-index"
+          Setup =
+            [| "CREATE TABLE char_nullif_probe(id INT PRIMARY KEY,v CHAR(20) COLLATE utf8mb4_0900_ai_ci,UNIQUE KEY ux ((NULLIF(v,_utf8mb4'x'))))"
+               "INSERT INTO char_nullif_probe VALUES(1,NULL),(2,'x'),(3,'X'),(4,'x '),(5,'other')"
+               "CREATE TABLE char_nullif_latin1(id INT PRIMARY KEY,v CHAR(20) CHARACTER SET latin1 COLLATE latin1_bin,KEY ix ((NULLIF(v,_latin1'x'))))"
+               "INSERT INTO char_nullif_latin1 VALUES(1,'x'),(2,'x '),(3,'X')" |]
+          Steps =
+            [| Contract.query "null-results" "SELECT id FROM char_nullif_probe WHERE NULLIF(v,_utf8mb4'x') IS NULL ORDER BY id"
+               Contract.query "connection-probe" "SELECT id FROM char_nullif_probe WHERE NULLIF(v,'x')='other'"
+               Contract.execute "folded-duplicate" "INSERT INTO char_nullif_probe VALUES(6,'OTHER')" |> Contract.fails 1062 "23000"
+               Contract.execute "update" "UPDATE char_nullif_probe SET v='new' WHERE id=5"
+               Contract.query "old-key" "SELECT id FROM char_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='other'"
+               Contract.query "new-key" "SELECT id FROM char_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='new'"
+               Contract.query "latin1-null-results" "SELECT id FROM char_nullif_latin1 WHERE NULLIF(v,_latin1'x') IS NULL ORDER BY id"
+               Contract.query "latin1-match" "SELECT id FROM char_nullif_latin1 WHERE NULLIF(v,_latin1'x')='X'" |]
+          Cleanup = [| "DROP TABLE char_nullif_probe"; "DROP TABLE char_nullif_latin1" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private bitCountFunctionalIndex =
         { Name = "bit-count-functional-index"
           Setup =
@@ -11351,6 +11370,7 @@ module ContractCatalog =
            textIfNullBranchFunctionalIndex
            nullifFunctionalIndex
            textNullifFunctionalIndex
+           charNullifFunctionalIndex
            bitCountFunctionalIndex
            crc32FunctionalIndex
            exactIntegerFunctionalBounds

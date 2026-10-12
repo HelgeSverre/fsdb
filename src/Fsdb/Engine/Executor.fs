@@ -20710,6 +20710,10 @@ let private explainIndexKeyLen
         let resultColumn =
             if transform |> Option.exists FunctionalIndex.hasNonNullableTextFallback then
                 { column with Nullable = false }
+            elif transform |> Option.exists FunctionalIndex.hasNullableVarcharNullIfResult then
+                match column.Type with
+                | TChar width -> { column with Type = TVarchar width }
+                | _ -> column
             else
                 column
 

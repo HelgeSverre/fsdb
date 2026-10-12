@@ -77,3 +77,15 @@ The later 18-step text contract passed in
 `torture/artifacts/runs/20261012T170209162-66020/contracts`, including the
 equivalent mixed-charset query. That full run retained the regex and one
 mixed-type join result difference.
+
+MySQL 8.4.11 also accepts `NULLIF(v,_utf8mb4'x')` on a `CHAR(20)` source.
+The hidden result is nullable `VARCHAR(20)`, with an 83-byte key for utf8mb4
+and a 23-byte key for latin1. Fsdb now maintains physical keys for fitting
+`CHAR` text comparisons using the same source-collation rules. A focused
+regression covers trailing-space storage, folded uniqueness, equality
+access, and both key widths; the `char-nullif-functional-index` contract
+compares rows, duplicate diagnostics, and key maintenance with MySQL.
+`just check` passed all 3,501 tests. All eight `CHAR` contract steps matched
+native MySQL 8.4.11 in
+`torture/artifacts/runs/20261012T171141706-71107/contracts`; that broader
+run retained the established regex and mixed-type join differences.

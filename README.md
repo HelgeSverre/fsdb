@@ -477,13 +477,15 @@ different access pattern:
   `NULLIF(integer_column, integer_literal)` has a nullable physical key:
   narrow integer sources promote to `INT`, while `BIGINT` retains its width.
   Equality and unique-key checks use the projected result.
-  `NULLIF` also has a physical key for `VARCHAR` when its text comparison
+  `NULLIF` also has a physical key for `CHAR` and `VARCHAR` when its text comparison
   literal uses the source charset. Key projection follows the column's
   collation, including case and accent folding and PAD SPACE. Plain
   connection literals share a key with matching `utf8mb4` literals. The
   default `utf8mb4_0900_ai_ci` key also serves text literals from other
   nonbinary charsets when the comparison values collate equal. Other
   mixed-charset expressions and numeric probes scan.
+  A `CHAR` source has a nullable `VARCHAR` hidden result, including the
+  variable-length prefix in `EXPLAIN` key width.
   `IF(column IS NULL, integer_literal, column)` has a distinct nullable
   physical key for `BOOLEAN`, narrow integer columns, `INT`, and signed
   `BIGINT` with a fitting signed literal. The hidden key uses a four-byte
