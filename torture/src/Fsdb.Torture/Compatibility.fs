@@ -1330,6 +1330,8 @@ module ContractCatalog =
                yield Contract.execute "char-json-view-extract-create" "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
                yield Contract.execute "char-json-view-nested-create" "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
                yield Contract.execute "char-json-view-renamed-create" "CREATE VIEW char_renamed_v AS SELECT id,payload AS renamed FROM char_view_source"
+               yield Contract.execute "char-json-view-cast-create" "CREATE VIEW char_cast_v AS SELECT CAST('\"12.5\"' AS JSON) AS payload"
+               yield Contract.execute "char-json-view-cast-nested-create" "CREATE VIEW char_cast_nested_v AS SELECT payload AS renamed FROM char_cast_v"
                yield Contract.execute "char-json-view-union-create" "CREATE VIEW char_union_v AS SELECT 1 AS id,CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,CAST('null' AS JSON)"
                for name, sql in
                    [ "direct", "SELECT id,HEX(CHAR(payload)) FROM char_direct_v ORDER BY id DESC"
@@ -1339,6 +1341,8 @@ module ContractCatalog =
                      "union", "SELECT id,HEX(CHAR(payload)) FROM char_union_v ORDER BY id DESC" ] do
                    yield Contract.query (sprintf "char-json-view-%s" name) sql |> Contract.comparingValues
                    yield Contract.query (sprintf "char-json-view-%s-warnings" name) "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-view-cast-nested" "SELECT HEX(CHAR(renamed)) FROM char_cast_nested_v" |> Contract.comparingValues
+               yield Contract.query "char-json-view-cast-nested-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.execute "char-json-storage-create" "CREATE TABLE char_json_probe(id INT PRIMARY KEY,payload JSON)"
                yield Contract.execute "char-json-storage-insert"
                    "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"

@@ -94,7 +94,8 @@ view expression `JSON_EXTRACT(payload, '$') AS extracted` warns under
 `json_extract`. A second view renaming `extracted` retains `json_extract`;
 renaming the direct `payload` column retains `payload`. Fsdb previously used
 the outer alias for these warning sources. Descending view queries also match
-the warning row numbers.
+the warning row numbers. A nested view of `CAST(... AS JSON) AS payload` likewise
+retains `payload` as the warning source after renaming it.
 
 Stored JSON values and warning row numbers now match the audited seven-row
 table with all rows, a `WHERE` filter, descending ordering with and without

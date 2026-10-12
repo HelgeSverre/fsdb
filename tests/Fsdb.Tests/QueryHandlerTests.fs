@@ -3571,6 +3571,8 @@ let tests =
               let session, _ = handle session "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
               let session, _ = handle session "CREATE VIEW char_renamed_v AS SELECT id,payload AS renamed FROM char_view_source"
+              let session, _ = handle session "CREATE VIEW char_cast_v AS SELECT CAST('\"12.5\"' AS JSON) AS payload"
+              let session, _ = handle session "CREATE VIEW char_cast_nested_v AS SELECT payload AS renamed FROM char_cast_v"
               let session, _ = handle session "CREATE VIEW char_union_v AS SELECT 1 AS id,CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,CAST('null' AS JSON)"
               for viewName, columnName, warningSource in
                   [ "char_direct_v", "payload", "payload"
@@ -3588,6 +3590,13 @@ let tests =
                                 3156, sprintf "Invalid JSON value for CAST to INTEGER from column %s at row %d" warningSource row ]
                           sql
                   | _, result -> failtestf "expected CHAR JSON view result for %s, got %A" sql result
+              match handle session "SELECT HEX(CHAR(renamed)) FROM char_cast_nested_v" with
+              | session, ResultSet(_, [ [ Some "0C" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3156, "Invalid JSON value for CAST to INTEGER from column payload at row 1" ]
+                      "renamed CAST JSON view warning source"
+              | _, result -> failtestf "expected CHAR JSON CAST view result, got %A" result
 
           testCase "CHAR rejects computed integer overflow before byte assembly"
           <| fun _ ->
