@@ -54,8 +54,10 @@ tests cover both sources and warning order.
 
 Computed large DOUBLE arguments take a different path. MySQL raises error
 1690 before byte assembly for audited arithmetic, negation beyond the signed
-boundary, `ABS`, `COALESCE`, `IFNULL`, `GREATEST`, `ROUND`, and
-`CAST(... AS DOUBLE)` origins. Audited `IF`, `CASE`, and `NULLIF` results pass
+boundary, `ABS`, `COALESCE`, `IFNULL`, `GREATEST`, `LEAST`, `POW`, `EXP`,
+`CEIL`, `FLOOR`, `ROUND`, `TRUNCATE`, and `CAST(... AS DOUBLE)` origins.
+The `CEIL` diagnostic uses MySQL's `ceiling(...)` spelling, and a one-argument
+`ROUND` diagnostic shows the default scale `0`. Audited `IF`, `CASE`, and `NULLIF` results pass
 large values through quietly. The direct negative value exactly at the signed
 boundary is also quiet, while the same value stored in a DOUBLE column warns
 1292. Large DECIMAL casts and DECIMAL arithmetic retain their truncation

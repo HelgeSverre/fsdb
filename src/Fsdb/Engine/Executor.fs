@@ -7685,6 +7685,8 @@ and private validateCharComputedOverflow ctx name expressions values : Result<un
                     match expression with
                     | FuncCall(functionName, [ argument ]) when functionName.Equals("ROUND", System.StringComparison.OrdinalIgnoreCase) ->
                         FuncCall(functionName, [ argument; Lit(VInt 0L) ])
+                    | FuncCall(functionName, arguments) when functionName.Equals("CEIL", System.StringComparison.OrdinalIgnoreCase) ->
+                        FuncCall("CEILING", arguments)
                     | _ -> expression
                 Some(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql diagnosticExpression))
             | _ -> None)

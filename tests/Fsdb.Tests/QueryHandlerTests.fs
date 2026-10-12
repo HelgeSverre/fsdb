@@ -3506,6 +3506,13 @@ let tests =
                     "SELECT HEX(CHAR(IFNULL(NULL,1e30)))", "BIGINT value is out of range in 'ifnull(NULL,1e30)'"
                     "SELECT HEX(CHAR(GREATEST(1e30,1)))", "BIGINT value is out of range in 'greatest(1e30,1)'"
                     "SELECT HEX(CHAR(ROUND(1e30)))", "BIGINT value is out of range in 'round(1e30,0)'"
+                    "SELECT HEX(CHAR(POW(10e0,30)))", "BIGINT value is out of range in 'pow(10e0,30)'"
+                    "SELECT HEX(CHAR(EXP(70)))", "BIGINT value is out of range in 'exp(70)'"
+                    "SELECT HEX(CHAR(CEIL(1e30)))", "BIGINT value is out of range in 'ceiling(1e30)'"
+                    "SELECT HEX(CHAR(FLOOR(-1e30)))", "BIGINT value is out of range in 'floor(-(1e30))'"
+                    "SELECT HEX(CHAR(TRUNCATE(1e30,0)))", "BIGINT value is out of range in 'truncate(1e30,0)'"
+                    "SELECT HEX(CHAR(ROUND(1e30,2)))", "BIGINT value is out of range in 'round(1e30,2)'"
+                    "SELECT HEX(CHAR(LEAST(1e30,1e29)))", "BIGINT value is out of range in 'least(1e30,1e29)'"
                     "SELECT HEX(CHAR(CAST('1e30' AS DOUBLE)))", "BIGINT value is out of range in 'cast('1e30' as double)'" ] do
                   match handle session sql with
                   | _, Err(1690, message) -> Expect.equal message expectedMessage sql

@@ -1264,6 +1264,13 @@ module ContractCatalog =
                      "SELECT HEX(CHAR(IFNULL(NULL,1e30)))"
                      "SELECT HEX(CHAR(GREATEST(1e30,1)))"
                      "SELECT HEX(CHAR(ROUND(1e30)))"
+                     "SELECT HEX(CHAR(POW(10e0,30)))"
+                     "SELECT HEX(CHAR(EXP(70)))"
+                     "SELECT HEX(CHAR(CEIL(1e30)))"
+                     "SELECT HEX(CHAR(FLOOR(-1e30)))"
+                     "SELECT HEX(CHAR(TRUNCATE(1e30,0)))"
+                     "SELECT HEX(CHAR(ROUND(1e30,2)))"
+                     "SELECT HEX(CHAR(LEAST(1e30,1e29)))"
                      "SELECT HEX(CHAR(CAST('1e30' AS DOUBLE)))" ] |> List.indexed do
                    yield Contract.query (sprintf "char-computed-overflow-%d" index) sql |> Contract.fails 1690 "22003"
                yield Contract.query "char-double-pass-through"
