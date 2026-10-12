@@ -27,3 +27,24 @@ through an update. All 3,492 Fsdb tests pass. All 11
 `20261012T104107235-2663/contracts`; the full run has 143 cases and
 19,019 steps, with the same ten previously documented differences as before.
 Non-integer or non-literal comparisons and broader compositions remain open.
+
+## Exact-binary text comparison
+
+Native MySQL 8.4.11 also accepts a unique `NULLIF(v,_utf8mb4'x')` key on
+`VARCHAR(20) COLLATE utf8mb4_0900_bin`. The hidden nullable text key is 83
+bytes. Plain `'x'` and `_utf8mb4'x'` in the comparison use the same key;
+`_latin1'x'` and numeric comparison scan. A source `x` projects NULL,
+while `X` and `x ` remain distinct non-NULL values. An explicit duplicate
+`X` fails with 1062. Fsdb now retains the comparison literal's charset
+identity and maintains this exact-binary key. The focused Expecto regression
+and `text-nullif-functional-index` differential contract cover equality,
+nullable uniqueness, numeric comparison, and updates. Other text collations
+and text types remain open until physical projection can use their collation
+rules directly.
+
+`just check` passed all 3,499 tests. All nine steps of the text contract
+matched native MySQL 8.4.11 in
+`torture/artifacts/runs/20261012T164135996-60894/contracts`. The broader
+run retained two unrelated result differences in the established regex and
+mixed-type join cases. The native server uses `lower_case_table_names=2` on
+macOS; the digest-pinned container lane was not rerun for this change.

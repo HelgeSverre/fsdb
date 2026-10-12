@@ -9169,6 +9169,54 @@ let tests =
                         |> explainRow
                     Expect.equal unsignedPlan.KeyLength (Some "9") "the decimal key uses nine bytes"
 
+                testCase "NULLIF text keys retain charset identity and nullable width"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE nullif_text (id INT PRIMARY KEY, value VARCHAR(20) COLLATE utf8mb4_0900_bin, UNIQUE KEY ux ((NULLIF(value,_utf8mb4'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts a binary-collated text NULLIF key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO nullif_text VALUES (1,NULL),(2,'x'),(3,'X'),(4,'x '),(5,'1'),(6,'01'),(7,'1x')")
+                        (Affected 7UL)
+                        "NULLIF projects exact case and trailing-space text"
+
+                    match runDefault store "INSERT INTO nullif_text VALUES (8,'X')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "a duplicate non-NULL text result must fail; got %A" other
+
+                    for literal in [ "_utf8mb4'x'"; "'x'" ] do
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM nullif_text WHERE NULLIF(value,{literal})='X'")
+                            (ResultSet([ "id" ], [ [ Some "3" ] ]))
+                            "the exact-case text result is returned"
+
+                        let plan =
+                            runDefault store $"EXPLAIN SELECT id FROM nullif_text WHERE NULLIF(value,{literal})='X'"
+                            |> explainRow
+
+                        Expect.equal plan.Key (Some "ux") "matching-charsets use the NULLIF key"
+                        Expect.equal plan.KeyLength (Some "83") "NULLIF text result remains nullable"
+
+                    let otherCharset =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_text WHERE NULLIF(value,_latin1'x')='X'"
+                        |> explainRow
+
+                    Expect.equal otherCharset.Key None "a different comparison charset scans"
+
+                    let numeric =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_text WHERE NULLIF(value,_utf8mb4'x')=1"
+                        |> explainRow
+
+                    Expect.equal numeric.Key None "numeric comparison scans rather than probing one text key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM nullif_text WHERE NULLIF(value,_utf8mb4'x')=1 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "5" ]; [ Some "6" ]; [ Some "7" ] ]))
+                        "numeric comparison keeps every text-to-number match"
+
                 testCase "NULLIF integer functional keys promote narrow widths and preserve nullable uniqueness"
                 <| fun _ ->
                     let store = newStore ()

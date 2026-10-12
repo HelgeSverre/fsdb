@@ -6101,6 +6101,24 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE nullif_probe"; "DROP TABLE nullif_unsigned"; "DROP TABLE nullif_tiny"; "DROP TABLE nullif_abs" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private textNullifFunctionalIndex =
+        { Name = "text-nullif-functional-index"
+          Setup =
+            [| "CREATE TABLE text_nullif_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,UNIQUE KEY ux ((NULLIF(v,_utf8mb4'x'))))"
+               "INSERT INTO text_nullif_probe VALUES(1,NULL),(2,'x'),(3,'X'),(4,'x '),(5,'1'),(6,'01'),(7,'1x')" |]
+          Steps =
+            [| Contract.query "introduced-comparison" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='X'"
+               Contract.query "connection-comparison" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,'x')='X'"
+               Contract.query "other-charset" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_latin1'x')='X'"
+               Contract.query "numeric-comparison" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x')=1 ORDER BY id"
+               Contract.query "null-results" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x') IS NULL ORDER BY id"
+               Contract.execute "duplicate" "INSERT INTO text_nullif_probe VALUES(8,'X')" |> Contract.fails 1062 "23000"
+               Contract.execute "update" "UPDATE text_nullif_probe SET v='new' WHERE id=3"
+               Contract.query "old-key" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='X'"
+               Contract.query "new-key" "SELECT id FROM text_nullif_probe WHERE NULLIF(v,_utf8mb4'x')='new'" |]
+          Cleanup = [| "DROP TABLE text_nullif_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private bitCountFunctionalIndex =
         { Name = "bit-count-functional-index"
           Setup =
@@ -11315,6 +11333,7 @@ module ContractCatalog =
            textNullFallbackFunctionalIndex
            textIfNullBranchFunctionalIndex
            nullifFunctionalIndex
+           textNullifFunctionalIndex
            bitCountFunctionalIndex
            crc32FunctionalIndex
            exactIntegerFunctionalBounds

@@ -5942,6 +5942,21 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         eval argument |> Result.map (Functions.weightString (keyCollation ctx source))
     | NamedFunction "IF" [ condition; whenTrue; whenFalse ] when Functions.isUnmodifiedBuiltinScalar "IF" ctx.Registry ->
         evalIfResult ctx expr condition whenTrue whenFalse eval
+    | NamedFunction "NULLIF" [ first; comparison ] when Functions.isUnmodifiedBuiltinScalar "NULLIF" ctx.Registry ->
+        eval first
+        |> Result.bind (fun value ->
+            eval comparison
+            |> Result.bind (fun other ->
+                comparisonResult
+                    ctx
+                    first
+                    (tryColumnDefForExpr ctx first)
+                    value
+                    comparison
+                    (tryColumnDefForExpr ctx comparison)
+                    Eq
+                    other
+                |> Result.map (function VInt 1L -> VNull | _ -> value)))
     | FuncCall(name, arguments) when
         Functions.isUnmodifiedBuiltinScalar name ctx.Registry
         && (match name.ToUpperInvariant(), arguments with
