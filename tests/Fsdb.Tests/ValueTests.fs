@@ -3182,6 +3182,25 @@ let tests =
                               (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{Hex_Digit}"; VInt 1L; VInt 1L; VString "c" ])
                               (VString "😀")
                               "negated Unicode hex property consumes one Unicode scalar"
+                      testCase "REGEXP Join_Control property matches only join controls"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "\\p{Join_Control}", "\u200c", 1L
+                                "\\p{Join_C}", "\u200d", 1L
+                                "[\\p{Join_Control}]", "\u200c", 1L
+                                "\\p{Join_Control}", "\u200b", 0L
+                                "\\p{Join_Control}", "😀", 0L
+                                "\\P{Join_Control}", "\u200c", 0L
+                                "\\P{Join_Control}", "\u200b", 1L
+                                "[\\P{Join_Control}]", "\u200b", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{Join_C}"; VInt 1L; VInt 1L; VString "c" ])
+                              (VString "😀")
+                              "negated Join_Control consumes one Unicode scalar"
                       testCase "REGEXP Any property consumes one Unicode scalar"
                       <| fun _ ->
                           for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do
