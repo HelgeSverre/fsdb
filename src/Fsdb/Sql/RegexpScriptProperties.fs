@@ -43,6 +43,15 @@ let private scalarRangesAtom ranges =
 
     "(?:" + String.concat "|" (bmpAtom @ supplementaryAtoms) + ")"
 
+let private scriptAliases name code =
+    set [ name; code; "IS" + name
+          "SC=" + name; "SC=" + code
+          "SCRIPT=" + name; "SCRIPT=" + code ]
+
+let private extensionAliases name code =
+    set [ "SCX=" + name; "SCX=" + code
+          "SCRIPT_EXTENSIONS=" + name; "SCRIPT_EXTENSIONS=" + code ]
+
 // ICU's Greek script includes Greek Extended and supplementary symbols, but
 // excludes Coptic letters within the Greek and Coptic block.
 let private greekScriptRanges =
@@ -72,10 +81,10 @@ let private greekScriptExtensionsAtom ignoreCase =
     "(?:" + greekScriptAtomFor ignoreCase + "|" + greekScriptExtensionMembers + ")"
 
 let private greekScriptAliases =
-    set [ "GREEK"; "GREK"; "ISGREEK"; "SC=GREEK"; "SC=GREK"; "SCRIPT=GREEK"; "SCRIPT=GREK" ]
+    scriptAliases "GREEK" "GREK"
 
 let private greekScriptExtensionAliases =
-    set [ "SCX=GREEK"; "SCX=GREK"; "SCRIPT_EXTENSIONS=GREEK"; "SCRIPT_EXTENSIONS=GREK" ]
+    extensionAliases "GREEK" "GREK"
 
 let private hanScriptRanges =
     [ 0x2E80, 0x2E99; 0x2E9B, 0x2EF3; 0x2F00, 0x2FD5
@@ -100,10 +109,10 @@ let private hanScriptAtom = scalarRangesAtom hanScriptRanges
 let private hanScriptExtensionsAtom = "(?:" + hanScriptAtom + "|" + scalarRangesAtom hanScriptExtensionMembers + ")"
 
 let private hanScriptAliases =
-    set [ "HAN"; "HANI"; "ISHAN"; "SC=HAN"; "SC=HANI"; "SCRIPT=HAN"; "SCRIPT=HANI" ]
+    scriptAliases "HAN" "HANI"
 
 let private hanScriptExtensionAliases =
-    set [ "SCX=HAN"; "SCX=HANI"; "SCRIPT_EXTENSIONS=HAN"; "SCRIPT_EXTENSIONS=HANI" ]
+    extensionAliases "HAN" "HANI"
 
 let private latinScriptRanges =
     [ 0x0041, 0x005A; 0x0061, 0x007A; 0x00AA, 0x00AA; 0x00BA, 0x00BA
@@ -132,10 +141,10 @@ let private latinScriptAtom = scalarRangesAtom latinScriptRanges
 let private latinScriptExtensionsAtom = "(?:" + latinScriptAtom + "|" + scalarRangesAtom latinScriptExtensionMembers + ")"
 
 let private latinScriptAliases =
-    set [ "LATIN"; "LATN"; "ISLATIN"; "SC=LATIN"; "SC=LATN"; "SCRIPT=LATIN"; "SCRIPT=LATN" ]
+    scriptAliases "LATIN" "LATN"
 
 let private latinScriptExtensionAliases =
-    set [ "SCX=LATIN"; "SCX=LATN"; "SCRIPT_EXTENSIONS=LATIN"; "SCRIPT_EXTENSIONS=LATN" ]
+    extensionAliases "LATIN" "LATN"
 
 let private cyrillicScriptRanges =
     [ 0x0400, 0x0484; 0x0487, 0x052F; 0x1C80, 0x1C8A
@@ -153,10 +162,10 @@ let private cyrillicScriptAtom = scalarRangesAtom cyrillicScriptRanges
 let private cyrillicScriptExtensionsAtom = "(?:" + cyrillicScriptAtom + "|" + scalarRangesAtom cyrillicScriptExtensionMembers + ")"
 
 let private cyrillicScriptAliases =
-    set [ "CYRILLIC"; "CYRL"; "ISCYRILLIC"; "SC=CYRILLIC"; "SC=CYRL"; "SCRIPT=CYRILLIC"; "SCRIPT=CYRL" ]
+    scriptAliases "CYRILLIC" "CYRL"
 
 let private cyrillicScriptExtensionAliases =
-    set [ "SCX=CYRILLIC"; "SCX=CYRL"; "SCRIPT_EXTENSIONS=CYRILLIC"; "SCRIPT_EXTENSIONS=CYRL" ]
+    extensionAliases "CYRILLIC" "CYRL"
 
 let private arabicScriptRanges =
     [ 0x0600, 0x0604; 0x0606, 0x060B; 0x060D, 0x061A; 0x061C, 0x061E
@@ -190,10 +199,10 @@ let private arabicScriptAtom = scalarRangesAtom arabicScriptRanges
 let private arabicScriptExtensionsAtom = "(?:" + arabicScriptAtom + "|" + scalarRangesAtom arabicScriptExtensionMembers + ")"
 
 let private arabicScriptAliases =
-    set [ "ARABIC"; "ARAB"; "ISARABIC"; "SC=ARABIC"; "SC=ARAB"; "SCRIPT=ARABIC"; "SCRIPT=ARAB" ]
+    scriptAliases "ARABIC" "ARAB"
 
 let private arabicScriptExtensionAliases =
-    set [ "SCX=ARABIC"; "SCX=ARAB"; "SCRIPT_EXTENSIONS=ARABIC"; "SCRIPT_EXTENSIONS=ARAB" ]
+    extensionAliases "ARABIC" "ARAB"
 
 let private devanagariScriptRanges =
     [ 0x0900, 0x0950; 0x0955, 0x0963; 0x0966, 0x097F
@@ -208,10 +217,10 @@ let private devanagariScriptAtom = scalarRangesAtom devanagariScriptRanges
 let private devanagariScriptExtensionsAtom = "(?:" + devanagariScriptAtom + "|" + scalarRangesAtom devanagariScriptExtensionMembers + ")"
 
 let private devanagariScriptAliases =
-    set [ "DEVANAGARI"; "DEVA"; "ISDEVANAGARI"; "SC=DEVANAGARI"; "SC=DEVA"; "SCRIPT=DEVANAGARI"; "SCRIPT=DEVA" ]
+    scriptAliases "DEVANAGARI" "DEVA"
 
 let private devanagariScriptExtensionAliases =
-    set [ "SCX=DEVANAGARI"; "SCX=DEVA"; "SCRIPT_EXTENSIONS=DEVANAGARI"; "SCRIPT_EXTENSIONS=DEVA" ]
+    extensionAliases "DEVANAGARI" "DEVA"
 
 let private scriptAtoms =
     [ greekScriptAliases, greekScriptAtom, greekScriptFoldedAtom
