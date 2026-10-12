@@ -28,3 +28,11 @@ All four contract steps matched in `20261012T174924382-1284/contracts`
 against native MySQL 8.4.11, and the case restored its database objects.
 The full 150-case, 19,096-step run retained two previously documented
 row differences in the Han REGEXP property and mixed-type join cases.
+
+The [focused quick benchmark](../../benchmarks/results/2cf93f5d-quick.md)
+used 10,000 `functional_users` rows and the same `prefix42%` query with
+the key enabled or ignored. Fsdb averaged 691 µs indexed versus 21.1 ms
+scanning (about 30.5× faster); MySQL averaged 85 µs indexed versus
+1.64 ms scanning (about 19.3× faster). Fsdb's indexed read remained about
+8.1× slower than MySQL's. These are three-iteration ShortRun measurements
+on one host, not a broader throughput or durability claim.
