@@ -3570,6 +3570,8 @@ let tests =
               let session, _ = handle session "CREATE VIEW char_direct_v AS SELECT id,payload FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
+              let session, _ = handle session "CREATE VIEW char_star_v AS SELECT * FROM char_extract_v"
+              let session, _ = handle session "CREATE VIEW char_star_renamed_v AS SELECT id,extracted AS renamed FROM char_star_v"
               let session, _ = handle session "CREATE VIEW char_renamed_v AS SELECT id,payload AS renamed FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_cast_v AS SELECT CAST('\"12.5\"' AS JSON) AS payload"
               let session, _ = handle session "CREATE VIEW char_cast_nested_v AS SELECT payload AS renamed FROM char_cast_v"
@@ -3578,6 +3580,8 @@ let tests =
                   [ "char_direct_v", "payload", "payload"
                     "char_extract_v", "extracted", "json_extract"
                     "char_nested_v", "nested_payload", "json_extract"
+                    "char_star_v", "extracted", "json_extract"
+                    "char_star_renamed_v", "renamed", "json_extract"
                     "char_renamed_v", "renamed", "payload"
                     "char_union_v", "payload", "payload" ] do
                   let sql = sprintf "SELECT id,HEX(CHAR(%s)) FROM %s ORDER BY id DESC" columnName viewName

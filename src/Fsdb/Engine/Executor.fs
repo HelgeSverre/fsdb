@@ -7678,23 +7678,31 @@ and private viewJsonSourceNames (store: Store) (dbName: string) (columns: Column
                 | None -> Map.empty
                 | Some view ->
                     match parseStoredViewStatement view with
-                    | Ok(Select definition) when definition.Projections.Length = view.Columns.Length ->
+                    | Ok(Select definition) ->
                         let upstream =
                             match definition.From, definition.Joins with
                             | Some(FromTable source), [] ->
                                 sources (Set.add key seen) (source.Database |> Option.defaultValue viewDb) source.Table
                             | _ -> Map.empty
-                        List.zip view.Columns definition.Projections
-                        |> List.choose (fun (outputName, projection) ->
-                            let sourceName =
-                                match projection.Expression with
-                                | FuncCall(functionName, _) -> Some(functionName.ToLowerInvariant())
-                                | Col columnName
-                                | QualifiedCol(_, columnName) ->
-                                    Some(Map.tryFind (columnName.ToLowerInvariant()) upstream |> Option.defaultValue columnName)
-                                | _ -> None
-                            sourceName |> Option.map (fun name -> outputName.ToLowerInvariant(), name))
-                        |> Map.ofList
+                        let sourceName (columnName: string) =
+                            Map.tryFind (columnName.ToLowerInvariant()) upstream |> Option.defaultValue columnName
+                        match definition.Projections with
+                        | [ { Expression = Star _ } ] ->
+                            view.Columns
+                            |> List.map (fun name -> name.ToLowerInvariant(), sourceName name)
+                            |> Map.ofList
+                        | projections when projections.Length = view.Columns.Length ->
+                            List.zip view.Columns projections
+                            |> List.choose (fun (outputName, projection) ->
+                                let origin =
+                                    match projection.Expression with
+                                    | FuncCall(functionName, _) -> Some(functionName.ToLowerInvariant())
+                                    | Col columnName
+                                    | QualifiedCol(_, columnName) -> Some(sourceName columnName)
+                                    | _ -> None
+                                origin |> Option.map (fun name -> outputName.ToLowerInvariant(), name))
+                            |> Map.ofList
+                        | _ -> Map.empty
                     | _ -> Map.empty
         match select.From, select.Joins with
         | Some(FromTable viewRef), [] ->

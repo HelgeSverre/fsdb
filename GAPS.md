@@ -261,9 +261,9 @@ JSON_EXTRACT, JSON_SET, JSON_MERGE_PATCH, JSON_KEYS, audited JSON mutation and
 search functions, and JSON_SCHEMA_VALIDATION_REPORT origins also match. Every
 registered JSON-returning builtin has at least one audited `CHAR()` source
 case. Simple derived sources, JSON/NULL CTE UNIONs, and audited direct,
-renamed, nested expression, and UNION views preserve JSON values and warning
-names; broader view shapes, user-defined JSON origins, and other
-expression-origin overflow cases remain open.
+renamed, nested expression, single-source `SELECT *`, and UNION views preserve
+JSON values and warning names; broader view shapes, user-defined JSON origins,
+and other expression-origin overflow cases remain open.
 
 | Missing family | Functions | Impact |
 |---|---|---|
