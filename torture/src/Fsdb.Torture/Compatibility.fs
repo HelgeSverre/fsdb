@@ -6073,6 +6073,27 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE equivalent_fallback_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private binaryLikePrefixRange =
+        let values =
+            [ "ab"; "abc"; "abZ"; "ab "; "ab%" ]
+            @ [ for id in 6..30 -> sprintf "zz%02d" id ]
+            |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
+            |> String.concat ","
+
+        { Name = "binary-like-prefix-range"
+          Setup =
+            [| "CREATE TABLE like_prefix_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v))"
+               "INSERT INTO like_prefix_probe VALUES " + values
+               "CREATE TABLE like_prefix_short_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v(2)))"
+               "INSERT INTO like_prefix_short_probe VALUES " + values |]
+          Steps =
+            [| Contract.query "prefix" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab%' ORDER BY id"
+               Contract.query "prefix-and-single-character" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab_%' ORDER BY id"
+               Contract.query "leading-wildcard" "SELECT id FROM like_prefix_probe WHERE v LIKE '%ab' ORDER BY id"
+               Contract.query "truncated-key" "SELECT id FROM like_prefix_short_probe WHERE v LIKE 'abc%' ORDER BY id" |]
+          Cleanup = [| "DROP TABLE like_prefix_probe"; "DROP TABLE like_prefix_short_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private textIfNullBranchFunctionalIndex =
         { Name = "text-if-null-branch-functional-index"
           Setup =
@@ -11395,6 +11416,7 @@ module ContractCatalog =
            ifNullBranchFunctionalIndex
            textNullFallbackFunctionalIndex
            equivalentTextFallbackFunctionalIndex
+           binaryLikePrefixRange
            textIfNullBranchFunctionalIndex
            nullifFunctionalIndex
            textNullifFunctionalIndex

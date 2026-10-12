@@ -206,6 +206,16 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, name FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 1}"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "LikePrefix")>]
+    member this.FilterByLikePrefix() =
+        this.Query "SELECT id FROM functional_users WHERE prefix_name LIKE 'prefix42%'"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "LikePrefix")>]
+    member this.FilterByLikePrefixScan() =
+        this.Query "SELECT id FROM functional_users IGNORE INDEX (ix_functional_users_prefix_name) WHERE prefix_name LIKE 'prefix42%'"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale", "SecondaryRange", "Planner")>]
     member this.FilterByConstantSecondaryRange() =
         let lower = randomUserId () - 1

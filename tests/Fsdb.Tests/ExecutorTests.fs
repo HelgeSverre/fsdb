@@ -6845,6 +6845,54 @@ let tests =
                     | ResultSet(_, [ [ Some "100" ] ]) -> ()
                     | other -> failtestf "expected all rows through the selected access path, got %A" other
 
+                testCase "binary text LIKE prefixes use selective index ranges"
+                <| fun _ ->
+                    let store = newStore ()
+                    let seed =
+                        [ "ab"; "abc"; "abZ"; "ab "; "ab%" ]
+                        @ [ for id in 6..30 -> sprintf "zz%02d" id ]
+                        |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
+                        |> String.concat ","
+
+                    for table, index in
+                        [ "like_indexed", ", KEY ix_v(v)"
+                          "like_prefix_indexed", ", KEY ix_v(v(2))"
+                          "like_scanned", "" ] do
+                        Expect.equal
+                            (runDefault store $"CREATE TABLE {table} (id INT PRIMARY KEY, v VARCHAR(20) COLLATE utf8mb4_0900_bin{index})")
+                            (Affected 0UL)
+                            "create the comparison table"
+                        Expect.equal
+                            (runDefault store $"INSERT INTO {table} VALUES {seed}")
+                            (Affected 30UL)
+                            "seed matching and nonmatching prefixes"
+
+                    for pattern, expected in
+                        [ "ab%", [ 1; 2; 3; 4; 5 ]
+                          "ab_%", [ 2; 3; 4; 5 ] ] do
+                        let rows = expected |> List.map (fun id -> [ Some(string id) ])
+                        for table in [ "like_indexed"; "like_scanned" ] do
+                            Expect.equal
+                                (runDefault store $"SELECT id FROM {table} WHERE v LIKE '{pattern}' ORDER BY id")
+                                (ResultSet([ "id" ], rows))
+                                "the range candidates keep the residual LIKE semantics"
+
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM like_indexed WHERE v LIKE '{pattern}'" |> explainRow
+                        Expect.equal plan.AccessType (Some "range") "a selective LIKE prefix uses the ordered key"
+                        Expect.equal plan.Key (Some "ix_v") "EXPLAIN names the prefix key"
+
+                    let leadingWildcard = runDefault store "EXPLAIN SELECT id FROM like_indexed WHERE v LIKE '%ab'" |> explainRow
+                    Expect.equal leadingWildcard.Key None "a leading wildcard cannot bound the index"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM like_prefix_indexed WHERE v LIKE 'abc%' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "a truncated key keeps the residual LIKE filter"
+
+                    let truncated = runDefault store "EXPLAIN SELECT id FROM like_prefix_indexed WHERE v LIKE 'abc%'" |> explainRow
+                    Expect.equal truncated.AccessType (Some "range") "a truncated key still narrows the candidates"
+                    Expect.equal truncated.Key (Some "ix_v") "the prefix key supplies the broad range"
+
                 testCase "competing index families choose the lowest-cardinality access"
                 <| fun _ ->
                     let store = newStore ()

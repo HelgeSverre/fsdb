@@ -84,7 +84,9 @@ let createSchema (conn: MySqlConnection) =
         CREATE TABLE functional_users (
             id INT PRIMARY KEY,
             name VARCHAR(100) NOT NULL,
-            KEY ix_functional_users_name ((UPPER(TRIM(name))))
+            prefix_name VARCHAR(100) COLLATE utf8mb4_0900_bin NOT NULL,
+            KEY ix_functional_users_name ((UPPER(TRIM(name)))),
+            KEY ix_functional_users_prefix_name (prefix_name)
         )
         """
 
@@ -169,9 +171,9 @@ let seed (conn: MySqlConnection) =
         runBatch "users (name, email, age, scan_age, meta, created_at, sort_key)" (String.Join(",", rows))
 
         let functionalRows =
-            [ for i in batchStart..batchEnd -> $"({i + 1},' user_{i} ')" ]
+            [ for i in batchStart..batchEnd -> $"({i + 1},' user_{i} ','prefix{i}')" ]
 
-        runBatch "functional_users (id, name)" (String.Join(",", functionalRows))
+        runBatch "functional_users (id, name, prefix_name)" (String.Join(",", functionalRows))
 
     for batchStart in 0 .. batchSize .. userCount - 1 do
         let batchEnd = min (batchStart + batchSize - 1) (userCount - 1)

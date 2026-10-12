@@ -13389,6 +13389,34 @@ and private plannerRangePredicatesFor
         | [] -> rangePredicatesFor numericColumnName tryNumericConstant expression
         | predicates -> predicates
 
+/// A fixed ASCII prefix is a byte-order interval under utf8mb4_0900_bin.
+and private likePrefixRangePredicate scope (table: Table) tref expression =
+    match expression with
+    | Like(source, LiteralValue(VString pattern), _, None) ->
+        rangeColumnNameFor scope tref source
+        |> Option.bind (fun name ->
+            table.Columns
+            |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+            |> Option.filter (fun column ->
+                match column.Type with
+                | TVarchar _ ->
+                    column.Collation
+                    |> Option.exists (fun collation -> equalsIgnoreCase collation "utf8mb4_0900_bin")
+                | _ -> false)
+            |> Option.bind (fun column ->
+                let wildcard = pattern.IndexOfAny([| '%'; '_' |])
+                if wildcard <= 0 then None
+                else
+                    let prefix = pattern[..wildcard - 1]
+                    if prefix |> Seq.exists (fun character -> character < ' ' || character >= '\u007f' || character = '\\') then None
+                    else
+                        let successor = prefix.Substring(0, prefix.Length - 1) + string (char (int prefix[prefix.Length - 1] + 1))
+                        Some
+                            { Column = column.Name
+                              Lower = Some(VString prefix, true)
+                              Upper = Some(VString successor, false) }))
+    | _ -> None
+
 and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
     let addBound bounds (predicate: RangeLookupBounds<_, _>) =
         let existing =
@@ -14601,6 +14629,14 @@ and private tryRangeAccessInTableWith
             |> List.choose (fun bounds ->
                 Storage.trySecondaryRangeLookupInTableWith allowed store table bounds.Column bounds.Lower bounds.Upper)
 
+        let likeRanges =
+            whereExpr
+            |> optionalConjuncts
+            |> List.choose (likePrefixRangePredicate scope table tref)
+            |> List.choose (fun bounds ->
+                // Storage widens truncated bounds to include every row sharing the prefix key.
+                Storage.trySecondaryRangeLookupInTableWith allowed store table bounds.Column bounds.Lower bounds.Upper)
+
         let functionalColumn expression =
             let inScope =
                 match scope with
@@ -14641,7 +14677,7 @@ and private tryRangeAccessInTableWith
                         values.Lower
                         values.Upper))
 
-        storedRanges @ functionalRanges
+        storedRanges @ likeRanges @ functionalRanges
         |> List.filter eligible
         |> function
             | [] -> None
