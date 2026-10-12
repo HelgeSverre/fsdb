@@ -6058,6 +6058,23 @@ module ContractCatalog =
                "DROP TABLE text_coalesce_unique" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private textIfNullBranchFunctionalIndex =
+        { Name = "text-if-null-branch-functional-index"
+          Setup =
+            [| "CREATE TABLE text_if_branch_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,UNIQUE KEY ux ((IF(v IS NULL,_utf8mb4'x',v))))"
+               "INSERT INTO text_if_branch_probe VALUES(1,NULL),(2,'X'),(3,'1'),(4,'01'),(5,'1x')"
+               "CREATE TABLE text_if_reversed_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,KEY ix ((IF(v IS NOT NULL,v,_utf8mb4'x'))))"
+               "INSERT INTO text_if_reversed_probe VALUES(1,NULL),(2,'x')" |]
+          Steps =
+            [| Contract.query "introduced-fallback" "SELECT id FROM text_if_branch_probe WHERE IF(v IS NULL,_utf8mb4'x',v)='x'"
+               Contract.query "connection-fallback" "SELECT id FROM text_if_branch_probe WHERE IF(v IS NULL,'x',v)='x'"
+               Contract.query "other-charset" "SELECT id FROM text_if_branch_probe WHERE IF(v IS NULL,_latin1'x',v)='x'"
+               Contract.query "numeric-comparison" "SELECT id FROM text_if_branch_probe WHERE IF(v IS NULL,_utf8mb4'x',v)=1 ORDER BY id"
+               Contract.execute "duplicate" "INSERT INTO text_if_branch_probe VALUES(6,'x')" |> Contract.fails 1062 "23000"
+               Contract.query "reversed-fallback" "SELECT id FROM text_if_reversed_probe WHERE IF(v IS NOT NULL,v,'x')='x' ORDER BY id" |]
+          Cleanup = [| "DROP TABLE text_if_branch_probe"; "DROP TABLE text_if_reversed_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private nullifFunctionalIndex =
         { Name = "nullif-functional-index"
           Setup =
@@ -11296,6 +11313,7 @@ module ContractCatalog =
            ifnullFunctionalIndex
            ifNullBranchFunctionalIndex
            textNullFallbackFunctionalIndex
+           textIfNullBranchFunctionalIndex
            nullifFunctionalIndex
            bitCountFunctionalIndex
            crc32FunctionalIndex

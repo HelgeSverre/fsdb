@@ -8766,6 +8766,70 @@ let tests =
                     Expect.equal ifnullPlan.Key (Some "ix_ifnull") "IFNULL uses its own key"
                     Expect.equal ifnullPlan.KeyLength (Some "82") "IFNULL has the same non-null VARCHAR width"
 
+                testCase "text IF NULL-branch keys retain charset identity and nullable width"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE text_if_branch (id INT PRIMARY KEY, value VARCHAR(20) COLLATE utf8mb4_bin, UNIQUE KEY ux ((IF(value IS NULL,_utf8mb4'x',value))))")
+                        (Affected 0UL)
+                        "MySQL accepts a text conditional key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO text_if_branch VALUES (1,NULL),(2,'X'),(3,'1'),(4,'01'),(5,'1x')")
+                        (Affected 5UL)
+                        "seed distinct text and fallback values"
+
+                    match runDefault store "INSERT INTO text_if_branch VALUES (6,'x')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "the explicit text must collide with the NULL fallback; got %A" other
+
+                    for literal in [ "_utf8mb4'x'"; "'x'" ] do
+                        let expression = $"IF(value IS NULL,{literal},value)"
+
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM text_if_branch WHERE {expression}='x'")
+                            (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                            "both spellings find the fallback row"
+
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM text_if_branch WHERE {expression}='x'" |> explainRow
+                        Expect.equal plan.Key (Some "ux") "matching-charsets use the IF key"
+                        Expect.equal plan.KeyLength (Some "83") "the IF text result retains its NULL byte"
+
+                    let otherCharset =
+                        runDefault store "EXPLAIN SELECT id FROM text_if_branch WHERE IF(value IS NULL,_latin1'x',value)='x'"
+                        |> explainRow
+
+                    Expect.equal otherCharset.Key None "a different literal charset does not use the key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM text_if_branch WHERE IF(value IS NULL,_utf8mb4'x',value)=1 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "3" ]; [ Some "4" ]; [ Some "5" ] ]))
+                        "numeric comparison retains all text spellings"
+
+                    let numeric =
+                        runDefault store "EXPLAIN SELECT id FROM text_if_branch WHERE IF(value IS NULL,_utf8mb4'x',value)=1"
+                        |> explainRow
+
+                    Expect.equal numeric.Key None "numeric comparison does not probe one text key"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE text_if_reversed (id INT PRIMARY KEY, value VARCHAR(20) COLLATE utf8mb4_bin, KEY ix ((IF(value IS NOT NULL,value,_utf8mb4'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts the reversed text IF key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO text_if_reversed VALUES (1,NULL),(2,'x')")
+                        (Affected 2UL)
+                        "the reversed key stores both text branches"
+
+                    let reversed =
+                        runDefault store "EXPLAIN SELECT id FROM text_if_reversed WHERE IF(value IS NOT NULL,value,'x')='x'"
+                        |> explainRow
+
+                    Expect.equal reversed.Key (Some "ix") "the reversed form also matches the connection literal"
+                    Expect.equal reversed.KeyLength (Some "83") "the reversed text result remains nullable"
+
                 testCase "unsigned COALESCE keys use MySQL's signed or decimal result type"
                 <| fun _ ->
                     let store = newStore ()

@@ -35,11 +35,33 @@ overflow. Other `IF` conditions, `BIGINT UNSIGNED`, unsigned fallback
 literals beyond signed `BIGINT`, and other branch expressions remain outside
 the supported physical-key grammar.
 
-`just check` passed all 3,497 tests with no build warnings. All 23 steps of
+## Fitting text branches
+
+Native MySQL 8.4.11 also accepts both branch forms on a nullable
+`VARCHAR(20) COLLATE utf8mb4_bin` source with `_utf8mb4'x'` as the fallback.
+The hidden text key has an 83-byte nullable width. A NULL row collides with
+an explicit `x` under a unique key (1062), and equality probes use the key
+with either the introduced `_utf8mb4'x'` or plain connection literal `'x'` in
+the `IF` branch. This differs from the audited text `COALESCE` and `IFNULL`
+forms, where the plain literal misses the physical expression identity.
+`_latin1'x'` remains a different expression and scans. Numeric comparison
+also scans, preserving MySQL's matches for text `1`, `01`, and `1x`.
+
+Fsdb now maintains equality and unique keys for fitting text branches on
+`VARCHAR` with a matching charset. The focused Expecto regression covers
+both branch orders, literal identity, nullable key length, uniqueness, and
+numeric comparison. All six steps of the
+`text-if-null-branch-functional-index` contract match native MySQL 8.4.11.
+
+`just check` passed all 3,498 tests with no build warnings. All 23 steps of
 `if-null-branch-functional-index` passed in the native MySQL 8.4.11 contract
 run at `torture/artifacts/runs/20261012T160736591-54070/contracts`. The
 145-case, 19,052-step run retained two unrelated result differences:
 `regexp-posix-classes/han-script-negation` and the previously recorded
-`mixed-type-join-in/costed-d-three-labels-unindexed`. The native server uses
-`lower_case_table_names=2` on macOS. This is supplementary evidence; the
-digest-pinned container lane has not been rerun for this change.
+`mixed-type-join-in/costed-d-three-labels-unindexed`. The later native
+contract run at
+`torture/artifacts/runs/20261012T162917661-58519/contracts` passed the new
+text branch case; its only two differences were those same existing cases.
+The native server uses `lower_case_table_names=2` on macOS. This is
+supplementary evidence; the digest-pinned container lane has not been rerun
+for this change.

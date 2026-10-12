@@ -226,10 +226,18 @@ let tryPhysicalExpression expression =
             Some(Some qualifier, column)
         | _ -> None
 
+    let conditionalLiteral = function
+        | Lit(VString _ as value) ->
+            literal (IntroducedLiteral(value, "utf8mb4", ResolvedIntroducer))
+        | ConnectionLiteral((VString _ | VEncodedString _) as value, collation) ->
+            let charset = Fsdb.Collation.charsetOfCollation collation |> Fsdb.Charset.canonicalName
+            literal (IntroducedLiteral(value, charset, ResolvedIntroducer))
+        | argument -> literal argument
+
     let conditionalFallback form tested argument source calls =
         matchingColumn tested source
         |> Option.bind (fun (qualifier, column) ->
-            literal argument
+            conditionalLiteral argument
             |> Option.map (fun (expression, value) ->
                 qualifier, column, Some { Function = form; Value = value; Literal = expression }, None, calls))
 
@@ -362,9 +370,10 @@ let hasNonNullableTextFallback = function
             physical.Calls.IsEmpty
             && (physical.NullFallback
                 |> Option.exists (fun fallback ->
-                    match fallback.Value with
-                    | VString _ | VEncodedString _ -> true
-                    | _ -> false)))
+                    not (isConditionalFallback fallback.Function)
+                    && (match fallback.Value with
+                        | VString _ | VEncodedString _ -> true
+                        | _ -> false))))
     | _ -> false
 
 let tryRebaseColumn column = function
@@ -534,7 +543,9 @@ let supportsColumn transform (column: ColumnDef) =
                 (physical.NullFallback
                  |> Option.forall (fun fallback ->
                      if isConditionalFallback fallback.Function then
-                         transforms.IsEmpty && (tryIntegerFallbackKey columnType fallback |> Option.isSome)
+                         transforms.IsEmpty
+                         && (tryIntegerFallbackKey columnType fallback |> Option.isSome
+                             || supportsTextFallback column fallback)
                      else
                          tryIntegerFallbackKey columnType fallback |> Option.isSome
                          || (transforms.IsEmpty && supportsTextFallback column fallback)))

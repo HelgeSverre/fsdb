@@ -488,6 +488,10 @@ different access pattern:
   Equality and unique-key checks use the projected result. The equivalent
   `IF(column IS NOT NULL, column, integer_literal)` form has its own key
   identity, matching MySQL's expression-based lookup.
+  Both `IF` branch forms also support a fitting text fallback on `VARCHAR`
+  when its charset matches the source. Unlike text `COALESCE` and `IFNULL`,
+  an ordinary connection literal can use the key; a different introduced
+  charset cannot. The nullable text key retains its NULL byte.
 
   Text and binary values use MySQL's leading-number conversion and
   diagnostics. Arithmetic and other general expression keys retain their DDL
