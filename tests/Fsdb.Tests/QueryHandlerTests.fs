@@ -3521,6 +3521,47 @@ let tests =
                       "JSON schema report warning source"
               | _, result -> failtestf "expected CHAR JSON schema report result, got %A" result
 
+          testCase "CHAR uses derived JSON column names in warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expectedValue, expectedCode, expectedReason in
+                  [ "SELECT HEX(CHAR(payload)) FROM (SELECT JSON_ARRAY(1,2) AS payload) AS d", "00", 3156, "Invalid"
+                    "SELECT HEX(CHAR(payload)) FROM (SELECT JSON_EXTRACT('[\"12.5\"]','$[0]') AS payload) AS d", "0C", 3156, "Invalid"
+                    "SELECT HEX(CHAR(payload)) FROM (SELECT CAST('18446744073709551616' AS JSON) AS payload) AS d", "FFFFFFFF", 3155, "Out of range" ] do
+                  match handle session sql with
+                  | session, ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expectedValue sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ expectedCode, sprintf "%s JSON value for CAST to INTEGER from column payload at row 1" expectedReason ]
+                          sql
+                  | _, result -> failtestf "expected derived CHAR JSON result for %s, got %A" sql result
+              let cteSql = "WITH d AS (SELECT 1 AS id,CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,CAST('null' AS JSON)) SELECT id,HEX(CHAR(payload)) FROM d ORDER BY id DESC"
+              match handle session cteSql with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "2"; Some "00" ]; [ Some "1"; Some "0C" ] ] "CTE JSON rows"
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3156, "Invalid JSON value for CAST to INTEGER from column payload at row 1"
+                        3156, "Invalid JSON value for CAST to INTEGER from column payload at row 2" ]
+                      "CTE JSON warning order"
+              | _, result -> failtestf "expected CTE CHAR JSON result, got %A" result
+              for sql, expectedRows, expectedWarning in
+                  [ "WITH d AS (SELECT 1 AS id, CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,NULL) SELECT id,HEX(CHAR(payload)),JSON_TYPE(payload) FROM d ORDER BY id",
+                    [ [ Some "1"; Some "0C"; Some "STRING" ]; [ Some "2"; Some ""; None ] ],
+                    "Invalid JSON value for CAST to INTEGER from column payload at row 1"
+                    "WITH d AS (SELECT 1 AS id, NULL AS payload UNION ALL SELECT 2,CAST('\"12.5\"' AS JSON)) SELECT id,HEX(CHAR(payload)),JSON_TYPE(payload) FROM d ORDER BY id",
+                    [ [ Some "1"; Some ""; None ]; [ Some "2"; Some "0C"; Some "STRING" ] ],
+                    "Invalid JSON value for CAST to INTEGER from column payload at row 2" ] do
+                  match handle session sql with
+                  | session, ResultSet(_, rows) ->
+                      Expect.equal rows expectedRows sql
+                      Expect.equal
+                          (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                          [ 3156, expectedWarning ]
+                          sql
+                  | _, result -> failtestf "expected mixed JSON/NULL CTE result for %s, got %A" sql result
+
           testCase "CHAR rejects computed integer overflow before byte assembly"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

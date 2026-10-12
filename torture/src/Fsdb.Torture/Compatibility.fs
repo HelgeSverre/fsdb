@@ -1305,6 +1305,25 @@ module ContractCatalog =
                    "SELECT HEX(CHAR(JSON_SCHEMA_VALIDATION_REPORT('{}','{}')))"
                    |> Contract.comparingValues
                yield Contract.query "char-json-schema-report-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-union-wire"
+                   "SELECT CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT CAST('null' AS JSON)"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-derived-source"
+                   "SELECT HEX(CHAR(payload)) FROM (SELECT JSON_EXTRACT('[\"12.5\"]','$[0]') AS payload) AS d"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-derived-source-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-cte-union"
+                   "WITH d AS (SELECT 1 AS id,CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,CAST('null' AS JSON)) SELECT id,HEX(CHAR(payload)) FROM d ORDER BY id DESC"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-cte-union-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-cte-null-last"
+                   "WITH d AS (SELECT 1 AS id, CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,NULL) SELECT id,HEX(CHAR(payload)),JSON_TYPE(payload) FROM d ORDER BY id"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-cte-null-last-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-cte-null-first"
+                   "WITH d AS (SELECT 1 AS id, NULL AS payload UNION ALL SELECT 2,CAST('\"12.5\"' AS JSON)) SELECT id,HEX(CHAR(payload)),JSON_TYPE(payload) FROM d ORDER BY id"
+                   |> Contract.comparingValues
+               yield Contract.query "char-json-cte-null-first-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.execute "char-json-storage-create" "CREATE TABLE char_json_probe(id INT PRIMARY KEY,payload JSON)"
                yield Contract.execute "char-json-storage-insert"
                    "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"

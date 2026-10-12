@@ -15175,7 +15175,8 @@ and private tryCumeDistDenseRanks
 /// FLOAT/DOUBLE promote it further; a string anywhere poisons the column to
 /// VAR_STRING (verified: `UNION` of '10', '9', 2, 1.5 sorts as strings —
 /// '1.5,10,2,9', not numerically); DATE + DATETIME lands on DATETIME;
-/// anything else falls back to text.
+/// all-JSON branches (plus bare NULL) retain JSON; anything else falls back
+/// to text.
 and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
     let types = columns |> List.map _.TypeId
     let isInt t =
@@ -15186,7 +15187,10 @@ and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
     let isDate t = t = Value.TypeDate
     let isDateTime t = t = Value.TypeDateTime || t = Value.TypeTimestamp
 
-    if types |> List.exists (fun t -> t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob) then
+    if types |> List.contains Value.TypeJson
+       && types |> List.forall (fun t -> t = Value.TypeJson || t = Value.TypeNull) then
+        { Value.columnMetadata Value.TypeJson with Flags = Value.BinaryFlag }
+    elif types |> List.exists (fun t -> t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob) then
         Value.columnMetadata Value.TypeVarString
     elif types |> List.exists (fun t -> t = TypeDouble || t = TypeFloat) then
         let typeId =
@@ -15331,9 +15335,34 @@ and private runUnionStmtWithOuter
             // MySQL's union type reconciliation across every branch, and
             // every row's values coerced to it — an `ORDER BY` over the
             // mixed-typed union then sorts exactly as MySQL does.
+            // A bare NULL projection has no runtime value to infer from, so
+            // its branch metadata falls back to VAR_STRING. Preserve that
+            // syntactic NULL identity when reconciling it with JSON.
+            let isBareNullProjection index (select: SelectStmt) =
+                let hasStar =
+                    select.Projections
+                    |> List.exists (fun projection ->
+                        match projection.Expression with
+                        | Star _ -> true
+                        | _ -> false)
+                not hasStar
+                && (select.Projections
+                    |> List.tryItem index
+                    |> Option.exists (fun projection ->
+                        match projection.Expression with
+                        | Lit VNull -> true
+                        | _ -> false))
+
+            let branchTypes = List.rev typesSoFar
+            let branches = first :: (rest |> List.map snd)
             let reconciled =
                 cols
-                |> List.mapi (fun i _ -> typesSoFar |> List.map (fun ts -> ts.[i]) |> unionAggregateType)
+                |> List.mapi (fun i _ ->
+                    List.map2 (fun branch (types: ColumnMetadata list) ->
+                        let metadata = types.[i]
+                        if isBareNullProjection i branch then { metadata with TypeId = Value.TypeNull }
+                        else metadata) branches branchTypes
+                    |> unionAggregateType)
 
             // A DECIMAL-reconciled column renders at the union's scale —
             // MySQL shows `SELECT 2 UNION SELECT 1.5` as 1.5 / 2.0, not 2.

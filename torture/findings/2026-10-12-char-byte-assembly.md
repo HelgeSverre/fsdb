@@ -80,11 +80,19 @@ oracle sweep also confirmed `json_extract`, `json_set`, `json_merge_patch`, and
 least one warning-producing `CHAR()` case for every registered JSON-returning
 builtin. Focused and native differential cases pin down those observed forms.
 
+Simple derived JSON columns retain their column names in conversion warnings.
+An all-JSON `UNION ALL` inside a CTE previously reconciled to text, turning a
+JSON string into a zero-valued `CHAR()` argument; it now retains JSON. A bare
+`NULL` projection on either side of the audited UNION keeps the JSON result
+type too.
+Focused and native cases cover the values, warnings, and the direct UNION wire
+type.
+
 Stored JSON values and warning row numbers now match the audited seven-row
 table with all rows, a `WHERE` filter, descending ordering with and without
 `LIMIT`, and grouping by the row ID. The projection row number follows the
 selected result order: a filtered or descending warning refers to its output
-position rather than the physical table position. Other JSON expression
-nested, derived, and user-defined JSON origins, more complex ordering and
-grouping shapes, and floating overflow in other expression forms remain
-outside this audit.
+position rather than the physical table position. More deeply nested,
+view-derived, or user-defined JSON origins, more complex ordering and grouping
+shapes, and floating overflow in other expression forms remain outside this
+audit.
