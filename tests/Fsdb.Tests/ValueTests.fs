@@ -3335,6 +3335,25 @@ let tests =
                           Expect.equal (matches "[\\p{Han}]" 0x323af) (VInt 1L) "bracket includes supplementary Han"
                           Expect.equal (matches "\\P{scx=Han}" 0x3001) (VInt 0L) "negation excludes shared mark"
                           Expect.equal (matches "\\P{Han}" 0x323b0) (VInt 1L) "negation includes adjacent scalar"
+                      testCase "REGEXP Latin script and shared extension marks"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          for codePoint in [ 0x0041; 0x00e9; 0x1e9e; 0x10780; 0x1df2a ] do
+                              Expect.equal (matches "\\p{Latin}" codePoint) (VInt 1L) (sprintf "U+%X has Latin script" codePoint)
+
+                          for codePoint in [ 0x00b7; 0x0300; 0x0363 ] do
+                              Expect.equal (matches "\\p{Latin}" codePoint) (VInt 0L) (sprintf "U+%X lacks Latin script" codePoint)
+                              Expect.equal (matches "\\p{scx=Latn}" codePoint) (VInt 1L) (sprintf "U+%X has Latin script extension" codePoint)
+
+                          for alias in [ "\\p{Latn}"; "\\p{IsLatin}"; "\\p{sc=Latin}"; "\\p{Script=Latn}" ] do
+                              Expect.equal (matches alias 0x00e9) (VInt 1L) (sprintf "%s alias" alias)
+
+                          Expect.equal (matches "\\p{scx=Latn}" 0x03a9) (VInt 0L) "Greek letter lacks Latin script extension"
+                          Expect.equal (matches "[\\p{Latin}]" 0x1df2a) (VInt 1L) "bracket includes supplementary Latin"
+                          Expect.equal (matches "\\P{scx=Latin}" 0x0300) (VInt 0L) "negation excludes shared mark"
+                          Expect.equal (matches "\\P{Latin}" 0x1df2b) (VInt 1L) "negation includes adjacent scalar"
                       testCase "REGEXP variation selectors include supplementary scalars"
                       <| fun _ ->
                           let matches pattern codePoint =

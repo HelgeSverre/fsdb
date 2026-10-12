@@ -255,11 +255,45 @@ let private hanScriptAliases =
 let private hanScriptExtensionAliases =
     set [ "SCX=HAN"; "SCX=HANI"; "SCRIPT_EXTENSIONS=HAN"; "SCRIPT_EXTENSIONS=HANI" ]
 
+let private latinScriptRanges =
+    [ 0x0041, 0x005A; 0x0061, 0x007A; 0x00AA, 0x00AA; 0x00BA, 0x00BA
+      0x00C0, 0x00D6; 0x00D8, 0x00F6; 0x00F8, 0x02B8; 0x02E0, 0x02E4
+      0x1D00, 0x1D25; 0x1D2C, 0x1D5C; 0x1D62, 0x1D65
+      0x1D6B, 0x1D77; 0x1D79, 0x1DBE; 0x1E00, 0x1EFF
+      0x2071, 0x2071; 0x207F, 0x207F; 0x2090, 0x209C
+      0x212A, 0x212B; 0x2132, 0x2132; 0x214E, 0x214E; 0x2160, 0x2188
+      0x2C60, 0x2C7F; 0xA722, 0xA787; 0xA78B, 0xA7CD
+      0xA7D0, 0xA7D1; 0xA7D3, 0xA7D3; 0xA7D5, 0xA7DC; 0xA7F2, 0xA7FF
+      0xAB30, 0xAB5A; 0xAB5C, 0xAB64; 0xAB66, 0xAB69
+      0xFB00, 0xFB06; 0xFF21, 0xFF3A; 0xFF41, 0xFF5A
+      0x10780, 0x10785; 0x10787, 0x107B0; 0x107B2, 0x107BA
+      0x1DF00, 0x1DF1E; 0x1DF25, 0x1DF2A ]
+
+let private latinScriptExtensionMembers =
+    [ 0x00B7, 0x00B7; 0x02BC, 0x02BC; 0x02C7, 0x02C7
+      0x02C9, 0x02CB; 0x02CD, 0x02CD; 0x02D7, 0x02D7; 0x02D9, 0x02D9
+      0x0300, 0x030E; 0x0310, 0x0311; 0x0313, 0x0313; 0x0320, 0x0320
+      0x0323, 0x0325; 0x032D, 0x032E; 0x0330, 0x0331; 0x0358, 0x0358
+      0x035E, 0x035E; 0x0363, 0x036F; 0x0485, 0x0486; 0x0951, 0x0952
+      0x10FB, 0x10FB; 0x1DF8, 0x1DF8; 0x202F, 0x202F; 0x20F0, 0x20F0
+      0x2E17, 0x2E17; 0xA700, 0xA707; 0xA92E, 0xA92E ]
+
+let private latinScriptAtom = scalarRangesAtom latinScriptRanges
+let private latinScriptExtensionsAtom = "(?:" + latinScriptAtom + "|" + scalarRangesAtom latinScriptExtensionMembers + ")"
+
+let private latinScriptAliases =
+    set [ "LATIN"; "LATN"; "ISLATIN"; "SC=LATIN"; "SC=LATN"; "SCRIPT=LATIN"; "SCRIPT=LATN" ]
+
+let private latinScriptExtensionAliases =
+    set [ "SCX=LATIN"; "SCX=LATN"; "SCRIPT_EXTENSIONS=LATIN"; "SCRIPT_EXTENSIONS=LATN" ]
+
 let private scriptAtoms =
     [ greekScriptAliases, greekScriptAtom, greekScriptFoldedAtom
       greekScriptExtensionAliases, greekScriptExtensionsAtom false, greekScriptExtensionsAtom true
       hanScriptAliases, hanScriptAtom, hanScriptAtom
-      hanScriptExtensionAliases, hanScriptExtensionsAtom, hanScriptExtensionsAtom ]
+      hanScriptExtensionAliases, hanScriptExtensionsAtom, hanScriptExtensionsAtom
+      latinScriptAliases, latinScriptAtom, latinScriptAtom
+      latinScriptExtensionAliases, latinScriptExtensionsAtom, latinScriptExtensionsAtom ]
     |> List.collect (fun (aliases, sensitive, insensitive) ->
         aliases |> Set.toList |> List.map (fun name -> name, (sensitive, insensitive)))
     |> Map.ofList

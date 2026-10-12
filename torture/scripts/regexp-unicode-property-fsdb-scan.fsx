@@ -15,7 +15,11 @@ let expected =
       "Han", "c", 99030, "4d88d555fa81ea31035361dab2fa6c61d20de0fb7f044f7f2decec7b306c5f8c"
       "Han", "i", 99030, "4d88d555fa81ea31035361dab2fa6c61d20de0fb7f044f7f2decec7b306c5f8c"
       "scx=Hani", "c", 99338, "c2244d16981124663e29f8a1c552acd9a8f057b5a5ac718d1208033a1dfc8574"
-      "scx=Hani", "i", 99338, "c2244d16981124663e29f8a1c552acd9a8f057b5a5ac718d1208033a1dfc8574" ]
+      "scx=Hani", "i", 99338, "c2244d16981124663e29f8a1c552acd9a8f057b5a5ac718d1208033a1dfc8574"
+      "Latin", "c", 1487, "e6fc4143c01663dd2ac0c1c315be88b426374cdc9090b2135c68a638dc2a64a9"
+      "Latin", "i", 1487, "e6fc4143c01663dd2ac0c1c315be88b426374cdc9090b2135c68a638dc2a64a9"
+      "scx=Latn", "c", 1555, "653fc207d45648866dcf78ce80dd2e30707ab5fad62a1ea695594de6c5426e36"
+      "scx=Latn", "i", 1555, "653fc207d45648866dcf78ce80dd2e30707ab5fad62a1ea695594de6c5426e36" ]
 
 for propertyName, mode, expectedCount, expectedDigest in expected do
     let pattern =

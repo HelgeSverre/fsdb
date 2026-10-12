@@ -18,11 +18,15 @@ COMMON_EXPECTED = {
     ("Variation_Selector", "i"): (260, "c539c99975ea71b6bc652c0d4bc1327c0e68e46ca369951847b0c2fef1aa5b77"),
 }
 
-PINNED_HAN = {
+PINNED_SCRIPTS = {
     ("Han", "c"): (99030, "4d88d555fa81ea31035361dab2fa6c61d20de0fb7f044f7f2decec7b306c5f8c"),
     ("Han", "i"): (99030, "4d88d555fa81ea31035361dab2fa6c61d20de0fb7f044f7f2decec7b306c5f8c"),
     ("scx=Hani", "c"): (99338, "c2244d16981124663e29f8a1c552acd9a8f057b5a5ac718d1208033a1dfc8574"),
     ("scx=Hani", "i"): (99338, "c2244d16981124663e29f8a1c552acd9a8f057b5a5ac718d1208033a1dfc8574"),
+    ("Latin", "c"): (1487, "e6fc4143c01663dd2ac0c1c315be88b426374cdc9090b2135c68a638dc2a64a9"),
+    ("Latin", "i"): (1487, "e6fc4143c01663dd2ac0c1c315be88b426374cdc9090b2135c68a638dc2a64a9"),
+    ("scx=Latn", "c"): (1555, "653fc207d45648866dcf78ce80dd2e30707ab5fad62a1ea695594de6c5426e36"),
+    ("scx=Latn", "i"): (1555, "653fc207d45648866dcf78ce80dd2e30707ab5fad62a1ea695594de6c5426e36"),
 }
 
 PINNED_IMAGE = "sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb"
@@ -72,7 +76,7 @@ def verify_pinned(container):
     client = native["Client"](["-h127.0.0.1", "-P" + port, "-ptorture-secret"])
     try:
         native["expect"]("version", client.query("SELECT VERSION()"), "8.4.11")
-        verify(client, COMMON_EXPECTED | PINNED_HAN)
+        verify(client, COMMON_EXPECTED | PINNED_SCRIPTS)
     finally:
         client.close()
 
