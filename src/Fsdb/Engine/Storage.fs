@@ -2957,7 +2957,7 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
                         (Diagnostics.currentRowNumber ()))
             FunctionalIndex.projectValueWithStatus encodeText transform indexedValue
         with
-        | FunctionalIndex.CoalesceIndexValueOutOfRange ->
+        | FunctionalIndex.IntegerFallbackIndexValueOutOfRange ->
             let message =
                 sprintf
                     "Value is out of range for functional index '%s' at row %d"

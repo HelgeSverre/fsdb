@@ -8776,6 +8776,70 @@ let tests =
                     Expect.equal widePlan.Key (Some "ix") "the wide literal uses its physical key"
                     Expect.equal widePlan.KeyLength (Some "8") "the hidden BIGINT key is eight bytes"
 
+                testCase "IFNULL integer functional keys retain their distinct result types"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE ifnull_narrow (id INT PRIMARY KEY, value TINYINT, UNIQUE INDEX ux ((IFNULL(value, 0))))")
+                        (Affected 0UL)
+                        "MySQL accepts a unique IFNULL key"
+                    Expect.equal
+                        (runDefault store "INSERT INTO ifnull_narrow VALUES (1, NULL)")
+                        (Affected 1UL)
+                        "the fallback is indexed"
+                    match runDefault store "INSERT INTO ifnull_narrow VALUES (2, 0)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "IFNULL zero must collide with NULL; got %A" other
+
+                    let narrowPlan =
+                        runDefault store "EXPLAIN SELECT id FROM ifnull_narrow WHERE IFNULL(value, 0) = 0"
+                        |> explainRow
+                    Expect.equal narrowPlan.Key (Some "ux") "IFNULL equality uses its own key"
+                    Expect.equal narrowPlan.KeyLength (Some "8") "IFNULL has a BIGINT result where COALESCE has INT"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE ifnull_wide (id INT PRIMARY KEY, value TINYINT, INDEX ix ((IFNULL(value, 2147483648))))")
+                        (Affected 0UL)
+                        "the ten-digit fallback fits the IFNULL result"
+                    Expect.equal
+                        (runDefault store "INSERT INTO ifnull_wide VALUES (1, NULL)")
+                        (Affected 1UL)
+                        "the IFNULL BIGINT key stores the wide fallback"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM ifnull_wide WHERE IFNULL(value, 2147483648) = 2147483648")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the wide fallback probes exactly"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE ifnull_unsigned_int (id INT PRIMARY KEY, value INT UNSIGNED, INDEX ix ((IFNULL(value, 0))))")
+                        (Affected 0UL)
+                        "the unsigned INT source uses a signed BIGINT key"
+                    Expect.equal
+                        (runDefault store "INSERT INTO ifnull_unsigned_int VALUES (1, 4294967295)")
+                        (Affected 1UL)
+                        "the full unsigned INT range fits the hidden key"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM ifnull_unsigned_int WHERE IFNULL(value, 0) = 4294967295")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the unsigned maximum probes exactly"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE ifnull_unsigned (id INT PRIMARY KEY, value BIGINT UNSIGNED, UNIQUE INDEX ux ((IFNULL(value, 0))))")
+                        (Affected 0UL)
+                        "the mixed BIGINT result is decimal"
+                    Expect.equal
+                        (runDefault store "INSERT INTO ifnull_unsigned VALUES (1, NULL), (2, 18446744073709551615)")
+                        (Affected 2UL)
+                        "the unsigned maximum remains exact"
+                    match runDefault store "INSERT INTO ifnull_unsigned VALUES (3, 0)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "IFNULL decimal zero must collide with NULL; got %A" other
+                    let unsignedPlan =
+                        runDefault store "EXPLAIN SELECT id FROM ifnull_unsigned WHERE IFNULL(value, 0) = 0"
+                        |> explainRow
+                    Expect.equal unsignedPlan.KeyLength (Some "9") "the decimal key uses nine bytes"
+
                 testCase "TRIM expression indexes enforce uniqueness and narrow predicates"
                 <| fun _ ->
                     let store = newStore ()

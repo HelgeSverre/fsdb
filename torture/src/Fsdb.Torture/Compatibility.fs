@@ -5946,6 +5946,38 @@ module ContractCatalog =
                "DROP TABLE coalesce_literal_big_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private ifnullFunctionalIndex =
+        { Name = "ifnull-functional-index"
+          Setup =
+            [| "CREATE TABLE ifnull_probe(id INT PRIMARY KEY,v INT,KEY ix ((IFNULL(v,0))))"
+               "INSERT INTO ifnull_probe VALUES(1,NULL),(2,0),(3,5)"
+               "CREATE TABLE ifnull_unique(id INT PRIMARY KEY,v TINYINT,UNIQUE KEY ux ((IFNULL(v,0))))"
+               "INSERT INTO ifnull_unique VALUES(1,NULL)"
+               "CREATE TABLE ifnull_wide(id INT PRIMARY KEY,v TINYINT,KEY ix ((IFNULL(v,2147483648))))"
+               "INSERT INTO ifnull_wide VALUES(1,NULL)"
+               "CREATE TABLE ifnull_unsigned_int(id INT PRIMARY KEY,v INT UNSIGNED,KEY ix ((IFNULL(v,0))))"
+               "INSERT INTO ifnull_unsigned_int VALUES(1,4294967295)"
+               "CREATE TABLE ifnull_unsigned(id INT PRIMARY KEY,v BIGINT UNSIGNED,UNIQUE KEY ux ((IFNULL(v,0))))"
+               "INSERT INTO ifnull_unsigned VALUES(1,NULL),(2,18446744073709551615)" |]
+          Steps =
+            [| Contract.query "fallback" "SELECT id FROM ifnull_probe WHERE IFNULL(v,0)=0 ORDER BY id"
+               Contract.query "ordinary" "SELECT id FROM ifnull_probe WHERE IFNULL(v,0)=5 ORDER BY id"
+               Contract.execute "duplicate" "INSERT INTO ifnull_unique VALUES(2,0)" |> Contract.fails 1062 "23000"
+               Contract.query "wide-fallback" "SELECT id FROM ifnull_wide WHERE IFNULL(v,2147483648)=2147483648"
+               Contract.query "unsigned-int-maximum" "SELECT id FROM ifnull_unsigned_int WHERE IFNULL(v,0)=4294967295"
+               Contract.query "unsigned-maximum" "SELECT id FROM ifnull_unsigned WHERE IFNULL(v,0)=18446744073709551615"
+               Contract.execute "unsigned-duplicate" "INSERT INTO ifnull_unsigned VALUES(3,0)" |> Contract.fails 1062 "23000"
+               Contract.execute "update" "UPDATE ifnull_probe SET v=7 WHERE id=1"
+               Contract.query "old-key" "SELECT id FROM ifnull_probe WHERE IFNULL(v,0)=0 ORDER BY id"
+               Contract.query "new-key" "SELECT id FROM ifnull_probe WHERE IFNULL(v,0)=7 ORDER BY id" |]
+          Cleanup =
+            [| "DROP TABLE ifnull_probe"
+               "DROP TABLE ifnull_unique"
+               "DROP TABLE ifnull_wide"
+               "DROP TABLE ifnull_unsigned_int"
+               "DROP TABLE ifnull_unsigned" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private bitCountFunctionalIndex =
         { Name = "bit-count-functional-index"
           Setup =
@@ -11155,6 +11187,7 @@ module ContractCatalog =
            integralDoubleIndexProbes
            signFunctionalIndex
            coalesceFunctionalIndex
+           ifnullFunctionalIndex
            bitCountFunctionalIndex
            crc32FunctionalIndex
            exactIntegerFunctionalBounds

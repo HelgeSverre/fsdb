@@ -465,6 +465,10 @@ different access pattern:
   key. A value outside the hidden key's range fails in strict mode and is
   clipped with a warning in permissive mode. Equality, uniqueness, grouping,
   mutation, and recovery use that key; an embedding override uses a scan.
+  `IFNULL(column, integer_literal)` also has a physical key; unlike `COALESCE`,
+  ordinary integer sources produce a signed `BIGINT` result, while
+  `BIGINT UNSIGNED` with a signed fallback produces `DECIMAL(20,0)`. The
+  function name is part of the key identity.
 
   Text and binary values use MySQL's leading-number conversion and
   diagnostics. Arithmetic and other general expression keys retain their DDL

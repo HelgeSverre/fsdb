@@ -14988,8 +14988,8 @@ and private transformUsesStoredSemantics (registry: Registry) expression = funct
                 |> List.forall (fun (name, _) -> Functions.isUnmodifiedBuiltinScalar name registry)
 
             callsUnmodified
-            && (requested.NullFallback.IsNone
-                || Functions.isUnmodifiedBuiltinScalar "COALESCE" registry)
+            && (requested.NullFallback
+                |> Option.forall (fun fallback -> Functions.isUnmodifiedBuiltinScalar fallback.Name registry))
         | _ -> false
     | Some transform ->
         match expression with
@@ -20688,7 +20688,7 @@ let private explainIndexKeyLen
             transforms
             |> Option.bind (List.tryItem position)
             |> Option.flatten
-            |> Option.bind (FunctionalIndex.tryCoalesceKeyLength column.Type)
+            |> Option.bind (FunctionalIndex.tryIntegerFallbackKeyLength column.Type)
 
         functionalLength |> Option.orElseWith (fun () -> explainPrefixKeyLen column prefixLength))
     |> traverse (function

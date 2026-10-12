@@ -10,7 +10,7 @@ open Fsdb.Value
 
 exception DoubleOutOfRange of string
 exception InvalidLogarithmArgument
-exception CoalesceIndexValueOutOfRange
+exception IntegerFallbackIndexValueOutOfRange
 
 type private Builtin =
     { CanonicalName: string
@@ -152,17 +152,21 @@ let tryBuiltinName transform =
     |> List.tryPick (fun definition ->
         if definition.Transform = transform then Some definition.CanonicalName else None)
 
+type NullFallback =
+    { Name: string
+      Value: Value }
+
 type PhysicalExpression =
     { Qualifier: string option
       Column: string
-      NullFallback: Value option
+      NullFallback: NullFallback option
       Calls: (string * IndexTransform) list
       Transform: IndexTransform }
 
 let private canonicalExpression (column: string) fallback (calls: (string * IndexTransform) list) =
     let source =
         match fallback with
-        | Some value -> FuncCall("COALESCE", [ Col(column.ToLowerInvariant()); Lit value ])
+        | Some fallback -> FuncCall(fallback.Name, [ Col(column.ToLowerInvariant()); Lit fallback.Value ])
         | None -> Col(column.ToLowerInvariant())
 
     calls
@@ -176,11 +180,14 @@ let tryPhysicalExpression expression =
     let rec collect calls = function
         | Col column -> Some(None, column, None, calls)
         | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, None, calls)
-        | FuncCall(name, [ Col column; Lit fallback ]) when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase) ->
-            Some(None, column, Some fallback, calls)
+        | FuncCall(name, [ Col column; Lit fallback ])
+            when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
+                 || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
+            Some(None, column, Some { Name = name.ToUpperInvariant(); Value = fallback }, calls)
         | FuncCall(name, [ QualifiedCol(qualifier, column); Lit fallback ])
-            when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase) ->
-            Some(Some qualifier, column, Some fallback, calls)
+            when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
+                 || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
+            Some(Some qualifier, column, Some { Name = name.ToUpperInvariant(); Value = fallback }, calls)
         | FuncCall(name, [ argument ]) ->
             tryBuiltin name
             |> Option.bind (fun transform -> collect ((name, transform) :: calls) argument)
@@ -369,23 +376,26 @@ let private numericKeyResult columnType startsWithFallback transforms =
             | _ -> result)
         sourceResult
 
-type private CoalesceIntegerKey =
+type private IntegerFallbackKey =
     | SignedInt32
     | SignedInt64
     | UnsignedInt64
     | ExactDecimal20
 
-let private tryCoalesceIntegerKey columnType fallback =
+let private tryIntegerFallbackKey columnType fallback =
     let wideLiteral value = value >= 10_000_000_000L || value <= -10_000_000_000L
 
-    match columnType, fallback with
-    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _), VInt value ->
+    match columnType, fallback.Name, fallback.Value with
+    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt false), "IFNULL", VInt _ ->
+        Some SignedInt64
+    | TBigInt true, "IFNULL", VInt _ -> Some ExactDecimal20
+    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _), "COALESCE", VInt value ->
         Some(if wideLiteral value then SignedInt64 else SignedInt32)
-    | TBigInt false, VInt _ -> Some SignedInt64
-    | TBigInt true, VInt _ -> Some ExactDecimal20
-    | (TBool | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false), VUInt _ ->
+    | TBigInt false, "COALESCE", VInt _ -> Some SignedInt64
+    | TBigInt true, "COALESCE", VInt _ -> Some ExactDecimal20
+    | (TBool | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false), _, VUInt _ ->
         Some ExactDecimal20
-    | (TTinyInt true | TSmallInt true | TMediumInt true | TInt true | TBigInt true), VUInt _ ->
+    | (TTinyInt true | TSmallInt true | TMediumInt true | TInt true | TBigInt true), _, VUInt _ ->
         Some UnsignedInt64
     | _ -> None
 
@@ -397,7 +407,7 @@ let supportsColumnType transform columnType =
             let transforms = physical.Calls |> List.map snd
             let sourceSupported =
                 physical.NullFallback
-                |> Option.forall (fun fallback -> tryCoalesceIntegerKey columnType fallback |> Option.isSome)
+                |> Option.forall (fun fallback -> tryIntegerFallbackKey columnType fallback |> Option.isSome)
 
             if not sourceSupported then false
             else
@@ -435,11 +445,11 @@ let rec private integerKeyLength = function
     | _ -> None
 
 /// The hidden result type depends on both source signedness and literal width.
-let tryCoalesceKeyLength columnType = function
+let tryIntegerFallbackKeyLength columnType = function
     | Expression expression ->
         match tryPhysicalExpression expression with
         | Some { NullFallback = Some fallback; Calls = [] } ->
-            match tryCoalesceIntegerKey columnType fallback with
+            match tryIntegerFallbackKey columnType fallback with
             | Some SignedInt32 -> Some 4
             | Some SignedInt64
             | Some UnsignedInt64 -> Some 8
@@ -449,7 +459,7 @@ let tryCoalesceKeyLength columnType = function
     | _ -> None
 
 let fixedKeyLength columnType transform =
-    tryCoalesceKeyLength columnType transform
+    tryIntegerFallbackKeyLength columnType transform
     |> Option.orElseWith (fun () -> integerKeyLength transform)
 
 let rec hasNumericResult = function
@@ -545,7 +555,7 @@ let private tryExactUInt64 =
     | VBytes bytes -> bytes |> Text.Encoding.Latin1.GetString |> ofText
     | _ -> None
 
-let private tryCoalesceKeyValue key value =
+let private tryIntegerFallbackKeyValue key value =
     match key with
     | SignedInt32 ->
         value
@@ -565,11 +575,11 @@ let private tryCoalesceKeyValue key value =
             Some(VDecimal number)
         | _ -> None
 
-let private tryNullFallbackProbe columnType fallback value =
+let private tryIntegerFallbackProbe columnType fallback value =
     fallback
-    |> Option.bind (tryCoalesceIntegerKey columnType)
+    |> Option.bind (tryIntegerFallbackKey columnType)
     |> Option.bind (fun key ->
-        match tryCoalesceKeyValue key value with
+        match tryIntegerFallbackKeyValue key value with
         | Some projected -> Some projected
         // Preserve an exact, out-of-range probe. It cannot match a clipped
         // key, but still lets the physical lookup prove the result empty.
@@ -584,17 +594,17 @@ let prepareIndexValue columnType transform value =
     | Some(Expression expression) ->
         match tryPhysicalExpression expression with
         | Some { NullFallback = Some fallback } ->
-            match tryCoalesceIntegerKey columnType fallback with
+            match tryIntegerFallbackKey columnType fallback with
             | Some key ->
-                let selected = if value = VNull then fallback else value
-                match tryCoalesceKeyValue key selected with
+                let selected = if value = VNull then fallback.Value else value
+                match tryIntegerFallbackKeyValue key selected with
                 | Some projected -> projected, false
                 | None ->
                     match key, selected with
                     | SignedInt32, VInt number ->
                         VInt(if number < int64 Int32.MinValue then int64 Int32.MinValue else int64 Int32.MaxValue), true
                     | SignedInt32, VUInt _ -> VInt(int64 Int32.MaxValue), true
-                    | _ -> raise CoalesceIndexValueOutOfRange
+                    | _ -> raise IntegerFallbackIndexValueOutOfRange
             | None -> value, false
         | _ -> value, false
     | _ -> value, false
@@ -667,7 +677,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             let transforms = physical.Calls |> List.map snd
 
             match List.tryLast transforms with
-            | None when physical.NullFallback.IsSome -> tryNullFallbackProbe columnType physical.NullFallback value
+            | None when physical.NullFallback.IsSome -> tryIntegerFallbackProbe columnType physical.NullFallback value
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
             | Some transform when isEncodedTextTransform transform -> tryTextResultProbe value
@@ -677,7 +687,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
                 | Approximate, VDouble number when Double.IsFinite number -> Some(VDouble number)
                 | Approximate, _ -> None
                 | ExactSource, _ when physical.NullFallback.IsSome ->
-                    tryNullFallbackProbe columnType physical.NullFallback value
+                    tryIntegerFallbackProbe columnType physical.NullFallback value
                 | ExactSource, _ -> tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
             | Some _ -> normalizeStored value
             | None -> None)
@@ -842,7 +852,7 @@ let rec projectValueWithStatus encodeText transform value =
         | Some physical ->
             let source =
                 match value, physical.NullFallback with
-                | VNull, Some fallback -> fallback
+                | VNull, Some fallback -> fallback.Value
                 | _ -> value
 
             physical.Calls
