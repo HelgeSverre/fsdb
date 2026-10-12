@@ -44,10 +44,14 @@ probes check that default trailing-space stripping leaves only `ab c` matching
 `LIKE 'ab %'`. The `binary-like-prefix-range` differential contract compares the returned
 rows with native MySQL.
 
-All twenty-nine contract steps matched in `20261012T185944804-37978/contracts`
-against native MySQL 8.4.11, and the case restored its database objects.
-The full 150-case, 19,121-step run had one Han REGEXP difference and one
-connection-sensitive mixed-type join difference outside this case.
+All twenty-nine contract steps matched both the native Homebrew MySQL 8.4.11
+run (`20261012T185944804-37978/contracts`) and the digest-pinned Docker
+MySQL 8.4.11 run (`20261012T190355105-38814/contracts`). Both runs restored
+the case's database objects. The full pinned-image run had ten differences
+outside this case, including identifier-case diagnostics and the
+connection-sensitive mixed-type join. The native Homebrew run additionally
+reported a Han REGEXP property difference because that build ships different
+Unicode property data; the Han case matches the pinned image.
 
 The [focused quick benchmark](../../benchmarks/results/2cf93f5d-quick.md)
 used 10,000 `functional_users` rows and the same `prefix42%` query with
