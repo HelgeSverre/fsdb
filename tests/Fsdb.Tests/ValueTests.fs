@@ -3354,6 +3354,24 @@ let tests =
                           Expect.equal (matches "[\\p{Latin}]" 0x1df2a) (VInt 1L) "bracket includes supplementary Latin"
                           Expect.equal (matches "\\P{scx=Latin}" 0x0300) (VInt 0L) "negation excludes shared mark"
                           Expect.equal (matches "\\P{Latin}" 0x1df2b) (VInt 1L) "negation includes adjacent scalar"
+                      testCase "REGEXP Cyrillic script and shared extension marks"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          for codePoint in [ 0x0416; 0x1c80; 0xa640; 0x1e030; 0x1e08f ] do
+                              Expect.equal (matches "\\p{Cyrillic}" codePoint) (VInt 1L) (sprintf "U+%X has Cyrillic script" codePoint)
+
+                          for codePoint in [ 0x0300; 0x0485; 0x2e43 ] do
+                              Expect.equal (matches "\\p{Cyrillic}" codePoint) (VInt 0L) (sprintf "U+%X lacks Cyrillic script" codePoint)
+                              Expect.equal (matches "\\p{scx=Cyrl}" codePoint) (VInt 1L) (sprintf "U+%X has Cyrillic script extension" codePoint)
+
+                          for alias in [ "\\p{Cyrl}"; "\\p{IsCyrillic}"; "\\p{sc=Cyrillic}"; "\\p{Script=Cyrl}" ] do
+                              Expect.equal (matches alias 0x0416) (VInt 1L) (sprintf "%s alias" alias)
+
+                          Expect.equal (matches "[\\p{Cyrillic}]" 0x1e08f) (VInt 1L) "bracket includes supplementary Cyrillic"
+                          Expect.equal (matches "\\P{scx=Cyrillic}" 0x0485) (VInt 0L) "negation excludes shared mark"
+                          Expect.equal (matches "\\P{Cyrillic}" 0x1e090) (VInt 1L) "negation includes adjacent scalar"
                       testCase "REGEXP variation selectors include supplementary scalars"
                       <| fun _ ->
                           let matches pattern codePoint =

@@ -137,13 +137,36 @@ let private latinScriptAliases =
 let private latinScriptExtensionAliases =
     set [ "SCX=LATIN"; "SCX=LATN"; "SCRIPT_EXTENSIONS=LATIN"; "SCRIPT_EXTENSIONS=LATN" ]
 
+let private cyrillicScriptRanges =
+    [ 0x0400, 0x0484; 0x0487, 0x052F; 0x1C80, 0x1C8A
+      0x1D2B, 0x1D2B; 0x1D78, 0x1D78; 0x2DE0, 0x2DFF
+      0xA640, 0xA69F; 0xFE2E, 0xFE2F
+      0x1E030, 0x1E06D; 0x1E08F, 0x1E08F ]
+
+let private cyrillicScriptExtensionMembers =
+    [ 0x02BC, 0x02BC; 0x0300, 0x0302; 0x0304, 0x0304
+      0x0306, 0x0306; 0x0308, 0x0308; 0x030B, 0x030B
+      0x0311, 0x0311; 0x0485, 0x0486; 0x1DF8, 0x1DF8
+      0x2E43, 0x2E43 ]
+
+let private cyrillicScriptAtom = scalarRangesAtom cyrillicScriptRanges
+let private cyrillicScriptExtensionsAtom = "(?:" + cyrillicScriptAtom + "|" + scalarRangesAtom cyrillicScriptExtensionMembers + ")"
+
+let private cyrillicScriptAliases =
+    set [ "CYRILLIC"; "CYRL"; "ISCYRILLIC"; "SC=CYRILLIC"; "SC=CYRL"; "SCRIPT=CYRILLIC"; "SCRIPT=CYRL" ]
+
+let private cyrillicScriptExtensionAliases =
+    set [ "SCX=CYRILLIC"; "SCX=CYRL"; "SCRIPT_EXTENSIONS=CYRILLIC"; "SCRIPT_EXTENSIONS=CYRL" ]
+
 let private scriptAtoms =
     [ greekScriptAliases, greekScriptAtom, greekScriptFoldedAtom
       greekScriptExtensionAliases, greekScriptExtensionsAtom false, greekScriptExtensionsAtom true
       hanScriptAliases, hanScriptAtom, hanScriptAtom
       hanScriptExtensionAliases, hanScriptExtensionsAtom, hanScriptExtensionsAtom
       latinScriptAliases, latinScriptAtom, latinScriptAtom
-      latinScriptExtensionAliases, latinScriptExtensionsAtom, latinScriptExtensionsAtom ]
+      latinScriptExtensionAliases, latinScriptExtensionsAtom, latinScriptExtensionsAtom
+      cyrillicScriptAliases, cyrillicScriptAtom, cyrillicScriptAtom
+      cyrillicScriptExtensionAliases, cyrillicScriptExtensionsAtom, cyrillicScriptExtensionsAtom ]
     |> List.collect (fun (aliases, sensitive, insensitive) ->
         aliases |> Set.toList |> List.map (fun name -> name, (sensitive, insensitive)))
     |> Map.ofList

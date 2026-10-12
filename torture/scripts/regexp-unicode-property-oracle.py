@@ -27,6 +27,10 @@ PINNED_SCRIPTS = {
     ("Latin", "i"): (1487, "e6fc4143c01663dd2ac0c1c315be88b426374cdc9090b2135c68a638dc2a64a9"),
     ("scx=Latn", "c"): (1555, "653fc207d45648866dcf78ce80dd2e30707ab5fad62a1ea695594de6c5426e36"),
     ("scx=Latn", "i"): (1555, "653fc207d45648866dcf78ce80dd2e30707ab5fad62a1ea695594de6c5426e36"),
+    ("Cyrillic", "c"): (508, "03188fa3fcd5b19593b01537c99f8450d60866f828457b64d27048badb55f791"),
+    ("Cyrillic", "i"): (508, "03188fa3fcd5b19593b01537c99f8450d60866f828457b64d27048badb55f791"),
+    ("scx=Cyrl", "c"): (521, "aee85ddae735d8f9c89079482e8bb7d67fd00d4d5be124b05653d4fb1e0e4403"),
+    ("scx=Cyrl", "i"): (521, "aee85ddae735d8f9c89079482e8bb7d67fd00d4d5be124b05653d4fb1e0e4403"),
 }
 
 PINNED_IMAGE = "sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb"

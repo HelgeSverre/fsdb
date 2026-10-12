@@ -10899,6 +10899,12 @@ module ContractCatalog =
                Contract.query "latin-script-negation"
                    "SELECT REGEXP_LIKE(CONVERT(0xCC80 USING utf8mb4),'\\\\P{scx=Latin}','c'),REGEXP_LIKE(CONVERT(0xCEA9 USING utf8mb4),'\\\\P{Latin}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF09DBCAB USING utf8mb4),'\\\\P{Latin}',1,1,'c')),REGEXP_LIKE(CONVERT(0xF0909E80 USING utf8mb4),'[^\\\\p{scx=Latn}]','c')"
                    |> Contract.comparingValues
+               Contract.query "cyrillic-script-properties"
+                   "SELECT REGEXP_LIKE(CONVERT(0xD096 USING utf8mb4),'\\\\p{Cyrillic}','c'),REGEXP_LIKE(CONVERT(0xD285 USING utf8mb4),'\\\\p{Cyrillic}','c'),REGEXP_LIKE(CONVERT(0xD285 USING utf8mb4),'\\\\p{scx=Cyrl}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF09E828F USING utf8mb4),'[\\\\p{Script=Cyrl}]',1,1,'c'))"
+                   |> Contract.comparingValues
+               Contract.query "cyrillic-script-negation"
+                   "SELECT REGEXP_LIKE(CONVERT(0xD285 USING utf8mb4),'\\\\P{scx=Cyrillic}','c'),REGEXP_LIKE(CONVERT(0xE2B983 USING utf8mb4),'\\\\P{Cyrillic}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF09E8290 USING utf8mb4),'\\\\P{Cyrillic}',1,1,'c')),REGEXP_LIKE(CONVERT(0xF09E828F USING utf8mb4),'[^\\\\p{scx=Cyrl}]','c')"
+                   |> Contract.comparingValues
                Contract.query "variation-selector-properties"
                    "SELECT REGEXP_LIKE(CONVERT(0xE1A08B USING utf8mb4),'\\\\p{VS}','c'),REGEXP_LIKE(CONVERT(0xEFB88F USING utf8mb4),'\\\\p{Variation_Selector}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF3A08480 USING utf8mb4),'[\\\\p{VS}]',1,1,'c')),REGEXP_LIKE(CONVERT(0xE1A08E USING utf8mb4),'\\\\p{VS}','c')"
                    |> Contract.comparingValues
