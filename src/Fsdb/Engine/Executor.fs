@@ -5467,7 +5467,7 @@ let private metadataInferenceCache =
 // The evaluator belongs to the recursive execution group below; its builtin
 // allowlist is fixed across statements and should not be rebuilt per probe.
 let private plannerFoldableBuiltins =
-    set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST"
+    set [ "COALESCE"; "IFNULL"; "IF"; "NULLIF"; "GREATEST"; "LEAST"; "CONCAT"
           "MOD"; "TRUNCATE"; "POW"; "POWER"; "BIT_COUNT"; "CRC32"; "PI" ]
 
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
@@ -13439,35 +13439,49 @@ and private plannerRangePredicatesFor
         | predicates -> predicates
 
 /// Binary UTF-8 collations keep fixed LIKE prefixes within a byte-order interval.
-and private likePrefixRangePredicate scope (table: Table) tref expression =
+and private likePrefixRangePredicate constantValue scope (table: Table) tref expression =
+    let rec hasExplicitCollation expression =
+        match expression with
+        | Expression.CollationOverride _ -> true
+        | _ -> Expression.children expression |> List.exists hasExplicitCollation
+
     match expression with
-    | Like(source, LiteralValue(VString pattern), _, escape) ->
-        rangeColumnNameFor scope tref source
-        |> Option.bind (fun name ->
-            table.Columns
-            |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
-            |> Option.filter (fun column ->
-                match column.Type with
-                | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
-                    column.Collation
-                    |> Option.exists (fun collation ->
-                        equalsIgnoreCase collation "utf8mb4_0900_bin"
-                        || equalsIgnoreCase collation "utf8mb4_bin")
-                | _ -> false)
-            |> Option.bind (fun column ->
-                let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
-                if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
-                else
-                    // PAD SPACE sorts longer trailing-space variants before the bare prefix.
-                    let lower =
-                        if column.Collation |> Option.exists (fun collation -> equalsIgnoreCase collation "utf8mb4_bin") then
-                            likePadSpaceLowerBound prefix
-                        else
-                            Some prefix
-                    Some
-                        { Column = column.Name
-                          Lower = lower |> Option.map (fun value -> VString value, true)
-                          Upper = likePrefixUpperBound prefix |> Option.map (fun successor -> VString successor, false) }))
+    | Like(source, patternExpression, _, escape) when not (hasExplicitCollation patternExpression) ->
+        let pattern =
+            match patternExpression with
+            | LiteralValue(VString text) -> Some text
+            | _ ->
+                constantValue patternExpression
+                |> Option.bind (function VString text -> Some text | _ -> None)
+
+        pattern
+        |> Option.bind (fun pattern ->
+            rangeColumnNameFor scope tref source
+            |> Option.bind (fun name ->
+                table.Columns
+                |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+                |> Option.filter (fun column ->
+                    match column.Type with
+                    | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                        column.Collation
+                        |> Option.exists (fun collation ->
+                            equalsIgnoreCase collation "utf8mb4_0900_bin"
+                            || equalsIgnoreCase collation "utf8mb4_bin")
+                    | _ -> false)
+                |> Option.bind (fun column ->
+                    let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
+                    if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
+                    else
+                        // PAD SPACE sorts longer trailing-space variants before the bare prefix.
+                        let lower =
+                            if column.Collation |> Option.exists (fun collation -> equalsIgnoreCase collation "utf8mb4_bin") then
+                                likePadSpaceLowerBound prefix
+                            else
+                                Some prefix
+                        Some
+                            { Column = column.Name
+                              Lower = lower |> Option.map (fun value -> VString value, true)
+                              Upper = likePrefixUpperBound prefix |> Option.map (fun successor -> VString successor, false) })))
     | _ -> None
 
 and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
@@ -14685,7 +14699,7 @@ and private tryRangeAccessInTableWith
         let likeRanges =
             whereExpr
             |> optionalConjuncts
-            |> List.choose (likePrefixRangePredicate scope table tref)
+            |> List.choose (likePrefixRangePredicate (plannerConstantEvaluator store registry) scope table tref)
             |> List.choose (fun bounds ->
                 // Storage widens truncated bounds to include every row sharing the prefix key.
                 Storage.trySecondaryRangeLookupInTableWith allowed store table bounds.Column bounds.Lower bounds.Upper)

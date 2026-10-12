@@ -6849,8 +6849,8 @@ let tests =
                 <| fun _ ->
                     let store = newStore ()
                     let seed =
-                        [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo" ]
-                        @ [ for id in 8..32 -> sprintf "zz%02d" id ]
+                        [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo"; "ABX" ]
+                        @ [ for id in 9..33 -> sprintf "zz%02d" id ]
                         |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
                         |> String.concat ","
 
@@ -6864,7 +6864,7 @@ let tests =
                             "create the comparison table"
                         Expect.equal
                             (runDefault store $"INSERT INTO {table} VALUES {seed}")
-                            (Affected 32UL)
+                            (Affected 33UL)
                             "seed matching and nonmatching prefixes"
 
                     for pattern, expected in
@@ -6888,15 +6888,28 @@ let tests =
                         [ "v LIKE 'ab\\\\_%'", [ 6; 7 ]
                           "v LIKE 'ab\\\\%%'", [ 5 ]
                           "v LIKE 'ab#_%' ESCAPE '#'", [ 6; 7 ]
-                          "v LIKE 'abc'", [ 2 ] ] do
+                          "v LIKE 'abc'", [ 2 ]
+                          "v LIKE CONCAT('ab','%')", [ 1; 2; 3; 4; 5; 6; 7 ]
+                          "v LIKE IF(1,'ab%','zz%')", [ 1; 2; 3; 4; 5; 6; 7 ]
+                          "v LIKE COALESCE(NULL,'ab%')", [ 1; 2; 3; 4; 5; 6; 7 ] ] do
                         let rows = expected |> List.map (fun id -> [ Some(string id) ])
                         Expect.equal
                             (runDefault store $"SELECT id FROM like_indexed WHERE {predicate} ORDER BY id")
                             (ResultSet([ "id" ], rows))
-                            "escaped and exact prefixes keep their LIKE results"
+                            "literal and constant prefixes keep their LIKE results"
                         let plan = runDefault store $"EXPLAIN SELECT id FROM like_indexed WHERE {predicate}" |> explainRow
-                        Expect.equal plan.AccessType (Some "range") "the literal prefix uses a range"
-                        Expect.equal plan.Key (Some "ix_v") "the literal prefix uses the text key"
+                        Expect.equal plan.AccessType (Some "range") "the fixed prefix uses a range"
+                        Expect.equal plan.Key (Some "ix_v") "the fixed prefix uses the text key"
+
+                    for pattern in
+                        [ "('ab%' COLLATE utf8mb4_0900_ai_ci)"
+                          "(CONCAT('ab','%') COLLATE utf8mb4_0900_ai_ci)" ] do
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM like_indexed WHERE v LIKE {pattern} ORDER BY id")
+                            (ResultSet([ "id" ], [ for id in 1..8 -> [ Some(string id) ] ]))
+                            "an explicit pattern collation cannot use the binary prefix range"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM like_indexed WHERE v LIKE {pattern}" |> explainRow
+                        Expect.isFalse (plan.AccessType = Some "range") "a collated pattern cannot use the binary range"
 
                     Expect.equal
                         (runDefault store "SELECT id FROM like_prefix_indexed WHERE v LIKE 'abc%' ORDER BY id")

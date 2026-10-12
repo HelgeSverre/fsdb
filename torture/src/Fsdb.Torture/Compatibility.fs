@@ -6079,7 +6079,7 @@ module ContractCatalog =
             |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
             |> String.concat ","
 
-        let values = renderValues [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo" ] 32
+        let values = renderValues [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo"; "ABX" ] 33
         let unicodeValues = renderValues [ "é"; "éa"; "ê"; "é"; "😀"; "😀a"; "😁"; "éÿ"; "é " ] 34
         let padSpaceValues =
             renderValues [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁"; "ab  "; "ab  c" ] 38
@@ -6110,6 +6110,11 @@ module ContractCatalog =
                Contract.query "escaped-percent" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab\\\\%%' ORDER BY id"
                Contract.query "escaped-explicit" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab#_%' ESCAPE '#' ORDER BY id"
                Contract.query "exact-pattern" "SELECT id FROM like_prefix_probe WHERE v LIKE 'abc' ORDER BY id"
+               Contract.query "constant-concat" "SELECT id FROM like_prefix_probe WHERE v LIKE CONCAT('ab','%') ORDER BY id"
+               Contract.query "constant-if" "SELECT id FROM like_prefix_probe WHERE v LIKE IF(1,'ab%','zz%') ORDER BY id"
+               Contract.query "constant-coalesce" "SELECT id FROM like_prefix_probe WHERE v LIKE COALESCE(NULL,'ab%') ORDER BY id"
+               Contract.query "explicit-pattern-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE ('ab%' COLLATE utf8mb4_0900_ai_ci) ORDER BY id"
+               Contract.query "constant-explicit-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE (CONCAT('ab','%') COLLATE utf8mb4_0900_ai_ci) ORDER BY id"
                Contract.query "truncated-key" "SELECT id FROM like_prefix_short_probe WHERE v LIKE 'abc%' ORDER BY id"
                Contract.query "unicode-bmp" "SELECT id FROM like_unicode_probe WHERE v LIKE 'é%' ORDER BY id"
                Contract.query "unicode-supplementary" "SELECT id FROM like_unicode_probe WHERE v LIKE '😀%' ORDER BY id"
